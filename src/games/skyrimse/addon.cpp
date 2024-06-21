@@ -19,7 +19,7 @@
 #include <embed/0x936CE1A3.h>    // tonemap
 
 #include <embed/0x675543CF.h>    // TAA
-#include <embed/0xFEE901F4.h>    // FXAA?
+// #include <embed/0xFEE901F4.h>    // FXAA?
 #include <embed/0xA82C3C26.h>    // DoF
 #include <embed/0x9DA2366D.h>    // UI Images
 #include <embed/0x2D38165D.h>    // transparent HUD
