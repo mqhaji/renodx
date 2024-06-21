@@ -35,3 +35,4 @@ build/**
 build32/**
 
 **/.vshistory/
+.vscode/settings.json
