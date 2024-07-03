@@ -364,9 +364,9 @@ void main(
   o0.xyz = cb_usecompressedhdrbuffers ? r1.xyz : r0.xyz;
   o0.w = 1;
 
-  if (injectedData.toneMapGammaCorrection == 1) { // apply 2.2 gamma correction to fix srgb 2.2 mismatch
+  if (injectedData.toneMapGammaCorrection) { // fix srgb 2.2 mismatch
     o0.xyz = srgbFromLinear(o0.xyz);
-    o0.xyz = pow(o0.xyz, 2.2f);
+    o0.xyz = sign(o0.xyz) * pow(abs(o0.xyz), 2.2f);
   }
   o0.rgb *= injectedData.toneMapGameNits / 80.f;
 

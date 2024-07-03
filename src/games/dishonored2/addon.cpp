@@ -93,6 +93,16 @@ UserSettingUtil::UserSettings userSettings = {
     .tooltip = "Emulates a 2.2 EOTF (use with HDR or sRGB)",
   },
   new UserSettingUtil::UserSetting {
+    .key = "toneMapHueCorrection",
+    .binding = &shaderInjection.toneMapHueCorrection,
+    .defaultValue = 100.f,
+    .label = "Hue Correction",
+    .section = "Tone Mapping",
+    .tooltip = "Emulates hue shifting from the vanilla tonemapper",
+    .max = 100.f,
+    .parse = [](float value) { return value * 0.01f; }
+  },
+  new UserSettingUtil::UserSetting {
     .key = "colorGradeExposure",
     .binding = &shaderInjection.colorGradeExposure,
     .defaultValue = 1.f,
@@ -138,11 +148,12 @@ UserSettingUtil::UserSettings userSettings = {
     .parse = [](float value) { return value * 0.02f; }
   },
   new UserSettingUtil::UserSetting {
-    .key = "colorGradeDechroma",
-    .binding = &shaderInjection.colorGradeDechroma,
+    .key = "colorGradeBlowout",
+    .binding = &shaderInjection.colorGradeBlowout,
     .defaultValue = 50.f,
     .label = "Blowout",
     .section = "Color Grading",
+    .tooltip = "Controls highlight desaturation due to overexposure.",
     .max = 100.f,
     .parse = [](float value) { return value * 0.01f; }
   },
@@ -213,10 +224,10 @@ UserSettingUtil::UserSettings userSettings = {
   new UserSettingUtil::UserSetting {
     .key = "midGray",
     .binding = &shaderInjection.midGray,
-    .defaultValue = .18f,
+    .defaultValue = .1893f,
     .label = "vanillaMidGray",
     .section = "Tonemapper Advanced Settings",
-    .max = .4f,
+    .max = .7f,
     .format = "%.4f"
   },
   new UserSettingUtil::UserSetting {
@@ -285,8 +296,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID) {
         {reshade::api::format::r8g8b8a8_unorm_srgb, reshade::api::format::r16g16b16a16_float}
       );
       SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
+        {reshade::api::format::b8g8r8a8_unorm, reshade::api::format::r16g16b16a16_float}
+      );
+      SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
         {reshade::api::format::r10g10b10a2_unorm, reshade::api::format::r16g16b16a16_float}
-      );      if (!reshade::register_addon(hModule)) return FALSE;
+      );      
+      if (!reshade::register_addon(hModule)) return FALSE;
 
       reshade::register_event<reshade::addon_event::present>(on_present);
 

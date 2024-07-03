@@ -1,5 +1,5 @@
-#include "../../shaders/color.hlsl"
 #include "./shared.h"
+#include "../../shaders/tonemap.hlsl"
 
 // ---- Created with 3Dmigoto v1.3.16 on Mon Jun 03 21:42:02 2024
 
@@ -115,7 +115,7 @@ void main(
       r3.xyz = ro_postfx_bloom_lensdirt_from.SampleLevel(smp_linearclamp_s, r1.zw, 0).xyz;
       r4.xyz = ro_postfx_bloom_lensdirt_to.SampleLevel(smp_linearclamp_s, r1.zw, 0).xyz;
       r4.xyz = r4.xyz + -r3.xyz;
-      r2.xyz = cb_postfx_bloom_lensdirt_blendweight * r4.xyz + r3.xyz;
+      r2.xyz = cb_postfx_bloom_lensdirt_blendweight * r4.xyz * injectedData.lensDirt + r3.xyz;
     }
     r1.z = cmp(0 < cb_env_bloom_veil_strength);
     if (r1.z != 0) {
@@ -125,7 +125,7 @@ void main(
 
       r3.xyz = injectedData.fxBloom * cb_env_bloom_veil_strength * r3.xyz;  // bloom strength
       
-      r4.xyz = cb_postfx_bloom_lensdirt_strength * r2.xyz;
+      r4.xyz = cb_postfx_bloom_lensdirt_strength * r2.xyz * injectedData.lensDirt; // lens dirt
       r3.xyz = r4.xyz * r3.xyz + r3.xyz;
       r0.xyz = r3.xyz + r0.xyz;
     }
@@ -189,8 +189,15 @@ void main(
     r2.xyz = r2.xyz * float3(0.800000012,0.800000012,0.800000012) + float3(0.200000003,0.200000003,0.200000003);
     r0.xyz = r1.xyz * r2.xyz + r0.xyz;
   }
-  r0.xyz = max(float3(0,0,0), r0.xyz);
+
+
+  r0.xyz = max(float3(0,0,0), r0.xyz);  
   r0.xyz = v0.zzz * r0.xyz;
+
+  // r0.xyz = float3(0.18, 0.18, 0.18);
+
+  float3 untonemapped = r0.xyz;
+
   r1.xyz = cmp(r0.xyz < cb_postfx_tonemapping_tonemappingparms.xxx);
   r2.xyzw = r1.xxxx ? cb_postfx_tonemapping_tonemappingcoeffs0.xyzw : cb_postfx_tonemapping_tonemappingcoeffs1.xyzw;
   r0.xw = r2.xy * r0.xx + r2.zw;
@@ -201,13 +208,118 @@ void main(
   r1.xyzw = r1.zzzz ? cb_postfx_tonemapping_tonemappingcoeffs0.xyzw : cb_postfx_tonemapping_tonemappingcoeffs1.xyzw;
   r0.xy = r1.xy * r0.zz + r1.zw;
   r2.z = r0.x / r0.y;
-  r0.xyz = r2.xyz * float3(31,31,31) + float3(0.5,0.5,0.5);
-  r0.xyz = float3(0.03125,0.03125,0.03125) * r0.xyz;
-  r0.xyz = ro_tonemapping_finalcolorcube.SampleLevel(smp_linearclamp_s, r0.xyz, 0).xyz;
-  r0.xyz = max(0, cb_env_tonemapping_gamma_brightness.yyy * r0.xyz);
-  r0.xyz = log2(r0.xyz);
-  r0.xyz = cb_env_tonemapping_gamma_brightness.xxx * r0.xyz;
-  o0.xyz = exp2(r0.xyz);
+
+  float4 vanillaColor;
+  vanillaColor.rgb = r2.xyz;
+  vanillaColor.a = injectedData.toneMapHueCorrection;
+
+  float vanillaMidGray = injectedData.midGray;
+  float renoDRTContrast = 1.f;
+  float renoDRTFlare = injectedData.renoDRTFlare;
+  float renoDRTShadows = 1.f;
+  float renoDRTDechroma = injectedData.colorGradeBlowout;
+  float renoDRTSaturation = 1.f;
+  float renoDRTHighlights = 1.f;
+
+  ToneMapParams tmParams = buildToneMapParams(
+      injectedData.toneMapType,
+      injectedData.toneMapPeakNits,
+      injectedData.toneMapGameNits,
+      injectedData.toneMapGammaCorrection,
+      injectedData.colorGradeExposure,
+      injectedData.colorGradeHighlights,
+      injectedData.colorGradeShadows,
+      injectedData.colorGradeContrast,
+      injectedData.colorGradeSaturation,
+      vanillaMidGray,
+      vanillaMidGray * 100.f,
+      renoDRTHighlights,
+      renoDRTShadows,
+      renoDRTContrast,
+      renoDRTSaturation,
+      renoDRTDechroma,
+      renoDRTFlare,
+      vanillaColor);
+
+
+  float3 outputColor = untonemapped;  // pre lut color
+
+  if (injectedData.toneMapType == 0) {
+    outputColor = vanillaColor;
+  }
+
+  if (injectedData.colorGradeLUTStrength == 0.f)
+  {
+    outputColor = toneMap(outputColor, tmParams);
+  }
+  else
+  {
+    float3 hdrColor;
+    float3 sdrColor;
+    if (tmParams.type == 3.f)
+    {
+      tmParams.renoDRTSaturation *= tmParams.saturation;
+
+      sdrColor = renoDRTToneMap(outputColor, tmParams, true);
+
+      tmParams.renoDRTHighlights *= tmParams.highlights;
+      tmParams.renoDRTShadows *= tmParams.shadows;
+      tmParams.renoDRTContrast *= tmParams.contrast;
+
+      hdrColor = renoDRTToneMap(outputColor, tmParams);
+    }
+    else if (tmParams.type == 1.f) {
+      sdrColor = saturate(toneMap(outputColor, tmParams));
+      hdrColor = toneMap(outputColor, tmParams);
+    }
+    else
+    {
+      outputColor = applyUserColorGrading(
+          outputColor,
+          tmParams.exposure,
+          tmParams.highlights,
+          tmParams.shadows,
+          tmParams.contrast,
+          tmParams.saturation);
+
+      if (tmParams.type == 2.f)
+      {
+        hdrColor = acesToneMap(outputColor, tmParams);
+        sdrColor = acesToneMap(outputColor, tmParams, true);
+      }
+      else
+      {
+        hdrColor = saturate(outputColor);
+        sdrColor = saturate(outputColor);
+      }
+    }
+
+
+
+    r0.xyz = max(0, outputColor.xyz) * float3(31,31,31) + float3(0.5,0.5,0.5);
+    r0.xyz = float3(0.03125,0.03125,0.03125) * r0.xyz;
+    r0.xyz = ro_tonemapping_finalcolorcube.SampleLevel(smp_linearclamp_s, r0.xyz, 0).xyz;
+    
+    if (injectedData.toneMapType == 0)
+    {
+      outputColor = toneMapUpgrade(vanillaColor, saturate(vanillaColor), r0.xyz, injectedData.colorGradeLUTStrength);  // lerp between pre and post lut
+    }
+    else {
+      outputColor = toneMapUpgrade(hdrColor, sdrColor, r0.xyz, injectedData.colorGradeLUTStrength);
+    }
+  }
+
+
+  r0.xyz = outputColor;
+  r0.xyz = cb_env_tonemapping_gamma_brightness.yyy * r0.xyz;
+  o0.xyz = sign(r0.xyz) * pow(abs(r0.xyz), cb_env_tonemapping_gamma_brightness.xxx);
+
+  if (injectedData.toneMapGammaCorrection) { // fix srgb 2.2 mismatch
+    o0.xyz = srgbFromLinear(o0.xyz);
+    o0.xyz = sign(o0.xyz) * pow(abs(o0.xyz), 2.2f);
+  }
+  o0.rgb *= injectedData.toneMapGameNits / 80.f;
+
   o0.w = 1;
   return;
 }

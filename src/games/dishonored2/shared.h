@@ -23,8 +23,9 @@ struct ShaderInjectData {
   float fxFilmGrain;
   float elapsedTime;
   float midGray;
-  float colorGradeDechroma;
+  float colorGradeBlowout;
   float renoDRTFlare;
+  float toneMapHueCorrection;
 };
 
 #ifndef __cplusplus
