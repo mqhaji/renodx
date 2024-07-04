@@ -214,7 +214,7 @@ void main(
 
   if (injectedData.toneMapType != 0) {
 
-    // float vanillaMidGray = ro_postfx_luminance_buffautoexposure[cb_postfx_luminance_exposureindex.y].MiddleGreyLuminanceLDR;
+    // float vanillaMidGray = ((ro_postfx_luminance_buffautoexposure[cb_postfx_luminance_exposureindex.y].MiddleGreyLuminanceLDR / ro_postfx_luminance_buffautoexposure[cb_postfx_luminance_exposureindex.y].MaxLuminanceLDR) * ro_postfx_luminance_buffautoexposure[cb_postfx_luminance_exposureindex.y].LuminanceFactor);
     float vanillaMidGray = injectedData.midGray;
     float renoDRTContrast = 1.f;
     float renoDRTFlare = injectedData.renoDRTFlare;
@@ -227,7 +227,7 @@ void main(
         injectedData.toneMapType,
         injectedData.toneMapPeakNits,
         injectedData.toneMapGameNits,
-        injectedData.toneMapGammaCorrection,
+        injectedData.toneMapGammaCorrection - 1,
         injectedData.colorGradeExposure,
         injectedData.colorGradeHighlights,
         injectedData.colorGradeShadows,
@@ -250,9 +250,9 @@ void main(
     r0.xyz = float3(0.03125,0.03125,0.03125) * r0.xyz;
     r0.xyz = ro_tonemapping_finalcolorcube.SampleLevel(smp_linearclamp_s, r0.xyz, 0).xyz;
 
-    float3 clampedOutput = r0.xyz;
 
-    // r0.xyz = SampleLUTWithExtrapolation(Texture2D lut, SamplerState samplerState, const float3 neutralLutColor, bool inputLinear = false, bool lutLinear = false, bool outputLinear = false, bool lutExtrapolation = bool(ENABLE_LUT_EXTRAPOLATION), uint lutSize = LUT_SIZE);
+  if (injectedData.toneMapType != 0) {
+    float3 clampedOutput = r0.xyz;
     r0.xyz = SampleLUTWithExtrapolation(
         ro_tonemapping_finalcolorcube, 
         smp_linearclamp_s, 
@@ -263,8 +263,8 @@ void main(
         true,   // lutExtrapolation
         32      // lutSize
     );
-
-  r0.xyz = lerp(clampedOutput, r0.xyz, injectedData.colorGradeLUTScaling);
+    r0.xyz = lerp(satCorrection(r0.xyz, clampedOutput), r0.xyz, injectedData.colorGradeLUTColorBoost);
+  }
   r0.xyz = lerp(r2.xyz, r0.xyz, injectedData.colorGradeLUTStrength);
 
   // r0.xyz = outputColor;
