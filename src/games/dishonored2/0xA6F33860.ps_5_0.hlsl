@@ -1,5 +1,6 @@
 #include "./shared.h"
 #include "../../shaders/tonemap.hlsl"
+#include "../../shaders/lut.hlsl"
 
 // ---- Created with 3Dmigoto v1.3.16 on Mon Jun 03 21:42:02 2024
 
@@ -191,14 +192,12 @@ void main(
   }
 
 
-  r0.xyz = max(float3(0,0,0), r0.xyz);  
-  r0.xyz = v0.zzz * r0.xyz;
-
-  // r0.xyz = float3(0.18, 0.18, 0.18);
+  r0.xyz = v0.zzz * r0.xyz; // auto exposure
 
   float3 untonemapped = r0.xyz;
 
   r1.xyz = cmp(r0.xyz < cb_postfx_tonemapping_tonemappingparms.xxx);
+  // highlights looks messed up when r1.xyz = true
   r2.xyzw = r1.xxxx ? cb_postfx_tonemapping_tonemappingcoeffs0.xyzw : cb_postfx_tonemapping_tonemappingcoeffs1.xyzw;
   r0.xw = r2.xy * r0.xx + r2.zw;
   r2.x = r0.x / r0.w;
@@ -213,104 +212,62 @@ void main(
   vanillaColor.rgb = r2.xyz;
   vanillaColor.a = injectedData.toneMapHueCorrection;
 
-  float vanillaMidGray = injectedData.midGray;
-  float renoDRTContrast = 1.f;
-  float renoDRTFlare = injectedData.renoDRTFlare;
-  float renoDRTShadows = 1.f;
-  float renoDRTDechroma = injectedData.colorGradeBlowout;
-  float renoDRTSaturation = 1.f;
-  float renoDRTHighlights = 1.f;
+  if (injectedData.toneMapType != 0) {
 
-  ToneMapParams tmParams = buildToneMapParams(
-      injectedData.toneMapType,
-      injectedData.toneMapPeakNits,
-      injectedData.toneMapGameNits,
-      injectedData.toneMapGammaCorrection,
-      injectedData.colorGradeExposure,
-      injectedData.colorGradeHighlights,
-      injectedData.colorGradeShadows,
-      injectedData.colorGradeContrast,
-      injectedData.colorGradeSaturation,
-      vanillaMidGray,
-      vanillaMidGray * 100.f,
-      renoDRTHighlights,
-      renoDRTShadows,
-      renoDRTContrast,
-      renoDRTSaturation,
-      renoDRTDechroma,
-      renoDRTFlare,
-      vanillaColor);
+    // float vanillaMidGray = ro_postfx_luminance_buffautoexposure[cb_postfx_luminance_exposureindex.y].MiddleGreyLuminanceLDR;
+    float vanillaMidGray = injectedData.midGray;
+    float renoDRTContrast = 1.f;
+    float renoDRTFlare = injectedData.renoDRTFlare;
+    float renoDRTShadows = 1.f;
+    float renoDRTDechroma = injectedData.colorGradeBlowout;
+    float renoDRTSaturation = 1.f;
+    float renoDRTHighlights = 1.f;
 
-
-  float3 outputColor = untonemapped;  // pre lut color
-
-  if (injectedData.toneMapType == 0) {
-    outputColor = vanillaColor;
+    ToneMapParams tmParams = buildToneMapParams(
+        injectedData.toneMapType,
+        injectedData.toneMapPeakNits,
+        injectedData.toneMapGameNits,
+        injectedData.toneMapGammaCorrection,
+        injectedData.colorGradeExposure,
+        injectedData.colorGradeHighlights,
+        injectedData.colorGradeShadows,
+        injectedData.colorGradeContrast,
+        injectedData.colorGradeSaturation,
+        vanillaMidGray,
+        vanillaMidGray * 100.f,
+        renoDRTHighlights,
+        renoDRTShadows,
+        renoDRTContrast,
+        renoDRTSaturation,
+        renoDRTDechroma,
+        renoDRTFlare,
+        vanillaColor);
+      
+    r2.xyz = toneMap(untonemapped, tmParams);
   }
 
-  if (injectedData.colorGradeLUTStrength == 0.f)
-  {
-    outputColor = toneMap(outputColor, tmParams);
-  }
-  else
-  {
-    float3 hdrColor;
-    float3 sdrColor;
-    if (tmParams.type == 3.f)
-    {
-      tmParams.renoDRTSaturation *= tmParams.saturation;
-
-      sdrColor = renoDRTToneMap(outputColor, tmParams, true);
-
-      tmParams.renoDRTHighlights *= tmParams.highlights;
-      tmParams.renoDRTShadows *= tmParams.shadows;
-      tmParams.renoDRTContrast *= tmParams.contrast;
-
-      hdrColor = renoDRTToneMap(outputColor, tmParams);
-    }
-    else if (tmParams.type == 1.f) {
-      sdrColor = saturate(toneMap(outputColor, tmParams));
-      hdrColor = toneMap(outputColor, tmParams);
-    }
-    else
-    {
-      outputColor = applyUserColorGrading(
-          outputColor,
-          tmParams.exposure,
-          tmParams.highlights,
-          tmParams.shadows,
-          tmParams.contrast,
-          tmParams.saturation);
-
-      if (tmParams.type == 2.f)
-      {
-        hdrColor = acesToneMap(outputColor, tmParams);
-        sdrColor = acesToneMap(outputColor, tmParams, true);
-      }
-      else
-      {
-        hdrColor = saturate(outputColor);
-        sdrColor = saturate(outputColor);
-      }
-    }
-
-
-
-    r0.xyz = max(0, outputColor.xyz) * float3(31,31,31) + float3(0.5,0.5,0.5);
+    r0.xyz = r2.xyz * float3(31,31,31) + float3(0.5,0.5,0.5);
     r0.xyz = float3(0.03125,0.03125,0.03125) * r0.xyz;
     r0.xyz = ro_tonemapping_finalcolorcube.SampleLevel(smp_linearclamp_s, r0.xyz, 0).xyz;
-    
-    if (injectedData.toneMapType == 0)
-    {
-      outputColor = toneMapUpgrade(vanillaColor, saturate(vanillaColor), r0.xyz, injectedData.colorGradeLUTStrength);  // lerp between pre and post lut
-    }
-    else {
-      outputColor = toneMapUpgrade(hdrColor, sdrColor, r0.xyz, injectedData.colorGradeLUTStrength);
-    }
-  }
 
+    float3 clampedOutput = r0.xyz;
 
-  r0.xyz = outputColor;
+    // r0.xyz = SampleLUTWithExtrapolation(Texture2D lut, SamplerState samplerState, const float3 neutralLutColor, bool inputLinear = false, bool lutLinear = false, bool outputLinear = false, bool lutExtrapolation = bool(ENABLE_LUT_EXTRAPOLATION), uint lutSize = LUT_SIZE);
+    r0.xyz = SampleLUTWithExtrapolation(
+        ro_tonemapping_finalcolorcube, 
+        smp_linearclamp_s, 
+        r2.xyz, 
+        true,   // inputLinear
+        true,   // lutLinear
+        true,   // outputLinear
+        true,   // lutExtrapolation
+        32      // lutSize
+    );
+
+  r0.xyz = lerp(clampedOutput, r0.xyz, injectedData.colorGradeLUTScaling);
+  r0.xyz = lerp(r2.xyz, r0.xyz, injectedData.colorGradeLUTStrength);
+
+  // r0.xyz = outputColor;
   r0.xyz = cb_env_tonemapping_gamma_brightness.yyy * r0.xyz;
   o0.xyz = sign(r0.xyz) * pow(abs(r0.xyz), cb_env_tonemapping_gamma_brightness.xxx);
 

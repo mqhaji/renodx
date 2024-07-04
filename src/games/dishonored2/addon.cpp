@@ -292,15 +292,15 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID) {
       SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
         {reshade::api::format::r8g8b8a8_typeless, reshade::api::format::r16g16b16a16_float} 
       );
-      SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
-        {reshade::api::format::r8g8b8a8_unorm_srgb, reshade::api::format::r16g16b16a16_float}
-      );
-      SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
-        {reshade::api::format::b8g8r8a8_unorm, reshade::api::format::r16g16b16a16_float}
-      );
-      SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
-        {reshade::api::format::r10g10b10a2_unorm, reshade::api::format::r16g16b16a16_float}
-      );      
+      // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
+      //   {reshade::api::format::r8g8b8a8_unorm_srgb, reshade::api::format::r16g16b16a16_float}
+      // );
+      // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
+      //   {reshade::api::format::b8g8r8a8_unorm, reshade::api::format::r16g16b16a16_float}
+      // );
+      // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
+      //   {reshade::api::format::r10g10b10a2_unorm, reshade::api::format::r16g16b16a16_float}
+      // );      
       if (!reshade::register_addon(hModule)) return FALSE;
 
       reshade::register_event<reshade::addon_event::present>(on_present);
