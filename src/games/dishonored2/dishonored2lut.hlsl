@@ -1,5 +1,5 @@
-#ifndef SRC_GAMES_DISHONORED_DISHONORED2LUT_HLSL_
-#define SRC_GAMES_DISHONORED_DISHONORED2LUT_HLSL_
+#ifndef SRC_GAMES_DISHONORED2_DISHONORED2LUT_HLSL_
+#define SRC_GAMES_DISHONORED2_DISHONORED2LUT_HLSL_
 
 // Color grading/charts tex lookup
 float3 TexColorChart3D(Texture3D chartTex, SamplerState ssChart, float3 cImage, uint lutSize)
@@ -148,4 +148,4 @@ float3 satCorrection(float3 incorrectColor, float3 correctColor) {
   return color;
 }
 
-#endif  // SRC_GAMES_DISHONORED_DISHONORED2LUT_HLSL_
+#endif  // SRC_GAMES_DISHONORED2_DISHONORED2LUT_HLSL_
