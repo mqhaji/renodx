@@ -43,7 +43,7 @@ void main(
   r0.yz = -r1.xz + r0.yz;
   r1.xz = r0.xx * r0.yz + r1.xz;
   o0.w = r1.w;
-  r0.x = dot(float3(0.212500006, 0.715399981, 0.0720999986), abs(r1.xyz));
+  r0.x = dot(float3(0.212500006, 0.715399981, 0.0720999986), r1.xyz);
   r0.yzw = r0.xxx + -r1.xyz;
   r0.x = saturate(r0.x * cb0[0].y + cb0[0].z);  //  r0.x = saturate(r0.x * cb0[0].y + cb0[0].z);
   r0.x = cb0[0].x * r0.x;
@@ -78,17 +78,9 @@ void main(
       renoDRTDechroma,
       renoDRTFlare);
 
-  ToneMapLUTParams lutParams = buildLUTParams(
-      s2_s,
-      injectedData.colorGradeLUTStrength,
-      injectedData.colorGradeLUTScaling,
-      TONE_MAP_LUT_TYPE__2_2,
-      TONE_MAP_LUT_TYPE__2_2,
-      16);
-
   float3 outputColor = r0.xyz; // pre lut color
 
-  if (injectedData.colorGradeLUTStrength == 0.f || tmParams.type == 1.f)
+  if (injectedData.colorGradeLUTStrength == 0.f)
   {
     outputColor = toneMap(outputColor, tmParams);
   }
@@ -107,6 +99,10 @@ void main(
       tmParams.renoDRTContrast *= tmParams.contrast;
 
       hdrColor = renoDRTToneMap(outputColor, tmParams);
+    }
+    else if (tmParams.type == 1.f) {
+      sdrColor = saturate(toneMap(outputColor, tmParams));
+      hdrColor = toneMap(outputColor, tmParams);
     }
     else
     {
@@ -150,10 +146,10 @@ void main(
 
     if (injectedData.toneMapType == 0)
     {
-      outputColor = toneMapUpgrade(outputColor, saturate(outputColor), r0.xyz, lutParams.strength);  // lerp between pre and post lut
+      outputColor = toneMapUpgrade(outputColor, saturate(outputColor), r0.xyz, injectedData.colorGradeLUTStrength);  // lerp between pre and post lut
     }
     else {
-      outputColor = toneMapUpgrade(hdrColor, sdrColor, r0.xyz, lutParams.strength);
+      outputColor = toneMapUpgrade(hdrColor, sdrColor, r0.xyz, injectedData.colorGradeLUTStrength);
     }
   }
   r1.xyz = t1.SampleLevel(s1_s, v2.zw, 0).xyz;

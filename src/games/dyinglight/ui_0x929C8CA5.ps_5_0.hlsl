@@ -41,6 +41,10 @@ void main(
   o0.w = r0.x * r0.y;
   
   o0.xyz = saturate(o0.xyz);
+  if (injectedData.toneMapGammaCorrection) { // fix srgb 2.2 mismatch
+    o0.xyz = srgbFromLinear(o0.xyz);
+    o0.xyz = pow(o0.xyz, 2.2f);
+  }
   o0.xyz *= injectedData.toneMapUINits/80.f;
   return;
 }

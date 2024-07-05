@@ -10,10 +10,17 @@
 
 
 /* these 3 are untested*/
-#include <embed/0x8B0B0A1E.h>    // TONEMAP?
-#include <embed/0x2E034F94.h>    // TONEMAP?
-#include <embed/0xE4562BAF.h>    // TONEMAP?
+// #include <embed/0x8B0B0A1E.h>    // TONEMAP?
+// #include <embed/0x2E034F94.h>    // TONEMAP?
+// #include <embed/0xE4562BAF.h>    // TONEMAP?
 
+// #include <embed/0x9165A474.h> // black smoke
+// #include <embed/0xEC3D14D2.h> // distant fog/smoke
+// #include <embed/0x32A56036.h> // distant fog/smoke
+// #include <embed/0x372AEE4E.h> // black smoke
+// #include <embed/0xAB16B3F7.h> // fire
+// #include <embed/0xB561688F.h> // distant smoke?
+// #include <embed/0x1FB36E90.h> // screen blood effect
 
 // #include <embed/0x95588EA5.h> // radial dirty lens effect
 // #include <embed/0x8135BEA2.h> // radial lens flare
@@ -57,6 +64,8 @@ ShaderReplaceMod::CustomShaders customShaders = {
   // CustomShaderEntry(0x2E034F94),          // TONEMAP?
   // CustomShaderEntry(0xE4562BAF),          // TONEMAP?
 
+
+  // CustomShaderEntry(0x1FB36E90),       // screen blood effect
 
   // CustomShaderEntry(0x95588EA5),       // radial dirty lens effect
   // CustomShaderEntry(0x8135BEA2),       // radial lens flare
@@ -257,7 +266,7 @@ static void onPresetOff() {
   UserSettingUtil::updateUserSetting("fxBloom", 50.f);
   UserSettingUtil::updateUserSetting("fxAutoExposure", 50.f);
   UserSettingUtil::updateUserSetting("fxDoF", 50.f);
-  UserSettingUtil::updateUserSetting("fxFilmGrain", 0.f);
+  UserSettingUtil::updateUserSetting("fxFilmGrain", 50.f);
 }
 
 static auto start = std::chrono::steady_clock::now();
@@ -283,17 +292,22 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID) {
       ShaderReplaceMod::traceUnmodifiedShaders = true;
       SwapChainUpgradeMod::forceBorderless = false;
       SwapChainUpgradeMod::preventFullScreen = false;
-      SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
-        {reshade::api::format::r8g8b8a8_unorm, reshade::api::format::r16g16b16a16_float} 
-      );
-      SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
-        {reshade::api::format::r8g8b8a8_typeless, reshade::api::format::r16g16b16a16_float} 
-      );
+      for (auto index : {3, 4}) {
+        SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
+          {
+            .oldFormat = reshade::api::format::r8g8b8a8_typeless,
+            .newFormat = reshade::api::format::r16g16b16a16_float,
+            .index = index
+          }
+        );
+      // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
+      //   {reshade::api::format::r8g8b8a8_unorm, reshade::api::format::r16g16b16a16_float} 
+      // );
       // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
       //   {reshade::api::format::r8g8b8a8_unorm_srgb, reshade::api::format::r16g16b16a16_float}
       // );
       // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
-      //   {reshade::api::format::b8g8r8a8_unorm, reshade::api::format::r16g16b16a16_float, 0}
+      //   {reshade::api::format::b8g8r8a8_unorm, reshade::api::format::r16g16b16a16_float}
       // );
       // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
       //   {reshade::api::format::r10g10b10a2_unorm, reshade::api::format::r16g16b16a16_float}
@@ -301,7 +315,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID) {
       // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
       //   {reshade::api::format::r11g11b10_float, reshade::api::format::r16g16b16a16_float}
       // );
-      
+
+      }      
       break;
     case DLL_PROCESS_DETACH:
       reshade::unregister_addon(hModule);

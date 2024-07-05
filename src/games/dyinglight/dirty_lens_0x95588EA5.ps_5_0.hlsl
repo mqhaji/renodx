@@ -37,7 +37,7 @@ void main(
   r1.xyzw = t0.Sample(s0_s, v1.zw).xyzw;
   r0.xyzw = r1.xyzw * r2.xxxx + r0.xyzw;
   r0.xyzw = r0.xyzw * float4(2,2,2,2) + float4(-2,-2,-2,-2);
-  r0.xyzw = r0.xyzw;  //  r0.xyzw = max(float4(0,0,0,0), r0.xyzw);
+  //  r0.xyzw = max(float4(0,0,0,0), r0.xyzw);
   r1.xy = v2.xy * v2.xy;
   r1.xy = -r1.xy * r1.xy + float2(1,1);
   r1.x = r1.x * r1.y;

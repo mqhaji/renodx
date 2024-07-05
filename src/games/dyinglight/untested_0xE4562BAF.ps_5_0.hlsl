@@ -49,7 +49,7 @@ void main(
   r0.x = log2(abs(r0.x));
   r0.x = 0.454545468 * r0.x;
   o0.xyz = exp2(r0.xxx);
-  o0.w = max(0, cb0[0].x + cb0[0].y); //  o0.w = saturate(cb0[0].x + cb0[0].y); // not sure if it has an effect
+  o0.w = saturate(cb0[0].x + cb0[0].y);
   o1.w = 0;
   r0.xy = t1.Sample(s1_s, v1.xy).yw;
   r0.xy = r0.yx * cb0[2].xx + cb0[2].yy;

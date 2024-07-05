@@ -27,6 +27,8 @@ void main(
   float4 fDest;
 
   r0.xyzw = t0.Sample(s0_s, v1.xy).xyzw;
+
+  // no noticeable effect when skipping this code
   r1.x = r0.x + r0.y;
   r1.x = r1.x + r0.z;
   r0.xyzw = -r1.xxxx * float4(0.333333343,0.333333343,0.333333343,0.333333343) + r0.xyzw;

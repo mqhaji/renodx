@@ -43,6 +43,6 @@ void main(
   r0.w = dot(float3(0.212500006,0.715399981,0.0720999986), r1.xyz);
   r2.xy = r0.ww * cb0[0].xz + cb0[0].zz;
   r0.w = r2.x / r2.y;
-  o0.xyz = r1.xyz * r0.www + r0.xyz;  //  o0.xyz = max(0, r1.xyz * r0.www + r0.xyz);
+  o0.xyz = r1.xyz * r0.www + r0.xyz;  //  o0.xyz = saturate(r1.xyz * r0.www + r0.xyz);
   return;
 }

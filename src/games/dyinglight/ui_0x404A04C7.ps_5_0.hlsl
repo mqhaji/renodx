@@ -54,7 +54,7 @@ void main(
   o0.w = r1.w;
   o0.xyz = saturate(r0.xxx * float3(0.0170000009,0.0170000009,0.0170000009) + r0.yzw);
 
-  if (injectedData.toneMapGammaCorrection == 1) { // apply 2.2 gamma correction to fix srgb 2.2 mismatch
+  if (injectedData.toneMapGammaCorrection) { // fix srgb 2.2 mismatch
     o0.xyz = srgbFromLinear(o0.xyz);
     o0.xyz = pow(o0.xyz, 2.2f);
   }

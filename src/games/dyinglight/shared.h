@@ -25,6 +25,7 @@ struct ShaderInjectData {
   float renoDRTFlare;
   float midGray;
   float elapsedTime;
+  float fxAutoExposure;
 };
 
 #ifndef __cplusplus

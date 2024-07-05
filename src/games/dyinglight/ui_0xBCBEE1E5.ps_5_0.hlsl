@@ -38,7 +38,7 @@ void main(
 
   o0.xyz = saturate(o0.xyz);
 
-  if (injectedData.toneMapGammaCorrection == 1) { // apply 2.2 gamma correction to fix srgb 2.2 mismatch
+  if (injectedData.toneMapGammaCorrection) { // fix srgb 2.2 mismatch
     o0.xyz = srgbFromLinear(o0.xyz);
     o0.xyz = pow(o0.xyz, 2.2f);
   }

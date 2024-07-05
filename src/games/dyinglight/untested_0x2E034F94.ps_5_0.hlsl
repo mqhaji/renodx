@@ -41,7 +41,7 @@ void main(
   if (r0.x != 0) discard;
   r0.xyzw = t1.Sample(s1_s, v1.xy).xyzw;
   r0.x = dot(float3(0.212500006,0.715399981,0.0720999986), r0.xyz);
-  o0.w = max(0, r0.w * cb0[0].x + cb0[0].y);  //  o0.w = saturate(r0.w * cb0[0].x + cb0[0].y);
+  o0.w = saturate(r0.w * cb0[0].x + cb0[0].y);
   r0.x = cb0[0].z * r0.x;
   r0.x = log2(abs(r0.x));
   r0.x = 0.454545468 * r0.x;

@@ -37,8 +37,8 @@ void main(
   r1.x = 0.454545468 * r1.x;
   o0.xyz = exp2(r1.xxx);
   r1.x = 1 + -r0.w;
-  o0.w = max(0, r1.x * cb0[0].x + cb0[0].y);  //  o0.w = saturate(r1.x * cb0[0].x + cb0[0].y);
-  r0.x = max(0, r0.x);  //  r0.x = saturate(r0.x);
+  o0.w = saturate(r1.x * cb0[0].x + cb0[0].y);
+  r0.x = saturate(r0.x);
   r0.x = r0.x * 2 + -1;
   r1.xyz = max(0, v3.xyz * r0.xxx + float3(1,1,1)); //  r1.xyz = saturate(v3.xyz * r0.xxx + float3(1,1,1));
   o1.xyz = r1.xyz * r0.yzw;

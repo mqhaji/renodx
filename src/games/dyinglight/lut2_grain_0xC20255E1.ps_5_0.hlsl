@@ -45,7 +45,6 @@ void main(
   uint4 bitmask, uiDest;
   float4 fDest;
 
-  // generates film grain
   r0.xyzw = t1.Sample(s1_s, v1.xy).xyzw;
   r0.xyzw = r0.xyzw * float4(2,2,2,2) + float4(-1,-1,-1,-1);
   r1.xyzw = t2.Sample(s2_s, v1.zw).xyzw;
@@ -59,8 +58,6 @@ void main(
   r0.xyzw = r0.xyzw * cb0[2].yyyy + cb0[2].zzzz;
   r0.xyz = r0.xyz + -r0.www;
   r0.xyz = cb0[3].xxx * r0.xyz + r0.www;
-  
-  // applies film grain and does some other stuff I'm not sure about
   r1.xy = -abs(v3.xy) * abs(v3.xy) + float2(1,1);
   r0.w = saturate(-r1.x * r1.y + 1);  //  r0.w = saturate(-r1.x * r1.y + 1);
   r0.w = cb0[2].x * r0.w;
@@ -71,7 +68,7 @@ void main(
   r1.xy = -r2.xz + r1.xy;
   r2.xz = r0.ww * r1.xy + r2.xz;
   o0.w = r2.w;
-  r0.w = saturate(dot(float3(0.212500006,0.715399981,0.0720999986), abs(r2.xyz))); //    r0.w = saturate(dot(float3(0.212500006,0.715399981,0.0720999986), r2.xyz));
+  r0.w = saturate(dot(float3(0.212500006,0.715399981,0.0720999986), r2.xyz)); //    r0.w = saturate(dot(float3(0.212500006,0.715399981,0.0720999986), r2.xyz));
   r0.w = sign(r0.w) * sqrt(abs(r0.w));
   r0.w = sign(r0.w) * sqrt(abs(r0.w));
   r0.xyz = r0.xyz * r0.www;
@@ -79,16 +76,14 @@ void main(
   r0.xyz = cmp(r0.xyz >= float3(0,0,0));
   r0.xyz = r0.xyz ? r1.xyz : -r1.xyz;
   r0.xyz = r0.xyz * injectedData.fxFilmGrain + r2.xyz;  // film grain
+  r0.w = dot(float3(0.212500006,0.715399981,0.0720999986), r0.xyz);
+  r1.xyz = r0.www + -r0.xyz;
+  r0.w = saturate(r0.w * cb0[0].y + cb0[0].z);  //  r0.w = saturate(r0.w * cb0[0].y + cb0[0].z);
+  r0.w = cb0[0].x * r0.w;
+  r0.xyz = r0.www * r1.xyz + r0.xyz;
+  r0.w = dot(r0.xyz, cb0[1].xyz);
+  r0.xyz = r0.xyz * cb0[1].www + r0.www;
 
-  if (injectedData.toneMapType == 0) {  // vanilla tonemapper?
-    r0.w = dot(float3(0.212500006,0.715399981,0.0720999986), r0.xyz);
-    r1.xyz = r0.www + -r0.xyz;
-    r0.w = saturate(r0.w * cb0[0].y + cb0[0].z);  //  r0.w = saturate(r0.w * cb0[0].y + cb0[0].z);
-    r0.w = cb0[0].x * r0.w;
-    r0.xyz = r0.www * r1.xyz + r0.xyz;
-    r0.w = dot(r0.xyz, cb0[1].xyz);
-    r0.xyz = r0.xyz * cb0[1].www + r0.www;
-  }
   float vanillaMidGray = .179;
   float renoDRTContrast = 1.f;
   float renoDRTFlare = 0.f;
@@ -116,17 +111,10 @@ void main(
       renoDRTDechroma,
       renoDRTFlare);
 
-  ToneMapLUTParams lutParams = buildLUTParams(
-      s2_s,
-      injectedData.colorGradeLUTStrength,
-      injectedData.colorGradeLUTScaling,
-      TONE_MAP_LUT_TYPE__2_2,
-      TONE_MAP_LUT_TYPE__2_2,
-      16);
 
   float3 outputColor = r0.xyz;  // pre lut color
 
-  if (injectedData.colorGradeLUTStrength == 0.f || tmParams.type == 1.f)
+  if (injectedData.colorGradeLUTStrength == 0.f)
   {
     outputColor = toneMap(outputColor, tmParams);
   }
@@ -145,6 +133,10 @@ void main(
       tmParams.renoDRTContrast *= tmParams.contrast;
 
       hdrColor = renoDRTToneMap(outputColor, tmParams);
+    }
+    else if (tmParams.type == 1.f) {
+      sdrColor = saturate(toneMap(outputColor, tmParams));
+      hdrColor = toneMap(outputColor, tmParams);
     }
     else
     {
@@ -186,10 +178,10 @@ void main(
 
     if (injectedData.toneMapType == 0)
     {
-      outputColor = toneMapUpgrade(outputColor, saturate(outputColor), r0.xyz, lutParams.strength);  // lerp between pre and post lut
+      outputColor = toneMapUpgrade(outputColor, saturate(outputColor), r0.xyz, injectedData.colorGradeLUTStrength);  // lerp between pre and post lut
     }
     else {
-      outputColor = toneMapUpgrade(hdrColor, sdrColor, r0.xyz, lutParams.strength);
+      outputColor = toneMapUpgrade(hdrColor, sdrColor, r0.xyz, injectedData.colorGradeLUTStrength);
     }
   }
   r1.xyz = t3.SampleLevel(s3_s, v3.zw, 0).xyz;

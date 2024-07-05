@@ -28,18 +28,15 @@ void main(
   float4 fDest;
 
   r0.xyzw = t0.SampleLevel(s0_s, v1.xy, 0).xyzw;
-  o0.w = r0.w;
+  o0.xyzw = r0.xyzw;
 
-  // r0.xyz = log2(abs(r0.xyz));
-  // r0.xyz = cb0[0].xxx * r0.xyz;
-  // o0.xyz = exp2(r0.xyz);
-
-  o0.xyz = sign(r0.xyz) * pow(abs(r0.xyz), cb0[0].xxx);
-
-  if (injectedData.toneMapGammaCorrection == 1) { // apply 2.2 gamma correction to fix srgb 2.2 mismatch
+  if (injectedData.toneMapGammaCorrection) { // fix srgb 2.2 mismatch
     o0.xyz = srgbFromLinear(o0.xyz);
-    o0.xyz = pow(o0.xyz, 2.2f);
+    o0.xyz = sign(o0.xyz) * pow(abs(o0.xyz), 2.2f);
   }
+
+  // apply game gamma adjustment slider
+  o0.xyz = sign(o0.xyz) * pow(abs(o0.xyz), cb0[0].xxx);
 
   o0.xyz *= injectedData.toneMapGameNits/80.f;
 
