@@ -280,7 +280,7 @@ void main(
         injectedData.toneMapGameNits,
         injectedData.toneMapGammaCorrection - 1,
         1.f,
-        1.f,
+        injectedData.colorGradeHighlights,
         1.f,
         1.f,
         1.f,
@@ -291,20 +291,20 @@ void main(
         renoDRTContrast,
         renoDRTSaturation,
         renoDRTDechroma,
-        renoDRTFlare);
+        renoDRTFlare,
+        vanillaColor);
       
-    r2.xyz = lerp(toneMap(untonemapped, tmParams), hueSatCorrection(toneMap(untonemapped, tmParams), vanillaColor.rgb), vanillaColor.a);
+    r2.xyz = toneMap(untonemapped, tmParams);
+    r2.xyz = lerp(vanillaColor, r2.xyz, clamp(vanillaColor, 0.0, 1.0));
 
     r2.xyz = applyUserColorGrading(
       r2.xyz,
       injectedData.colorGradeExposure,
-      injectedData.colorGradeHighlights,
+      1.f,
       injectedData.colorGradeShadows,
       injectedData.colorGradeContrast,
       injectedData.colorGradeSaturation
-    );
-
-    r2.xyz = lerp(vanillaColor, r2.xyz, clamp(vanillaColor / vanillaMidGray, 0.0, 1.0));
+    );  
   }
 
   r0.xyz = r2.xyz * float3(31,31,31) + float3(0.5,0.5,0.5);
