@@ -285,9 +285,6 @@ float3 toneMap(float3 untonemapped, ToneMapParams params) {
       tmParams.renoDRTContrast *= tmParams.contrast;                                                       \
                                                                                                            \
       hdrColor = renoDRTToneMap(outputColor, tmParams);                                                    \
-      if (tmParams.correctColor.a) {                                                                       \
-        hdrColor = lerp(hdrColor, hueCorrection(hdrColor, tmParams.correctColor.rgb), tmParams.correctColor.a);   \
-      }                                                                                                    \
                                                                                                            \
     } else {                                                                                               \
       outputColor = applyUserColorGrading(                                                                 \
@@ -301,18 +298,12 @@ float3 toneMap(float3 untonemapped, ToneMapParams params) {
                                                                                                            \
       if (tmParams.type == 2.f) {                                                                          \
         hdrColor = acesToneMap(outputColor, tmParams);                                                     \
-        if (tmParams.correctColor.a) {                                                                     \
-          hdrColor = lerp(hdrColor, hueCorrection(hdrColor, tmParams.correctColor.rgb), tmParams.correctColor.a); \
-        }                                                                                                  \
         sdrColor = acesToneMap(outputColor, tmParams, true);                                               \
         if (tmParams.correctColor.a) {                                                                     \
           sdrColor = lerp(sdrColor, hueCorrection(sdrColor, tmParams.correctColor.rgb), tmParams.correctColor.a); \
         }                                                                                                  \
       } else {                                                                                             \
         hdrColor = outputColor;                                                                            \
-        if (tmParams.correctColor.a) {                                                                     \
-          hdrColor = lerp(hdrColor, hueCorrection(hdrColor, tmParams.correctColor.rgb), tmParams.correctColor.a); \
-        }                                                                                                  \
         sdrColor = outputColor;                                                                            \
         if (tmParams.correctColor.a) {                                                                     \
           sdrColor = lerp(sdrColor, hueCorrection(sdrColor, tmParams.correctColor.rgb), tmParams.correctColor.a); \
