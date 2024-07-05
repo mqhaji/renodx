@@ -157,56 +157,62 @@ void main(
   r0.xyz = r0.xyz * r0.xyz * injectedData.fxBloom;
   r0.xyz = r0.xyz * HDR_EncodeScale2.zzz + r1.xyz;
 
+  float3 untonemapped = r0.xyz;
+
   // tone mapping + autoexposure (midgray adjustment)
   r0.w = dot(float3(0.298999995,0.587000012,0.114), r0.xyz);
-  if (injectedData.toneMapType == 0) {  // vanilla tonemapper
-    r1.x = log2(r0.w);
-    r1.x = r1.x * 0.693147182 + 12;
-    r1.x = saturate(0.0625 * r1.x);
-    r1.y = 0.25;
-    r1.x = SamplerToneMapCurve_TEX.SampleLevel(SamplerToneMapCurve_SMP_s, r1.xy, 0).x;
-    r1.y = -r1.x * r1.x + 1;
-    r2.xyz = max(float3(0,0,0), r0.xyz);
-    r1.z = max(9.99999975e-005, r0.w);
-    r2.xyz = r2.xyz / r1.zzz;
-    r1.y = max(9.99999975e-006, r1.y);
-    r2.xyz = log2(r2.xyz);
-    r1.yzw = r2.xyz * r1.yyy;
-    r1.yzw = exp2(r1.yzw);
-    r2.xyz = r1.yzw * r1.xxx;
-    r2.w = sqrt(r1.x);
-    r3.x = cmp(ToneMappingDebugParams.y < r2.w);
-    r2.w = cmp(r2.w < ToneMappingDebugParams.x);
-    r4.xyzw = r2.wwww ? float4(0,0,1,1) : 0;
-    r3.xyzw = r3.xxxx ? float4(1,0,0,1) : r4.xyzw;
-    r2.w = ToneMappingDebugParams.z * r3.w;
-    r1.xyz = -r1.yzw * r1.xxx + r3.xyz;
-    r1.xyz = r2.www * r1.xyz + r2.xyz;
-    r0.xyz = log2(r0.xyz);
-    r0.xyz = r0.xyz * float3(0.693147182,0.693147182,0.693147182) + float3(12,12,12);
-    r2.xyz = saturate(float3(0.0625,0.0625,0.0625) * r0.xyz);
-    r2.w = 0.25;
-    r0.x = SamplerToneMapCurve_TEX.SampleLevel(SamplerToneMapCurve_SMP_s, r2.xw, 0).x;
-    r0.y = SamplerToneMapCurve_TEX.SampleLevel(SamplerToneMapCurve_SMP_s, r2.yw, 0).x;
-    r0.z = SamplerToneMapCurve_TEX.SampleLevel(SamplerToneMapCurve_SMP_s, r2.zw, 0).x;
-    r1.w = dot(float3(0.298999995,0.587000012,0.114), r0.xyz);
-    r1.w = sqrt(r1.w);
-    r2.x = cmp(ToneMappingDebugParams.y < r1.w);
-    r1.w = cmp(r1.w < ToneMappingDebugParams.x);
-    r3.xyzw = r1.wwww ? float4(0,0,1,1) : 0;
-    r2.xyzw = r2.xxxx ? float4(1,0,0,1) : r3.xyzw;
-    r1.w = ToneMappingDebugParams.z * r2.w;
-    r2.xyz = r2.xyz + -r0.xyz;
-    r0.xyz = r1.www * r2.xyz + r0.xyz;
-    r0.xyz = r0.xyz + -r1.xyz;
-    r0.xyz = ToneMappingDebugParams.www * r0.xyz + r1.xyz;
+
+  if (injectedData.toneMapType != 0) {
+    r0.xyz = float3(0.18, 0.18, 0.18);  // temp solution until I find midgray vars
   }
-  else {  // custom tonemapper
-    float vanillaMidGray = injectedData.midGray;
-    float renoDRTContrast = 1.f;
-    float renoDRTFlare = injectedData.renoDRTFlare;
+  r1.x = log2(r0.w);
+  r1.x = r1.x * 0.693147182 + 12;
+  r1.x = saturate(0.0625 * r1.x);
+  r1.y = 0.25;
+  r1.x = SamplerToneMapCurve_TEX.SampleLevel(SamplerToneMapCurve_SMP_s, r1.xy, 0).x;
+  r1.y = -r1.x * r1.x + 1;
+  r2.xyz = max(float3(0,0,0), r0.xyz);
+  r1.z = max(9.99999975e-005, r0.w);
+  r2.xyz = r2.xyz / r1.zzz;
+  r1.y = max(9.99999975e-006, r1.y);
+  r2.xyz = log2(r2.xyz);
+  r1.yzw = r2.xyz * r1.yyy;
+  r1.yzw = exp2(r1.yzw);
+  r2.xyz = r1.yzw * r1.xxx;
+  r2.w = sqrt(r1.x);
+  r3.x = cmp(ToneMappingDebugParams.y < r2.w);
+  r2.w = cmp(r2.w < ToneMappingDebugParams.x);
+  r4.xyzw = r2.wwww ? float4(0,0,1,1) : 0;
+  r3.xyzw = r3.xxxx ? float4(1,0,0,1) : r4.xyzw;
+  r2.w = ToneMappingDebugParams.z * r3.w;
+  r1.xyz = -r1.yzw * r1.xxx + r3.xyz;
+  r1.xyz = r2.www * r1.xyz + r2.xyz;
+  r0.xyz = log2(r0.xyz);
+  r0.xyz = r0.xyz * float3(0.693147182,0.693147182,0.693147182) + float3(12,12,12);
+  r2.xyz = saturate(float3(0.0625,0.0625,0.0625) * r0.xyz);
+  r2.w = 0.25;
+  r0.x = SamplerToneMapCurve_TEX.SampleLevel(SamplerToneMapCurve_SMP_s, r2.xw, 0).x;
+  r0.y = SamplerToneMapCurve_TEX.SampleLevel(SamplerToneMapCurve_SMP_s, r2.yw, 0).x;
+  r0.z = SamplerToneMapCurve_TEX.SampleLevel(SamplerToneMapCurve_SMP_s, r2.zw, 0).x;
+  r1.w = dot(float3(0.298999995,0.587000012,0.114), r0.xyz);
+  r1.w = sqrt(r1.w);
+  r2.x = cmp(ToneMappingDebugParams.y < r1.w);
+  r1.w = cmp(r1.w < ToneMappingDebugParams.x);
+  r3.xyzw = r1.wwww ? float4(0,0,1,1) : 0;
+  r2.xyzw = r2.xxxx ? float4(1,0,0,1) : r3.xyzw;
+  r1.w = ToneMappingDebugParams.z * r2.w;
+  r2.xyz = r2.xyz + -r0.xyz;
+  r0.xyz = r1.www * r2.xyz + r0.xyz;
+  r0.xyz = r0.xyz + -r1.xyz;
+  r0.xyz = ToneMappingDebugParams.www * r0.xyz + r1.xyz;
+
+
+  if (injectedData.toneMapType != 0) {  // custom tonemapper
+    float vanillaMidGray = (r0.r + r0.g + r0.b) / 3.f;
+    float renoDRTContrast = 1.02f;
+    float renoDRTFlare = 0.f;
     float renoDRTShadows = 1.f;
-    float renoDRTDechroma = 0.f;
+    float renoDRTDechroma = injectedData.colorGradeBlowout;
     float renoDRTSaturation = 1.f;
     float renoDRTHighlights = 1.f;
 
@@ -229,7 +235,7 @@ void main(
         renoDRTDechroma,
         renoDRTFlare);
 
-    r0.xyz = toneMap(r0.xyz, tmParams);
+    r0.xyz = toneMap(untonemapped, tmParams);
   }
 
   // no idea what this does

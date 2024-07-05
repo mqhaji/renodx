@@ -65,7 +65,7 @@ UserSettingUtil::UserSettings userSettings = {
     .section = "Tone Mapping",
     .tooltip = "Sets the value of peak white in nits",
     .min = 48.f,
-    .max = 10000.f
+    .max = 4000.f
   },
   new UserSettingUtil::UserSetting {
     .key = "toneMapGameNits",
@@ -145,21 +145,21 @@ UserSettingUtil::UserSettings userSettings = {
     .parse = [](float value) { return value * 0.02f; }
   },
   new UserSettingUtil::UserSetting {
+    .key = "colorGradeBlowout",
+    .binding = &shaderInjection.colorGradeBlowout,
+    .defaultValue = 50.f,
+    .label = "Blowout",
+    .section = "Color Grading",
+    .tooltip = "Controls highlight desaturation due to overexposure.",
+    .max = 100.f,
+    .parse = [](float value) { return value * 0.01f; }
+  },
+  new UserSettingUtil::UserSetting {
     .key = "colorGradeLUTStrength",
     .binding = &shaderInjection.colorGradeLUTStrength,
     .defaultValue = 100.f,
     .label = "LUT Strength",
     .section = "Color Grading",
-    .max = 100.f,
-    .parse = [](float value) { return value * 0.01f; }
-  },
-  new UserSettingUtil::UserSetting {
-    .key = "colorGradeLUTScaling",
-    .binding = &shaderInjection.colorGradeLUTScaling,
-    .defaultValue = 50.f,
-    .label = "LUT Scaling",
-    .section = "Color Grading",
-    .tooltip = "Scales the color grade LUT to full range when size is clamped.",
     .max = 100.f,
     .parse = [](float value) { return value * 0.01f; }
   },
@@ -199,25 +199,6 @@ UserSettingUtil::UserSettings userSettings = {
     .max = 100.f,
     .parse = [](float value) { return value * 0.02f; }
   },
-  new UserSettingUtil::UserSetting {
-    .key = "midGray",
-    .binding = &shaderInjection.midGray,
-    .defaultValue = 0.49f,
-    .label = "midGray",
-    .section = "Tonemapper Settings",
-    .max = 1.f,
-    .format = "%.2f"
-  },
-  new UserSettingUtil::UserSetting {
-    .key = "renoDRTFlare",
-    .binding = &shaderInjection.renoDRTFlare,
-    .defaultValue = 0.f,
-    .label = "renoDRTFlare",
-    .section = "Tonemapper Settings",
-    .max = 0.4f,
-    .format = "%.4f"
-  },
-
 };
 
 // clang-format on
@@ -234,7 +215,6 @@ static void onPresetOff() {
   UserSettingUtil::updateUserSetting("colorGradeContrast", 50.f);
   UserSettingUtil::updateUserSetting("colorGradeSaturation", 50.f);
   UserSettingUtil::updateUserSetting("colorGradeLUTStrength", 100.f);
-  UserSettingUtil::updateUserSetting("colorGradeLUTScaling", 0.f);
   UserSettingUtil::updateUserSetting("fxDoF", 50.f);
   UserSettingUtil::updateUserSetting("fxBloom", 50.f);
   UserSettingUtil::updateUserSetting("fxFilmGrain", 50.f);

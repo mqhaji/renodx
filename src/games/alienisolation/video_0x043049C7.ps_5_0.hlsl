@@ -35,14 +35,12 @@ void main(
   o0.xyz = r0.www * float3(0,-0.39199999,2.01699996) + r0.xyz;
   o0.w = v0.w;
 
-  o0.rgb = saturate(o0.rgb);  // clamp colors 0-1
-  // convert from sRGB to linear and apply gamma 2.2 correction
+  o0.rgb = saturate(o0.rgb);
   o0.rgb = injectedData.toneMapGammaCorrection ? pow(o0.rgb, 2.2f) : linearFromSRGB(o0.rgb);
-  float videoPeak = injectedData.toneMapPeakNits / (injectedData.toneMapGameNits / 203.f);
-  // apply BT.2446A inverse tonemapping
-  o0.rgb = bt2446a_inverse_tonemapping_bt709(o0.rgb, 100.f * injectedData.toneMapGameNits/injectedData.toneMapPeakNits, videoPeak);
-  o0.rgb *= injectedData.toneMapPeakNits / videoPeak;
-  o0.rgb /= 80.f;
-
+  float scaling = injectedData.toneMapPeakNits / injectedData.toneMapGameNits;
+  float videoPeak = 203.f * scaling;
+  o0.rgb = bt2446a_inverse_tonemapping_bt709(o0.rgb, 100.f / scaling, videoPeak) ;
+  o0.rgb /= videoPeak; // Normalize to 1.0
+  o0.rgb *= injectedData.toneMapPeakNits / 80.f;
   return;
 }
