@@ -208,13 +208,14 @@ void main(
 
 
   if (injectedData.toneMapType != 0) {  // custom tonemapper
-    float vanillaMidGray = (r0.r + r0.g + r0.b) / 3.f;
-    float renoDRTContrast = 1.02f;
+    untonemapped *= ((r0.r + r0.g + r0.b) / 3.f) / .18f;
+    float vanillaMidGray = 0.18f;
+    float renoDRTContrast = 0.9f;
     float renoDRTFlare = 0.f;
-    float renoDRTShadows = 1.f;
+    float renoDRTShadows = 0.86f;
     float renoDRTDechroma = injectedData.colorGradeBlowout;
-    float renoDRTSaturation = 1.f;
-    float renoDRTHighlights = 1.f;
+    float renoDRTSaturation = 1.02f;
+    float renoDRTHighlights = 1.2f;
 
     ToneMapParams tmParams = buildToneMapParams(
         injectedData.toneMapType,
@@ -282,14 +283,16 @@ void main(
   r2.xyw = r1.xyz * r2.xxx + r3.xyz;
   r1.xyz = r1.xyz * r2.zzz + r2.xyw;
   r0.xyz = injectedData.fxFilmGrain * r1.xyz + r0.xyz;
-  r0.xyz = max(0, r0.xyz * rp_parameter_ps[0].xxx + rp_parameter_ps[0].yyy);
+  r0.xyz = r0.xyz * rp_parameter_ps[0].xxx + rp_parameter_ps[0].yyy;
   
   
   o0.w = dot(r0.xyz, float3(0.298999995,0.587000012,0.114));
   o0.xyz = r0.xyz;
 
   // final gamma conversion and paper white scaling
-  o0.rgb = injectedData.toneMapGammaCorrection ? pow(o0.rgb, 2.2f) : linearFromSRGB(o0.rgb);
+  o0.rgb = injectedData.toneMapGammaCorrection
+               ? sign(o0.rgb) * pow(abs(o0.rgb), 2.2f)
+               : linearFromSRGB(o0.rgb);
   o0.rgb *= injectedData.toneMapGameNits / 80.f;
 
   return;
