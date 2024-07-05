@@ -41,12 +41,12 @@ UserSettingUtil::UserSettings userSettings = {
     .key = "toneMapType",
     .binding = &shaderInjection.toneMapType,
     .valueType = UserSettingUtil::UserSettingValueType::integer,
-    .defaultValue = 3.f,
+    .defaultValue = 4.f,
     .canReset = false,
     .label = "Tone Mapper",
     .section = "Tone Mapping",
     .tooltip = "Sets the tone mapper type",
-    .labels = {"Vanilla", "None", "ACES", "RenoDRT"}
+    .labels = {"Vanilla", "None", "ACES", "RenoDRT", "Vanilla+"}
   },
   new UserSettingUtil::UserSetting {
     .key = "toneMapPeakNits",
@@ -193,15 +193,6 @@ UserSettingUtil::UserSettings userSettings = {
     .parse = [](float value) { return value * 0.02f; }
   },
   new UserSettingUtil::UserSetting {
-    .key = "fxAutoExposure",
-    .binding = &shaderInjection.fxAutoExposure,
-    .defaultValue = 50.f,
-    .label = "Auto Exposure",
-    .section = "Effects",
-    .max = 100.f,
-    .parse = [](float value) { return value * 0.02f; }
-  },
-  new UserSettingUtil::UserSetting {
     .key = "fxDoF",
     .binding = &shaderInjection.fxDoF,
     .defaultValue = 50.f,
@@ -219,25 +210,6 @@ UserSettingUtil::UserSettings userSettings = {
     .max = 100.f,
     .parse = [](float value) { return value * 0.02f; }
   },
-  new UserSettingUtil::UserSetting {
-    .key = "midGray",
-    .binding = &shaderInjection.midGray,
-    .defaultValue = .1893f,
-    .label = "vanillaMidGray",
-    .section = "Tonemapper Advanced Settings",
-    .max = .7f,
-    .format = "%.4f"
-  },
-  new UserSettingUtil::UserSetting {
-    .key = "renoDRTFlare",
-    .binding = &shaderInjection.renoDRTFlare,
-    .defaultValue = 0.f,
-    .label = "renoDRTFlare",
-    .section = "Tonemapper Advanced Settings",
-    .max = 0.5f,
-    .format = "%.4f"
-  }
-
 };
 
 // clang-format on
@@ -257,7 +229,6 @@ static void onPresetOff() {
   UserSettingUtil::updateUserSetting("colorGradeLUTStrength", 100.f);
   UserSettingUtil::updateUserSetting("colorGradeLUTColorBoost", 0.f);
   UserSettingUtil::updateUserSetting("fxBloom", 50.f);
-  UserSettingUtil::updateUserSetting("fxAutoExposure", 50.f);
   UserSettingUtil::updateUserSetting("fxSceneFilter", 50.f);
   UserSettingUtil::updateUserSetting("fxDoF", 50.f);
   UserSettingUtil::updateUserSetting("fxFilmGrain", 0.f);
@@ -284,9 +255,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID) {
       ShaderReplaceMod::forcePipelineCloning = true;
       ShaderReplaceMod::traceUnmodifiedShaders = true;
       ShaderReplaceMod::expectedConstantBufferIndex = 13;
-      SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
-        {reshade::api::format::r8g8b8a8_unorm, reshade::api::format::r16g16b16a16_float} 
-      );
+      // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
+      //   {reshade::api::format::r8g8b8a8_unorm, reshade::api::format::r16g16b16a16_float} 
+      // );
       SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
         {reshade::api::format::r8g8b8a8_typeless, reshade::api::format::r16g16b16a16_float} 
       );

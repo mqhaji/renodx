@@ -190,14 +190,19 @@ void main(
     r2.xyz = r2.xyz * float3(0.800000012,0.800000012,0.800000012) + float3(0.200000003,0.200000003,0.200000003);
     r0.xyz = r1.xyz * r2.xyz + r0.xyz;
   }
-
-
   r0.xyz = v0.zzz * r0.xyz; // auto exposure
 
   float3 untonemapped = r0.xyz;
 
+  if (injectedData.toneMapType != 0) {
+    r0.xyz = float3(0.18, 0.18, 0.18);  // temp solution until I find midgray vars
+  }
+
+  // store temp values for 2nd run of tonemapper
+  float tempR0w = r0.w;
+
+  // begin vanilla run 1
   r1.xyz = cmp(r0.xyz < cb_postfx_tonemapping_tonemappingparms.xxx);
-  // highlights looks messed up when r1.xyz = true
   r2.xyzw = r1.xxxx ? cb_postfx_tonemapping_tonemappingcoeffs0.xyzw : cb_postfx_tonemapping_tonemappingcoeffs1.xyzw;
   r0.xw = r2.xy * r0.xx + r2.zw;
   r2.x = r0.x / r0.w;
@@ -207,20 +212,37 @@ void main(
   r1.xyzw = r1.zzzz ? cb_postfx_tonemapping_tonemappingcoeffs0.xyzw : cb_postfx_tonemapping_tonemappingcoeffs1.xyzw;
   r0.xy = r1.xy * r0.zz + r1.zw;
   r2.z = r0.x / r0.y;
+  // end vanilla run 1
+  float vanillaMidGray = (r2.r + r2.g + r2.b) / 3.f;
 
+  // reset values for 2nd run of tonemapper
+  r0.xyz = untonemapped.rgb;
+  r0.w = tempR0w;
+
+  // begin vanilla run 2
+  r1.xyz = cmp(r0.xyz < cb_postfx_tonemapping_tonemappingparms.xxx);
+  r2.xyzw = r1.xxxx ? cb_postfx_tonemapping_tonemappingcoeffs0.xyzw : cb_postfx_tonemapping_tonemappingcoeffs1.xyzw;
+  r0.xw = r2.xy * r0.xx + r2.zw;
+  r2.x = r0.x / r0.w;
+  r3.xyzw = r1.yyyy ? cb_postfx_tonemapping_tonemappingcoeffs0.xyzw : cb_postfx_tonemapping_tonemappingcoeffs1.xyzw;
+  r0.xy = r3.xy * r0.yy + r3.zw;
+  r2.y = r0.x / r0.y;
+  r1.xyzw = r1.zzzz ? cb_postfx_tonemapping_tonemappingcoeffs0.xyzw : cb_postfx_tonemapping_tonemappingcoeffs1.xyzw;
+  r0.xy = r1.xy * r0.zz + r1.zw;
+  r2.z = r0.x / r0.y;
+  // end vanilla run 2
   float4 vanillaColor;
   vanillaColor.rgb = r2.xyz;
   vanillaColor.a = injectedData.toneMapHueCorrection;
 
-  if (injectedData.toneMapType != 0) {
-
-    float vanillaMidGray = injectedData.midGray;
-    float renoDRTContrast = 1.f;
-    float renoDRTFlare = injectedData.renoDRTFlare;
-    float renoDRTShadows = 1.f;
+  if (injectedData.toneMapType != 0 && injectedData.toneMapType != 4) {
+    // float vanillaMidGray = injectedData.midGray;
+    float renoDRTContrast = 1.28f;
+    float renoDRTFlare = 0.f;
+    float renoDRTShadows = 1.2f;
     float renoDRTDechroma = injectedData.colorGradeBlowout;
-    float renoDRTSaturation = 1.f;
-    float renoDRTHighlights = 1.f;
+    float renoDRTSaturation = 1.06f;
+    float renoDRTHighlights = 1.06f;
 
     ToneMapParams tmParams = buildToneMapParams(
         injectedData.toneMapType,
@@ -244,6 +266,46 @@ void main(
       
     r2.xyz = toneMap(untonemapped, tmParams);
   }
+  else if (injectedData.toneMapType == 4) {
+    float renoDRTContrast = 1.15f;
+    float renoDRTFlare = 0.f;
+    float renoDRTShadows = 1.f;
+    float renoDRTDechroma = injectedData.colorGradeBlowout;
+    float renoDRTSaturation = 1.f;
+    float renoDRTHighlights = 1.15f;
+
+    ToneMapParams tmParams = buildToneMapParams(
+        3.f,
+        injectedData.toneMapPeakNits,
+        injectedData.toneMapGameNits,
+        injectedData.toneMapGammaCorrection - 1,
+        1.f,
+        1.f,
+        1.f,
+        1.f,
+        1.f,
+        vanillaMidGray,
+        vanillaMidGray * 100.f,
+        renoDRTHighlights,
+        renoDRTShadows,
+        renoDRTContrast,
+        renoDRTSaturation,
+        renoDRTDechroma,
+        renoDRTFlare);
+      
+    r2.xyz = lerp(toneMap(untonemapped, tmParams), hueSatCorrection(toneMap(untonemapped, tmParams), vanillaColor.rgb), vanillaColor.a);
+
+    r2.xyz = applyUserColorGrading(
+      r2.xyz,
+      injectedData.colorGradeExposure,
+      injectedData.colorGradeHighlights,
+      injectedData.colorGradeShadows,
+      injectedData.colorGradeContrast,
+      injectedData.colorGradeSaturation
+    );
+
+    r2.xyz = lerp(vanillaColor, r2.xyz, clamp(vanillaColor / vanillaMidGray, 0.0, 1.0));
+  }
 
   r0.xyz = r2.xyz * float3(31,31,31) + float3(0.5,0.5,0.5);
   r0.xyz = float3(0.03125,0.03125,0.03125) * r0.xyz;
@@ -265,7 +327,6 @@ void main(
   }
   r0.xyz = lerp(r2.xyz, r0.xyz, injectedData.colorGradeLUTStrength);
 
-  // r0.xyz = outputColor;
   r0.xyz = cb_env_tonemapping_gamma_brightness.yyy * r0.xyz;
   o0.xyz = sign(r0.xyz) * pow(abs(r0.xyz), cb_env_tonemapping_gamma_brightness.xxx);
 
