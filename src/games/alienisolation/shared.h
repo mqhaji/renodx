@@ -14,14 +14,12 @@ struct ShaderInjectData {
   float colorGradeShadows;
   float colorGradeContrast;
   float colorGradeSaturation;
+  float colorGradeBlowout;
   float colorGradeLUTStrength;
-  float colorGradeLUTScaling;
   float fxDoF;
   float fxBloom;
   float fxFilmGrain;
   float fxMotionBlur;
-  float renoDRTFlare;
-  float midGray;
 };
 
 #ifndef __cplusplus
