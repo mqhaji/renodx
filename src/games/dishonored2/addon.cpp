@@ -8,9 +8,8 @@
 
 #define DEBUG_LEVEL_0
 
-// #include <embed/0xEFF57007.h>    // 
 #include <embed/0xA6F33860.h>    // Final Tonemap
-#include <embed/0x5BBBD356.h>    // ?
+// #include <embed/0x5BBBD356.h>    // subsurface scattering
 
 
 
@@ -29,8 +28,7 @@ extern "C" __declspec(dllexport) const char* DESCRIPTION = "RenoDX for Dishonore
 ShaderReplaceMod::CustomShaders customShaders = {
 
   CustomShaderEntry(0xA6F33860),
-  CustomShaderEntry(0x5BBBD356),
-  // CustomSwapchainShader(),      // 
+  // CustomShaderEntry(0x5BBBD356),  //subsurface scattering
 
 
 };

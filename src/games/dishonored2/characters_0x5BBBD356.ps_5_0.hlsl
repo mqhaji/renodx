@@ -368,7 +368,6 @@ void main(
     o0.xyz = srgbFromLinear(o0.xyz);
     o0.xyz = sign(o0.xyz) * pow(abs(o0.xyz), 2.2f);
   }
-  o0.rgb *= injectedData.toneMapGameNits / 80.f;
 
   return;
 }

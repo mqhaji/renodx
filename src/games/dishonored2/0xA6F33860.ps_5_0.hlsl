@@ -1,6 +1,6 @@
 #include "./shared.h"
 #include "../../shaders/tonemap.hlsl"
-#include "../../shaders/lut.hlsl"
+#include "./dishonored2lut.hlsl"
 
 // ---- Created with 3Dmigoto v1.3.16 on Mon Jun 03 21:42:02 2024
 
@@ -214,7 +214,6 @@ void main(
 
   if (injectedData.toneMapType != 0) {
 
-    // float vanillaMidGray = ((ro_postfx_luminance_buffautoexposure[cb_postfx_luminance_exposureindex.y].MiddleGreyLuminanceLDR / ro_postfx_luminance_buffautoexposure[cb_postfx_luminance_exposureindex.y].MaxLuminanceLDR) * ro_postfx_luminance_buffautoexposure[cb_postfx_luminance_exposureindex.y].LuminanceFactor);
     float vanillaMidGray = injectedData.midGray;
     float renoDRTContrast = 1.f;
     float renoDRTFlare = injectedData.renoDRTFlare;
@@ -246,10 +245,9 @@ void main(
     r2.xyz = toneMap(untonemapped, tmParams);
   }
 
-    r0.xyz = r2.xyz * float3(31,31,31) + float3(0.5,0.5,0.5);
-    r0.xyz = float3(0.03125,0.03125,0.03125) * r0.xyz;
-    r0.xyz = ro_tonemapping_finalcolorcube.SampleLevel(smp_linearclamp_s, r0.xyz, 0).xyz;
-
+  r0.xyz = r2.xyz * float3(31,31,31) + float3(0.5,0.5,0.5);
+  r0.xyz = float3(0.03125,0.03125,0.03125) * r0.xyz;
+  r0.xyz = ro_tonemapping_finalcolorcube.SampleLevel(smp_linearclamp_s, r0.xyz, 0).xyz;
 
   if (injectedData.toneMapType != 0) {
     float3 clampedOutput = r0.xyz;
@@ -271,11 +269,11 @@ void main(
   r0.xyz = cb_env_tonemapping_gamma_brightness.yyy * r0.xyz;
   o0.xyz = sign(r0.xyz) * pow(abs(r0.xyz), cb_env_tonemapping_gamma_brightness.xxx);
 
-  if (injectedData.toneMapGammaCorrection) { // fix srgb 2.2 mismatch
-    o0.xyz = srgbFromLinear(o0.xyz);
-    o0.xyz = sign(o0.xyz) * pow(abs(o0.xyz), 2.2f);
-  }
-  o0.rgb *= injectedData.toneMapGameNits / 80.f;
+  // if (injectedData.toneMapGammaCorrection) { // fix srgb 2.2 mismatch
+  //   o0.xyz = srgbFromLinear(o0.xyz);
+  //   o0.xyz = sign(o0.xyz) * pow(abs(o0.xyz), 2.2f);
+  // }
+  // o0.rgb *= injectedData.toneMapGameNits / 80.f;
 
   o0.w = 1;
   return;
