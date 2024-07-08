@@ -213,7 +213,7 @@ void main(
   r0.xy = r1.xy * r0.zz + r1.zw;
   r2.z = r0.x / r0.y;
   // end vanilla run 1
-  float vanillaMidGray = (r2.r + r2.g + r2.b) / 3.f;
+  float vanillaMidGray = yFromBT709(r2.rgb);
 
   // reset values for 2nd run of tonemapper
   r0.xyz = untonemapped.rgb;
@@ -236,7 +236,6 @@ void main(
   vanillaColor.a = injectedData.toneMapHueCorrection;
 
   if (injectedData.toneMapType != 0 && injectedData.toneMapType != 4) {
-    // float vanillaMidGray = injectedData.midGray;
     float renoDRTContrast = 1.28f;
     float renoDRTFlare = 0.f;
     float renoDRTShadows = 1.2f;
@@ -271,7 +270,7 @@ void main(
     float renoDRTFlare = 0.f;
     float renoDRTShadows = 1.f;
     float renoDRTDechroma = injectedData.colorGradeBlowout;
-    float renoDRTSaturation = 1.f;
+    float renoDRTSaturation = 1.06f;
     float renoDRTHighlights = 1.15f;
 
     ToneMapParams tmParams = buildToneMapParams(
@@ -295,8 +294,11 @@ void main(
         vanillaColor);
       
     r2.xyz = toneMap(untonemapped, tmParams);
-    r2.xyz = lerp(vanillaColor, r2.xyz, clamp(vanillaColor, 0.0, 1.0));
 
+    float vanillaLum = yFromBT709(vanillaColor.rgb);
+    r2.xyz = lerp(vanillaColor.rgb, r2.xyz, saturate(vanillaLum));  // combine tonemappers
+
+    // allow for user adjustments
     r2.xyz = applyUserColorGrading(
       r2.xyz,
       injectedData.colorGradeExposure,
@@ -307,10 +309,12 @@ void main(
     );  
   }
 
+  // vanilla LUT Sampling
   r0.xyz = r2.xyz * float3(31,31,31) + float3(0.5,0.5,0.5);
   r0.xyz = float3(0.03125,0.03125,0.03125) * r0.xyz;
   r0.xyz = ro_tonemapping_finalcolorcube.SampleLevel(smp_linearclamp_s, r0.xyz, 0).xyz;
 
+  // LUT Extrapolation
   if (injectedData.toneMapType != 0) {
     float3 clampedOutput = r0.xyz;
     r0.xyz = SampleLUTWithExtrapolation(
@@ -329,13 +333,6 @@ void main(
 
   r0.xyz = cb_env_tonemapping_gamma_brightness.yyy * r0.xyz;
   o0.xyz = sign(r0.xyz) * pow(abs(r0.xyz), cb_env_tonemapping_gamma_brightness.xxx);
-
-  // if (injectedData.toneMapGammaCorrection) { // fix srgb 2.2 mismatch
-  //   o0.xyz = srgbFromLinear(o0.xyz);
-  //   o0.xyz = sign(o0.xyz) * pow(abs(o0.xyz), 2.2f);
-  // }
-  // o0.rgb *= injectedData.toneMapGameNits / 80.f;
-
   o0.w = 1;
   return;
 }

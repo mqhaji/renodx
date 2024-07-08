@@ -9,7 +9,13 @@
 #define DEBUG_LEVEL_0
 
 #include <embed/0xA6F33860.h>    // Final Tonemap
-// #include <embed/0x5BBBD356.h>    // subsurface scattering
+
+// #include <embed/0xB9E43380.h>    // Text
+// #include <embed/0xCC4FB5BF.h>    // Text
+// #include <embed/0x08F8ECFE.h>    // Text
+// #include <embed/0x28E5E21A.h>    // Text
+// #include <embed/0x38E853C8.h>    // UI
+// #include <embed/0xE3BB1976.h>    // UI
 
 
 
@@ -27,8 +33,14 @@ extern "C" __declspec(dllexport) const char* DESCRIPTION = "RenoDX for Dishonore
 
 ShaderReplaceMod::CustomShaders customShaders = {
 
-  CustomShaderEntry(0xA6F33860),
-  // CustomShaderEntry(0x5BBBD356),  //subsurface scattering
+  CustomShaderEntry(0xA6F33860),      // Tonemap
+
+  // CustomSwapchainShader(0xB9E43380),  // Text
+  // CustomSwapchainShader(0xCC4FB5BF),  // Text
+  // CustomSwapchainShader(0x08F8ECFE),  // Text
+  // CustomSwapchainShader(0x28E5E21A),  // Text
+  // CustomSwapchainShader(0x38E853C8),  // UI
+  // CustomSwapchainShader(0xE3BB1976),  // UI
 
 
 };
@@ -70,17 +82,17 @@ UserSettingUtil::UserSettings userSettings = {
     .min = 48.f,
     .max = 500.f
   },
-  new UserSettingUtil::UserSetting {
-    .key = "toneMapUINits",
-    .binding = &shaderInjection.toneMapUINits,
-    .defaultValue = 203.f,
-    .canReset = false,
-    .label = "UI Brightness",
-    .section = "Tone Mapping",
-    .tooltip = "Sets the brightness of UI and HUD elements in nits",
-    .min = 48.f,
-    .max = 500.f
-  },
+  // new UserSettingUtil::UserSetting {
+  //   .key = "toneMapUINits",
+  //   .binding = &shaderInjection.toneMapUINits,
+  //   .defaultValue = 203.f,
+  //   .canReset = false,
+  //   .label = "UI Brightness",
+  //   .section = "Tone Mapping",
+  //   .tooltip = "Sets the brightness of UI and HUD elements in nits",
+  //   .min = 48.f,
+  //   .max = 500.f
+  // },
   new UserSettingUtil::UserSetting {
     .key = "toneMapGammaCorrection",
     .binding = &shaderInjection.toneMapGammaCorrection,
@@ -229,7 +241,6 @@ static void onPresetOff() {
   UserSettingUtil::updateUserSetting("colorGradeLUTStrength", 100.f);
   UserSettingUtil::updateUserSetting("colorGradeLUTColorBoost", 0.f);
   UserSettingUtil::updateUserSetting("fxBloom", 50.f);
-  UserSettingUtil::updateUserSetting("fxSceneFilter", 50.f);
   UserSettingUtil::updateUserSetting("fxDoF", 50.f);
   UserSettingUtil::updateUserSetting("fxFilmGrain", 0.f);
 }
@@ -259,7 +270,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID) {
       //   {reshade::api::format::r8g8b8a8_unorm, reshade::api::format::r16g16b16a16_float} 
       // );
       SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
-        {reshade::api::format::r8g8b8a8_typeless, reshade::api::format::r16g16b16a16_float} 
+        {reshade::api::format::r8g8b8a8_typeless, reshade::api::format::r16g16b16a16_float, 0} 
       );
       // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
       //   {reshade::api::format::r8g8b8a8_unorm_srgb, reshade::api::format::r16g16b16a16_float}
@@ -269,6 +280,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID) {
       // );
       // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
       //   {reshade::api::format::r10g10b10a2_unorm, reshade::api::format::r16g16b16a16_float}
+      // );      
+      // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
+      //   {reshade::api::format::r11g11b10_float, reshade::api::format::r16g16b16a16_float, 2}
       // );      
       if (!reshade::register_addon(hModule)) return FALSE;
 
