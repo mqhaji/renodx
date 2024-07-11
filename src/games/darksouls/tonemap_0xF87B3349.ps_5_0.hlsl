@@ -210,6 +210,9 @@ void main(float4 v0
   }
 
   if (injectedData.toneMapType != 0) {
+    float4 vanillaColor;
+    vanillaColor.rgb = r1.xyz;
+    vanillaColor.a = injectedData.toneMapHueCorrection; 
     float3 tonemapped = renodx::tonemap::config::Apply(
         untonemapped,
         renodx::tonemap::config::Create(
@@ -229,15 +232,14 @@ void main(float4 v0
             renoDRTContrast,
             renoDRTSaturation,
             renoDRTDechroma,
-            renoDRTFlare));
+            renoDRTFlare,
+            vanillaColor));
 
-    if (injectedData.toneMapHueCorrection) {
-      r1.xyz = renodx::color::correct::Hue(tonemapped, r1.xyz);
-    } else {
-      r1.xyz = tonemapped;
-    }
+
+    r1.xyz = tonemapped;
+
   } else {  // Clamp vanilla tonemapper to BT709
-    r0.xyz = max(0, r1.xyz);
+    r1.xyz = max(0, r1.xyz);
   }
 
   r0.xyz = sign(r1.xyz) * pow(abs(r1.xyz), 1.f / 2.2f);  // Linearize before color grade
@@ -278,6 +280,8 @@ void main(float4 v0
     r0.xyz = clamp(r0.xyz, 0, injectedData.toneMapPeakNits / injectedData.toneMapGameNits);
   }
 
+  o0.w = dot(r0.xyz, float3(0.298999995, 0.587000012, 0.114));
+
   r0.rgb = injectedData.toneMapGammaCorrection
                ? sign(r0.rgb) * pow(abs(r0.rgb), 2.2f)
                : renodx::color::bt709::from::SRGB(r0.rgb);
@@ -286,7 +290,6 @@ void main(float4 v0
 
   r0.rgb = renodx::color::bt709::clamp::BT2020(r0.rgb);
 
-  o0.w = dot(r0.xyz, float3(0.298999995, 0.587000012, 0.114));
   o0.xyz = r0.xyz;
   return;
 }
