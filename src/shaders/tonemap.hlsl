@@ -88,6 +88,7 @@ struct Config {
   float reno_drt_saturation;
   float reno_drt_dechroma;
   float reno_drt_flare;
+  float4 correct_color;
 };
 
 float3 UpgradeToneMap(float3 color_hdr, float3 color_sdr, float3 post_process_color, float post_process_strength) {
@@ -140,7 +141,8 @@ Config Create(
     float reno_drt_contrast = 1.f,
     float reno_drt_saturation = 1.f,
     float reno_drt_dechroma = 0.5f,
-    float reno_drt_flare = 0.f) {
+    float reno_drt_flare = 0.f,
+    float4 correct_color = float4(0, 0, 0, 0)) {
   const Config config = {
       type,
       peak_nits,
@@ -158,7 +160,8 @@ Config Create(
       reno_drt_contrast,
       reno_drt_saturation,
       reno_drt_dechroma,
-      reno_drt_flare};
+      reno_drt_flare,
+      correct_color};
   return config;
 }
 
@@ -228,6 +231,9 @@ float3 Apply(float3 untonemapped, Config config) {
       color = ApplyACES(color, config);
     }
   }
+  if (config.correct_color.a) {
+    color = lerp(color, renodx::color::correct::Hue(color, config.correct_color.rgb), config.correct_color.a);
+  }
   return color;
 }
 
@@ -244,6 +250,9 @@ float3 Apply(float3 untonemapped, Config config) {
       config.reno_drt_saturation *= config.saturation;                                                           \
                                                                                                                  \
       color_sdr = ApplyRenoDRT(color_output, config, true);                                                      \
+      if (config.correct_color.a) {                                                                              \
+        color_sdr = lerp(color_sdr, renodx::color::correct::Hue(color_sdr, config.correct_color.rgb), config.correct_color.a);   \
+      }                                                                                                          \
                                                                                                                  \
       config.reno_drt_highlights *= config.highlights;                                                           \
       config.reno_drt_shadows *= config.shadows;                                                                 \
@@ -258,9 +267,15 @@ float3 Apply(float3 untonemapped, Config config) {
       if (config.type == 2.f) {                                                                                  \
         color_hdr = ApplyACES(color_output, config);                                                             \
         color_sdr = ApplyACES(color_output, config, true);                                                       \
+        if (config.correct_color.a) {                                                                            \
+          color_sdr = lerp(color_sdr, renodx::color::correct::Hue(color_sdr, config.correct_color.rgb), config.correct_color.a);   \
+        }                                                                                                        \
       } else {                                                                                                   \
         color_hdr = color_output;                                                                                \
         color_sdr = color_output;                                                                                \
+        if (config.correct_color.a) {                                                                            \
+          color_sdr = lerp(color_sdr, renodx::color::correct::Hue(color_sdr, config.correct_color.rgb), config.correct_color.a);   \
+        }                                                                                                        \
       }                                                                                                          \
     }                                                                                                            \
                                                                                                                  \
