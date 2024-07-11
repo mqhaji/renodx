@@ -105,7 +105,7 @@ UserSettingUtil::UserSettings userSettings = {
   new UserSettingUtil::UserSetting {
     .key = "toneMapHueCorrection",
     .binding = &shaderInjection.toneMapHueCorrection,
-    .defaultValue = 100.f,
+    .defaultValue = 50.f,
     .label = "Hue Correction",
     .section = "Tone Mapping",
     .tooltip = "Emulates hue shifting from the vanilla tonemapper",
@@ -160,7 +160,7 @@ UserSettingUtil::UserSettings userSettings = {
   new UserSettingUtil::UserSetting {
     .key = "colorGradeBlowout",
     .binding = &shaderInjection.colorGradeBlowout,
-    .defaultValue = 0.f,
+    .defaultValue = 55.f,
     .label = "Blowout",
     .section = "Color Grading",
     .tooltip = "Controls highlight desaturation due to overexposure.",
@@ -176,16 +176,16 @@ UserSettingUtil::UserSettings userSettings = {
     .max = 100.f,
     .parse = [](float value) { return value * 0.01f; }
   },
-  new UserSettingUtil::UserSetting {
-    .key = "colorGradeLUTColorBoost",
-    .binding = &shaderInjection.colorGradeLUTColorBoost,
-    .defaultValue = 50.f,
-    .label = "LUT Color Boost",
-    .section = "Color Grading",
-    .tooltip = "Scales the saturation of HDR highlights extrapolated from the LUT",
-    .max = 100.f,
-    .parse = [](float value) { return value * 0.01f; }
-  },
+  // new UserSettingUtil::UserSetting {
+  //   .key = "colorGradeLUTColorBoost",
+  //   .binding = &shaderInjection.colorGradeLUTColorBoost,
+  //   .defaultValue = 50.f,
+  //   .label = "LUT Color Boost",
+  //   .section = "Color Grading",
+  //   .tooltip = "Scales the saturation of HDR highlights extrapolated from the LUT",
+  //   .max = 100.f,
+  //   .parse = [](float value) { return value * 0.01f; }
+  // },
   new UserSettingUtil::UserSetting {
     .key = "lensDirt",
     .binding = &shaderInjection.lensDirt,
@@ -200,24 +200,6 @@ UserSettingUtil::UserSettings userSettings = {
     .binding = &shaderInjection.fxBloom,
     .defaultValue = 50.f,
     .label = "Bloom",
-    .section = "Effects",
-    .max = 100.f,
-    .parse = [](float value) { return value * 0.02f; }
-  },
-  new UserSettingUtil::UserSetting {
-    .key = "fxDoF",
-    .binding = &shaderInjection.fxDoF,
-    .defaultValue = 50.f,
-    .label = "Depth of Field",
-    .section = "Effects",
-    .max = 100.f,
-    .parse = [](float value) { return value * 0.02f; }
-  },
-  new UserSettingUtil::UserSetting {
-    .key = "fxFilmGrain",
-    .binding = &shaderInjection.fxFilmGrain,
-    .defaultValue = 0.f,
-    .label = "Film Grain",
     .section = "Effects",
     .max = 100.f,
     .parse = [](float value) { return value * 0.02f; }
@@ -241,8 +223,6 @@ static void onPresetOff() {
   UserSettingUtil::updateUserSetting("colorGradeLUTStrength", 100.f);
   UserSettingUtil::updateUserSetting("colorGradeLUTColorBoost", 0.f);
   UserSettingUtil::updateUserSetting("fxBloom", 50.f);
-  UserSettingUtil::updateUserSetting("fxDoF", 50.f);
-  UserSettingUtil::updateUserSetting("fxFilmGrain", 0.f);
 }
 
 static auto start = std::chrono::steady_clock::now();

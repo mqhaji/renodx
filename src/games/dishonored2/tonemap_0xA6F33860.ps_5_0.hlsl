@@ -270,7 +270,7 @@ void main(
     float renoDRTFlare = 0.f;
     float renoDRTShadows = 1.f;
     float renoDRTDechroma = injectedData.colorGradeBlowout;
-    float renoDRTSaturation = 1.06f;
+    float renoDRTSaturation = 1.3;
     float renoDRTHighlights = 1.15f;
 
     ToneMapParams tmParams = buildToneMapParams(
@@ -309,6 +309,8 @@ void main(
     );  
   }
 
+  float3 tonemapped = r2.xyz;
+  
   // vanilla LUT Sampling
   r0.xyz = r2.xyz * float3(31,31,31) + float3(0.5,0.5,0.5);
   r0.xyz = float3(0.03125,0.03125,0.03125) * r0.xyz;
@@ -320,16 +322,17 @@ void main(
     r0.xyz = SampleLUTWithExtrapolation(
         ro_tonemapping_finalcolorcube, 
         smp_linearclamp_s, 
-        r2.xyz, 
-        true,   // inputLinear
-        true,   // lutLinear
-        true,   // outputLinear
-        true,   // lutExtrapolation
-        32      // lutSize
+        r2.xyz,                               // neutralColor
+        true,                                 // inputLinear
+        true,                                 // lutLinear
+        true,                                 // outputLinear
+        injectedData.toneMapGammaCorrection,  // gammaCorrection
+        true,                                 // lutExtrapolation
+        32                                    // lutSize
     );
-    r0.xyz = lerp(satCorrection(r0.xyz, clampedOutput), r0.xyz, injectedData.colorGradeLUTColorBoost);
+    // r0.xyz = lerp(satCorrection(r0.xyz, clampedOutput), r0.xyz, injectedData.colorGradeLUTColorBoost);
   }
-  r0.xyz = lerp(r2.xyz, r0.xyz, injectedData.colorGradeLUTStrength);
+  r0.xyz = lerp(tonemapped, r0.xyz, injectedData.colorGradeLUTStrength);
 
   r0.xyz = cb_env_tonemapping_gamma_brightness.yyy * r0.xyz;
   o0.xyz = sign(r0.xyz) * pow(abs(r0.xyz), cb_env_tonemapping_gamma_brightness.xxx);
