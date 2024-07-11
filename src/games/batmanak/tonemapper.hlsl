@@ -6,6 +6,9 @@ float3 applyUserToneMap(float3 untonemapped, Texture2D lutTexture, SamplerState 
   float3 outputColor = untonemapped;
 
   float vanillaMidGray = renodx::tonemap::uncharted2::BT709(0.18f, 2.2f);
+  float4 vanillaColor;
+  vanillaColor.rgb = saturate(renodx::tonemap::uncharted2::BT709(untonemapped, 2.2f));
+  vanillaColor.a = injectedData.toneMapHueCorrection;
 
   float renoDRTContrast = 1.12f;
   float renoDRTFlare = 0.f;
@@ -33,7 +36,8 @@ float3 applyUserToneMap(float3 untonemapped, Texture2D lutTexture, SamplerState 
           renoDRTContrast,
           renoDRTSaturation,
           renoDRTDechroma,
-          renoDRTFlare),
+          renoDRTFlare,
+          vanillaColor),
       renodx::lut::config::Create(
           lutSampler,
           injectedData.colorGradeLUTStrength,
