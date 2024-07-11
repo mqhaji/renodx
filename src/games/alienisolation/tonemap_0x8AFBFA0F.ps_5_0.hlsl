@@ -189,7 +189,7 @@ void main(
   r1.xyz = r2.www * r1.xyz + r2.xyz;
   r0.xyz = log2(r0.xyz);
   r0.xyz = r0.xyz * float3(0.693147182,0.693147182,0.693147182) + float3(12,12,12);
-  r2.xyz = saturate(float3(0.0625,0.0625,0.0625) * r0.xyz);
+  r2.xyz = max(0, float3(0.0625,0.0625,0.0625) * r0.xyz);
   r2.w = 0.25;
   r0.x = SamplerToneMapCurve_TEX.SampleLevel(SamplerToneMapCurve_SMP_s, r2.xw, 0).x;
   r0.y = SamplerToneMapCurve_TEX.SampleLevel(SamplerToneMapCurve_SMP_s, r2.yw, 0).x;
@@ -208,7 +208,8 @@ void main(
 
 
   if (injectedData.toneMapType != 0) {  // custom tonemapper
-    untonemapped *= ((r0.r + r0.g + r0.b) / 3.f) / .18f;
+    // untonemapped *= ((r0.r + r0.g + r0.b) / 3.f) / .18f;
+    untonemapped *= yFromBT709(r0.rgb) / .18f;
     float vanillaMidGray = 0.18f;
     float renoDRTContrast = 0.9f;
     float renoDRTFlare = 0.f;
@@ -265,9 +266,13 @@ void main(
   r0.w = rp_parameter_ps[2].y * rp_parameter_ps[2].x;
   r1.xyz = r1.xyz * r1.xyz + -r0.xyz;
   r0.xyz = r0.www * r1.xyz + r0.xyz;
-  r0.xyz = log2(abs(r0.xyz));
-  r0.xyz = OutputGamma.xxx * r0.xyz;
-  r0.xyz = exp2(r0.xyz);
+
+  // r0.xyz = log2(abs(r0.xyz));
+  // r0.xyz = OutputGamma.xxx * r0.xyz;
+  // r0.xyz = exp2(r0.xyz);
+
+  // replace gamma correction with bt2020 preserving formula
+  r0.xyz = sign(r0.xyz) * pow(abs(r0.xyz), OutputGamma.xxx);
 
   r0.xyz = lerp(preLUTColor, r0.xyz, injectedData.colorGradeLUTStrength);
 
