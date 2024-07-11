@@ -24,7 +24,9 @@ void main(
   o0.w = saturate(v1.w * r0.x);
   o0.xyz = saturate(v1.xyz);
 
-  o0.rgb = injectedData.toneMapGammaCorrection ? pow(o0.rgb, 2.2f) : linearFromSRGB(o0.rgb);
+  o0.rgb = (injectedData.toneMapGammaCorrection
+                ? pow(o0.rgb, 2.2f)
+                : renodx::color::bt709::from::SRGB(o0.rgb));
   o0.rgb *= injectedData.toneMapUINits / 80.f;
 
   return;

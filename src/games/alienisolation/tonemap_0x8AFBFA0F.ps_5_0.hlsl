@@ -209,7 +209,7 @@ void main(
 
   if (injectedData.toneMapType != 0) {  // custom tonemapper
     // untonemapped *= ((r0.r + r0.g + r0.b) / 3.f) / .18f;
-    untonemapped *= yFromBT709(r0.rgb) / .18f;
+    untonemapped *= renodx::color::y::from::BT709(r0.rgb) / .18f;
     float vanillaMidGray = 0.18f;
     float renoDRTContrast = 0.9f;
     float renoDRTFlare = 0.f;
@@ -218,26 +218,28 @@ void main(
     float renoDRTSaturation = 1.02f;
     float renoDRTHighlights = 1.2f;
 
-    ToneMapParams tmParams = buildToneMapParams(
-        injectedData.toneMapType,
-        injectedData.toneMapPeakNits,
-        injectedData.toneMapGameNits,
-        injectedData.toneMapGammaCorrection,
-        injectedData.colorGradeExposure,
-        injectedData.colorGradeHighlights,
-        injectedData.colorGradeShadows,
-        injectedData.colorGradeContrast,
-        injectedData.colorGradeSaturation,
-        vanillaMidGray,
-        vanillaMidGray * 100.f,
-        renoDRTHighlights,
-        renoDRTShadows,
-        renoDRTContrast,
-        renoDRTSaturation,
-        renoDRTDechroma,
-        renoDRTFlare);
+    float3 tonemapped = renodx::tonemap::config::Apply(
+        untonemapped,
+        renodx::tonemap::config::Create(
+            injectedData.toneMapType,
+            injectedData.toneMapPeakNits,
+            injectedData.toneMapGameNits,
+            injectedData.toneMapGammaCorrection,
+            injectedData.colorGradeExposure,
+            injectedData.colorGradeHighlights,
+            injectedData.colorGradeShadows,
+            injectedData.colorGradeContrast,
+            injectedData.colorGradeSaturation,
+            vanillaMidGray,
+            vanillaMidGray * 100.f,
+            renoDRTHighlights,
+            renoDRTShadows,
+            renoDRTContrast,
+            renoDRTSaturation,
+            renoDRTDechroma,
+            renoDRTFlare));
 
-    r0.xyz = toneMap(untonemapped, tmParams);
+    r0.xyz = tonemapped;
   }
 
   // no idea what this does
@@ -295,9 +297,12 @@ void main(
   o0.xyz = r0.xyz;
 
   // final gamma conversion and paper white scaling
-  o0.rgb = injectedData.toneMapGammaCorrection
-               ? sign(o0.rgb) * pow(abs(o0.rgb), 2.2f)
-               : linearFromSRGB(o0.rgb);
+  float3 signs = sign(o0.rgb);
+  o0.rgb = abs(o0.rgb);
+  o0.rgb = (injectedData.toneMapGammaCorrection
+                ? pow(o0.rgb, 2.2f)
+                : renodx::color::bt709::from::SRGB(o0.rgb));
+  o0.rgb *= signs;
   o0.rgb *= injectedData.toneMapGameNits / 80.f;
 
   return;
