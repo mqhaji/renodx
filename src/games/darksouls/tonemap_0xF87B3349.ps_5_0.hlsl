@@ -211,7 +211,7 @@ void main(float4 v0
 
   if (injectedData.toneMapType != 0) {
     float4 vanillaColor;
-    vanillaColor.rgb = r1.xyz;
+    vanillaColor.rgb = saturate(r1.xyz);
     vanillaColor.a = injectedData.toneMapHueCorrection; 
     float3 tonemapped = renodx::tonemap::config::Apply(
         untonemapped,
