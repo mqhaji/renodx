@@ -568,8 +568,8 @@ float4 tonemap(bool isACESMode = false) {
       float renoDRTHighlights = 1.20f;
       float renoDRTShadows = 1.0f;
       float renoDRTContrast = 1.80f;
-      float renoDRTSaturation = 1.40f;
-      float renoDRTDechroma = 0.60f;
+      float renoDRTSaturation = 1.f;
+      float renoDRTDechroma = injectedData.colorGradeBlowout;
       float renoDRTFlare = 0.f;
 
       ToneMapParams tmParams = buildToneMapParams(
