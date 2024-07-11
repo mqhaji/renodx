@@ -300,6 +300,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID) {
             .index = index
           }
         );
+      }      
       // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
       //   {reshade::api::format::r8g8b8a8_unorm, reshade::api::format::r16g16b16a16_float} 
       // );
@@ -315,8 +316,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID) {
       // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
       //   {reshade::api::format::r11g11b10_float, reshade::api::format::r16g16b16a16_float}
       // );
-
-      }      
       break;
     case DLL_PROCESS_DETACH:
       reshade::unregister_addon(hModule);
