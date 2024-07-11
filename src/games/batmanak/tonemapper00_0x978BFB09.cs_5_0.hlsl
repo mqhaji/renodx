@@ -202,10 +202,6 @@ cbuffer cb0 : register(b0) {
     outputColor = injectedData.toneMapGammaCorrection ? pow(r0.rgb, 2.2f) : linearFromSRGB(r0.rgb);
   } else {
     outputColor = applyUserToneMap(untonemapped.rgb, t2, s0_s, correctColor);
-    // if (injectedData.toneMapHueCorrection) {
-    //   r0.rgb = injectedData.toneMapGammaCorrection ? sign(r0.rgb) * pow(abs(r0.rgb), 2.2f) : linearFromSRGB(r0.rgb);
-    //   outputColor = hueCorrection(outputColor, r0.rgb);
-    // }
 #if DRAW_TONEMAPPER
     if (!dtmParams.drawToneMapper)
 #endif

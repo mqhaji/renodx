@@ -207,7 +207,7 @@ UserSettingUtil::UserSettings userSettings = {
     .defaultValue = 0.f,
     .label = "Gamut Expansion",
     .section = "Color Grading",
-    .tooltip = "Generates HDR colors (BT.2020) from bright saturated SDR (BT.709) ones.",
+    .tooltip = "Generates HDR colors from bright saturated SDR ones.",
     .max = 100.f,
     .parse = [](float value) { return value * 0.01f; }
   },
