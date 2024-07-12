@@ -274,7 +274,7 @@ void main(
   r0.xyz = r0.www * r1.xyz + r0.xyz;
 
   // replace gamma correction with wcg preserving formula
-  r0.xyz = sign(r0.xyz) * pow(abs(r0.xyz), OutputGamma.xxx);
+  r0.xyz = sign(r0.xyz) * pow(abs(r0.xyz), OutputGamma.xxx);  // causes invalid?
 
   r0.xyz = lerp(preLUTColor, r0.xyz, injectedData.colorGradeLUTStrength);
 
