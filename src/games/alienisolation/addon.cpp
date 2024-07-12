@@ -10,13 +10,14 @@
 
 #include <embed/0x8AFBFA0F.h> // Tonemap
 // #include <embed/0x007F7E1C.h> // SMAA
-// #include <embed/0xB95A4E01.h> // ???
+// #include <embed/0xB95A4E01.h> // Copy
 #include <embed/0x043049C7.h> // Video
 #include <embed/0xCC0C2DF3.h> // UI - gamma adjust slider notch, line above settings explanations
 #include <embed/0x72826F5B.h> // UI - some text
 #include <embed/0xD98FBA78.h> // UI - button prompts
 #include <embed/0xC38B68F9.h> // UI - most text
-#include <embed/0xF1A79FBF.h> // UI - nav elements
+#include <embed/0xF1A79FBF.h> // UI - nav elements, pause menu blur
+#include <embed/0x335B9229.h> // HUD - health bar 
 
 
 #include <deps/imgui/imgui.h>
@@ -30,15 +31,17 @@
 namespace {
 
 renodx::mods::shader::CustomShaders custom_shaders = {
-    CustomShaderEntry(0x8AFBFA0F),
-    // CustomSwapchainShader(0xB95A4E01),  // ???
-    // CustomShaderEntry(0x007F7E1C),  // SMAA
+    CustomShaderEntry(0x8AFBFA0F),      // tonemap
+    // CustomSwapchainShader(0xB95A4E01),  // Copy
+    // CustomShaderEntry(0x007F7E1C),   // SMAA?
+
     CustomSwapchainShader(0x043049C7),  // Video
     CustomSwapchainShader(0xCC0C2DF3),  // UI - gamma adjust slider notch, line above settings explanations
     CustomSwapchainShader(0x72826F5B),  // UI - some text
     CustomSwapchainShader(0xD98FBA78),  // UI - button prompts
     CustomSwapchainShader(0xC38B68F9),  // UI - most text
-    CustomSwapchainShader(0xF1A79FBF),  // UI - nav elements
+    CustomSwapchainShader(0xF1A79FBF),  // UI - nav elements, pause menu blur
+    CustomSwapchainShader(0x335B9229),  // HUD - health bar
 };
 
 ShaderInjectData shader_injection;
