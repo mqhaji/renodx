@@ -159,11 +159,10 @@ void main(
 
   float3 untonemapped = r0.xyz;
 
-  // tone mapping + autoexposure (midgray adjustment)
+  // start of tonemap (contains some autoexposure)
   r0.w = dot(float3(0.298999995,0.587000012,0.114), r0.xyz);
-
   if (injectedData.toneMapType != 0) {
-    r0.xyz = float3(0.18, 0.18, 0.18);  // temp solution until I find midgray vars
+    r0.xyz = float3(0.18, 0.18, 0.18);
   }
   r1.x = log2(r0.w);
   r1.x = r1.x * 0.693147182 + 12;
@@ -208,15 +207,20 @@ void main(
 
 
   if (injectedData.toneMapType != 0) {  // custom tonemapper
-    // untonemapped *= ((r0.r + r0.g + r0.b) / 3.f) / .18f;
-    untonemapped *= renodx::color::y::from::BT709(r0.rgb) / .18f;
+    untonemapped *= renodx::color::y::from::BT709(r0.rgb) / 0.18f;
     float vanillaMidGray = 0.18f;
-    float renoDRTContrast = 0.9f;
+    float renoDRTContrast = 1.f;
     float renoDRTFlare = 0.f;
-    float renoDRTShadows = 0.86f;
+    float renoDRTShadows = 1.f;
     float renoDRTDechroma = injectedData.colorGradeBlowout;
-    float renoDRTSaturation = 1.02f;
-    float renoDRTHighlights = 1.2f;
+    float renoDRTSaturation = 1.f;
+    float renoDRTHighlights = 1.f;
+    // float renoDRTContrast = 0.9f;
+    // float renoDRTFlare = 0.f;
+    // float renoDRTShadows = 0.86f;
+    // float renoDRTDechroma = injectedData.colorGradeBlowout;
+    // float renoDRTSaturation = 1.02f;
+    // float renoDRTHighlights = 1.2f;
 
     float3 tonemapped = renodx::tonemap::config::Apply(
         untonemapped,
@@ -269,11 +273,7 @@ void main(
   r1.xyz = r1.xyz * r1.xyz + -r0.xyz;
   r0.xyz = r0.www * r1.xyz + r0.xyz;
 
-  // r0.xyz = log2(abs(r0.xyz));
-  // r0.xyz = OutputGamma.xxx * r0.xyz;
-  // r0.xyz = exp2(r0.xyz);
-
-  // replace gamma correction with bt2020 preserving formula
+  // replace gamma correction with wcg preserving formula
   r0.xyz = sign(r0.xyz) * pow(abs(r0.xyz), OutputGamma.xxx);
 
   r0.xyz = lerp(preLUTColor, r0.xyz, injectedData.colorGradeLUTStrength);
