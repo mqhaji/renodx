@@ -34,5 +34,6 @@ void main(
   r0.xyzw = -r1.xxxx * float4(0.333333343,0.333333343,0.333333343,0.333333343) + r0.xyzw;
   r1.x = 0.333333343 * r1.x;
   o0.xyzw = cb0[0].xxxx * r0.xyzw + r1.xxxx;  //  o0.xyzw = saturate(cb0[0].xxxx * r0.xyzw + r1.xxxx);
+  o0.w = saturate(o0.w);
   return;
 }

@@ -1,18 +1,12 @@
 /*
- * Copyright (C) 2024 Carlos Lopez
  * Copyright (C) 2024 Musa Haji
+ * Copyright (C) 2024 Carlos Lopez
  * SPDX-License-Identifier: MIT
  */
 
 #define ImTextureID ImU64
 
 #define DEBUG_LEVEL_0
-
-
-/* these 3 are untested*/
-// #include <embed/0x8B0B0A1E.h>    // TONEMAP?
-// #include <embed/0x2E034F94.h>    // TONEMAP?
-// #include <embed/0xE4562BAF.h>    // TONEMAP?
 
 // #include <embed/0x9165A474.h> // black smoke
 // #include <embed/0xEC3D14D2.h> // distant fog/smoke
@@ -21,18 +15,21 @@
 // #include <embed/0xAB16B3F7.h> // fire
 // #include <embed/0xB561688F.h> // distant smoke?
 // #include <embed/0x1FB36E90.h> // screen blood effect
-
+#include <embed/0X61D242D6.h>    // bloom
+// #include <embed/0XBA89E3AC.h> // lens flare - sunstar
+#include <embed/0x3F53E66E.h>    // lens flare - circles and color
 // #include <embed/0x95588EA5.h> // radial dirty lens effect
 // #include <embed/0x8135BEA2.h> // radial lens flare
-#include <embed/0xA6EC1DEC.h>    // bloom
+#include <embed/0xA6EC1DEC.h>    // god rays
+#include <embed/0xA67ABF78.h>    // tonemap
 // #include <embed/0x11737C11.h> // debris and other effects?
 #include <embed/0x372BEBAB.h>    // LUT 1 (only used in title screen?)
 // #include <embed/0xED9872EB.h> // AA?
-#include <embed/0xD42BAD58.h>    // No Film Grain + LUT 2
-#include <embed/0xC20255E1.h>    // Film Grain + LUT 2
-
+#include <embed/0xC20255E1.h>    // LUT 2a - Film Grain
+#include <embed/0xD42BAD58.h>    // LUT 2b - No Film Grain
+#include <embed/0x45D95DCB.h>    // LUT 2c - B&W Film Grain
+#include <embed/0xBA423838.h>    // LUT 2d - B&W No Film Grain
 #include <embed/0x8194877A.h>    // caps brightness
-
 #include <embed/0x558540C8.h>    // Gamma adjust
 #include <embed/0x548937E1.h>    // UI - loading screen
 #include <embed/0x404A04C7.h>    // UI - highlighted stuff, orange elements
@@ -42,291 +39,263 @@
 #include <embed/0xB917BF4E.h>    // UI - HUD, nav arrows, sliders, some icons, text boxes
 #include <embed/0x7E8358E3.h>    // UI - HUD numbers
 #include <embed/0x929C8CA5.h>    // UI - Minimap
-
-
-
-#include <chrono>
+#include <embed/0x4D09799F.h>    // UI - HUD Floating markers
 
 #include <deps/imgui/imgui.h>
 #include <include/reshade.hpp>
-#include "../../mods/shaderReplaceMod.hpp"
-#include "../../mods/swapChainUpgradeMod.hpp"
-#include "../../utils/userSettingUtil.hpp"
+
+#include "../../mods/shader.hpp"
+#include "../../mods/swapchain.hpp"
+#include "../../utils/settings.hpp"
 #include "./shared.h"
 
-extern "C" __declspec(dllexport) const char* NAME = "RenoDX - Dying Light";
+namespace {
+
+renodx::mods::shader::CustomShaders custom_shaders = {
+    // CustomShaderEntry(0x1FB36E90),       // screen blood effect
+    CustomShaderEntry(0x61D242D6),          // bloom
+    CustomShaderEntry(0x3F53E66E),          // lens flare - circles and color
+    // CustomShaderEntry(0x95588EA5),       // radial dirty lens effect
+    // CustomShaderEntry(0x8135BEA2),       // radial lens flare
+    CustomShaderEntry(0xA6EC1DEC),          // god rays
+    CustomShaderEntry(0xA67ABF78),          // tonemap
+    // CustomShaderEntry(0x11737C11),       // debris and other effects?
+    CustomShaderEntry(0x372BEBAB),          // LUT 1
+    // CustomShaderEntry(0xED9872EB),       // AA?
+    CustomShaderEntry(0xC20255E1),          // LUT 2a - Film Grain
+    CustomShaderEntry(0xD42BAD58),          // LUT 2b - No Film Grain
+    CustomShaderEntry(0x45D95DCB),          // LUT 2c - B&W Film Grain
+    CustomShaderEntry(0xBA423838),          // LUT 2d - B&W No Film Grain
+    CustomShaderEntry(0x8194877A),          // caps brightness
+    CustomSwapchainShader(0x558540C8),      // Gamma adjust
+    CustomSwapchainShader(0x548937E1),      // UI - loading screen
+    CustomSwapchainShader(0x404A04C7),      // UI - highlighted stuff, orange elements
+    CustomSwapchainShader(0xBCBEE1E5),      // UI - text
+    CustomSwapchainShader(0xDC15A986),      // UI - Alpha, semitransparent UI boxes, quit overlay
+    CustomSwapchainShader(0x6562755C),      // UI - Alpha, some text
+    CustomSwapchainShader(0xB917BF4E),      // UI - HUD, nav arrows, slider outlines, some icons, some text boxes
+    CustomSwapchainShader(0x7E8358E3),      // UI - HUD numbers
+    CustomSwapchainShader(0x929C8CA5),      // UI - Minimap  
+    CustomShaderEntry(0x4D09799F),      // UI - HUD Floating markers
+};
+
+ShaderInjectData shader_injection;
+
+renodx::utils::settings::Settings settings = {
+    new renodx::utils::settings::Setting{
+        .key = "toneMapType",
+        .binding = &shader_injection.toneMapType,
+        .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+        .default_value = 4.f,
+        .can_reset = false,
+        .label = "Tone Mapper",
+        .section = "Tone Mapping",
+        .tooltip = "Sets the tone mapper type",
+        .labels = {"Vanilla", "None", "ACES", "RenoDRT", "Vanilla+"},
+    },
+    new renodx::utils::settings::Setting{
+        .key = "toneMapPeakNits",
+        .binding = &shader_injection.toneMapPeakNits,
+        .default_value = 1000.f,
+        .can_reset = false,
+        .label = "Peak Brightness",
+        .section = "Tone Mapping",
+        .tooltip = "Sets the value of peak white in nits",
+        .min = 48.f,
+        .max = 4000.f,
+    },
+    new renodx::utils::settings::Setting{
+        .key = "toneMapGameNits",
+        .binding = &shader_injection.toneMapGameNits,
+        .default_value = 203.f,
+        .can_reset = false,
+        .label = "Game Brightness",
+        .section = "Tone Mapping",
+        .tooltip = "Sets the value of 100%% white in nits",
+        .min = 48.f,
+        .max = 500.f,
+    },
+    new renodx::utils::settings::Setting{
+        .key = "toneMapUINits",
+        .binding = &shader_injection.toneMapUINits,
+        .default_value = 203.f,
+        .can_reset = false,
+        .label = "UI Brightness",
+        .section = "Tone Mapping",
+        .tooltip = "Sets the brightness of UI and HUD elements in nits",
+        .min = 48.f,
+        .max = 500.f,
+    },
+    new renodx::utils::settings::Setting{
+        .key = "toneMapGammaCorrection",
+        .binding = &shader_injection.toneMapGammaCorrection,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 1.f,
+        .can_reset = false,
+        .label = "Gamma Correction",
+        .section = "Tone Mapping",
+        .tooltip = "Emulates a 2.2 EOTF (use with HDR or sRGB)",
+    },
+    new renodx::utils::settings::Setting{
+        .key = "toneMapHueCorrection",
+        .binding = &shader_injection.toneMapHueCorrection,
+        .default_value = 100.f,
+        .can_reset = false,
+        .label = "Hue Correction",
+        .section = "Tone Mapping",
+        .tooltip = "Emulates hue shifting from the vanilla tonemapper",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "colorGradeExposure",
+        .binding = &shader_injection.colorGradeExposure,
+        .default_value = 1.f,
+        .label = "Exposure",
+        .section = "Color Grading",
+        .max = 10.f,
+        .format = "%.2f",
+    },
+    new renodx::utils::settings::Setting{
+        .key = "colorGradeHighlights",
+        .binding = &shader_injection.colorGradeHighlights,
+        .default_value = 50.f,
+        .label = "Highlights",
+        .section = "Color Grading",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.02f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "colorGradeShadows",
+        .binding = &shader_injection.colorGradeShadows,
+        .default_value = 50.f,
+        .label = "Shadows",
+        .section = "Color Grading",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.02f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "colorGradeContrast",
+        .binding = &shader_injection.colorGradeContrast,
+        .default_value = 50.f,
+        .label = "Contrast",
+        .section = "Color Grading",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.02f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "colorGradeSaturation",
+        .binding = &shader_injection.colorGradeSaturation,
+        .default_value = 50.f,
+        .label = "Saturation",
+        .section = "Color Grading",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.02f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "colorGradeBlowout",
+        .binding = &shader_injection.colorGradeBlowout,
+        .default_value = 0.f,
+        .label = "Blowout",
+        .section = "Color Grading",
+        .tooltip = "Controls highlight desaturation due to overexposure.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "colorGradeLUTStrength",
+        .binding = &shader_injection.colorGradeLUTStrength,
+        .default_value = 100.f,
+        .label = "LUT Strength",
+        .section = "Color Grading",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "fxBloom",
+        .binding = &shader_injection.fxBloom,
+        .default_value = 50.f,
+        .label = "Bloom",
+        .section = "Effects",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.02f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "fxLensFlare",
+        .binding = &shader_injection.fxLensFlare,
+        .default_value = 50.f,
+        .label = "Lens Flare",
+        .section = "Effects",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.02f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "fxFilmGrain",
+        .binding = &shader_injection.fxFilmGrain,
+        .default_value = 50.f,
+        .label = "FilmGrain",
+        .section = "Effects",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.02f; },
+    },
+};
+
+void OnPresetOff() {
+  renodx::utils::settings::UpdateSetting("toneMapType", 0.f);
+  renodx::utils::settings::UpdateSetting("toneMapPeakNits", 203.f);
+  renodx::utils::settings::UpdateSetting("toneMapGameNits", 203.f);
+  renodx::utils::settings::UpdateSetting("toneMapUINits", 203.f);
+  renodx::utils::settings::UpdateSetting("toneMapGammaCorrection", 0);
+  renodx::utils::settings::UpdateSetting("toneMapHueCorrection", 100);
+  renodx::utils::settings::UpdateSetting("colorGradeExposure", 1.f);
+  renodx::utils::settings::UpdateSetting("colorGradeHighlights", 50.f);
+  renodx::utils::settings::UpdateSetting("colorGradeShadows", 50.f);
+  renodx::utils::settings::UpdateSetting("colorGradeContrast", 50.f);
+  renodx::utils::settings::UpdateSetting("colorGradeSaturation", 50.f);
+  renodx::utils::settings::UpdateSetting("colorGradeLUTStrength", 100.f);
+  renodx::utils::settings::UpdateSetting("colorGradeBlowout", 0.f);
+  renodx::utils::settings::UpdateSetting("fxBloom", 50.f);
+  renodx::utils::settings::UpdateSetting("fxLensFlare", 50.f);
+  renodx::utils::settings::UpdateSetting("fxFilmGrain", 50.f);
+}
+
+}  // namespace
+
+// NOLINTBEGIN(readability-identifier-naming)
+
+extern "C" __declspec(dllexport) const char* NAME = "RenoDX";
 extern "C" __declspec(dllexport) const char* DESCRIPTION = "RenoDX for Dying Light";
 
-ShaderReplaceMod::CustomShaders customShaders = {
+// NOLINTEND(readability-identifier-naming)
 
-  /* these 3 are untested*/
-  // CustomShaderEntry(0x8B0B0A1E),          // TONEMAP?
-  // CustomShaderEntry(0x2E034F94),          // TONEMAP?
-  // CustomShaderEntry(0xE4562BAF),          // TONEMAP?
-
-
-  // CustomShaderEntry(0x1FB36E90),       // screen blood effect
-
-  // CustomShaderEntry(0x95588EA5),       // radial dirty lens effect
-  // CustomShaderEntry(0x8135BEA2),       // radial lens flare
-  CustomShaderEntry(0xA6EC1DEC),          // bloom
-  // CustomShaderEntry(0x11737C11),       // debris and other effects?
-  CustomShaderEntry(0x372BEBAB),          // LUT 1
-  // CustomShaderEntry(0xED9872EB),       // AA?
-  CustomShaderEntry(0xD42BAD58),          // LUT 2a - No Film Grain
-  CustomShaderEntry(0xC20255E1),          // LUT 2b - Film Grain
-
-  CustomShaderEntry(0x8194877A),          // caps brightness
-
-  CustomSwapchainShader(0x558540C8),      // Gamma adjust
-  CustomSwapchainShader(0x548937E1),      // UI - loading screen
-  CustomSwapchainShader(0x404A04C7),      // UI - highlighted stuff, orange elements
-  CustomSwapchainShader(0xBCBEE1E5),      // UI - text
-  CustomSwapchainShader(0xDC15A986),      // UI - Alpha, semitransparent UI boxes, quit overlay
-  CustomSwapchainShader(0x6562755C),      // UI - Alpha, some text
-  CustomSwapchainShader(0xB917BF4E),      // UI - HUD, nav arrows, slider outlines, some icons, some text boxes
-  CustomSwapchainShader(0x7E8358E3),      // UI - HUD numbers
-  CustomSwapchainShader(0x929C8CA5),      // UI - Minimap  
-};
-
-ShaderInjectData shaderInjection;
-
-// clang-format off
-UserSettingUtil::UserSettings userSettings = {
-  new UserSettingUtil::UserSetting {
-    .key = "toneMapType",
-    .binding = &shaderInjection.toneMapType,
-    .valueType = UserSettingUtil::UserSettingValueType::integer,
-    .defaultValue = 3.f,
-    .canReset = false,
-    .label = "Tone Mapper",
-    .section = "Tone Mapping",
-    .tooltip = "Sets the tone mapper type",
-    .labels = {"Vanilla", "None", "ACES", "RenoDRT"}
-  },
-  new UserSettingUtil::UserSetting {
-    .key = "toneMapPeakNits",
-    .binding = &shaderInjection.toneMapPeakNits,
-    .defaultValue = 1000.f,
-    .canReset = false,
-    .label = "Peak Brightness",
-    .section = "Tone Mapping",
-    .tooltip = "Sets the value of peak white in nits",
-    .min = 48.f,
-    .max = 4000.f
-  },
-  new UserSettingUtil::UserSetting {
-    .key = "toneMapGameNits",
-    .binding = &shaderInjection.toneMapGameNits,
-    .defaultValue = 203.f,
-    .canReset = false,
-    .label = "Game Brightness",
-    .section = "Tone Mapping",
-    .tooltip = "Sets the value of 100%% white in nits",
-    .min = 48.f,
-    .max = 500.f
-  },
-  new UserSettingUtil::UserSetting {
-    .key = "toneMapUINits",
-    .binding = &shaderInjection.toneMapUINits,
-    .defaultValue = 203.f,
-    .canReset = false,
-    .label = "UI Brightness",
-    .section = "Tone Mapping",
-    .tooltip = "Sets the brightness of UI and HUD elements in nits",
-    .min = 48.f,
-    .max = 500.f
-  },
-  new UserSettingUtil::UserSetting {
-    .key = "toneMapGammaCorrection",
-    .binding = &shaderInjection.toneMapGammaCorrection,
-    .valueType = UserSettingUtil::UserSettingValueType::boolean,
-    .canReset = false,
-    .label = "Gamma Correction",
-    .section = "Tone Mapping",
-    .tooltip = "Emulates a 2.2 EOTF (use with HDR or sRGB)",
-  },
-  new UserSettingUtil::UserSetting {
-    .key = "colorGradeExposure",
-    .binding = &shaderInjection.colorGradeExposure,
-    .defaultValue = 1.f,
-    .label = "Exposure",
-    .section = "Color Grading",
-    .max = 10.f,
-    .format = "%.2f"
-  },
-  new UserSettingUtil::UserSetting {
-    .key = "colorGradeHighlights",
-    .binding = &shaderInjection.colorGradeHighlights,
-    .defaultValue = 50.f,
-    .label = "Highlights",
-    .section = "Color Grading",
-    .max = 100.f,
-    .parse = [](float value) { return value * 0.02f; }
-  },
-  new UserSettingUtil::UserSetting {
-    .key = "colorGradeShadows",
-    .binding = &shaderInjection.colorGradeShadows,
-    .defaultValue = 50.f,
-    .label = "Shadows",
-    .section = "Color Grading",
-    .max = 100.f,
-    .parse = [](float value) { return value * 0.02f; }
-  },
-  new UserSettingUtil::UserSetting {
-    .key = "colorGradeContrast",
-    .binding = &shaderInjection.colorGradeContrast,
-    .defaultValue = 50.f,
-    .label = "Contrast",
-    .section = "Color Grading",
-    .max = 100.f,
-    .parse = [](float value) { return value * 0.02f; }
-  },
-  new UserSettingUtil::UserSetting {
-    .key = "colorGradeSaturation",
-    .binding = &shaderInjection.colorGradeSaturation,
-    .defaultValue = 50.f,
-    .label = "Saturation",
-    .section = "Color Grading",
-    .max = 100.f,
-    .parse = [](float value) { return value * 0.02f; }
-  },
-  new UserSettingUtil::UserSetting {
-    .key = "colorGradeLUTStrength",
-    .binding = &shaderInjection.colorGradeLUTStrength,
-    .defaultValue = 100.f,
-    .label = "LUT Strength",
-    .section = "Color Grading",
-    .max = 100.f,
-    .parse = [](float value) { return value * 0.01f; }
-  },
-  new UserSettingUtil::UserSetting {
-    .key = "colorGradeLUTScaling",
-    .binding = &shaderInjection.colorGradeLUTScaling,
-    .defaultValue = 100.f,
-    .label = "LUT Scaling",
-    .section = "Color Grading",
-    .tooltip = "Scales the color grade LUT to full range when size is clamped.",
-    .max = 100.f,
-    .parse = [](float value) { return value * 0.01f; }
-  },
-  new UserSettingUtil::UserSetting {
-    .key = "fxBloom",
-    .binding = &shaderInjection.fxBloom,
-    .defaultValue = 50.f,
-    .label = "Bloom",
-    .section = "Effects",
-    .max = 100.f,
-    .parse = [](float value) { return value * 0.02f; }
-  },
-  new UserSettingUtil::UserSetting {
-    .key = "fxDoF",
-    .binding = &shaderInjection.fxDoF,
-    .defaultValue = 50.f,
-    .label = "Depth of Field",
-    .section = "Effects",
-    .max = 100.f,
-    .parse = [](float value) { return value * 0.02f; }
-  },
-  new UserSettingUtil::UserSetting {
-    .key = "fxFilmGrain",
-    .binding = &shaderInjection.fxFilmGrain,
-    .defaultValue = 50.f,
-    .label = "Film Grain",
-    .section = "Effects",
-    .max = 100.f,
-    .parse = [](float value) { return value * 0.02f; }
-  },
-  new UserSettingUtil::UserSetting {
-    .key = "midGray",
-    .binding = &shaderInjection.midGray,
-    .defaultValue = 0.18f,
-    .label = "midGray",
-    .section = "Tonemapper Settings",
-    .max = 0.4f,
-    .format = "%.4f"
-  },
-};
-
-// clang-format on
-
-static void onPresetOff() {
-  UserSettingUtil::updateUserSetting("toneMapType", 0.f);
-  UserSettingUtil::updateUserSetting("toneMapPeakNits", 203.f);
-  UserSettingUtil::updateUserSetting("toneMapGameNits", 203.f);
-  UserSettingUtil::updateUserSetting("toneMapUINits", 203.f);
-  UserSettingUtil::updateUserSetting("toneMapGammaCorrection", 0);
-  UserSettingUtil::updateUserSetting("colorGradeExposure", 1.f);
-  UserSettingUtil::updateUserSetting("colorGradeHighlights", 50.f);
-  UserSettingUtil::updateUserSetting("colorGradeShadows", 50.f);
-  UserSettingUtil::updateUserSetting("colorGradeContrast", 50.f);
-  UserSettingUtil::updateUserSetting("colorGradeSaturation", 50.f);
-  UserSettingUtil::updateUserSetting("colorGradeLUTStrength", 100.f);
-  UserSettingUtil::updateUserSetting("colorGradeLUTScaling", 0.f);
-  UserSettingUtil::updateUserSetting("fxBloom", 50.f);
-  UserSettingUtil::updateUserSetting("fxAutoExposure", 50.f);
-  UserSettingUtil::updateUserSetting("fxDoF", 50.f);
-  UserSettingUtil::updateUserSetting("fxFilmGrain", 50.f);
-}
-
-static auto start = std::chrono::steady_clock::now();
-
-static void on_present(
-  reshade::api::command_queue* queue,
-  reshade::api::swapchain* swapchain,
-  const reshade::api::rect* source_rect,
-  const reshade::api::rect* dest_rect,
-  uint32_t dirty_rect_count,
-  const reshade::api::rect* dirty_rects
-) {
-  auto end = std::chrono::steady_clock::now();
-  shaderInjection.elapsedTime = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-}
-
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID) {
-  switch (fdwReason) {
+BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
+  switch (fdw_reason) {
     case DLL_PROCESS_ATTACH:
-      if (!reshade::register_addon(hModule)) return FALSE;
+      if (!reshade::register_addon(h_module)) return FALSE;
 
-      ShaderReplaceMod::forcePipelineCloning = true;
-      ShaderReplaceMod::traceUnmodifiedShaders = true;
-      SwapChainUpgradeMod::forceBorderless = false;
-      SwapChainUpgradeMod::preventFullScreen = false;
+      renodx::mods::shader::force_pipeline_cloning = true;
+      renodx::mods::shader::trace_unmodified_shaders = true;
+      renodx::mods::swapchain::force_borderless = false;
+      renodx::mods::swapchain::prevent_full_screen = true;
       for (auto index : {3, 4}) {
-        SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
-          {
-            .oldFormat = reshade::api::format::r8g8b8a8_typeless,
-            .newFormat = reshade::api::format::r16g16b16a16_float,
-            .index = index
-          }
-        );
-      }      
-      // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
-      //   {reshade::api::format::r8g8b8a8_unorm, reshade::api::format::r16g16b16a16_float} 
-      // );
-      // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
-      //   {reshade::api::format::r8g8b8a8_unorm_srgb, reshade::api::format::r16g16b16a16_float}
-      // );
-      // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
-      //   {reshade::api::format::b8g8r8a8_unorm, reshade::api::format::r16g16b16a16_float}
-      // );
-      // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
-      //   {reshade::api::format::r10g10b10a2_unorm, reshade::api::format::r16g16b16a16_float}
-      // );
-      // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
-      //   {reshade::api::format::r11g11b10_float, reshade::api::format::r16g16b16a16_float}
-      // );
+        renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
+            .old_format = reshade::api::format::r8g8b8a8_typeless,
+            .new_format = reshade::api::format::r16g16b16a16_float,
+            .index = index,
+        });
+      }
+
       break;
     case DLL_PROCESS_DETACH:
-      reshade::unregister_addon(hModule);
+      reshade::unregister_addon(h_module);
       break;
   }
 
-  UserSettingUtil::use(fdwReason, &userSettings, &onPresetOff);
+  renodx::utils::settings::Use(fdw_reason, &settings, &OnPresetOff);
 
-  SwapChainUpgradeMod::use(fdwReason);
+  renodx::mods::swapchain::Use(fdw_reason);
 
-  ShaderReplaceMod::use(fdwReason, customShaders, &shaderInjection);
+  renodx::mods::shader::Use(fdw_reason, custom_shaders, &shader_injection);
 
   return TRUE;
 }

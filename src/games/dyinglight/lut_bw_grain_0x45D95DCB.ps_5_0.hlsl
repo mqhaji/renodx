@@ -1,6 +1,6 @@
 #include "./shared.h"
 
-// ---- Created with 3Dmigoto v1.3.16 on Sat May 25 22:39:36 2024
+// ---- Created with 3Dmigoto v1.3.16 on Sat May 25 22:39:06 2024
 Texture2D<float4> t4 : register(t4);
 
 Texture2D<float4> t3 : register(t3);
@@ -23,7 +23,7 @@ SamplerState s0_s : register(s0);
 
 cbuffer cb0 : register(b0)
 {
-  float4 cb0[4];
+  float4 cb0[8];
 }
 
 
@@ -52,36 +52,42 @@ void main(
   r0.xyzw = cb0[2].wwww + r0.xyzw;
   r0.xyzw = frac(r0.xyzw);
   r0.xyzw = r0.xyzw * float4(2,2,2,2) + float4(-1,-1,-1,-1);
-  r0.xyzw = saturate(abs(r0.xyzw) * float4(5,5,5,5) + float4(-1,-1,-1,-1)); // making this max() increases film grain
+  r0.xyzw = saturate(abs(r0.xyzw) * float4(5,5,5,5) + float4(-1,-1,-1,-1));
   r0.xyzw = float4(1,1,1,1) + -r0.xyzw;
   r0.xyzw = r0.xyzw * cb0[2].yyyy + cb0[2].zzzz;
   r0.xyz = r0.xyz + -r0.www;
   r0.xyz = cb0[3].xxx * r0.xyz + r0.www;
   r1.xy = -abs(v3.xy) * abs(v3.xy) + float2(1,1);
-  r0.w = saturate(-r1.x * r1.y + 1);  //  r0.w = saturate(-r1.x * r1.y + 1);
+  r0.w = saturate(-r1.x * r1.y + 1);
   r0.w = cb0[2].x * r0.w;
   r0.w = cb0[0].w * r0.w;
   r1.x = t0.SampleLevel(s0_s, v2.xy, 0).x;
   r1.y = t0.SampleLevel(s0_s, v2.zw, 0).z;
-  r2.xyzw = t0.SampleLevel(s0_s, v3.zw, 0).xyzw;  // render
+  r2.xyzw = t0.SampleLevel(s0_s, v3.zw, 0).xyzw;
   r1.xy = -r2.xz + r1.xy;
   r2.xz = r0.ww * r1.xy + r2.xz;
   o0.w = r2.w;
-  r0.w = saturate(dot(float3(0.212500006,0.715399981,0.0720999986), r2.xyz)); //    r0.w = saturate(dot(float3(0.212500006,0.715399981,0.0720999986), r2.xyz));
-  r0.w = sign(r0.w) * sqrt(abs(r0.w));
-  r0.w = sign(r0.w) * sqrt(abs(r0.w));
+  r0.w = saturate(dot(float3(0.212500006,0.715399981,0.0720999986), r2.xyz));
+  r0.w = sqrt(r0.w);
+  r0.w = sqrt(r0.w);
   r0.xyz = r0.xyz * r0.www;
   r1.xyz = r0.xyz * r0.xyz;
   r0.xyz = cmp(r0.xyz >= float3(0,0,0));
   r0.xyz = r0.xyz ? r1.xyz : -r1.xyz;
-  r0.xyz = r0.xyz * injectedData.fxFilmGrain + r2.xyz;  // film grain
+  r0.xyz = r0.xyz + r2.xyz; //  r0.xyz = saturate(r0.xyz + r2.xyz);
   r0.w = dot(float3(0.212500006,0.715399981,0.0720999986), r0.xyz);
   r1.xyz = r0.www + -r0.xyz;
-  r0.w = saturate(r0.w * cb0[0].y + cb0[0].z);  //  r0.w = saturate(r0.w * cb0[0].y + cb0[0].z);
+  r0.w = saturate(r0.w * cb0[0].y + cb0[0].z);
   r0.w = cb0[0].x * r0.w;
   r0.xyz = r0.www * r1.xyz + r0.xyz;
   r0.w = dot(r0.xyz, cb0[1].xyz);
-  r0.xyz = r0.xyz * cb0[1].www + r0.www;
+  r0.xyz = r0.xyz * cb0[1].www + r0.www;  //  r0.xyz = saturate(r0.xyz * cb0[1].www + r0.www);
+  r0.w = saturate(dot(r0.xyz, cb0[4].xyz));
+  r1.xyz = cb0[6].xyz * r0.www;
+  r2.xyz = r0.xyz * cb0[7].xyz + -r1.xyz;
+  r0.w = saturate(dot(r0.xyz, cb0[5].xyz));
+  r1.xyz = r0.www * r2.xyz + r1.xyz;  //  r1.xyz = saturate(r0.www * r2.xyz + r1.xyz);
+  r0.xyz = r0.xyz * cb0[6].www + r1.xyz;  //  r0.xyz = saturate(r0.xyz * cb0[6].www + r1.xyz);
 
   float3 outputColor = r0.xyz;
 
@@ -91,7 +97,7 @@ void main(
     r1.x = t4.Sample(s4_s, r0.xx).x;
     r1.y = t4.Sample(s4_s, r0.yy).y;
     r1.z = t4.Sample(s4_s, r0.zz).z;
-    r0.xyz = sign(r1.xyz) * pow(abs(r1.xyz), 2.2f);
+    r0.xyz = sign(r1.xyz) * pow(abs(r1.xyz), 2.2f );
 
     float3 hdrColor = outputColor;
     float3 sdrColor = saturate(outputColor);

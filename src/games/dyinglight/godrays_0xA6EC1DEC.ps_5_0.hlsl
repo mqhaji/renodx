@@ -35,7 +35,7 @@ void main(
   float4 fDest;
 
   r0.xyz = t2.SampleLevel(s2_s, v1.xy, 0).xyz;
-  r0.xyz = cb0[0].yyy * r0.xyz * injectedData.fxBloom;  // bloom
+  r0.xyz = cb0[0].yyy * r0.xyz;  // bloom
   r0.w = t1.SampleLevel(s1_s, float2(0,0), 0).x;
   r1.xyzw = t0.SampleLevel(s0_s, v1.xy, 0).xyzw;
   r1.xyz = r1.xyz * r0.www;

@@ -1,6 +1,10 @@
 #ifndef SRC_DYING_LIGHT_SHARED_H_
 #define SRC_DYING_LIGHT_SHARED_H_
 
+#ifndef __cplusplus
+#include "../../shaders/renodx.hlsl"
+#endif
+
 // Must be 32bit aligned
 // Should be 4x32
 struct ShaderInjectData {
@@ -9,6 +13,7 @@ struct ShaderInjectData {
   float toneMapGameNits;
   float toneMapUINits;
   float toneMapGammaCorrection;
+  float toneMapHueCorrection;
   float colorGradeExposure;
   float colorGradeHighlights;
   float colorGradeShadows;
@@ -18,14 +23,8 @@ struct ShaderInjectData {
   float colorGradeLUTStrength;
   float colorGradeLUTScaling;
   float fxBloom;
-  float fxDoF;
   float fxLensFlare;
-  float fxVignette;
   float fxFilmGrain;
-  float renoDRTFlare;
-  float midGray;
-  float elapsedTime;
-  float fxAutoExposure;
 };
 
 #ifndef __cplusplus

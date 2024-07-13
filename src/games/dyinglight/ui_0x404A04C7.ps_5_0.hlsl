@@ -1,5 +1,4 @@
 #include "./shared.h"
-#include "../../shaders/color.hlsl"
 
 // ---- Created with 3Dmigoto v1.3.16 on Sat May 25 22:39:05 2024
 Texture2D<float4> t1 : register(t1);
@@ -51,14 +50,13 @@ void main(
   r0.yzw = r5.xyz * r0.yyy;
   r0.yzw = float3(0.800000012,0.800000012,0.800000012) * r0.yzw;
   r0.yzw = r1.xyz * float3(0.800000012,0.800000012,0.800000012) + r0.yzw;
-  o0.w = r1.w;
+  o0.w = saturate(r1.w);
   o0.xyz = saturate(r0.xxx * float3(0.0170000009,0.0170000009,0.0170000009) + r0.yzw);
 
   if (injectedData.toneMapGammaCorrection) { // fix srgb 2.2 mismatch
-    o0.xyz = srgbFromLinear(o0.xyz);
+    o0.xyz = renodx::color::srgb::from::BT709(o0.xyz);
     o0.xyz = pow(o0.xyz, 2.2f);
   }
   o0.xyz *= injectedData.toneMapUINits/80.f;
-
   return;
 }
