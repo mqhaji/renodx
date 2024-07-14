@@ -194,12 +194,12 @@ float3 SampleLUTWithExtrapolation(Texture3D lut, SamplerState samplerState, cons
     if (lutExtrapolation && uvOutOfRange)
     {
     	// Diagonal: Find the direction between the clamped and unclamped coordinates, flip it, and use it to determine where more centered texel for extrapolation is.
-#if 0 //TODOFT1: improve the math
-    	const float3 centeredUV = clampedUV - (normalize(unclampedUV - clampedUV) * lutTexelRange);
-#elif 0
-    	const float3 centeredUV = clampedUV - ((unclampedUV - clampedUV) * lutTexelRange);
+#if 0 //TODOFT2: improve the math
+    	static float backwardsAmount = 3.0;
+    	const float3 centeredUV = clampedUV - (normalize(unclampedUV - clampedUV) * lutTexelRange * backwardsAmount);
 #else // Go backwards by half or so, to be sure it's all good (this also fixes clipped LUTs, but can go beyond their max intent...)
-      const float3 centeredUV = clampedUV - (normalize(unclampedUV - 0.5) * 0.5);
+    	static float backwardsAmount = 0.5; // adjusted to 0.5 to fix broken blues
+    	const float3 centeredUV = clampedUV - (normalize(unclampedUV - clampedUV) * backwardsAmount);
 #endif
 
     	const float3 centeredSample = TexColorChart3D(lut, samplerState, AdjustColorGradingLUTCoordinatesForLinearLUT(centeredUV, lutLinear, lutMax3D), lutSize);
