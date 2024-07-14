@@ -46,6 +46,7 @@
 #include <embed/0x23EFA382.h>    // UI - Images
 #include <embed/0x7D5191F6.h>    // UI - Loading please wait
 #include <embed/0x637A1F5C.h>    // UI - popup notification
+#include <embed/0x379D46ED.h>    // UI - Death screen images
 
 #include <deps/imgui/imgui.h>
 #include <include/reshade.hpp>
@@ -90,6 +91,7 @@ renodx::mods::shader::CustomShaders custom_shaders = {
     CustomSwapchainShader(0x23EFA382),      // UI - Images
     CustomSwapchainShader(0x7D5191F6),      // UI - Loading please wait
     CustomSwapchainShader(0x637A1F5C),      // UI - popup notification
+    CustomSwapchainShader(0x379D46ED),      // UI - Death screen images
 };
 
 ShaderInjectData shader_injection;
@@ -208,7 +210,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "colorGradeBlowout",
         .binding = &shader_injection.colorGradeBlowout,
-        .default_value = 0.f,
+        .default_value = 33.f,
         .label = "Blowout",
         .section = "Color Grading",
         .tooltip = "Controls highlight desaturation due to overexposure.",
