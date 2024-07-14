@@ -248,7 +248,7 @@ void main(
             injectedData.toneMapType,
             injectedData.toneMapPeakNits,
             injectedData.toneMapGameNits,
-            injectedData.toneMapGammaCorrection,
+            injectedData.toneMapGammaCorrection - 1,
             injectedData.colorGradeExposure,
             injectedData.colorGradeHighlights,
             injectedData.colorGradeShadows,
@@ -311,22 +311,22 @@ void main(
 
   float3 tonemapped = r2.xyz;
   
-  // vanilla LUT Sampling
-  r0.xyz = r2.xyz * float3(31,31,31) + float3(0.5,0.5,0.5);
-  r0.xyz = float3(0.03125,0.03125,0.03125) * r0.xyz;
-  r0.xyz = ro_tonemapping_finalcolorcube.SampleLevel(smp_linearclamp_s, r0.xyz, 0).xyz;
-
-  // LUT Extrapolation
-  if (injectedData.toneMapType != 0) {
-    float3 clampedOutput = r0.xyz;
+  if (injectedData.toneMapType == 0) {   // vanilla LUT Sampling
+    r0.xyz = r2.xyz * float3(31,31,31) + float3(0.5,0.5,0.5);
+    r0.xyz = float3(0.03125,0.03125,0.03125) * r0.xyz;
+    r0.xyz = ro_tonemapping_finalcolorcube.SampleLevel(smp_linearclamp_s, r0.xyz, 0).xyz;
+  }
+  else {                                 // LUT Extrapolation
     r0.xyz = SampleLUTWithExtrapolation(
-        ro_tonemapping_finalcolorcube, 
-        smp_linearclamp_s, 
+        ro_tonemapping_finalcolorcube,        // lut
+        smp_linearclamp_s,                    // samplerState
         r2.xyz,                               // neutralColor
         true,                                 // inputLinear
-        true,                                 // lutLinear
+        true,                                 // lutInputLinear
+        true,                                 // lutOutputLinear
         true,                                 // outputLinear
-        injectedData.toneMapGammaCorrection,  // gammaCorrection
+        false,                                // gammaCorrectionInput
+        false,                                // gammaCorrectionOutput
         true,                                 // lutExtrapolation
         32                                    // lutSize
     );
