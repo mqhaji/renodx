@@ -204,24 +204,65 @@ void main(
   r0.xyz = r1.www * r2.xyz + r0.xyz;
   r0.xyz = r0.xyz + -r1.xyz;
   r0.xyz = ToneMappingDebugParams.www * r0.xyz + r1.xyz;
+  float exposureScale = renodx::color::y::from::BT709(r0.rgb) / 0.18f; // autoexposure
+
+  // vanilla run 2
+  r0.xyz = untonemapped;
+  r1.x = log2(r0.w);
+  r1.x = r1.x * 0.693147182 + 12;
+  r1.x = saturate(0.0625 * r1.x);
+  r1.y = 0.25;
+  r1.x = SamplerToneMapCurve_TEX.SampleLevel(SamplerToneMapCurve_SMP_s, r1.xy, 0).x;
+  r1.y = -r1.x * r1.x + 1;
+  r2.xyz = max(float3(0,0,0), r0.xyz);
+  r1.z = max(9.99999975e-005, r0.w);
+  r2.xyz = r2.xyz / r1.zzz;
+  r1.y = max(9.99999975e-006, r1.y);
+  r2.xyz = log2(r2.xyz);
+  r1.yzw = r2.xyz * r1.yyy;
+  r1.yzw = exp2(r1.yzw);
+  r2.xyz = r1.yzw * r1.xxx;
+  r2.w = sqrt(r1.x);
+  r3.x = cmp(ToneMappingDebugParams.y < r2.w);
+  r2.w = cmp(r2.w < ToneMappingDebugParams.x);
+  r4.xyzw = r2.wwww ? float4(0,0,1,1) : 0;
+  r3.xyzw = r3.xxxx ? float4(1,0,0,1) : r4.xyzw;
+  r2.w = ToneMappingDebugParams.z * r3.w;
+  r1.xyz = -r1.yzw * r1.xxx + r3.xyz;
+  r1.xyz = r2.www * r1.xyz + r2.xyz;
+  r0.xyz = log2(r0.xyz);
+  r0.xyz = r0.xyz * float3(0.693147182,0.693147182,0.693147182) + float3(12,12,12);
+  r2.xyz = max(0, float3(0.0625,0.0625,0.0625) * r0.xyz);
+  r2.w = 0.25;
+  r0.x = SamplerToneMapCurve_TEX.SampleLevel(SamplerToneMapCurve_SMP_s, r2.xw, 0).x;
+  r0.y = SamplerToneMapCurve_TEX.SampleLevel(SamplerToneMapCurve_SMP_s, r2.yw, 0).x;
+  r0.z = SamplerToneMapCurve_TEX.SampleLevel(SamplerToneMapCurve_SMP_s, r2.zw, 0).x;
+  r1.w = dot(float3(0.298999995,0.587000012,0.114), r0.xyz);
+  r1.w = sqrt(r1.w);
+  r2.x = cmp(ToneMappingDebugParams.y < r1.w);
+  r1.w = cmp(r1.w < ToneMappingDebugParams.x);
+  r3.xyzw = r1.wwww ? float4(0,0,1,1) : 0;
+  r2.xyzw = r2.xxxx ? float4(1,0,0,1) : r3.xyzw;
+  r1.w = ToneMappingDebugParams.z * r2.w;
+  r2.xyz = r2.xyz + -r0.xyz;
+  r0.xyz = r1.www * r2.xyz + r0.xyz;
+  r0.xyz = r0.xyz + -r1.xyz;
+  r0.xyz = ToneMappingDebugParams.www * r0.xyz + r1.xyz;
+  
+  float4 vanillaColor;
+  vanillaColor.rgb = r0.rgb;
+  vanillaColor.a = injectedData.toneMapHueCorrection;
 
 
-  if (injectedData.toneMapType != 0) {  // custom tonemapper
-    untonemapped *= renodx::color::y::from::BT709(r0.rgb) / 0.18f;
-    float vanillaMidGray = 0.18f;
-    float renoDRTContrast = 1.f;
-    float renoDRTFlare = 0.f;
-    float renoDRTShadows = 1.f;
-    float renoDRTDechroma = injectedData.colorGradeBlowout;
-    float renoDRTSaturation = 1.f;
-    float renoDRTHighlights = 1.f;
-    // float renoDRTContrast = 0.9f;
-    // float renoDRTFlare = 0.f;
-    // float renoDRTShadows = 0.86f;
-    // float renoDRTDechroma = injectedData.colorGradeBlowout;
-    // float renoDRTSaturation = 1.02f;
-    // float renoDRTHighlights = 1.2f;
-
+  untonemapped *= exposureScale;
+  float vanillaMidGray = 0.18f;
+  float renoDRTContrast = 0.78f;
+  float renoDRTFlare = 0.f;
+  float renoDRTShadows = 0.68f;
+  float renoDRTDechroma = injectedData.colorGradeBlowout;
+  float renoDRTSaturation = 1.f;
+  float renoDRTHighlights = 1.4f;
+  if (injectedData.toneMapType != 0 && injectedData.toneMapType != 4) {
     float3 tonemapped = renodx::tonemap::config::Apply(
         untonemapped,
         renodx::tonemap::config::Create(
@@ -241,10 +282,48 @@ void main(
             renoDRTContrast,
             renoDRTSaturation,
             renoDRTDechroma,
-            renoDRTFlare));
+            renoDRTFlare,
+            vanillaColor));
 
     r0.xyz = tonemapped;
   }
+  else if (injectedData.toneMapType == 4) {  
+    float3 tonemapped = renodx::tonemap::config::Apply(
+        untonemapped,
+        renodx::tonemap::config::Create(
+            3.f,
+            injectedData.toneMapPeakNits,
+            injectedData.toneMapGameNits,
+            injectedData.toneMapGammaCorrection,
+            1.f,
+            injectedData.colorGradeHighlights,
+            1.f,
+            1.f,
+            1.f,
+            vanillaMidGray,
+            vanillaMidGray * 100.f,
+            renoDRTHighlights,
+            renoDRTShadows,
+            renoDRTContrast,
+            renoDRTSaturation,
+            renoDRTDechroma,
+            renoDRTFlare,
+            vanillaColor));
+      r0.xyz = tonemapped;
+
+    float vanillaLum = renodx::color::y::from::BT709(vanillaColor.rgb);
+    r0.xyz = lerp(vanillaColor.rgb, r0.xyz, saturate(vanillaLum));  // combine tonemappers
+
+    // allow for user adjustments
+    r0.xyz = renodx::color::grade::UserColorGrading(
+        r0.xyz,
+        injectedData.colorGradeExposure,
+        1.f,
+        injectedData.colorGradeShadows,
+        injectedData.colorGradeContrast,
+        injectedData.colorGradeSaturation);
+  }
+
 
   // no idea what this does
   r1.xy = (uint2)v2.xy;
@@ -261,7 +340,7 @@ void main(
   r1.yzw = r0.www * r1.yzw + r0.xyz;
   r0.xyz = r1.xxx ? r1.yzw : r0.xyz;
   r0.xyz = v1.zzz * r0.xyz;
-  r1.xyz = sqrt(r0.xyz);
+  r1.xyz = sign(r0.xyz) * sqrt(abs(r0.xyz));  //  r1.xyz = sqrt(r0.xyz);
   r1.xyz = rp_parameter_ps[2].zzz + r1.xyz;
 
 
@@ -279,19 +358,20 @@ void main(
   r0.xyz = lerp(preLUTColor, r0.xyz, injectedData.colorGradeLUTStrength);
 
   // film grain
-  r1.xyz = SamplerNoise_TEX.Sample(SamplerNoise_SMP_s, v1.xy).xyz;
-  r1.xyz = float3(-0.5,-0.5,-0.5) + r1.xyz;
-  r0.w = dot(float3(0.298999995,0.587000012,0.114), r0.xyz);
-  r2.xyz = float3(0,0.5,1) + -r0.www;
-  r2.xyz = saturate(rp_parameter_ps[7].xyz + -abs(r2.xyz));
-  r2.xyz = r2.xyz / rp_parameter_ps[7].xyz;
-  r2.xyz = rp_parameter_ps[8].xyz * r2.xyz;
-  r3.xyz = r2.yyy * r1.xyz;
-  r2.xyw = r1.xyz * r2.xxx + r3.xyz;
-  r1.xyz = r1.xyz * r2.zzz + r2.xyw;
-  r0.xyz = injectedData.fxFilmGrain * r1.xyz + r0.xyz;
-  r0.xyz = r0.xyz * rp_parameter_ps[0].xxx + rp_parameter_ps[0].yyy;
-  
+  if (injectedData.fxFilmGrain) {
+    r1.xyz = SamplerNoise_TEX.Sample(SamplerNoise_SMP_s, v1.xy).xyz;
+    r1.xyz = float3(-0.5,-0.5,-0.5) + r1.xyz;
+    r0.w = dot(float3(0.298999995,0.587000012,0.114), r0.xyz);
+    r2.xyz = float3(0,0.5,1) + -r0.www;
+    r2.xyz = saturate(rp_parameter_ps[7].xyz + -abs(r2.xyz));
+    r2.xyz = r2.xyz / rp_parameter_ps[7].xyz;
+    r2.xyz = rp_parameter_ps[8].xyz * r2.xyz;
+    r3.xyz = r2.yyy * r1.xyz;
+    r2.xyw = r1.xyz * r2.xxx + r3.xyz;
+    r1.xyz = r1.xyz * r2.zzz + r2.xyw;
+    r0.xyz = injectedData.fxFilmGrain * r1.xyz + r0.xyz;
+    r0.xyz = r0.xyz * rp_parameter_ps[0].xxx + rp_parameter_ps[0].yyy;
+  }
   
   o0.w = dot(r0.xyz, float3(0.298999995,0.587000012,0.114));
   o0.xyz = r0.xyz;
