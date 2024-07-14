@@ -43,8 +43,7 @@ void main(
   o0.xyz = r1.xxx * r0.xyz;
   o0.w = r0.w;
 
-  o0.a = 1.f;
-  o0.xyzw = saturate(o0.xyzw);
+  o0.xyz = saturate(o0.xyz);
   if (injectedData.toneMapGammaCorrection) { // fix srgb 2.2 mismatch
     o0.xyz = renodx::color::srgb::from::BT709(o0.xyz);
     o0.xyz = pow(o0.xyz, 2.2f);

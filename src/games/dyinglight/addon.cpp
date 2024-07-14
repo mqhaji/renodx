@@ -40,6 +40,12 @@
 #include <embed/0x7E8358E3.h>    // UI - HUD numbers
 #include <embed/0x929C8CA5.h>    // UI - Minimap
 #include <embed/0x4D09799F.h>    // UI - HUD Floating markers
+#include <embed/0x9F9A6B19.h>    // UI - Menu tab bar
+#include <embed/0xD292312D.h>    // UI - ?
+#include <embed/0x822D56FA.h>    // UI - Menu blur
+#include <embed/0x23EFA382.h>    // UI - Images
+#include <embed/0x7D5191F6.h>    // UI - Loading please wait
+#include <embed/0x637A1F5C.h>    // UI - popup notification
 
 #include <deps/imgui/imgui.h>
 #include <include/reshade.hpp>
@@ -77,6 +83,13 @@ renodx::mods::shader::CustomShaders custom_shaders = {
     CustomSwapchainShader(0x7E8358E3),      // UI - HUD numbers
     CustomSwapchainShader(0x929C8CA5),      // UI - Minimap  
     CustomShaderEntry(0x4D09799F),      // UI - HUD Floating markers
+    CustomSwapchainShader(0x9F9A6B19),      // UI - Menu tab bar
+    CustomSwapchainShader(0xD292312D),      // UI - ?
+    CustomSwapchainShader(0x822D56FA),      // UI - Menu blur
+    // CustomSwapchainShader(0x03554D47),      // UI - Menu background - breaks alpha
+    CustomSwapchainShader(0x23EFA382),      // UI - Images
+    CustomSwapchainShader(0x7D5191F6),      // UI - Loading please wait
+    CustomSwapchainShader(0x637A1F5C),      // UI - popup notification
 };
 
 ShaderInjectData shader_injection;
