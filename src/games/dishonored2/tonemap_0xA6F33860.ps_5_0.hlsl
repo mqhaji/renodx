@@ -239,7 +239,7 @@ void main(
     float renoDRTFlare = 0.f;
     float renoDRTShadows = 1.2f;
     float renoDRTDechroma = injectedData.colorGradeBlowout;
-    float renoDRTSaturation = 1.06f;
+    float renoDRTSaturation = 1.18f;
     float renoDRTHighlights = 1.06f;
 
     float3 tonemapped = renodx::tonemap::config::Apply(
@@ -266,12 +266,12 @@ void main(
     r2.xyz = tonemapped;
   }
   else if (injectedData.toneMapType == 4) {
-    float renoDRTContrast = 1.15f;
+    float renoDRTContrast = 1.28f;
     float renoDRTFlare = 0.f;
-    float renoDRTShadows = 1.f;
+    float renoDRTShadows = 1.2f;
     float renoDRTDechroma = injectedData.colorGradeBlowout;
-    float renoDRTSaturation = 1.3;
-    float renoDRTHighlights = 1.15f;
+    float renoDRTSaturation = 1.18;
+    float renoDRTHighlights = 1.06f;
 
     float3 tonemapped = renodx::tonemap::config::Apply(
         untonemapped,
