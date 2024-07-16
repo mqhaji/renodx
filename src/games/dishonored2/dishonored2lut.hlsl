@@ -456,22 +456,28 @@ float3 SampleLUTWithExtrapolation(Texture3D lut, SamplerState samplerState, cons
     const float distanceFromUnclampedToClamped = length(unclampedUV - clampedUV);
     const bool uvOutOfRange = distanceFromUnclampedToClamped > FLT_MIN; // Some threshold is needed to avoid divisions by tiny numbers
 
-    const float3 clampedSample = TexColorChart2D(lut, samplerState, AdjustLUTCoordinatesForLinearLUT(clampedUV, lutInputLinear, lutOutputLinear, lutMax3D), lutSize); // Use "clampedUV" instead of "unclampedUV" as we don't know what kind of sampler was in use here
+    float3 clampedSample = TexColorChart2D(lut, samplerState, AdjustLUTCoordinatesForLinearLUT(clampedUV, lutInputLinear, lutOutputLinear, lutMax3D), lutSize); // Use "clampedUV" instead of "unclampedUV" as we don't know what kind of sampler was in use here
     float3 outputSample = clampedSample;
     bool gammaCorrected = false;
 
     if (lutExtrapolation && uvOutOfRange)
     {
-    	// Diagonal: Find the direction between the clamped and unclamped coordinates, flip it, and use it to determine where more centered texel for extrapolation is.
-#if 0 //TODOFT2: improve the math
-    	static float backwardsAmount = 3.0;
-    	const float3 centeredUV = clampedUV - (normalize(unclampedUV - clampedUV) * lutTexelRange * backwardsAmount);
-#else // Go backwards by half or so, to be sure it's all good (this also fixes clipped LUTs, but can go beyond their max intent...)
-    	static float backwardsAmount = 0.25;
-    	const float3 centeredUV = clampedUV - (normalize(unclampedUV - clampedUV) * backwardsAmount);
-#endif
+      const float3 centeredUVEdge = clampedUV - (normalize(unclampedUV - clampedUV) * lutTexelRange);
+      const float3 centeredUVCenter = clampedUV - (normalize(unclampedUV - clampedUV) * 0.5 * sqrt(2.0)); //TODOFT: take angle of LUT color
 
-    	const float3 centeredSample = TexColorChart2D(lut, samplerState, AdjustLUTCoordinatesForLinearLUT(centeredUV, lutInputLinear, lutOutputLinear, lutMax3D), lutSize);
+      float3 centeredSampleEdge = TexColorChart2D(lut, samplerState, AdjustLUTCoordinatesForLinearLUT(centeredUVEdge, lutInputLinear, lutOutputLinear, lutMax3D), lutOutputLinear);
+      float3 centeredSampleCenter = TexColorChart2D(lut, samplerState, AdjustLUTCoordinatesForLinearLUT(centeredUVCenter, lutInputLinear, lutOutputLinear, lutMax3D), lutOutputLinear);
+
+    if (lutOutputLinear)
+    {
+      centeredSampleEdge = linear_to_sRGB_gamma_mirrored(centeredSampleEdge);
+      centeredSampleCenter = linear_to_sRGB_gamma_mirrored(centeredSampleCenter);
+      clampedSample = linear_to_sRGB_gamma_mirrored(clampedSample);
+      lutOutputLinear = false;
+    }
+
+      float3 centeredUV = lerp(centeredUVEdge, centeredUVCenter, 0.5);
+      float3 centeredSample = lerp(centeredSampleEdge, centeredSampleCenter, 0.5);
 #if 0 // Generate "extrapolationRatio" in 3D and starting from linear as opposed to gamma value //TODOFT2
       // "neutralLutColorLinear" is equivalent to "ColorGradingLUTTransferFunctionInInverted(unclampedUV, gammaCorrectionInput)"
     	const float3 distanceFromUnclampedToClamped3D = neutralLutColorLinear - gamma_sRGB_to_linear(clampedUV);

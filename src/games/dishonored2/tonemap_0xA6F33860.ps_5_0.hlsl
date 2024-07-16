@@ -212,8 +212,8 @@ void main(
   r0.xy = r1.xy * r0.zz + r1.zw;
   r2.z = r0.x / r0.y;
   // end vanilla run 1
-  float vanillaMidGray = renodx::color::y::from::BT709(r2.rgb);
 
+  float vanillaMidGray = renodx::color::y::from::BT709(r2.rgb);
   // reset values for 2nd run of tonemapper
   r0.xyz = untonemapped.rgb;
   r0.w = tempR0w;
@@ -230,49 +230,18 @@ void main(
   r0.xy = r1.xy * r0.zz + r1.zw;
   r2.z = r0.x / r0.y;
   // end vanilla run 2
+
   float4 vanillaColor;
   vanillaColor.rgb = r2.xyz;
   vanillaColor.a = injectedData.toneMapHueCorrection;
 
-  if (injectedData.toneMapType != 0 && injectedData.toneMapType != 4) {
     float renoDRTContrast = 1.28f;
     float renoDRTFlare = 0.f;
     float renoDRTShadows = 1.2f;
     float renoDRTDechroma = injectedData.colorGradeBlowout;
     float renoDRTSaturation = 1.18f;
-    float renoDRTHighlights = 1.06f;
-
-    float3 tonemapped = renodx::tonemap::config::Apply(
-        untonemapped,
-        renodx::tonemap::config::Create(
-            injectedData.toneMapType,
-            injectedData.toneMapPeakNits,
-            injectedData.toneMapGameNits,
-            injectedData.toneMapGammaCorrection - 1,
-            injectedData.colorGradeExposure,
-            injectedData.colorGradeHighlights,
-            injectedData.colorGradeShadows,
-            injectedData.colorGradeContrast,
-            injectedData.colorGradeSaturation,
-            vanillaMidGray,
-            vanillaMidGray * 100.f,
-            renoDRTHighlights,
-            renoDRTShadows,
-            renoDRTContrast,
-            renoDRTSaturation,
-            renoDRTDechroma,
-            renoDRTFlare,
-            vanillaColor));
-    r2.xyz = tonemapped;
-  }
-  else if (injectedData.toneMapType == 4) {
-    float renoDRTContrast = 1.28f;
-    float renoDRTFlare = 0.f;
-    float renoDRTShadows = 1.2f;
-    float renoDRTDechroma = injectedData.colorGradeBlowout;
-    float renoDRTSaturation = 1.18;
-    float renoDRTHighlights = 1.06f;
-
+    float renoDRTHighlights = 1.1f;
+  if (injectedData.toneMapType == 5) {
     float3 tonemapped = renodx::tonemap::config::Apply(
         untonemapped,
         renodx::tonemap::config::Create(
@@ -307,6 +276,70 @@ void main(
         injectedData.colorGradeShadows,
         injectedData.colorGradeContrast,
         injectedData.colorGradeSaturation);
+  }
+  else if (injectedData.toneMapType == 4) {
+    float ACESContrast = 0.7f;
+    float ACESShadows = 1.4f;
+    float ACESSaturation = 1.41f;
+    float ACESHighlights = 1.4f;
+    float3 tonemapped = renodx::tonemap::config::Apply(
+        untonemapped,
+        renodx::tonemap::config::Create(
+            2.f,
+            injectedData.toneMapPeakNits,
+            injectedData.toneMapGameNits,
+            injectedData.toneMapGammaCorrection - 1,
+            1.f,
+            ACESHighlights * injectedData.colorGradeHighlights,
+            ACESShadows,
+            ACESContrast,
+            ACESSaturation - injectedData.colorGradeBlowout,
+            vanillaMidGray,
+            vanillaMidGray * 100.f,
+            renoDRTHighlights,
+            renoDRTShadows,
+            renoDRTContrast,
+            renoDRTSaturation,
+            renoDRTDechroma,
+            renoDRTFlare,
+            vanillaColor));
+    r2.xyz = tonemapped;
+
+    float vanillaLum = renodx::color::y::from::BT709(vanillaColor.rgb);
+    r2.xyz = lerp(vanillaColor.rgb, r2.xyz, saturate(vanillaLum));  // combine tonemappers
+
+    // allow for user adjustments
+    r2.xyz = renodx::color::grade::UserColorGrading(
+        r2.xyz,
+        injectedData.colorGradeExposure,
+        1.f,
+        injectedData.colorGradeShadows,
+        injectedData.colorGradeContrast,
+        injectedData.colorGradeSaturation);
+  }
+  else if (injectedData.toneMapType > 0) {
+    float3 tonemapped = renodx::tonemap::config::Apply(
+        untonemapped,
+        renodx::tonemap::config::Create(
+            injectedData.toneMapType,
+            injectedData.toneMapPeakNits,
+            injectedData.toneMapGameNits,
+            injectedData.toneMapGammaCorrection - 1,
+            injectedData.colorGradeExposure,
+            injectedData.colorGradeHighlights,
+            injectedData.colorGradeShadows,
+            injectedData.colorGradeContrast,
+            injectedData.colorGradeSaturation,
+            vanillaMidGray,
+            vanillaMidGray * 100.f,
+            renoDRTHighlights,
+            renoDRTShadows,
+            renoDRTContrast,
+            renoDRTSaturation,
+            renoDRTDechroma,
+            renoDRTFlare,
+            vanillaColor));
+    r2.xyz = tonemapped;
   }
 
   float3 tonemapped = r2.xyz;
