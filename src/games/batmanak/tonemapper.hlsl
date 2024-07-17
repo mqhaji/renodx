@@ -6,9 +6,7 @@ float3 applyUserToneMap(float3 untonemapped, Texture2D lutTexture, SamplerState 
   float3 outputColor = untonemapped;
 
   float vanillaMidGray = renodx::tonemap::uncharted2::BT709(0.18f, 2.2f);
-  float4 vanillaColor;
-  vanillaColor.rgb = correctColor.rgb;
-  vanillaColor.a = injectedData.toneMapHueCorrection;
+  float3 vanillaColor = correctColor;
 
   float renoDRTContrast = 1.12f;
   float renoDRTFlare = 0.f;
@@ -18,7 +16,8 @@ float3 applyUserToneMap(float3 untonemapped, Texture2D lutTexture, SamplerState 
   float renoDRTHighlights = 1.2f;
 
   if (injectedData.toneMapType == 4) {
-    renoDRTSaturation = 1.113f;
+  float renoDRTHighlights = 1.128f;
+    // renoDRTSaturation = 1.113f;
   }
 
   outputColor = renodx::tonemap::config::Apply(
@@ -55,9 +54,6 @@ float3 applyUserToneMap(float3 untonemapped, Texture2D lutTexture, SamplerState 
     outputColor = lerp(vanillaColor.rgb, outputColor, saturate(vanillaLum));  // combine tonemappers
   }
 
-  if (injectedData.toneMapHueCorrection) {
-    outputColor = lerp(outputColor, renodx::color::correct::Hue(outputColor, vanillaColor), injectedData.toneMapHueCorrection);
-  }
 
   if (injectedData.toneMapGammaCorrection == 0.f) {
     outputColor = renodx::color::correct::GammaSafe(outputColor, true);

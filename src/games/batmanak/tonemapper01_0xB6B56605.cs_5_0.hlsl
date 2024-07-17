@@ -105,7 +105,6 @@ cbuffer cb0 : register(b0) {
 #if DRAW_TONEMAPPER
     if (!graph_config.draw)
 #endif
-  if (injectedData.toneMapType == 0) {
       if (injectedData.fxFilmGrain) {
         r3.xyzw = float4(1, 1, 1, 1) + -r0.wyzw;
         r3.xyzw = r3.xyzw * r3.xyzw;
@@ -123,13 +122,12 @@ cbuffer cb0 : register(b0) {
         r0.xyzw = r2.xyzw * r0.xyzw;
       }
     outputColor = injectedData.toneMapGammaCorrection ? pow(r0.rgb, 2.2f) : renodx::color::bt709::from::SRGB(r0.rgb);
-  } else {
-    r0.xyz = injectedData.toneMapGammaCorrection ? pow(r0.rgb, 2.2f) : renodx::color::bt709::from::SRGB(r0.rgb);
-    outputColor = applyUserToneMap(untonemapped.rgb, t1, s0_s, r0.xyz);
+  if (injectedData.toneMapType != 0) {
+    outputColor = applyUserToneMap(untonemapped.rgb, t1, s0_s, outputColor);
 #if DRAW_TONEMAPPER
     if (!graph_config.draw)
 #endif
-      if (injectedData.fxFilmGrain) {
+      if (injectedData.fxFilmGrain && injectedData.toneMapType != 4) {
         float3 grainedColor = renodx::effects::ApplyFilmGrain(
             outputColor,
             screenXY,
