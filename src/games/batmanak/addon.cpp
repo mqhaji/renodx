@@ -263,6 +263,7 @@ void OnPresetOff() {
   renodx::utils::settings::UpdateSetting("fxBloom", 50.f);
   renodx::utils::settings::UpdateSetting("fxLensFlare", 50.f);
   renodx::utils::settings::UpdateSetting("fxVignette", 50.f);
+  renodx::utils::settings::UpdateSetting("fxGrainBlending", 0.f);
   renodx::utils::settings::UpdateSetting("fxFilmGrain", 50.f);
 }
 

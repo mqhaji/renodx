@@ -145,7 +145,6 @@ cbuffer cb0 : register(b0) {
   const float3 untonemapped = r0.zwy;
 
   float3 outputColor = untonemapped;
-  if (injectedData.toneMapType == 0) {
     r1.xyzw = r0.yyzw * float4(0.219999999, 0.219999999, 0.219999999, 0.219999999) + float4(0.0299999993, 0.0299999993, 0.0299999993, 0.0299999993);
     r1.xyzw = r0.yyzw * r1.xyzw + float4(0.00200000009, 0.00200000009, 0.00200000009, 0.00200000009);
     r4.xyzw = r0.yyzw * float4(0.219999999, 0.219999999, 0.219999999, 0.219999999) + float4(0.300000012, 0.300000012, 0.300000012, 0.300000012);
@@ -174,6 +173,7 @@ cbuffer cb0 : register(b0) {
 #if DRAW_TONEMAPPER
     if (graph_config.draw)
 #endif
+  if (injectedData.toneMapType == 0) {
       if (injectedData.fxFilmGrain) {
         r1.xyzw = float4(1, 1, 1, 1) + -r0.wyzw;
         r1.xyzw = r1.xyzw * r1.xyzw;
@@ -187,7 +187,8 @@ cbuffer cb0 : register(b0) {
     r0.rgb = max(0, r0.rgb);
     outputColor = injectedData.toneMapGammaCorrection ? pow(r0.rgb, 2.2f) : renodx::color::bt709::from::SRGB(r0.rgb);
   } else {
-    outputColor = applyUserToneMap(untonemapped.rgb, t3, s0_s);
+    r0.xyz = injectedData.toneMapGammaCorrection ? pow(r0.rgb, 2.2f) : renodx::color::bt709::from::SRGB(r0.rgb);
+    outputColor = applyUserToneMap(untonemapped.rgb, t3, s0_s, r0.xyz);
 #if DRAW_TONEMAPPER
     if (!graph_config.draw)
 #endif
