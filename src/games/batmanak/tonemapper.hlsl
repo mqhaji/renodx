@@ -7,7 +7,7 @@ float3 applyUserToneMap(float3 untonemapped, Texture2D lutTexture, SamplerState 
 
   float vanillaMidGray = renodx::tonemap::uncharted2::BT709(0.18f, 2.2f);
   float4 vanillaColor;
-  vanillaColor.rgb = saturate(renodx::tonemap::uncharted2::BT709(untonemapped, 2.2f));
+  vanillaColor.rgb = renodx::tonemap::uncharted2::BT709(untonemapped, 2.2f);
   vanillaColor.a = injectedData.toneMapHueCorrection;
 
   float renoDRTContrast = 1.12f;
@@ -20,7 +20,7 @@ float3 applyUserToneMap(float3 untonemapped, Texture2D lutTexture, SamplerState 
   outputColor = renodx::tonemap::config::Apply(
       untonemapped,
       renodx::tonemap::config::Create(
-          injectedData.toneMapType,
+          min(3.f, injectedData.toneMapType),
           injectedData.toneMapPeakNits,
           injectedData.toneMapGameNits,
           injectedData.toneMapGammaCorrection - 1,  // -1 == srgb
@@ -46,6 +46,23 @@ float3 applyUserToneMap(float3 untonemapped, Texture2D lutTexture, SamplerState 
           renodx::lut::config::type::GAMMA_2_2,
           16.f),
       lutTexture);
+
+  if (injectedData.toneMapType == 4) {
+    renoDRTContrast = 1.0752f;
+    if (injectedData.colorGradeLUTStrength) {
+    renodx::lut::Config lut_config = renodx::lut::config::Create(
+        lutSampler,
+        injectedData.colorGradeLUTStrength,
+        0.f,  // Lut scaling not needed
+        renodx::lut::config::type::GAMMA_2_2,
+        renodx::lut::config::type::GAMMA_2_2,
+        16.f);
+      vanillaColor.rgb = renodx::lut::Sample(lutTexture, lut_config, vanillaColor.rgb);
+    }
+
+    float vanillaLum = renodx::color::y::from::BT709(saturate(vanillaColor.rgb));
+    outputColor = lerp(vanillaColor.rgb, outputColor, saturate(vanillaLum/vanillaMidGray));  // combine tonemappers
+  }
 
   if (injectedData.toneMapGammaCorrection == 0.f) {
     outputColor = renodx::color::correct::GammaSafe(outputColor, true);
