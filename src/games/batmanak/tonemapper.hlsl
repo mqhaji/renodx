@@ -16,8 +16,7 @@ float3 applyUserToneMap(float3 untonemapped, Texture2D lutTexture, SamplerState 
   float renoDRTHighlights = 1.2f;
 
   if (injectedData.toneMapType == 4) {
-  float renoDRTHighlights = 1.128f;
-    // renoDRTSaturation = 1.113f;
+    float renoDRTHighlights = 1.128f;
   }
 
   outputColor = renodx::tonemap::config::Apply(
@@ -50,8 +49,7 @@ float3 applyUserToneMap(float3 untonemapped, Texture2D lutTexture, SamplerState 
       lutTexture);
 
   if (injectedData.toneMapType == 4) {
-    float vanillaLum = renodx::color::y::from::BT709(saturate(vanillaColor.rgb));
-    outputColor = lerp(vanillaColor.rgb, outputColor, saturate(vanillaLum));  // combine tonemappers
+      outputColor = lerp(vanillaColor.rgb, outputColor, saturate(vanillaColor.rgb));  // combine tonemappers
   }
 
 

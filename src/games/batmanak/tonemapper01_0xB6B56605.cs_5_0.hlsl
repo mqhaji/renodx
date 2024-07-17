@@ -121,8 +121,11 @@ cbuffer cb0 : register(b0) {
         r2.xyzw = r3.xyzw * r2.xyzw + float4(1, 1, 1, 1);
         r0.xyzw = r2.xyzw * r0.xyzw;
       }
-    outputColor = injectedData.toneMapGammaCorrection ? pow(r0.rgb, 2.2f) : renodx::color::bt709::from::SRGB(r0.rgb);
-  if (injectedData.toneMapType != 0) {
+    if (injectedData.toneMapType == 0) {
+      outputColor = injectedData.toneMapGammaCorrection ? pow(r0.rgb, 2.2f) : renodx::color::bt709::from::SRGB(r0.rgb);
+    } else {
+      outputColor = pow(r0.rgb, 2.2f);
+    }  if (injectedData.toneMapType != 0) {
     outputColor = applyUserToneMap(untonemapped.rgb, t1, s0_s, outputColor);
 #if DRAW_TONEMAPPER
     if (!graph_config.draw)
