@@ -42,8 +42,11 @@ void main(
   r1.xyzw = t7.Sample(s7_s, r1.xy).xyzw;
   o0.xyzw = r1.xyzw * r0.xyzw;
 
-  // o0.rgba = saturate(o0.rgba);
-  // o0.rgb = linearFromSRGB(o0.rgb);
+  o0.rgb = abs(o0.rgb);
+  o0.rgb = (injectedData.toneMapGammaCorrection
+                ? pow(o0.rgb, 2.2f)
+                : renodx::color::bt709::from::SRGB(o0.rgb));
+  o0.rgb *= injectedData.toneMapGameNits / 80.f;
   
   return;
 }

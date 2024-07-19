@@ -235,13 +235,14 @@ void main(
   vanillaColor.rgb = r2.xyz;
   vanillaColor.a = injectedData.toneMapHueCorrection;
 
-    float renoDRTContrast = 1.28f;
+    float renoDRTContrast = 1.23f;
     float renoDRTFlare = 0.f;
     float renoDRTShadows = 1.2f;
     float renoDRTDechroma = injectedData.colorGradeBlowout;
     float renoDRTSaturation = 1.18f;
     float renoDRTHighlights = 1.1f;
   if (injectedData.toneMapType == 5) {
+    renoDRTSaturation = 1.4f;
     float3 tonemapped = renodx::tonemap::config::Apply(
         untonemapped,
         renodx::tonemap::config::Create(

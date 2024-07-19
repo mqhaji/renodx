@@ -16,6 +16,7 @@
 // #include <embed/0x28E5E21A.h>    // Text
 // #include <embed/0x38E853C8.h>    // UI
 // #include <embed/0xE3BB1976.h>    // UI
+#include <embed/0x1A0CD2AE.h>    // Copy - Game
 
 #include <chrono>
 
@@ -37,6 +38,7 @@ renodx::mods::shader::CustomShaders custom_shaders = {
     // CustomSwapchainShader(0x28E5E21A),  // Text
     // CustomSwapchainShader(0x38E853C8),  // UI
     // CustomSwapchainShader(0xE3BB1976),  // UI
+    CustomShaderEntry(0x1A0CD2AE),      // Copy - Game
 };
 
 ShaderInjectData shader_injection;
