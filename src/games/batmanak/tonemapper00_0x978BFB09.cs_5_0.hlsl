@@ -205,7 +205,7 @@ cbuffer cb0 : register(b0) {
 #if DRAW_TONEMAPPER
     if (!graph_config.draw)
 #endif
-      if (injectedData.fxFilmGrain && injectedData.toneMapType != 4) {
+      if (injectedData.fxFilmGrain && injectedData.toneMapType < 4) {
         float3 grainedColor = renodx::effects::ApplyFilmGrain(
           outputColor,
           screenXY.xy,

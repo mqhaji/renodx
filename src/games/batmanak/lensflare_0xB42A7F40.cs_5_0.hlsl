@@ -110,7 +110,16 @@ RWTexture2D<float4> u0 : register(u0);
   r2.xyzw = cb0[9].xxxx * r2.xyzw;  // Actual lens flare
   r1.xyzw = r1.xyzw * float4(2.75, 2.75, 2.75, 2.75) + r2.xyzw;
   r2.xyz = t1.SampleLevel(s0_s, r0.xy, 0).xyz;
+
+  float4 vanillaBloom = r1.xyzw * cb0[8].xxxx * injectedData.fxLensFlare + r2.xyzx;
   r1.xyzw = r1.xyzw * cb0[8].xxxx * injectedData.fxLensFlare + r2.xyzx * injectedData.fxBloom;  // Blurred Lens Flare + Bloom
+
+  if (injectedData.fxBloom != 1) {
+    float vanillaBloomLum = renodx::color::y::from::BT709(vanillaBloom);
+    r1.xyz = lerp(vanillaBloom.xyz, r1.xyz, saturate(vanillaBloomLum/0.18f));
+  }
+
+
   r2.xy = -r0.zw * float2(1, 0) + r0.xy;
   r2.xyz = t1.SampleLevel(s0_s, r2.xy, 0).xyz;
   r2.x = dot(r2.xyz, float3(1, 1, 1));
