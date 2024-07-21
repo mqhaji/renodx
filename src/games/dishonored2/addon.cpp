@@ -8,6 +8,7 @@
 
 #define DEBUG_LEVEL_0
 
+// #include <embed/0x06BBC941.h>    // Tonemap0
 #include <embed/0xA6F33860.h>    // Final Tonemap
 
 // #include <embed/0xB9E43380.h>    // Text
@@ -30,6 +31,7 @@
 namespace {
 
 renodx::mods::shader::CustomShaders custom_shaders = {
+    // CustomShaderEntry(0x06BBC941),      // Tonemap0
     CustomShaderEntry(0xA6F33860),      // Tonemap
 
     // CustomSwapchainShader(0xB9E43380),  // Text
