@@ -128,13 +128,8 @@ void main(
       r3.xyz = injectedData.fxBloom * cb_env_bloom_veil_strength * r3.xyz;  // bloom strength
 
       if (injectedData.fxBloom != 1) {
-        vanillaBloom.rgb = renodx::color::bt2020::from::BT709(vanillaBloom.rgb);
-        r3.xyz = renodx::color::bt2020::from::BT709(r3.xyz);
-
-        float vanillaBloomLum = renodx::color::y::from::BT2020(vanillaBloom);
+        float vanillaBloomLum = renodx::color::y::from::BT709(vanillaBloom);
         r3.xyz = lerp(vanillaBloom.rgb, r3.xyz, saturate(vanillaBloomLum/0.18f));
-
-        r3.xyz = renodx::color::bt709::from::BT2020(r3.xyz);
       }
       
       r4.xyz = cb_postfx_bloom_lensdirt_strength * r2.xyz * injectedData.fxLensDirt; // lens dirt
