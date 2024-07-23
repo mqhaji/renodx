@@ -16,7 +16,8 @@ float3 applyUserToneMap(float3 untonemapped, Texture2D lutTexture, SamplerState 
   float renoDRTHighlights = 1.2f;
 
   if (injectedData.toneMapType >= 4) {
-    float renoDRTHighlights = 1.f;
+    renoDRTHighlights = 1.f;
+    renoDRTSaturation = 1.07f;
     untonemapped *= (1 + (0.04 * injectedData.fxFilmGrain)); // compensate for additive film grain 
   }
 
@@ -49,18 +50,10 @@ float3 applyUserToneMap(float3 untonemapped, Texture2D lutTexture, SamplerState 
           16.f),
       lutTexture);
 
-  if (injectedData.toneMapType >= 4 ) {  // Vanilla+/boosted
-    if (injectedData.toneMapType == 4) {  // Vanilla+ boosted
-      outputColor = renodx::color::bt2020::from::BT709(outputColor);
-      vanillaColor.rgb = renodx::color::bt2020::from::BT709(vanillaColor.rgb);
-    }
-
-    outputColor = lerp(vanillaColor.rgb, outputColor, saturate(vanillaColor.rgb));  // combine tonemappers    
-
-    if (injectedData.toneMapType == 4) {
-      outputColor = max(0, outputColor);
-      outputColor = renodx::color::bt709::from::BT2020(outputColor);
-    }
+  if (injectedData.toneMapType >= 4) {  // Vanilla+/boosted
+    float3 negHDR = min(0, outputColor);
+    outputColor = lerp(vanillaColor.rgb, max(0, outputColor), saturate(vanillaColor.rgb));  // combine tonemappers
+    outputColor += negHDR;
   }
 
 
