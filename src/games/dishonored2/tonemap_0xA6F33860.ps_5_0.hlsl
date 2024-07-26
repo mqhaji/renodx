@@ -1,6 +1,6 @@
 #include "./shared.h"
-// #include "./dishonored2lut.hlsl"
 #include "./include/ColorGradingLUT.hlsl"
+#include "./include/DICE.hlsl"
 
 // ---- Created with 3Dmigoto v1.3.16 on Mon Jun 03 21:42:02 2024
 
@@ -252,7 +252,28 @@ void main(
   float renoDRTDechroma = injectedData.colorGradeBlowout;
   float renoDRTSaturation = 1.3f;
   float renoDRTHighlights = 1.16f;
-  if (injectedData.toneMapType == 5 || injectedData.toneMapType == 4) {
+  if (injectedData.toneMapType == 6) {  // Vanilla+ (DICE)
+    untonemapped = renodx::color::grade::UserColorGrading(
+        untonemapped,
+        injectedData.colorGradeExposure,
+        injectedData.colorGradeHighlights,
+        injectedData.colorGradeShadows,
+        injectedData.colorGradeContrast,
+        injectedData.colorGradeSaturation);
+
+    untonemapped *= vanillaMidGray / 0.18f;
+
+    untonemapped *= injectedData.toneMapGameNits / 80.f;
+    float3 tonemapped = DICETonemap(
+      untonemapped,
+      injectedData.toneMapPeakNits/injectedData.toneMapGameNits);
+    tonemapped /= injectedData.toneMapGameNits / 80.f;
+    
+    tonemapped = lerp(tonemapped, renodx::color::correct::Hue(tonemapped, vanillaColor.rgb), vanillaColor.a);
+
+    r2.xyz = lerp(vanillaColor.rgb, tonemapped, saturate(vanillaColor.rgb));  // combine tonemappers 
+  }
+  else if (injectedData.toneMapType == 5 || injectedData.toneMapType == 4) {
     float3 tonemapped = renodx::tonemap::config::Apply(
         untonemapped,
         renodx::tonemap::config::Create(

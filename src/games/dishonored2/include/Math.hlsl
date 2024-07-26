@@ -29,8 +29,15 @@ float3 safeDivision(float3 quotient, float3 dividend, int fallbackMode = 0)
     return float3(safeDivision(quotient.x, dividend.x, fallbackMode), safeDivision(quotient.y, dividend.y, fallbackMode), safeDivision(quotient.z, dividend.z, fallbackMode));
 }
 
+float3 sqr(float3 x) { return x * x; }
+float sqr(float x) { return x * x; }
+
+float3 min3(float _a, float _b, float _c) { return min(_a, min(_b, _c)); }
 float3 min3(float3 _a, float3 _b, float3 _c) { return min(_a, min(_b, _c)); }
+float3 min3(float3 _a) { return min(_a.x, min(_a.y, _a.z)); }
 float3 max3(float3 _a, float3 _b, float3 _c) { return max(_a, max(_b, _c)); }
+float3 max3(float _a, float _b, float _c) { return max(_a, max(_b, _c)); }
+float3 max3(float3 _a) { return max(_a.x, max(_a.y, _a.z)); }
 
 float3 NRand3(float2 seed, float tr = 1.0)
 {

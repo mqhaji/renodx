@@ -107,7 +107,7 @@ float3 LinearToSRGB(float3 col)
 // Optimized gamma<->linear functions (don't use unless really necessary, they are not accurate)
 float3 sqr_mirrored(float3 x)
 {
-	return (x * x) * sign(x); // LUMA FT: added mirroring to support negative colors
+	return sqr(x) * sign(x); // LUMA FT: added mirroring to support negative colors
 }
 float3 sqrt_mirrored(float3 x)
 {
@@ -145,4 +145,24 @@ float3 PQ_to_Linear(float3 ST2084Color, bool clampNegative = false)
 	float3 denominator = PQ_constant_C2 - (PQ_constant_C3 * colorPow);
 	float3 linearColor = pow(numerator / denominator, 1.f / PQ_constant_M1);
 	return linearColor;
+}
+
+static const float3x3 BT709_2_BT2020 = {
+	0.627403914928436279296875f,      0.3292830288410186767578125f,  0.0433130674064159393310546875f,
+	0.069097287952899932861328125f,   0.9195404052734375f,           0.011362315155565738677978515625f,
+	0.01639143936336040496826171875f, 0.08801330626010894775390625f, 0.895595252513885498046875f };
+
+static const float3x3 BT2020_2_BT709 = {
+	 1.66049098968505859375f,          -0.58764111995697021484375f,     -0.072849862277507781982421875f,
+	-0.12455047667026519775390625f,     1.13289988040924072265625f,     -0.0083494223654270172119140625f,
+	-0.01815076358616352081298828125f, -0.100578896701335906982421875f,  1.11872971057891845703125f };
+
+float3 BT709_To_BT2020(float3 color)
+{
+	return mul(BT709_2_BT2020, color);
+}
+
+float3 BT2020_To_BT709(float3 color)
+{
+	return mul(BT2020_2_BT709, color);
 }
