@@ -10,7 +10,7 @@
 
 #include <embed/0x94E08EA6.h>    // Final - Game
 #include <embed/0x125AB482.h>    // Final - UI
-#include <embed/0x7ED35FB9.h>    // Final - UI
+#include <embed/0x7ED35FB9.h>    // Video
 
 #include <deps/imgui/imgui.h>
 #include <include/reshade.hpp>
