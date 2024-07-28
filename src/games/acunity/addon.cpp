@@ -10,6 +10,7 @@
 
 #include <embed/0x94E08EA6.h>    // Final - Game
 #include <embed/0x125AB482.h>    // Final - UI
+#include <embed/0x7ED35FB9.h>    // Final - UI
 
 #include <deps/imgui/imgui.h>
 #include <include/reshade.hpp>
@@ -24,6 +25,7 @@ namespace {
 renodx::mods::shader::CustomShaders custom_shaders = {
     CustomShaderEntry(0x94E08EA6),          // Final - Game
     CustomShaderEntry(0x125AB482),          // Final - UI
+    CustomShaderEntry(0x7ED35FB9),          // Video
 };
 
 ShaderInjectData shader_injection;
@@ -224,11 +226,11 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       renodx::mods::shader::trace_unmodified_shaders = true;
       renodx::mods::swapchain::force_borderless = true;
       renodx::mods::swapchain::prevent_full_screen = true;
-    renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
-        .old_format = reshade::api::format::r8g8b8a8_unorm,
-        .new_format = reshade::api::format::r16g16b16a16_float
-    });
-    //   for (auto index : {11}) {
+    // renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
+    //     .old_format = reshade::api::format::r8g8b8a8_unorm,
+    //     .new_format = reshade::api::format::r16g16b16a16_float
+    // });
+    //   for (auto index : {15}) {
     //     renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
     //         .old_format = reshade::api::format::r8g8b8a8_unorm,
     //         .new_format = reshade::api::format::r16g16b16a16_float,
