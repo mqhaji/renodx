@@ -1,5 +1,6 @@
 #include "../../shaders/tonemap.hlsl"
 #include "./shared.h"
+#include "./oklabhelper.hlsl"
 
 // ---- Created with 3Dmigoto v1.3.16 on Thu May 30 03:22:41 2024
 
@@ -262,7 +263,11 @@ void main(
   float renoDRTDechroma = injectedData.colorGradeBlowout;
   float renoDRTSaturation = 1.f;
   float renoDRTHighlights = 1.4f;
-  if (injectedData.toneMapType != 0 && injectedData.toneMapType != 4) {
+
+  if (injectedData.toneMapType != 4) {
+    if (injectedData.toneMapType == 0) {
+      untonemapped = vanillaColor.rgb;
+    }
     float3 tonemapped = renodx::tonemap::config::Apply(
         untonemapped,
         renodx::tonemap::config::Create(
@@ -287,7 +292,7 @@ void main(
 
     r0.xyz = tonemapped;
   }
-  else if (injectedData.toneMapType == 4) {  
+  else {  
     float3 tonemapped = renodx::tonemap::config::Apply(
         untonemapped,
         renodx::tonemap::config::Create(
@@ -311,8 +316,10 @@ void main(
             vanillaColor));
       r0.xyz = tonemapped;
 
+    float3 negHDR = min(0, r0.xyz);
     float vanillaLum = renodx::color::y::from::BT709(vanillaColor.rgb);
-    r0.xyz = lerp(vanillaColor.rgb, r0.xyz, saturate(vanillaLum));  // combine tonemappers
+    r0.xyz = lerp(vanillaColor.rgb, max(0, r0.xyz), saturate(vanillaLum));  // combine tonemappers
+    r0.xyz += negHDR;
 
     // allow for user adjustments
     r0.xyz = renodx::color::grade::UserColorGrading(
@@ -352,10 +359,14 @@ void main(
   r1.xyz = r1.xyz * r1.xyz + -r0.xyz;
   r0.xyz = r0.www * r1.xyz + r0.xyz;
 
-  // replace gamma correction with wcg preserving formula
-  r0.xyz = sign(r0.xyz) * pow(abs(r0.xyz), OutputGamma.xxx);  // causes invalid?
+  r0.xyz = sign(r0.xyz) * pow(abs(r0.xyz), OutputGamma.xxx);  //  r0.xyz = pow(r0.xyz, OutputGamma.xxx);
 
+  float3 scaledLUT = renodx::tonemap::UpgradeToneMap(preLUTColor, saturate(preLUTColor), min(1, r0.xyz), injectedData.colorGradeLUTStrength);
   r0.xyz = lerp(preLUTColor, r0.xyz, injectedData.colorGradeLUTStrength);
+
+  if (injectedData.colorGradeLUTScaling) {
+    r0.xyz = lerp(r0.xyz, lightnessCorrect(r0.xyz, scaledLUT), injectedData.colorGradeLUTScaling);
+  }
 
   // film grain
   if (injectedData.fxFilmGrain) {
