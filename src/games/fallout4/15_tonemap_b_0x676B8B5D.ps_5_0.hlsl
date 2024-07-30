@@ -1,4 +1,5 @@
 #include "./shared.h"
+#include "./vanillaplus_tonemap.hlsl"
 
 Texture2D<float4> t0 : register(t0);
 Texture2D<float4> t1 : register(t1);
@@ -62,7 +63,7 @@ void main(float4 v0 : SV_POSITION0, float2 v1 : TEXCOORD0, out float4 o0 : SV_Ta
   // float W = 11.2;
   // C * B = 0.05;
 
-  if (injectedData.toneMapType == 0.f) {
+  if (injectedData.toneMapType == 0.f || injectedData.toneMapType == 4.f) {
     r1.xyz = r0.xyz + r0.xyz;
     r2.xyz = r0.xyz * 0.30f + 0.05f;               // (x * a + c * b)
     r3.xy = float2(0.20f, 3.333333f) * cb2[1].ww;  // d*e, e/f
@@ -76,6 +77,10 @@ void main(float4 v0 : SV_POSITION0, float2 v1 : TEXCOORD0, out float4 o0 : SV_Ta
     r1.x = r1.x * 0.0408563502 + -r3.y;    // r1.x / (24.476) - (e / f)
     r1.x = 1 / r1.x;                       // rcp
     r1.xyz = r1.xxx * r0.xyz;              // toneMap / tonemap(white)
+
+    if (injectedData.toneMapType == 4.f) {
+      r1.xyz = applyUserToneMap(untonemapped, r1.xyz, cb2[1].w);
+    }
   } else {
     r1.xyz = untonemapped;
   }

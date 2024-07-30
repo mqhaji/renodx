@@ -36,6 +36,15 @@ void main(float4 v0 : SV_POSITION0, float2 v1 : TEXCOORD0, out float4 o0 : SV_Ta
 
   o0.w = r0.w;
 
+
+  float3 tonemapped;
+  if (injectedData.toneMapType != 4) {
+  float renoDRTContrast = 1.0f;
+  float renoDRTFlare = 0.f;
+  float renoDRTShadows = 1.0f;
+  float renoDRTDechroma = injectedData.colorGradeBlowout;
+  float renoDRTSaturation = 1.0f;
+  float renoDRTHighlights = 1.0f;
   float vanillaMidGray = renodx::tonemap::ApplyCurve(0.18f * 2.f, 0.15f, 0.50f, 0.10f, 0.20f, 0.02f, 0.30f)
                          / renodx::tonemap::ApplyCurve(11.2f, 0.15f, 0.50f, 0.10f, 0.20f, 0.02f, 0.30f);
 
@@ -44,15 +53,10 @@ void main(float4 v0 : SV_POSITION0, float2 v1 : TEXCOORD0, out float4 o0 : SV_Ta
                      / renodx::tonemap::ApplyCurve(11.2f, 0.15f, 0.50f, 0.10f, 0.20f, 0.02f, 0.30f);
   vanillaColor.rgb = saturate(vanillaColor.rgb);
   vanillaColor.a = injectedData.toneMapHueCorrection;
+  if (injectedData.toneMapType == 0) {
+    vanillaColor.a = 0;
+  }
 
-  float renoDRTContrast = 1.0f;
-  float renoDRTFlare = 0.f;
-  float renoDRTShadows = 1.0f;
-  float renoDRTDechroma = injectedData.colorGradeBlowout;
-  float renoDRTSaturation = 1.0f;
-  float renoDRTHighlights = 1.0f;
-  float3 tonemapped;
-  if (injectedData.toneMapType < 4) {
     tonemapped = renodx::tonemap::config::Apply(
         r0.rgb,
         renodx::tonemap::config::Create(
@@ -75,79 +79,8 @@ void main(float4 v0 : SV_POSITION0, float2 v1 : TEXCOORD0, out float4 o0 : SV_Ta
             renoDRTFlare,
             vanillaColor));
   }
-  else if (injectedData.toneMapType == 4) {
-    tonemapped = renodx::tonemap::config::Apply(
-        r0.rgb,
-        renodx::tonemap::config::Create(
-            3.f,
-            injectedData.toneMapPeakNits,
-            injectedData.toneMapGameNits,
-            injectedData.toneMapGammaCorrection - 1,
-            1.f,
-            injectedData.colorGradeHighlights,
-            1.f,
-            1.f,
-            1.f,
-            vanillaMidGray,
-            vanillaMidGray * 100.f,
-            renoDRTHighlights,
-            renoDRTShadows,
-            renoDRTContrast,
-            renoDRTSaturation,
-            renoDRTDechroma,
-            renoDRTFlare,
-            vanillaColor));
-
-    float vanillaLum = renodx::color::y::from::BT709(vanillaColor.rgb);
-    tonemapped = lerp(vanillaColor.rgb, tonemapped, saturate(vanillaLum));  // combine tonemappers
-
-    // allow for user adjustments
-    tonemapped = renodx::color::grade::UserColorGrading(
-        tonemapped,
-        injectedData.colorGradeExposure,
-        1.f,
-        injectedData.colorGradeShadows,
-        injectedData.colorGradeContrast,
-        injectedData.colorGradeSaturation);
-  }
   else {
-    float ACESContrast = 0.56f;
-    float ACESShadows = 1.f;
-    float ACESSaturation = 1.16f;
-    float ACESHighlights = 1.2f;
-    tonemapped = renodx::tonemap::config::Apply(
-        r0.rgb,
-        renodx::tonemap::config::Create(
-            2.f,
-            injectedData.toneMapPeakNits,
-            injectedData.toneMapGameNits,
-            injectedData.toneMapGammaCorrection - 1,
-            1.f,
-            ACESHighlights * injectedData.colorGradeHighlights,
-            ACESShadows,
-            ACESContrast,
-            ACESSaturation - injectedData.colorGradeBlowout,
-            vanillaMidGray,
-            vanillaMidGray * 100.f,
-            renoDRTHighlights,
-            renoDRTShadows,
-            renoDRTContrast,
-            renoDRTSaturation,
-            renoDRTDechroma,
-            renoDRTFlare,
-            vanillaColor));
-
-    float vanillaLum = renodx::color::y::from::BT709(vanillaColor.rgb);
-    tonemapped = lerp(vanillaColor.rgb, tonemapped, saturate(vanillaLum));  // combine tonemappers
-
-    // allow for user adjustments
-    tonemapped = renodx::color::grade::UserColorGrading(
-        tonemapped,
-        injectedData.colorGradeExposure,
-        1.f,
-        injectedData.colorGradeShadows,
-        injectedData.colorGradeContrast,
-        injectedData.colorGradeSaturation);
+    tonemapped = r0.rgb;
   }
 
   float3 hdrColor = tonemapped;

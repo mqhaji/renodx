@@ -79,12 +79,12 @@ renodx::utils::settings::Settings settings = {
         .key = "toneMapType",
         .binding = &shader_injection.toneMapType,
         .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-        .default_value = 3.f,
+        .default_value = 4.f,
         .can_reset = false,
         .label = "Tone Mapper",
         .section = "Tone Mapping",
         .tooltip = "Sets the tone mapper type",
-        .labels = {"Vanilla", "None", "ACES", "RenoDRT", "Vanilla+", "Vanilla+ (ACES)"},
+        .labels = {"Vanilla", "None", "ACES", "RenoDRT", "Vanilla+"},
     },
     new renodx::utils::settings::Setting{
         .key = "toneMapPeakNits",
@@ -187,7 +187,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "colorGradeBlowout",
         .binding = &shader_injection.colorGradeBlowout,
-        .default_value = 50.f,
+        .default_value = 0.f,
         .label = "Blowout",
         .section = "Color Grading",
         .tooltip = "Controls highlight desaturation due to overexposure.",
