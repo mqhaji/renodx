@@ -39,10 +39,13 @@ float3 GammaSafe(float3 color, bool pow2srgb = false) {
   return color;
 }
 
-float3 Hue(float3 incorrect_color, float3 correct_color) {
+float3 Hue(float3 incorrect_color, float3 correct_color, float correct_amount = 1.f) {
+  if (!correct_amount) {
+    return incorrect_color;
+  }
   float3 correct_lch = renodx::color::oklch::from::BT709(correct_color);
   float3 incorrect_lch = renodx::color::oklch::from::BT709(incorrect_color);
-  incorrect_lch[2] = correct_lch[2];
+  incorrect_lch[2] = lerp(incorrect_lch[2], correct_lch[2], correct_amount);
   float3 color = renodx::color::bt709::from::OkLCh(incorrect_lch);
   color = mul(BT709_TO_AP1_MAT, color);  // Convert to AP1
   color = max(0, color);                 // Clamp to AP1
