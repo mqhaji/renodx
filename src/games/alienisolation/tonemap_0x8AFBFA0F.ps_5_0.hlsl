@@ -292,7 +292,8 @@ void main(
 
     r0.xyz = tonemapped;
   }
-  else {  
+  else {  // Vanilla+
+    float renoDRTHighlights = 1.596f;
     float3 tonemapped = renodx::tonemap::config::Apply(
         untonemapped,
         renodx::tonemap::config::Create(
