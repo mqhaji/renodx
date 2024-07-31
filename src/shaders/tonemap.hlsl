@@ -182,7 +182,8 @@ float3 ApplyRenoDRT(float3 color, Config config, bool sdr = false) {
       config.reno_drt_contrast,
       config.reno_drt_saturation,
       config.reno_drt_dechroma,
-      config.reno_drt_flare);
+      config.reno_drt_flare,
+      config.correct_color);
 }
 
 float3 ApplyACES(float3 color, Config config, bool sdr = false) {
@@ -248,7 +249,6 @@ float3 Apply(float3 untonemapped, Config config) {
       config.reno_drt_saturation *= config.saturation;                                                           \
                                                                                                                  \
       color_sdr = ApplyRenoDRT(color_output, config, true);                                                      \
-      color_sdr = renodx::color::correct::Hue(color_sdr, config.correct_color.rgb, config.correct_color.a);    \
                                                                                                                  \
       config.reno_drt_highlights *= config.highlights;                                                           \
       config.reno_drt_shadows *= config.shadows;                                                                 \
@@ -263,11 +263,11 @@ float3 Apply(float3 untonemapped, Config config) {
       if (config.type == 2.f) {                                                                                  \
         color_hdr = ApplyACES(color_output, config);                                                             \
         color_sdr = ApplyACES(color_output, config, true);                                                       \
-        color_sdr = renodx::color::correct::Hue(color_sdr, config.correct_color.rgb, config.correct_color.a);  \
+        color_sdr = renodx::color::correct::Hue(color_sdr, config.correct_color.rgb, config.correct_color.a);    \
       } else {                                                                                                   \
         color_hdr = color_output;                                                                                \
         color_sdr = color_output;                                                                                \
-        color_sdr = renodx::color::correct::Hue(color_sdr, config.correct_color.rgb, config.correct_color.a);  \
+        color_sdr = renodx::color::correct::Hue(color_sdr, config.correct_color.rgb, config.correct_color.a);    \
       }                                                                                                          \
     }                                                                                                            \
                                                                                                                  \
