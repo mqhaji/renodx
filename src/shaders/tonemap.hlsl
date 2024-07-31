@@ -231,8 +231,8 @@ float3 Apply(float3 untonemapped, Config config) {
     if (config.type == 2.f) {
       color = ApplyACES(color, config);
     }
+    color = renodx::color::correct::Hue(color, config.correct_color.rgb, config.correct_color.a);
   }
-  color = renodx::color::correct::Hue(color, config.correct_color.rgb, config.correct_color.a);
   return color;
 }
 
