@@ -12,6 +12,8 @@ struct ShaderInjectData {
   float toneMapPeakNits;
   float toneMapGameNits;
   float toneMapUINits;
+  float toneMapHueCorrection;
+  float toneMapBlend;
   float colorGradeExposure;
   float colorGradeHighlights;
   float colorGradeShadows;

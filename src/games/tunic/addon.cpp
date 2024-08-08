@@ -85,6 +85,42 @@ renodx::utils::settings::Settings settings = {
         .max = 500.f,
     },
     new renodx::utils::settings::Setting{
+        .key = "toneMapHueCorrection",
+        .binding = &shader_injection.toneMapHueCorrection,
+        .default_value = 100.f,
+        .can_reset = false,
+        .label = "Hue Correction",
+        .section = "Tone Mapping",
+        .tooltip = "Emulates hue shifting from the vanilla tonemapper",
+        .max = 100.f,
+        .is_enabled = []() { return shader_injection.toneMapType != 0; },
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    // new renodx::utils::settings::Setting{
+    //     .key = "toneMapBlend",
+    //     .binding = &shader_injection.toneMapBlend,
+    //     .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+    //     .default_value = 1,
+    //     .can_reset = false,
+    //     .label = "Blend with Vanilla",
+    //     .section = "Tone Mapping",
+    //     .tooltip = "Blends the user selected tonemapper with vanilla",
+    //     .is_enabled = []() { return shader_injection.toneMapType != 0; },
+    // },
+    new renodx::utils::settings::Setting{
+        .key = "toneMapBlend",
+        .binding = &shader_injection.toneMapBlend,
+        .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+        .default_value = 1.f,
+        .can_reset = false,
+        .label = "Blend with Vanilla",
+        .section = "Tone Mapping",
+        .tooltip = "Blends the user selected tonemapper with vanilla",
+        .labels = {"Off", "By Channel", "By Channel (Luminance)"},
+        .is_enabled = []() { return shader_injection.toneMapType == 3; },
+    },
+
+    new renodx::utils::settings::Setting{
         .key = "colorGradeExposure",
         .binding = &shader_injection.colorGradeExposure,
         .default_value = 1.f,
@@ -184,6 +220,7 @@ void OnPresetOff() {
   renodx::utils::settings::UpdateSetting("toneMapPeakNits", 203.f);
   renodx::utils::settings::UpdateSetting("toneMapGameNits", 203.f);
   renodx::utils::settings::UpdateSetting("toneMapUINits", 203.f);
+  renodx::utils::settings::UpdateSetting("toneMapBlend", 0.f);
   renodx::utils::settings::UpdateSetting("colorGradeExposure", 1.f);
   renodx::utils::settings::UpdateSetting("colorGradeHighlights", 50.f);
   renodx::utils::settings::UpdateSetting("colorGradeShadows", 50.f);

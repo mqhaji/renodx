@@ -30,31 +30,64 @@ void main(float4 v0 : SV_POSITION0, float4 v1 : TEXCOORD0, float4 v2 : TEXCOORD1
 
   float vanillaMidGray = 0.18f;
 
-  float renoDRTContrast = 1.1f;
+  float renoDRTContrast = 1.f;
   float renoDRTFlare = 0.f;
-  float renoDRTShadows = 1.f;
+  float renoDRTShadows = 0.98f;
   float renoDRTDechroma = injectedData.colorGradeBlowout;
   float renoDRTSaturation = 1.05f;
-  float renoDRTHighlights = 1.f;
+  float renoDRTHighlights = 1.17f;
+  renodx::tonemap::Config config;
+  float4 hueCorrect;
+  hueCorrect.rgb = untonemapped;
+  hueCorrect.a = injectedData.toneMapHueCorrection * -1.f;
+  if (injectedData.toneMapType == 0) {
+    hueCorrect.a = 0;
+  }
 
-  renodx::tonemap::Config config = renodx::tonemap::config::Create(
-      injectedData.toneMapType,
-      injectedData.toneMapPeakNits,
-      injectedData.toneMapGameNits,
-      0,
-      injectedData.colorGradeExposure,
-      injectedData.colorGradeHighlights,
-      injectedData.colorGradeShadows,
-      injectedData.colorGradeContrast,
-      injectedData.colorGradeSaturation,
-      vanillaMidGray,
-      vanillaMidGray * 100.f,
-      renoDRTHighlights,
-      renoDRTShadows,
-      renoDRTContrast,
-      renoDRTSaturation,
-      renoDRTDechroma,
-      renoDRTFlare);
+  if (!injectedData.toneMapBlend || injectedData.toneMapType == 0) {
+    config = renodx::tonemap::config::Create(
+        injectedData.toneMapType,
+        injectedData.toneMapPeakNits,
+        injectedData.toneMapGameNits,
+        0,
+        injectedData.colorGradeExposure,
+        injectedData.colorGradeHighlights,
+        injectedData.colorGradeShadows,
+        injectedData.colorGradeContrast,
+        injectedData.colorGradeSaturation,
+        vanillaMidGray,
+        vanillaMidGray * 100.f,
+        renoDRTHighlights,
+        renoDRTShadows,
+        renoDRTContrast,
+        renoDRTSaturation,
+        renoDRTDechroma,
+        renoDRTFlare,
+        hueCorrect);
+  }
+  else {
+    renoDRTShadows = 1.f;
+    renoDRTHighlights = 1.2f;
+    config = renodx::tonemap::config::Create(
+        injectedData.toneMapType,
+        injectedData.toneMapPeakNits,
+        injectedData.toneMapGameNits,
+        0,
+        1.f,
+        injectedData.colorGradeHighlights,
+        1.f,
+        1.f,
+        1.f,
+        vanillaMidGray,
+        vanillaMidGray * 100.f,
+        renoDRTHighlights,
+        renoDRTShadows,
+        renoDRTContrast,
+        renoDRTSaturation,
+        renoDRTDechroma,
+        renoDRTFlare,
+        hueCorrect);
+  }
   renodx::lut::Config lut_config = renodx::lut::config::Create(
       s1_s,
       injectedData.colorGradeLUTStrength,
@@ -67,9 +100,50 @@ void main(float4 v0 : SV_POSITION0, float4 v1 : TEXCOORD0, float4 v2 : TEXCOORD1
     untonemapped = saturate(untonemapped);
   }
 
-  untonemapped = max(0, renodx::color::bt709::from::SRGB(untonemapped));
+  // untonemapped = max(0, renodx::color::bt709::from::SRGB(untonemapped));
+  untonemapped = renodx::color::bt709::from::SRGB(untonemapped);
 
   float3 outputColor = renodx::tonemap::config::Apply(untonemapped, config, lut_config, t1);
+
+  if (injectedData.toneMapType != 0) {
+    renodx::tonemap::Config vanilla_config = renodx::tonemap::config::Create(
+        0,
+        injectedData.toneMapPeakNits,
+        injectedData.toneMapGameNits,
+        0,
+        1.f,
+        1.f,
+        1.f,
+        1.f,
+        1.f,
+        vanillaMidGray,
+        vanillaMidGray * 100.f,
+        renoDRTHighlights,
+        renoDRTShadows,
+        renoDRTContrast,
+        renoDRTSaturation,
+        renoDRTDechroma,
+        renoDRTFlare);
+
+      float3 vanillaColor = renodx::tonemap::config::Apply(saturate(untonemapped), vanilla_config, lut_config, t1);
+      // outputColor = renodx::color::correct::newHue(outputColor, vanillaColor, injectedData.toneMapHueCorrection);
+      if (injectedData.toneMapBlend) {
+        if (injectedData.toneMapBlend == 1) {
+          outputColor = lerp(vanillaColor.rgb, outputColor, saturate(vanillaColor.rgb));  // combine tonemappers
+        }
+        else {
+          float vanillaLum = renodx::color::y::from::BT709(vanillaColor.rgb);
+          outputColor = lerp(vanillaColor, outputColor, saturate(vanillaLum));  // combine tonemappers
+        }
+        outputColor = renodx::color::grade::UserColorGrading(
+            outputColor,
+            injectedData.colorGradeExposure,
+            1.f,
+            injectedData.colorGradeShadows,
+            injectedData.colorGradeContrast,
+            injectedData.colorGradeSaturation);
+      }
+  }
 
   outputColor = sign(outputColor) * pow(abs(outputColor), 1.f / 2.2f);
 
