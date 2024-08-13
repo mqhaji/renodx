@@ -46,7 +46,11 @@ float3 BT709(
   n = nits_peak;
   t_1 = flare;
 
+  // hue correction
+  bt709.rgb = renodx::color::correct::Hue(bt709.rgb, correct_color.rgb, correct_color.a);
+
   float y_original = renodx::color::y::from::BT709(abs(bt709));
+  float3 lch_original = renodx::color::oklch::from::BT709(bt709);
 
   float y = y_original * exposure;
 
@@ -86,13 +90,7 @@ float3 BT709(
   float3 lch_new = renodx::color::oklch::from::BT709(color_output);
   lch_new[1] = lerp(lch_new[1], 0.f, saturate(pow(y_original / (10000.f / 100.f), (1.f - dechroma))));
   lch_new[1] *= saturation;
-  if (correct_color.a) {
-    float3 lch_correct = renodx::color::oklch::from::BT709(correct_color.rgb);
-    lch_new[2] = lerp(lch_new[2], lch_correct[2], correct_color.a);  // vanilla tonemapper hue correction    
-  } else {
-    float3 lch_original = renodx::color::oklch::from::BT709(bt709);
-    lch_new[2] = lch_original[2];  // hue correction
-  }
+  lch_new[2] = lch_original[2];  // hue correction
 
   float3 color = renodx::color::bt709::from::OkLCh(lch_new);
   color = renodx::color::bt709::clamp::AP1(color);
