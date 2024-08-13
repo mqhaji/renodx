@@ -58,7 +58,7 @@ float3 BT709(float3 color, float output_luminance_max, float highlights_shoulder
   }
   return color;
 
-#if 0  // NOLINT By channel implementation
+#if 1  // NOLINT By channel implementation
   color.r = internal::LuminanceCompress(color.r, output_luminance_max, highlights_shoulder_start, false,
                                         renodx::math::FLT_MAX, highlights_modulation_pow);
   color.g = internal::LuminanceCompress(color.g, output_luminance_max, highlights_shoulder_start, false,
