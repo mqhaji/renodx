@@ -9,7 +9,10 @@
 
 #include <embed/0xFBC327C8.h>   // Tonemap
 #include <embed/0x4F343009.h>   // Flash
-#include <embed/0x57F6AAB4.h>   // Bloom
+
+#include <embed/0x6E78E24F.h>   // UI - Alpha
+#include <embed/0x671C1B51.h>   // UI - Text
+
 
 #include <deps/imgui/imgui.h>
 #include <include/reshade.hpp>
@@ -24,7 +27,9 @@ namespace {
 renodx::mods::shader::CustomShaders custom_shaders = {
         CustomShaderEntry(0xFBC327C8),  // Tonemap
         CustomShaderEntry(0x4F343009),  // Flash
-        CustomShaderEntry(0x57F6AAB4),  // Bloom
+
+        CustomShaderEntry(0x6E78E24F),  // Text - Alpha
+        CustomShaderEntry(0x671C1B51),  // Text - UI
 };
 
 ShaderInjectData shader_injection;
@@ -39,7 +44,7 @@ renodx::utils::settings::Settings settings = {
         .label = "Tone Mapper",
         .section = "Tone Mapping",
         .tooltip = "Sets the tone mapper type",
-        .labels = {"Vanilla", "None", "DICE", "Vanilla+"},
+        .labels = {"Vanilla", "None", "ACES", "RenoDRT", "DICE", "Vanilla+"},
     },
     new renodx::utils::settings::Setting{
         .key = "toneMapPeakNits",
@@ -65,6 +70,17 @@ renodx::utils::settings::Settings settings = {
         .max = 500.f,
     },
     new renodx::utils::settings::Setting{
+        .key = "toneMapUINits",
+        .binding = &shader_injection.toneMapUINits,
+        .default_value = 203.f,
+        .can_reset = false,
+        .label = "UI Brightness",
+        .section = "Tone Mapping",
+        .tooltip = "Sets the brightness of UI and HUD elements in nits",
+        .min = 48.f,
+        .max = 500.f,
+    },
+    new renodx::utils::settings::Setting{
         .key = "toneMapHueCorrection",
         .binding = &shader_injection.toneMapHueCorrection,
         .default_value = 50.f,
@@ -76,15 +92,6 @@ renodx::utils::settings::Settings settings = {
         .is_enabled = []() { return shader_injection.toneMapType != 0; },
         .parse = [](float value) { return value * 0.01f; },
     },
-    new renodx::utils::settings::Setting{
-        .key = "fxBloom",
-        .binding = &shader_injection.fxBloom,
-        .default_value = 50.f,
-        .label = "Bloom",
-        .section = "Effects",
-        .max = 100.f,
-        .parse = [](float value) { return value * 0.02f; },
-    }
 };
 
 void OnPresetOff() {

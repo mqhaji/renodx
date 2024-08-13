@@ -247,7 +247,7 @@ void main(
   o0.xyz = r0.xyz;
   o0.w = saturate(r0.w);
 
-  if (injectedData.toneMapType >= 2) {
+  if (injectedData.toneMapType >= 4) {
     const float paperWhite = injectedData.toneMapGameNits / 80.f;
     float3 linearColor = pow(abs(o0.xyz), 2.2) * sign(o0.xyz);
     linearColor *= paperWhite;
@@ -257,19 +257,50 @@ void main(
     linearColor = renodx::tonemap::dice::BT709(linearColor, peakWhite, highlightsShoulderStart);
 
     linearColor /= paperWhite;
-    // use clamped hue correction code path
     float3 linearSDR = sign(r0.rgb) * pow(abs(r0.rgb), 2.2f);
+    // use clamped hue correction code path
     linearColor.rgb = renodx::color::correct::Hue(linearColor.rgb, linearSDR, injectedData.toneMapHueCorrection * -1.f);
-    if (injectedData.toneMapType == 3) {
+    if (injectedData.toneMapType == 5) {
       const float3 vanillaColor = saturate(linearSDR);
       const float vanillaLum = saturate(renodx::color::y::from::BT709(vanillaColor));
       linearColor.rgb = lerp(vanillaColor, linearColor.rgb, vanillaColor);
     }
     o0.xyz = pow(abs(linearColor), 1.0 / 2.2) * sign(linearColor);
+  } else if (injectedData.toneMapType > 0) {
+    float3 linearColor = pow(abs(o0.xyz), 2.2) * sign(o0.xyz);
 
+    float vanillaMidGray = 0.18f;
+    float renoDRTContrast = 1.f;
+    float renoDRTFlare = 0.f;
+    float renoDRTShadows = 1.f;
+    float renoDRTDechroma = 0.f;
+    float renoDRTSaturation = 1.f;
+    float renoDRTHighlights = 1.f;
+    float3 tonemapped = renodx::tonemap::config::Apply(
+        linearColor,
+        renodx::tonemap::config::Create(
+            injectedData.toneMapType,
+            injectedData.toneMapPeakNits,
+            injectedData.toneMapGameNits,
+            0.f,
+            1.f,
+            1.f,
+            1.f,
+            1.f,
+            1.f,
+            vanillaMidGray,
+            vanillaMidGray * 100.f,
+            renoDRTHighlights,
+            renoDRTShadows,
+            renoDRTContrast,
+            renoDRTSaturation,
+            renoDRTDechroma,
+            renoDRTFlare));
+      o0.xyz = tonemapped;
 
-  }
-  else if (injectedData.toneMapType == 0) {
+    o0.xyz = pow(abs(o0.xyz), 1.0 / 2.2) * sign(o0.xyz);
+
+  } else {
     o0.xyz = saturate(o0.xyz);
   }
   return;

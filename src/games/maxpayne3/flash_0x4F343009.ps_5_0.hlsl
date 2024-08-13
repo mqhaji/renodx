@@ -245,9 +245,14 @@ void main(
   o0.w = dot(r1.xyz, float3(0.298999995,0.587000012,0.114));
   o0.xyz = r0.xyz;
 
-  float scale = 1.33f; // Adjust this to control how much the values can exceed 1
-  float3 reinhard = o0.xyz / (o0.xyz + 1) * scale;
-  o0.xyz = lerp(saturate(o0.xyz), reinhard, saturate(o0.xyz / 2));
+  // simple reinhard that allows values to go slightly over 1
+  // used because the game has annoying white flashes
+  // these happen during cutscenes and when enabling bullet time
+  // float scale = 1.33f;
+  // float3 reinhard = o0.xyz / (o0.xyz + 1) * scale;
+  // o0.xyz = lerp(saturate(o0.xyz), reinhard, saturate(o0.xyz / 2));
+
+  o0.xyz = saturate(o0.xyz);
 
   return;
 }

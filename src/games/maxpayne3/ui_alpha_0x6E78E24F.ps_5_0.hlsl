@@ -1,3 +1,5 @@
+#include "./shared.h"
+
 // ---- Created with 3Dmigoto v1.3.16 on Sun Jun 09 17:02:16 2024
 
 cbuffer AlphaTest : register(b11)
@@ -29,7 +31,10 @@ void main(
   if (r1.x != 0) discard;
   o0.xyzw = r0.xyzw;
 
-  o0.xyz = pow(o0.xyz, 2.2f);
-  o0.xyz *= 203.f/80.f;
+  if (injectedData.toneMapUINits != injectedData.toneMapGameNits) {
+    o0.xyz = pow(o0.xyz, 2.2f);
+    o0.xyz *= injectedData.toneMapUINits / injectedData.toneMapGameNits;
+    o0.xyz = pow(o0.xyz, 1.f / 2.2f);
+  }
   return;
 }
