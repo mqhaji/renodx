@@ -96,10 +96,10 @@ void main(float4 v0
 
   // Initial tonemapper settings, used in case 0
   float vanillaMidGray = DL_FREG_054.z / DL_FREG_054.w;
-  float renoDRTContrast = 1.2f;
+  float renoDRTContrast = 1.175f;
   float renoDRTFlare = 0.f;
   float renoDRTShadows = 1.f;
-  float renoDRTSaturation = 1.3f;
+  float renoDRTSaturation = 1.17f;
   float renoDRTHighlights = 1.f;
   float3 vanillaColor;
 
@@ -209,7 +209,6 @@ void main(float4 v0
   }
 
   float3 hdrColor;
-  float3 sdrColor;
   if (injectedData.toneMapType != 0) {
 
     vanillaColor = r1.xyz;  // vanilla tonemap, used for hue correction
@@ -236,7 +235,7 @@ void main(float4 v0
     hdrConfig.mid_gray_nits = vanillaMidGray * 100.f;
     hdrConfig.reno_drt_flare = renoDRTFlare;
 
-    // don't allow for double adjustment of color grading when blending is on
+    // prevent double adjustment of color grading when blending is on
     if (injectedData.toneMapBlend) {
       hdrConfig.exposure = 1.f;
       hdrConfig.shadows = 1.f;
@@ -244,30 +243,15 @@ void main(float4 v0
       hdrConfig.saturation = 1.f;
     }
 
-    renodx::tonemap::Config sdrConfig = hdrConfig;
-    sdrConfig.peak_nits = injectedData.toneMapGameNits;
-
     hdrColor = renodx::tonemap::config::Apply(untonemapped, hdrConfig);
-    sdrColor = renodx::tonemap::config::Apply(untonemapped, sdrConfig);
 
     // blend custom tonemapper with vanilla by channel
     if (injectedData.toneMapBlend) {
       float3 negHDR = min(0, hdrColor);
-      sdrColor = lerp(saturate(vanillaColor), max(0, sdrColor), saturate(vanillaColor));
-      hdrColor += negHDR;
-
-      negHDR = min(0, hdrColor);
       hdrColor = lerp(saturate(vanillaColor), max(0, hdrColor), saturate(vanillaColor));
       hdrColor += negHDR;
 
       // apply color grading post-blend
-      sdrColor = renodx::color::grade::UserColorGrading(
-          sdrColor,
-          injectedData.colorGradeExposure,
-          1.f,
-          injectedData.colorGradeShadows,
-          injectedData.colorGradeContrast,
-          injectedData.colorGradeSaturation);
       hdrColor = renodx::color::grade::UserColorGrading(
           hdrColor,
           injectedData.colorGradeExposure,
@@ -277,9 +261,8 @@ void main(float4 v0
           injectedData.colorGradeSaturation);
 
     }
-    r1.xyz = sdrColor;
+    r1.xyz = saturate(hdrColor);
 
-    sdrColor = sign(sdrColor) * pow(abs(sdrColor), 1.f / 2.2f);
     hdrColor = sign(hdrColor) * pow(abs(hdrColor), 1.f / 2.2f);
   }
 
@@ -305,17 +288,46 @@ void main(float4 v0
   r0.xyz = r3.xyz * r4.xyz + r0.xyz;
   r0.xyz = r0.xyz + -r1.xyz;
   r0.xyz = DL_FREG_068.xxx * r0.xyz + r1.xyz;
+  float3 colorGradeOutput = lerp(colorGradeInput, r0.xyz, injectedData.colorGradeLUTStrength);
 
   if (injectedData.toneMapType == 0) {    
-    r0.xyz = lerp(colorGradeInput, r0.xyz, injectedData.colorGradeLUTStrength);
-    r0.xyz = clamp(r0.xyz, 0, injectedData.toneMapPeakNits / injectedData.toneMapGameNits);
-  } else {
-    // apply color grade to SDR tonemapped image and apply difference to HDR
-    // color filter will now respect peak brightness
-    r0.xyz = renodx::tonemap::UpgradeToneMap(hdrColor, sdrColor, r0.xyz, injectedData.colorGradeLUTStrength);
-  }
+    colorGradeOutput = clamp(colorGradeOutput, 0, injectedData.toneMapPeakNits / injectedData.toneMapGameNits);
+  } else  {
+    colorGradeOutput = renodx::color::bt709::clamp::AP1(colorGradeOutput);
 
-  o0.w = dot(r0.xyz, float3(0.298999995, 0.587000012, 0.114));
-  o0.xyz = r0.xyz;
+    // use code based on UpgradeToneMap() so color grade doesn't increase peak brightness
+    // this allows us to place HDR tonemapper in the same place as SDR tonemapper,
+    // making blending easier
+    float ratio = 1.f;
+
+    float y_hdr = renodx::color::y::from::BT709(abs(hdrColor));
+    float y_sdr = renodx::color::y::from::BT709(abs(saturate(hdrColor)));
+    float y_post_process = renodx::color::y::from::BT709(abs(colorGradeOutput));
+
+    if (y_hdr < y_sdr) {
+      // If substracting (user contrast or paperwhite) scale down instead
+      // Should only apply on mismatched HDR
+      ratio = y_hdr / y_sdr;
+    } else {
+      float y_delta = y_hdr - y_sdr;
+      y_delta = max(0, y_delta);  // Cleans up NaN
+      const float y_new = y_post_process + y_delta;
+
+      const bool y_valid = (y_post_process > 0);  // Cleans up NaN and ignore black
+      ratio = y_valid ? (y_new / y_post_process) : 0;
+    }
+
+    float3 scaledColor = colorGradeOutput * ratio;
+
+    // apply lightness from scaledColor to colorGradeOutput
+    float3 correct_lab = renodx::color::oklab::from::BT709(scaledColor);
+    float3 incorrect_lab = renodx::color::oklab::from::BT709(colorGradeOutput);
+    incorrect_lab[0] = correct_lab[0];
+    colorGradeOutput = renodx::color::bt709::from::OkLab(incorrect_lab);
+    colorGradeOutput = renodx::color::bt709::clamp::AP1(colorGradeOutput);
+  }
+  
+  o0.w = dot(colorGradeOutput, float3(0.298999995, 0.587000012, 0.114));
+  o0.xyz = colorGradeOutput;
   return;
 }
