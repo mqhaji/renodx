@@ -124,6 +124,8 @@ void main(float4 v0 : SV_POSITION0, float2 v1 : TEXCOORD0, out float4 o0 : SV_Ta
   o0.rgb *= injectedData.toneMapGameNits / 80.f;
 
   // Clamp needed before effects happen after tone mapping...
-  o0.rgb = min(o0.rgb, injectedData.toneMapPeakNits / 80.f);
+  if (injectedData.toneMapType != 4) {
+    o0.rgb = min(o0.rgb, injectedData.toneMapPeakNits / 80.f);
+  }
   return;
 }

@@ -51,7 +51,7 @@ renodx::utils::settings::Settings settings = {
         .label = "Tone Mapper",
         .section = "Tone Mapping",
         .tooltip = "Sets the tone mapper type",
-        .labels = {"Vanilla", "None", "ACES", "RenoDRT"},
+        .labels = {"Vanilla", "None", "ACES", "RenoDRT", "DICE (LUT Extrapolation)"},
     },
     new renodx::utils::settings::Setting{
         .key = "toneMapPeakNits",
