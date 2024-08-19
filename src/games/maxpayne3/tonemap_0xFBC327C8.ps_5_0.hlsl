@@ -1,4 +1,5 @@
 #include "./shared.h"
+#include "./hueHelper.hlsl"
 
 // ---- Created with 3Dmigoto v1.3.16 on Sun Jun 09 17:02:23 2024
 
@@ -259,11 +260,11 @@ void main(
     linearColor /= paperWhite;
     float3 linearSDR = sign(r0.rgb) * pow(abs(r0.rgb), 2.2f);
     // use clamped hue correction code path
-    linearColor.rgb = renodx::color::correct::Hue(linearColor.rgb, linearSDR, injectedData.toneMapHueCorrection * -1.f);
+    linearColor = Hue(linearColor, linearSDR, injectedData.toneMapHueCorrection * -1.f);
     if (injectedData.toneMapType == 5) {
       const float3 vanillaColor = saturate(linearSDR);
       const float vanillaLum = saturate(renodx::color::y::from::BT709(vanillaColor));
-      linearColor.rgb = lerp(vanillaColor, linearColor.rgb, vanillaColor);
+      linearColor = lerp(vanillaColor, linearColor.rgb, vanillaColor);
     }
     o0.xyz = pow(abs(linearColor), 1.0 / 2.2) * sign(linearColor);
   } else if (injectedData.toneMapType > 0) {
@@ -297,6 +298,10 @@ void main(
             renoDRTDechroma,
             renoDRTFlare));
       o0.xyz = tonemapped;
+
+    float3 linearSDR = sign(r0.rgb) * pow(abs(r0.rgb), 2.2f);
+    // use clamped hue correction code path
+    linearColor = Hue(linearColor, linearSDR, injectedData.toneMapHueCorrection * -1.f);
 
     o0.xyz = pow(abs(o0.xyz), 1.0 / 2.2) * sign(o0.xyz);
 
