@@ -1,0 +1,283 @@
+/*
+ * Copyright (C) 2024 Carlos Lopez
+ * Copyright (C) 2024 Musa Haji
+ * SPDX-License-Identifier: MIT
+ */
+
+#define ImTextureID ImU64
+
+#define DEBUG_LEVEL_0
+
+#include <embed/0xA6F33860.h>    // Final Tonemap
+
+// #include <embed/0xB9E43380.h>    // Text
+// #include <embed/0xCC4FB5BF.h>    // Text
+// #include <embed/0x08F8ECFE.h>    // Text
+// #include <embed/0x28E5E21A.h>    // Text
+// #include <embed/0x38E853C8.h>    // UI
+// #include <embed/0xE3BB1976.h>    // UI
+
+
+
+#include <chrono>
+
+#include <deps/imgui/imgui.h>
+#include <include/reshade.hpp>
+#include "../../mods/shaderReplaceMod.hpp"
+#include "../../mods/swapChainUpgradeMod.hpp"
+#include "../../utils/userSettingUtil.hpp"
+#include "./shared.h"
+
+extern "C" __declspec(dllexport) const char* NAME = "RenoDX - Dishonored 2";
+extern "C" __declspec(dllexport) const char* DESCRIPTION = "RenoDX for Dishonored 2";
+
+ShaderReplaceMod::CustomShaders customShaders = {
+
+  CustomShaderEntry(0xA6F33860),      // Tonemap
+
+  // CustomSwapchainShader(0xB9E43380),  // Text
+  // CustomSwapchainShader(0xCC4FB5BF),  // Text
+  // CustomSwapchainShader(0x08F8ECFE),  // Text
+  // CustomSwapchainShader(0x28E5E21A),  // Text
+  // CustomSwapchainShader(0x38E853C8),  // UI
+  // CustomSwapchainShader(0xE3BB1976),  // UI
+
+
+};
+
+ShaderInjectData shaderInjection;
+
+// clang-format off
+UserSettingUtil::UserSettings userSettings = {
+  new UserSettingUtil::UserSetting {
+    .key = "toneMapType",
+    .binding = &shaderInjection.toneMapType,
+    .valueType = UserSettingUtil::UserSettingValueType::integer,
+    .defaultValue = 4.f,
+    .canReset = false,
+    .label = "Tone Mapper",
+    .section = "Tone Mapping",
+    .tooltip = "Sets the tone mapper type",
+    .labels = {"Vanilla", "None", "ACES", "RenoDRT", "Vanilla+"}
+  },
+  new UserSettingUtil::UserSetting {
+    .key = "toneMapPeakNits",
+    .binding = &shaderInjection.toneMapPeakNits,
+    .defaultValue = 1000.f,
+    .canReset = false,
+    .label = "Peak Brightness",
+    .section = "Tone Mapping",
+    .tooltip = "Sets the value of peak white in nits",
+    .min = 48.f,
+    .max = 4000.f
+  },
+  new UserSettingUtil::UserSetting {
+    .key = "toneMapGameNits",
+    .binding = &shaderInjection.toneMapGameNits,
+    .defaultValue = 203.f,
+    .canReset = false,
+    .label = "Game Brightness",
+    .section = "Tone Mapping",
+    .tooltip = "Sets the value of 100%% white in nits",
+    .min = 48.f,
+    .max = 500.f
+  },
+  // new UserSettingUtil::UserSetting {
+  //   .key = "toneMapUINits",
+  //   .binding = &shaderInjection.toneMapUINits,
+  //   .defaultValue = 203.f,
+  //   .canReset = false,
+  //   .label = "UI Brightness",
+  //   .section = "Tone Mapping",
+  //   .tooltip = "Sets the brightness of UI and HUD elements in nits",
+  //   .min = 48.f,
+  //   .max = 500.f
+  // },
+  new UserSettingUtil::UserSetting {
+    .key = "toneMapGammaCorrection",
+    .binding = &shaderInjection.toneMapGammaCorrection,
+    .valueType = UserSettingUtil::UserSettingValueType::boolean,
+    .canReset = false,
+    .label = "Gamma Correction",
+    .section = "Tone Mapping",
+    .tooltip = "Emulates a 2.2 EOTF (use with HDR or sRGB)",
+  },
+  new UserSettingUtil::UserSetting {
+    .key = "toneMapHueCorrection",
+    .binding = &shaderInjection.toneMapHueCorrection,
+    .defaultValue = 50.f,
+    .label = "Hue Correction",
+    .section = "Tone Mapping",
+    .tooltip = "Emulates hue shifting from the vanilla tonemapper",
+    .max = 100.f,
+    .parse = [](float value) { return value * 0.01f; }
+  },
+  new UserSettingUtil::UserSetting {
+    .key = "colorGradeExposure",
+    .binding = &shaderInjection.colorGradeExposure,
+    .defaultValue = 1.f,
+    .label = "Exposure",
+    .section = "Color Grading",
+    .max = 20.f,
+    .format = "%.2f"
+  },
+  new UserSettingUtil::UserSetting {
+    .key = "colorGradeHighlights",
+    .binding = &shaderInjection.colorGradeHighlights,
+    .defaultValue = 50.f,
+    .label = "Highlights",
+    .section = "Color Grading",
+    .max = 100.f,
+    .parse = [](float value) { return value * 0.02f; }
+  },
+  new UserSettingUtil::UserSetting {
+    .key = "colorGradeShadows",
+    .binding = &shaderInjection.colorGradeShadows,
+    .defaultValue = 50.f,
+    .label = "Shadows",
+    .section = "Color Grading",
+    .max = 100.f,
+    .parse = [](float value) { return value * 0.02f; }
+  },
+  new UserSettingUtil::UserSetting {
+    .key = "colorGradeContrast",
+    .binding = &shaderInjection.colorGradeContrast,
+    .defaultValue = 50.f,
+    .label = "Contrast",
+    .section = "Color Grading",
+    .max = 100.f,
+    .parse = [](float value) { return value * 0.02f; }
+  },
+  new UserSettingUtil::UserSetting {
+    .key = "colorGradeSaturation",
+    .binding = &shaderInjection.colorGradeSaturation,
+    .defaultValue = 50.f,
+    .label = "Saturation",
+    .section = "Color Grading",
+    .max = 100.f,
+    .parse = [](float value) { return value * 0.02f; }
+  },
+  new UserSettingUtil::UserSetting {
+    .key = "colorGradeBlowout",
+    .binding = &shaderInjection.colorGradeBlowout,
+    .defaultValue = 55.f,
+    .label = "Blowout",
+    .section = "Color Grading",
+    .tooltip = "Controls highlight desaturation due to overexposure.",
+    .max = 100.f,
+    .parse = [](float value) { return value * 0.01f; }
+  },
+  new UserSettingUtil::UserSetting {
+    .key = "colorGradeLUTStrength",
+    .binding = &shaderInjection.colorGradeLUTStrength,
+    .defaultValue = 100.f,
+    .label = "LUT Strength",
+    .section = "Color Grading",
+    .max = 100.f,
+    .parse = [](float value) { return value * 0.01f; }
+  },
+  // new UserSettingUtil::UserSetting {
+  //   .key = "colorGradeLUTColorBoost",
+  //   .binding = &shaderInjection.colorGradeLUTColorBoost,
+  //   .defaultValue = 50.f,
+  //   .label = "LUT Color Boost",
+  //   .section = "Color Grading",
+  //   .tooltip = "Scales the saturation of HDR highlights extrapolated from the LUT",
+  //   .max = 100.f,
+  //   .parse = [](float value) { return value * 0.01f; }
+  // },
+  new UserSettingUtil::UserSetting {
+    .key = "lensDirt",
+    .binding = &shaderInjection.lensDirt,
+    .valueType = UserSettingUtil::UserSettingValueType::boolean,
+    .canReset = false,
+    .label = "Lens Dirt",
+    .section = "Effects",
+    .tooltip = "Toggles Dirty Lens Effect",
+  },
+  new UserSettingUtil::UserSetting {
+    .key = "fxBloom",
+    .binding = &shaderInjection.fxBloom,
+    .defaultValue = 50.f,
+    .label = "Bloom",
+    .section = "Effects",
+    .max = 100.f,
+    .parse = [](float value) { return value * 0.02f; }
+  },
+};
+
+// clang-format on
+
+static void onPresetOff() {
+  UserSettingUtil::updateUserSetting("toneMapType", 0.f);
+  UserSettingUtil::updateUserSetting("toneMapPeakNits", 203.f);
+  UserSettingUtil::updateUserSetting("toneMapGameNits", 203.f);
+  UserSettingUtil::updateUserSetting("toneMapUINits", 203.f);
+  UserSettingUtil::updateUserSetting("toneMapGammaCorrection", 0);
+  UserSettingUtil::updateUserSetting("lensDirt", 1);
+  UserSettingUtil::updateUserSetting("colorGradeExposure", 1.f);
+  UserSettingUtil::updateUserSetting("colorGradeHighlights", 50.f);
+  UserSettingUtil::updateUserSetting("colorGradeShadows", 50.f);
+  UserSettingUtil::updateUserSetting("colorGradeContrast", 50.f);
+  UserSettingUtil::updateUserSetting("colorGradeSaturation", 50.f);
+  UserSettingUtil::updateUserSetting("colorGradeLUTStrength", 100.f);
+  UserSettingUtil::updateUserSetting("colorGradeLUTColorBoost", 0.f);
+  UserSettingUtil::updateUserSetting("fxBloom", 50.f);
+}
+
+static auto start = std::chrono::steady_clock::now();
+
+static void on_present(
+  reshade::api::command_queue* queue,
+  reshade::api::swapchain* swapchain,
+  const reshade::api::rect* source_rect,
+  const reshade::api::rect* dest_rect,
+  uint32_t dirty_rect_count,
+  const reshade::api::rect* dirty_rects
+) {
+  auto end = std::chrono::steady_clock::now();
+  shaderInjection.elapsedTime = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+}
+
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID) {
+  switch (fdwReason) {
+    case DLL_PROCESS_ATTACH:
+
+      ShaderReplaceMod::forcePipelineCloning = true;
+      ShaderReplaceMod::traceUnmodifiedShaders = true;
+      ShaderReplaceMod::expectedConstantBufferIndex = 13;
+      // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
+      //   {reshade::api::format::r8g8b8a8_unorm, reshade::api::format::r16g16b16a16_float} 
+      // );
+      SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
+        {reshade::api::format::r8g8b8a8_typeless, reshade::api::format::r16g16b16a16_float, 0} 
+      );
+      // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
+      //   {reshade::api::format::r8g8b8a8_unorm_srgb, reshade::api::format::r16g16b16a16_float}
+      // );
+      // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
+      //   {reshade::api::format::b8g8r8a8_unorm, reshade::api::format::r16g16b16a16_float}
+      // );
+      // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
+      //   {reshade::api::format::r10g10b10a2_unorm, reshade::api::format::r16g16b16a16_float}
+      // );      
+      // SwapChainUpgradeMod::swapChainUpgradeTargets.push_back(
+      //   {reshade::api::format::r11g11b10_float, reshade::api::format::r16g16b16a16_float, 2}
+      // );      
+      if (!reshade::register_addon(hModule)) return FALSE;
+
+      reshade::register_event<reshade::addon_event::present>(on_present);
+
+      break;
+    case DLL_PROCESS_DETACH:
+      reshade::unregister_addon(hModule);
+      reshade::unregister_event<reshade::addon_event::present>(on_present);
+      break;
+  }
+
+  UserSettingUtil::use(fdwReason, &userSettings, &onPresetOff);
+  SwapChainUpgradeMod::use(fdwReason);
+  ShaderReplaceMod::use(fdwReason, customShaders, &shaderInjection);
+
+  return TRUE;
+}
