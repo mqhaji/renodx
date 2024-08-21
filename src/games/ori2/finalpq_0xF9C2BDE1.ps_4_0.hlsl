@@ -1,4 +1,5 @@
 #include "./shared.h"
+#include "./hueHelper.hlsl"
 
 // ---- Created with 3Dmigoto v1.3.16 on Thu Aug 15 21:16:03 2024
 
@@ -73,6 +74,7 @@ void main(
       r0.xyz = renodx::tonemap::dice::BT709(r0.xyz, peakWhite, highlightsShoulderStart);
       r0.xyz /= paperWhite;
     }
+    r0.xyz = Hue(r0.xyz, injectedData.toneMapHueCorrection);
     r0.xyz = renodx::color::bt2020::from::BT709(r0.xyz);
     r0.xyz = renodx::color::pq::from::BT2020((r0.xyz * injectedData.toneMapGameNits) / 10000.f);
   }
