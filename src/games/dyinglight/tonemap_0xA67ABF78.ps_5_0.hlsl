@@ -52,9 +52,7 @@ void main(
   o0.w = r2.w;
   // vanilla tonemapper causes highlights to flicker, clamped in a later shader
 
-  float4 vanillaColor;
-  vanillaColor.rgb = o0.rgb;
-  vanillaColor.a = injectedData.toneMapHueCorrection;
+  float3 vanillaColor = o0.rgb;
   float vanillaMidGray = 0.178f;
 
   if (injectedData.toneMapType == 0) {
@@ -88,7 +86,9 @@ void main(
             renoDRTSaturation,
             renoDRTDechroma,
             renoDRTFlare,
-            vanillaColor));
+            renodx::tonemap::config::hue_correction_type::CUSTOM,
+            injectedData.toneMapHueCorrection,
+            vanillaColor.rgb));
     o0.xyz = tonemapped;
   }
   else {
@@ -112,7 +112,9 @@ void main(
             renoDRTSaturation,
             renoDRTDechroma,
             renoDRTFlare,
-            vanillaColor));
+            renodx::tonemap::config::hue_correction_type::CUSTOM,
+            injectedData.toneMapHueCorrection,
+            vanillaColor.rgb));
     o0.xyz = tonemapped;
 
     float vanillaLum = renodx::color::y::from::BT709(vanillaColor.rgb);
