@@ -1,6 +1,6 @@
 #include "./shared.h"
-#include "../../shaders/tonemap.hlsl"
-#include "./dishonored2lut.hlsl"
+#include "./include/ColorGradingLUT.hlsl"
+#include "./include/DICE.hlsl"
 
 // ---- Created with 3Dmigoto v1.3.16 on Mon Jun 03 21:42:02 2024
 
@@ -106,7 +106,7 @@ void main(
     r1.xy = cb_resolutionscale.xy * v0.xy;
     r1.z = cmp(0 < cb_postfx_lensdirt_usedefault.x);
     
-    r1.z = injectedData.lensDirt; // toggle dirty lens effect
+    r1.z = injectedData.fxLensDirt; // toggle dirty lens effect
     
     if (r1.z != 0) {
       r1.zw = cb_subpixeloffset.xy + v0.xy;
@@ -116,7 +116,7 @@ void main(
       r3.xyz = ro_postfx_bloom_lensdirt_from.SampleLevel(smp_linearclamp_s, r1.zw, 0).xyz;
       r4.xyz = ro_postfx_bloom_lensdirt_to.SampleLevel(smp_linearclamp_s, r1.zw, 0).xyz;
       r4.xyz = r4.xyz + -r3.xyz;
-      r2.xyz = cb_postfx_bloom_lensdirt_blendweight * r4.xyz * injectedData.lensDirt + r3.xyz;
+      r2.xyz = cb_postfx_bloom_lensdirt_blendweight * r4.xyz * injectedData.fxLensDirt + r3.xyz;
     }
     r1.z = cmp(0 < cb_env_bloom_veil_strength);
     if (r1.z != 0) {
@@ -124,9 +124,15 @@ void main(
       r4.xyz = r3.xyz * r0.www;
       r3.xyz = cb_usecompressedhdrbuffers ? r4.xyz : r3.xyz;
 
+      float3 vanillaBloom = cb_env_bloom_veil_strength * r3.xyz;
       r3.xyz = injectedData.fxBloom * cb_env_bloom_veil_strength * r3.xyz;  // bloom strength
+
+      if (injectedData.fxBloom != 1) {
+        float vanillaBloomLum = renodx::color::y::from::BT709(vanillaBloom);
+        r3.xyz = lerp(vanillaBloom.rgb, r3.xyz, saturate(vanillaBloomLum/0.18f));
+      }
       
-      r4.xyz = cb_postfx_bloom_lensdirt_strength * r2.xyz * injectedData.lensDirt; // lens dirt
+      r4.xyz = cb_postfx_bloom_lensdirt_strength * r2.xyz * injectedData.fxLensDirt; // lens dirt
       r3.xyz = r4.xyz * r3.xyz + r3.xyz;
       r0.xyz = r3.xyz + r0.xyz;
     }
@@ -194,9 +200,7 @@ void main(
 
   float3 untonemapped = r0.xyz;
 
-  if (injectedData.toneMapType != 0) {
-    r0.xyz = float3(0.18, 0.18, 0.18);  // temp solution until I find midgray vars
-  }
+  r0.xyz = float3(0.18, 0.18, 0.18);  // temp solution until I find midgray vars
 
   // store temp values for 2nd run of tonemapper
   float tempR0w = r0.w;
@@ -213,8 +217,8 @@ void main(
   r0.xy = r1.xy * r0.zz + r1.zw;
   r2.z = r0.x / r0.y;
   // end vanilla run 1
-  float vanillaMidGray = yFromBT709(r2.rgb);
 
+  float vanillaMidGray = renodx::color::y::from::BT709(r2.rgb);
   // reset values for 2nd run of tonemapper
   r0.xyz = untonemapped.rgb;
   r0.w = tempR0w;
@@ -231,108 +235,69 @@ void main(
   r0.xy = r1.xy * r0.zz + r1.zw;
   r2.z = r0.x / r0.y;
   // end vanilla run 2
-  float4 vanillaColor;
-  vanillaColor.rgb = r2.xyz;
-  vanillaColor.a = injectedData.toneMapHueCorrection;
 
-  if (injectedData.toneMapType != 0 && injectedData.toneMapType != 4) {
-    float renoDRTContrast = 1.28f;
-    float renoDRTFlare = 0.f;
-    float renoDRTShadows = 1.2f;
-    float renoDRTDechroma = injectedData.colorGradeBlowout;
-    float renoDRTSaturation = 1.06f;
-    float renoDRTHighlights = 1.06f;
+  float3 vanillaColor = r2.xyz;
+  float3 tonemapped;
+  if (injectedData.toneMapType == 0) {
+    r0.xyz = vanillaColor * float3(31,31,31) + float3(0.5,0.5,0.5);
+    r0.xyz = float3(0.03125,0.03125,0.03125) * r0.xyz;
+    r0.xyz = ro_tonemapping_finalcolorcube.SampleLevel(smp_linearclamp_s, r0.xyz, 0).xyz;
 
-    ToneMapParams tmParams = buildToneMapParams(
-        injectedData.toneMapType,
-        injectedData.toneMapPeakNits,
-        injectedData.toneMapGameNits,
-        injectedData.toneMapGammaCorrection - 1,
-        injectedData.colorGradeExposure,
+    r0.xyz = lerp(vanillaColor, r0.xyz, injectedData.colorGradeLUTStrength);
+  } else if (injectedData.toneMapType >= 2) {  // DICE
+    float colorGradeHighlights = 1.08f;
+    float colorGradeShadows = 1.14f;
+    float colorGradeContrast = 1.15f;
+    float colorGradeSaturation = 1.1f;
+    untonemapped = renodx::color::grade::UserColorGrading(
+        untonemapped,
+        1.f,
         injectedData.colorGradeHighlights,
         injectedData.colorGradeShadows,
         injectedData.colorGradeContrast,
         injectedData.colorGradeSaturation,
-        vanillaMidGray,
-        vanillaMidGray * 100.f,
-        renoDRTHighlights,
-        renoDRTShadows,
-        renoDRTContrast,
-        renoDRTSaturation,
-        renoDRTDechroma,
-        renoDRTFlare,
+        injectedData.toneMapHueCorrection,
         vanillaColor);
-      
-    r2.xyz = toneMap(untonemapped, tmParams);
+
+    untonemapped *= vanillaMidGray / 0.18f;
+    // r0.xyz = untonemapped;
+
+    // r0.xyz = lerp(vanillaColor.rgb, untonemapped, saturate(vanillaColor.rgb));  // combine tonemappers 
+
+
+    LUTExtrapolationData extrapolationData = DefaultLUTExtrapolationData();
+    extrapolationData.inputColor = untonemapped;
+    extrapolationData.vanillaInputColor = vanillaColor;
+
+    LUTExtrapolationSettings extrapolationSettings = DefaultLUTExtrapolationSettings();
+    extrapolationSettings.lutSize = 32u;
+    extrapolationSettings.inputLinear = true;
+    extrapolationSettings.lutInputLinear = true;
+    extrapolationSettings.lutOutputLinear = true;
+    extrapolationSettings.outputLinear = true;
+    extrapolationSettings.transferFunctionIn = LUT_EXTRAPOLATION_TRANSFER_FUNCTION_GAMMA_2_2;
+    extrapolationSettings.transferFunctionOut = LUT_EXTRAPOLATION_TRANSFER_FUNCTION_GAMMA_2_2;
+    extrapolationSettings.samplingQuality = 1;
+    extrapolationSettings.neutralLUTRestorationAmount = 0;
+    // extrapolationSettings.vanillaLUTRestorationAmount = 0;
+    extrapolationSettings.vanillaLUTRestorationAmount = injectedData.toneMapHueCorrection;
+    extrapolationSettings.enableExtrapolation = true;
+    extrapolationSettings.extrapolationQuality = 1;
+    // extrapolationSettings.backwardsAmount = 0.5;
+    extrapolationSettings.backwardsAmount = 0.5;
+    extrapolationSettings.whiteLevelNits = Rec709_WhiteLevelNits;
+    extrapolationSettings.inputTonemapToPeakWhiteNits = 0;
+    extrapolationSettings.clampedLUTRestorationAmount = 0;
+    extrapolationSettings.fixExtrapolationInvalidColors = true;
+
+
+    float3 outputColor = SampleLUTWithExtrapolation(ro_tonemapping_finalcolorcube, smp_linearclamp_s, extrapolationData, extrapolationSettings);
+
+    r0.xyz = lerp(untonemapped, outputColor, injectedData.colorGradeLUTStrength);
+  } else {
+    r0.xyz = untonemapped;
   }
-  else if (injectedData.toneMapType == 4) {
-    float renoDRTContrast = 1.15f;
-    float renoDRTFlare = 0.f;
-    float renoDRTShadows = 1.f;
-    float renoDRTDechroma = injectedData.colorGradeBlowout;
-    float renoDRTSaturation = 1.3;
-    float renoDRTHighlights = 1.15f;
-
-    ToneMapParams tmParams = buildToneMapParams(
-        3.f,
-        injectedData.toneMapPeakNits,
-        injectedData.toneMapGameNits,
-        injectedData.toneMapGammaCorrection - 1,
-        1.f,
-        injectedData.colorGradeHighlights,
-        1.f,
-        1.f,
-        1.f,
-        vanillaMidGray,
-        vanillaMidGray * 100.f,
-        renoDRTHighlights,
-        renoDRTShadows,
-        renoDRTContrast,
-        renoDRTSaturation,
-        renoDRTDechroma,
-        renoDRTFlare,
-        vanillaColor);
-      
-    r2.xyz = toneMap(untonemapped, tmParams);
-
-    float vanillaLum = yFromBT709(vanillaColor.rgb);
-    r2.xyz = lerp(vanillaColor.rgb, r2.xyz, saturate(vanillaLum));  // combine tonemappers
-
-    // allow for user adjustments
-    r2.xyz = applyUserColorGrading(
-      r2.xyz,
-      injectedData.colorGradeExposure,
-      1.f,
-      injectedData.colorGradeShadows,
-      injectedData.colorGradeContrast,
-      injectedData.colorGradeSaturation
-    );  
-  }
-
-  float3 tonemapped = r2.xyz;
-  
-  // vanilla LUT Sampling
-  r0.xyz = r2.xyz * float3(31,31,31) + float3(0.5,0.5,0.5);
-  r0.xyz = float3(0.03125,0.03125,0.03125) * r0.xyz;
-  r0.xyz = ro_tonemapping_finalcolorcube.SampleLevel(smp_linearclamp_s, r0.xyz, 0).xyz;
-
-  // LUT Extrapolation
-  if (injectedData.toneMapType != 0) {
-    float3 clampedOutput = r0.xyz;
-    r0.xyz = SampleLUTWithExtrapolation(
-        ro_tonemapping_finalcolorcube, 
-        smp_linearclamp_s, 
-        r2.xyz,                               // neutralColor
-        true,                                 // inputLinear
-        true,                                 // lutLinear
-        true,                                 // outputLinear
-        injectedData.toneMapGammaCorrection,  // gammaCorrection
-        true,                                 // lutExtrapolation
-        32                                    // lutSize
-    );
-    // r0.xyz = lerp(satCorrection(r0.xyz, clampedOutput), r0.xyz, injectedData.colorGradeLUTColorBoost);
-  }
-  r0.xyz = lerp(tonemapped, r0.xyz, injectedData.colorGradeLUTStrength);
+  // r0.xyz = lerp(tonemapped, r0.xyz, injectedData.colorGradeLUTStrength);
 
   r0.xyz = cb_env_tonemapping_gamma_brightness.yyy * r0.xyz;
   o0.xyz = sign(r0.xyz) * pow(abs(r0.xyz), cb_env_tonemapping_gamma_brightness.xxx);
