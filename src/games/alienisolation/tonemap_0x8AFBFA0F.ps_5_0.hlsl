@@ -250,10 +250,7 @@ void main(
   r0.xyz = r0.xyz + -r1.xyz;
   r0.xyz = ToneMappingDebugParams.www * r0.xyz + r1.xyz;
   
-  float4 vanillaColor;
-  vanillaColor.rgb = r0.rgb;
-  vanillaColor.a = injectedData.toneMapHueCorrection;
-
+  float3 vanillaColor = r0.rgb;
 
   untonemapped *= exposureScale;
   float vanillaMidGray = 0.18f;
@@ -288,7 +285,9 @@ void main(
             renoDRTSaturation,
             renoDRTDechroma,
             renoDRTFlare,
-            vanillaColor));
+            renodx::tonemap::config::hue_correction_type::CUSTOM,
+            injectedData.toneMapHueCorrection,
+            vanillaColor.rgb));
 
     r0.xyz = tonemapped;
   }
@@ -314,7 +313,9 @@ void main(
             renoDRTSaturation,
             renoDRTDechroma,
             renoDRTFlare,
-            vanillaColor));
+            renodx::tonemap::config::hue_correction_type::CUSTOM,
+            injectedData.toneMapHueCorrection,
+            vanillaColor.rgb));
       r0.xyz = tonemapped;
 
     float3 negHDR = min(0, r0.xyz);
