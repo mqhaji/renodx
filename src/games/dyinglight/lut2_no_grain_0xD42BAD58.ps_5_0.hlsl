@@ -51,18 +51,33 @@ void main(
   r0.xyz = r0.xyz * cb0[1].www + r0.www; //    r0.xyz = saturate(r0.xyz * cb0[1].www + r0.www);
 
   float3 outputColor = r0.xyz;
+  float3 hdrColor = outputColor;
+  float3 sdrColor = outputColor;
+  const float vanillaMidGray = 0.178f;
+  if (injectedData.toneMapType == 2) {
+    const float paperWhite = injectedData.toneMapGameNits / renodx::color::srgb::REFERENCE_WHITE;
+    hdrColor = outputColor * paperWhite;
+    const float peakWhite = injectedData.toneMapPeakNits / renodx::color::srgb::REFERENCE_WHITE;
+    const float highlightsShoulderStart = vanillaMidGray * paperWhite;  // Don't tonemap the blended part of the tonemapper
+    hdrColor = renodx::tonemap::dice::BT709(hdrColor, peakWhite, highlightsShoulderStart);
+    sdrColor = renodx::tonemap::dice::BT709(hdrColor, paperWhite, highlightsShoulderStart);
+    hdrColor /= paperWhite;
+    sdrColor /= paperWhite;
+  }
+  r0.xyz = sdrColor;
 
-  if (injectedData.colorGradeLUTStrength) {
-    r0.xyz = sign(r0.xyz) * pow(abs(r0.xyz), 1.f / 2.2f );
-    r0.xyz = r0.xyz * float3(0.99609375,0.99609375,0.99609375) + float3(0.001953125,0.001953125,0.001953125);
-    r1.x = t2.Sample(s2_s, r0.xx).x;
-    r1.y = t2.Sample(s2_s, r0.yy).y;
-    r1.z = t2.Sample(s2_s, r0.zz).z;
-    r0.xyz = sign(r1.xyz) * pow(abs(r1.xyz), 2.2f);
-
-    float3 hdrColor = outputColor;
-    float3 sdrColor = saturate(outputColor);
-    outputColor = renodx::tonemap::UpgradeToneMap(hdrColor, sdrColor, r0.xyz, injectedData.colorGradeLUTStrength);
+  // LUT
+  r0.xyz = sign(r0.xyz) * pow(abs(r0.xyz), 1.f / 2.2f);
+  r0.xyz = r0.xyz * float3(0.99609375,0.99609375,0.99609375) + float3(0.001953125,0.001953125,0.001953125);
+  r1.x = t2.Sample(s2_s, r0.xx).x;
+  r1.y = t2.Sample(s2_s, r0.yy).y;
+  r1.z = t2.Sample(s2_s, r0.zz).z;
+  r0.xyz = sign(r1.xyz) * pow(abs(r1.xyz), 2.2f);
+  
+  if (injectedData.toneMapType > 1) {
+    outputColor = renodx::tonemap::UpgradeToneMap(hdrColor, saturate(sdrColor), r0.xyz, injectedData.colorGradeLUTStrength);
+  } else if (injectedData.toneMapType == 0) {
+    outputColor = lerp(outputColor, r0.xyz, injectedData.colorGradeLUTStrength);
   }
 
   r1.xyz = t1.SampleLevel(s1_s, v2.zw, 0).xyz;
