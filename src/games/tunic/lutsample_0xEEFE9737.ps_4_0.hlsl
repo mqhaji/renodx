@@ -68,9 +68,42 @@ void main(float4 v0 : SV_POSITION0, float4 v1 : TEXCOORD0, float4 v2 : TEXCOORD1
     outputColor = renodx::tonemap::config::Apply(untonemapped, config, lut_config, t1);
     outputColor = sign(outputColor) * pow(abs(outputColor), 1.f / 2.2f);
   } else {
+
+    // if (injectedData.toneMapHueCorrection) {
+    //     float3 correct_color = untonemapped;
+    //     float3 incorrect_color = untonemapped;
+          
+    //     float avg_correct = renodx::math::Average(correct_color);
+
+    //     // Clamp correct_color and calculate average channel values for the clamped version
+    //     float3 clamped_correct_color = saturate(correct_color);
+    //     float avg_clamped_correct = renodx::math::Average(clamped_correct_color);
+
+    //     // Compute the hue clipping percentage based on the difference in averages
+    //     float hue_clip_percentage = saturate((avg_correct - avg_clamped_correct) / max(avg_correct, .0000001f));  // Prevent division by zero
+
+    //     // Interpolate hue components (a, b in OkLab) based on correct_amount using clamped color
+    //     float3 correct_lab = renodx::color::oklab::from::BT709(clamped_correct_color);
+    //     float3 incorrect_lab = renodx::color::oklab::from::BT709(incorrect_color);
+    //     float3 new_lab = incorrect_lab;
+
+    //     // Apply hue correction based on clipping percentage and interpolate based on correct_amount
+    //     new_lab.yz = lerp(incorrect_lab.yz, correct_lab.yz, hue_clip_percentage);
+    //     new_lab.yz = lerp(incorrect_lab.yz, new_lab.yz, abs(injectedData.toneMapHueCorrection));
+
+    //     // Restore original chrominance from incorrect_color in OkLCh space
+    //     float3 incorrect_lch = renodx::color::oklch::from::OkLab(incorrect_lab);
+    //     float3 new_lch = renodx::color::oklch::from::OkLab(new_lab);
+    //     new_lch[1] = incorrect_lch[1];
+
+    //     // Convert back to linear BT.709 space
+    //     untonemapped = renodx::color::bt709::from::OkLCh(new_lch);
+    // }
+
+
     LUTExtrapolationData extrapolationData = DefaultLUTExtrapolationData();
     extrapolationData.inputColor = untonemapped;
-    // extrapolationData.vanillaInputColor = saturate(untonemapped);
+    extrapolationData.vanillaInputColor = saturate(untonemapped);
 
     LUTExtrapolationSettings extrapolationSettings = DefaultLUTExtrapolationSettings();
     extrapolationSettings.lutSize = 32u;
@@ -82,10 +115,12 @@ void main(float4 v0 : SV_POSITION0, float4 v1 : TEXCOORD0, float4 v2 : TEXCOORD1
     extrapolationSettings.transferFunctionOut = LUT_EXTRAPOLATION_TRANSFER_FUNCTION_SRGB;
     extrapolationSettings.samplingQuality = 1;
     extrapolationSettings.neutralLUTRestorationAmount = 0;
-    extrapolationSettings.vanillaLUTRestorationAmount = 0;
+    // extrapolationSettings.vanillaLUTRestorationAmount = 0;
+    extrapolationSettings.vanillaLUTRestorationAmount = injectedData.toneMapHueCorrection;
     extrapolationSettings.enableExtrapolation = true;
     extrapolationSettings.extrapolationQuality = 1;
-    extrapolationSettings.backwardsAmount = 0.5;
+    // extrapolationSettings.backwardsAmount = 0.5;
+    extrapolationSettings.backwardsAmount = injectedData.colorGradeLUTScaling;
     extrapolationSettings.whiteLevelNits = Rec709_WhiteLevelNits;
     extrapolationSettings.inputTonemapToPeakWhiteNits = 0;
     extrapolationSettings.clampedLUTRestorationAmount = 0;
