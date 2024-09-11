@@ -9,6 +9,7 @@
 // Should be 4x32
 struct ShaderInjectData {
   float toneMapType;
+  float adaptiveTonemap;
   float toneMapPeakNits;
   float toneMapGameNits;
   float toneMapUINits;
