@@ -1,5 +1,7 @@
 #include "./shared.h"
 #include "./hueHelper.hlsl"
+#include "./DICE.hlsl"
+#include "./frostbite.hlsl"
 
 // ---- Created with 3Dmigoto v1.3.16 on Sun Jun 09 17:02:23 2024
 
@@ -54,6 +56,7 @@ void main(
   float4 r0,r1,r2,r3,r4,r5;
   uint4 bitmask, uiDest;
   float4 fDest;
+
 
   r0.xyzw = BackBuffer.SampleLevel(BackBufferSampler_s, v1.xy, 0).xyzw;
   r1.xyz = BackBuffer.Gather(BackBufferSampler_s, v1.xy).xyz;
@@ -248,65 +251,24 @@ void main(
   o0.xyz = r0.xyz;
   o0.w = saturate(r0.w);
 
-  if (injectedData.toneMapType >= 4) {
-    const float paperWhite = injectedData.toneMapGameNits / 80.f;
-    float3 linearColor = pow(abs(o0.xyz), 2.2) * sign(o0.xyz);
-    linearColor *= paperWhite;
+  float3 untonemapped = renodx::math::SafePow(o0.xyz, 2.2f);
+  if (injectedData.toneMapType == 3) {
+      untonemapped = Hue(untonemapped, injectedData.toneMapHueCorrection);
+      o0.rgb = maxpayne3::tonemap::frostbite::BT709(untonemapped, injectedData.toneMapPeakNits / injectedData.toneMapGameNits);
+      o0.rgb = renodx::math::SafePow(o0.rgb, 1.f / 2.2f);
+  } else if (injectedData.toneMapType == 2) {
+      untonemapped = Hue(untonemapped, injectedData.toneMapHueCorrection);
 
-    const float peakWhite = injectedData.toneMapPeakNits / 80.f;
-    const float highlightsShoulderStart = paperWhite;  // Don't tonemap the "SDR" range
-    linearColor = renodx::tonemap::dice::BT709(linearColor, peakWhite, highlightsShoulderStart);
-
-    linearColor /= paperWhite;
-    float3 linearSDR = sign(r0.rgb) * pow(abs(r0.rgb), 2.2f);
-    // use clamped hue correction code path
-    linearColor = Hue(linearColor, linearSDR, injectedData.toneMapHueCorrection * -1.f);
-    if (injectedData.toneMapType == 5) {
-      const float3 vanillaColor = saturate(linearSDR);
-      const float vanillaLum = saturate(renodx::color::y::from::BT709(vanillaColor));
-      linearColor = lerp(vanillaColor, linearColor.rgb, vanillaColor);
-    }
-    o0.xyz = pow(abs(linearColor), 1.0 / 2.2) * sign(linearColor);
-  } else if (injectedData.toneMapType > 0) {
-    float3 linearColor = pow(abs(o0.xyz), 2.2) * sign(o0.xyz);
-
-    float vanillaMidGray = 0.18f;
-    float renoDRTContrast = 1.f;
-    float renoDRTFlare = 0.f;
-    float renoDRTShadows = 1.f;
-    float renoDRTDechroma = 0.f;
-    float renoDRTSaturation = 1.f;
-    float renoDRTHighlights = 1.f;
-    float3 tonemapped = renodx::tonemap::config::Apply(
-        linearColor,
-        renodx::tonemap::config::Create(
-            injectedData.toneMapType,
-            injectedData.toneMapPeakNits,
-            injectedData.toneMapGameNits,
-            0.f,
-            1.f,
-            1.f,
-            1.f,
-            1.f,
-            1.f,
-            vanillaMidGray,
-            vanillaMidGray * 100.f,
-            renoDRTHighlights,
-            renoDRTShadows,
-            renoDRTContrast,
-            renoDRTSaturation,
-            renoDRTDechroma,
-            renoDRTFlare));
-      o0.xyz = tonemapped;
-
-    float3 linearSDR = sign(r0.rgb) * pow(abs(r0.rgb), 2.2f);
-    // use clamped hue correction code path
-    linearColor = Hue(linearColor, linearSDR, injectedData.toneMapHueCorrection * -1.f);
-
-    o0.xyz = pow(abs(o0.xyz), 1.0 / 2.2) * sign(o0.xyz);
-
-  } else {
-    o0.xyz = saturate(o0.xyz);
+      const float paperWhite = injectedData.toneMapGameNits / renodx::color::srgb::REFERENCE_WHITE;
+      const float peakWhite = injectedData.toneMapPeakNits / renodx::color::srgb::REFERENCE_WHITE;
+      DICESettings config = DefaultDICESettings();
+      config.Type = 3;
+      config.ShoulderStart = 0.5;  // Vanilla just clips, don't tonemap below 1
+      o0.rgb = DICETonemap(untonemapped * paperWhite, peakWhite, config) / paperWhite;
+      o0.rgb = renodx::math::SafePow(o0.rgb, 1.f / 2.2f);
+  } else if (injectedData.toneMapType == 0) {
+      o0.rgb = saturate(o0.rgb);
   }
+
   return;
 }
