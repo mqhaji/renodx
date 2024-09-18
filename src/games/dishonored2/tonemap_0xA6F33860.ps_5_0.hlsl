@@ -262,30 +262,24 @@ void main(
 
     untonemapped *= vanillaMidGray / 0.18f;
 
-    if (injectedData.toneMapType >= 2) {
-      float3 intermediateColor = lerp(saturate(vanillaColor), untonemapped, saturate(vanillaColor));
-      if (injectedData.blackFloor) {
-        float3 incorrect_color = intermediateColor;
-        float3 correct_color = untonemapped;
+    float3 intermediateColor = lerp(saturate(vanillaColor), untonemapped, saturate(vanillaColor));
+    if (injectedData.blackFloor) {
+      float3 incorrect_color = intermediateColor;
+      float3 correct_color = untonemapped;
 
-        float3 correct_lab = renodx::color::oklab::from::BT709(correct_color);
-        float3 correct_lch = renodx::color::oklch::from::OkLab(correct_lab);
+      float3 correct_lab = renodx::color::oklab::from::BT709(correct_color);
+      float3 correct_lch = renodx::color::oklch::from::OkLab(correct_lab);
 
-        float3 incorrect_lab = renodx::color::oklab::from::BT709(incorrect_color);
-        float3 incorrect_lch = renodx::color::oklch::from::OkLab(incorrect_lab);
-        incorrect_lch[0] = correct_lch[0];
-        float3 color = renodx::color::bt709::from::OkLCh(incorrect_lch);
-        untonemapped = renodx::color::bt709::clamp::AP1(color);
+      float3 incorrect_lab = renodx::color::oklab::from::BT709(incorrect_color);
+      float3 incorrect_lch = renodx::color::oklch::from::OkLab(incorrect_lab);
+      incorrect_lch[0] = correct_lch[0];
+      float3 color = renodx::color::bt709::from::OkLCh(incorrect_lch);
+      untonemapped = renodx::color::bt709::clamp::AP1(color);
 
 
-        intermediateColor = lerp(saturate(untonemapped), incorrect_color, saturate(untonemapped / 0.18));
-      }
-      untonemapped = intermediateColor;
+      intermediateColor = lerp(saturate(untonemapped), incorrect_color, saturate(untonemapped / 0.18));
     }
-    // r0.xyz = untonemapped;
-
-    // r0.xyz = lerp(vanillaColor.rgb, untonemapped, saturate(vanillaColor.rgb));  // combine tonemappers 
-
+    untonemapped = intermediateColor;
 
     // LUTExtrapolationData extrapolationData = DefaultLUTExtrapolationData();
     // extrapolationData.inputColor = untonemapped;
@@ -302,7 +296,7 @@ void main(
     // extrapolationSettings.samplingQuality = 1;
     // extrapolationSettings.neutralLUTRestorationAmount = 0;
     // // extrapolationSettings.vanillaLUTRestorationAmount = 0;
-    // extrapolationSettings.vanillaLUTRestorationAmount = injectedData.toneMapHueCorrection;
+    // extrapolationSettings.vanillaLUTRestorationAmount = 0;
     // extrapolationSettings.enableExtrapolation = true;
     // extrapolationSettings.extrapolationQuality = 1;
     // // extrapolationSettings.backwardsAmount = 0.5;

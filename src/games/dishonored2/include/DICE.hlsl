@@ -68,7 +68,7 @@ DICESettings DefaultDICESettings()
 {
   DICESettings Settings;
   Settings.Type = DICE_TYPE_BY_CHANNEL_PQ;
-  Settings.ShoulderStart = (Settings.Type >= DICE_TYPE_BY_LUMINANCE_RGB) ? (1.f / 4.f) : 0.f;
+  Settings.ShoulderStart = (Settings.Type >= DICE_TYPE_BY_LUMINANCE_RGB) ? (1.f / 3.f) : 0.f; //TODOFT3: increase value!!! (did I already?)
   Settings.DesaturationAmount = 1.0 / 3.0;
   Settings.DarkeningAmount = 1.0 / 3.0;
   return Settings;
@@ -80,7 +80,7 @@ DICESettings DefaultDICESettings()
 float3 DICETonemap(
   float3 Color,
   float PeakWhite,
-   const DICESettings Settings /*= DefaultDICESettings()*/)
+  const DICESettings Settings /*= DefaultDICESettings()*/)
 {
   const float sourceLuminance = GetLuminance(Color);
 
@@ -127,6 +127,7 @@ float3 DICETonemap(
       const float3 sourceColorNormalized = BT709_To_BT2020(Color) / HDR10_MaxWhite;
       const float3 sourceColorPQ = Linear_to_PQ(sourceColorNormalized, 1);
 
+      [unroll]
       for (uint i = 0; i < 3; i++) //TODO LUMA: optimize? will the shader compile already convert this to float3? Or should we already make a version with no branches that works in float3?
       {
         if (sourceColorPQ[i] > shoulderStartPQ) // Colors below the shoulder (or below zero) don't need to be adjusted
