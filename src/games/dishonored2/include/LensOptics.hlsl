@@ -1,7 +1,7 @@
 #include "./Common.hlsl"
 
 // This cbuffer is not actually set by lens optics shaders, but it should be still readable from the previous passes that set it (nobody else uses register b13)
-#include "include/CBuffer_PerViewGlobal.hlsl"
+#include "./CBuffer_PerViewGlobal.hlsl"
 
 // Formula "y = (x * (b * x + c)) / (x * (b * x + 1.7) + d)"
 float3 LensOpticsTonemap(float3 color, float shoulderScale, float linearScale, float toeScale, float linearScaleDivisor)
