@@ -1,6 +1,11 @@
 #ifndef SRC_COMMON_HLSL
 #define SRC_COMMON_HLSL
 
+// Silence pow(x, n) issue complaining about negative pow possibly failing
+#pragma warning( disable : 3571 )
+// Silence for loop issue where multiple int i declarations overlap each other (because hlsl doesn't have stack/scope like c++ thus variables don't pop after their scope dies)
+#pragma warning( disable : 3078 )
+
 // These should only ever be included through "Common.hlsl" and never individually
 #include "./Math.hlsl"
 #include "./Color.hlsl"
@@ -29,6 +34,11 @@ static const float SunShaftsBrightnessMultiplier = 4.0;
 // The value should be between 0 and 1.
 static const float SunShaftsAndLensOpticsExposureAlpha = 0.25; // Anything more than 0.25 can cause sun effects to be blinding if the exposure is too high (it's pretty high in some scenes)
 
+//TODOFT: test increase?
+static const float BinkVideosAutoHDRPeakWhiteNits = 400; // Values beyond 700 will make AutoHDR look bad
+// The higher it is, the "later" highlights start
+static const float BinkVideosAutoHDRShoulderPow = 2.75; // A somewhat conservative value
+
 // Formulas that either uses 2.2 or sRGB gamma depending on a global definition.
 // Note that converting between linear and gamma space back and forth results in quality loss, especially over very high and very low values.
 float3 game_gamma_to_linear_mirrored(float3 Color)
@@ -46,6 +56,46 @@ float3 linear_to_game_gamma_mirrored(float3 Color)
 #else
   return linear_to_sRGB_gamma_mirrored(Color);
 #endif
+}
+
+// Luma per pass or per frame data
+cbuffer LumaData : register(b8)
+{
+  struct
+  {
+    // If true, DLSS SR or other upscalers have already run before the game's original upscaling pass,
+    // and thus we need to work in full resolution space and not rendering resolution space.
+    uint PostEarlyUpscaling;
+    uint DummyPadding; // GPU has "32 32 32 32 | break" bits alignment on memory, so to not break the "float2" below, we need this (because we are using a unified struct).
+    // Camera jitters in UV space (rendering resolution) (not in projection matrix space, so they don't need to be divided by the rendering resolution). You might need to multiply this by 0.5 and invert the horizontal axis before using it.
+    float2 CameraJitters;
+    // Previous frame's camera jitters in UV space (relative to its own resolution).
+    float2 PreviousCameraJitters;
+    float2 RenderResolutionScale;
+    // This can be used instead of "CV_ScreenSize" in passes where "CV_ScreenSize" would have been
+    // replaced with 1 because DLSS SR upscaled the image earlier in the rendering.
+    float2 PreviousRenderResolutionScale;
+    row_major float4x4 ViewProjectionMatrix;
+    row_major float4x4 PreviousViewProjectionMatrix;
+    // Same as the one on "PostAA" "AA" but fixed to include jitters as well
+    row_major float4x4 ReprojectionMatrix;
+  } LumaData : packoffset(c0);
+}
+
+// AdvancedAutoHDR pass to generate some HDR brightess out of an SDR signal.
+// This is hue conserving and only really affects highlights.
+// "SDRColor" is meant to be in "SDR range", as in, a value of 1 matching SDR white (something between 80, 100, 203, 300 nits, or whatever else)
+// https://github.com/Filoppi/PumboAutoHDR
+float3 PumboAutoHDR(float3 SDRColor, float _PeakWhiteNits, float _PaperWhiteNits, float ShoulderPow = 2.75)
+{
+	const float SDRRatio = max(GetLuminance(SDRColor), 0.f);
+	// Limit AutoHDR brightness, it won't look good beyond a certain level.
+	// The paper white multiplier is applied later so we account for that.
+	const float AutoHDRMaxWhite = min(_PeakWhiteNits, PeakWhiteNits) / _PaperWhiteNits;
+	const float AutoHDRShoulderRatio = 1.f - max(1.f - SDRRatio, 0.f);
+	const float AutoHDRExtraRatio = pow(AutoHDRShoulderRatio, ShoulderPow) * (AutoHDRMaxWhite - 1.f);
+	const float AutoHDRTotalRatio = SDRRatio + AutoHDRExtraRatio;
+	return SDRColor * safeDivision(AutoHDRTotalRatio, SDRRatio, 1);
 }
 
 // LUMA FT: functions to convert an SDR color (optionally in gamma space) to an HDR one (optionally linear * paper white).
@@ -71,17 +121,8 @@ float3 SDRToHDR(float3 Color, bool InGammaSpace = true, bool UI = false)
   }
 	return Color;
 }
-float4 SDRToHDR(float4 Color, bool InGammaSpace = true, bool FixAlpha = false, bool UI = false)
+float4 SDRToHDR(float4 Color, bool InGammaSpace = true, bool UI = false)
 {
-  bool OutLinearSpace = bool(POST_PROCESS_SPACE_TYPE == 1) || (bool(POST_PROCESS_SPACE_TYPE >= 2) && !UI);
-  if (OutLinearSpace)
-  {
-    if (FixAlpha)
-    {
-      float HDRUIBlendPow = lerp(1.f, 1.f / DefaultGamma, 0.5f);
-      Color.a = pow(abs(Color.a), HDRUIBlendPow) * sign(Color.a);
-    }
-  }
 	return float4(SDRToHDR(Color.rgb, InGammaSpace, UI), Color.a);
 }
 
@@ -114,11 +155,17 @@ float3 DecodeBackBufferToLinearSDRRange(float3 color, bool UI = false)
 }
 
 // Partially mirrors "DrawLUTTexture()".
-bool ShouldSkipPostProcess(float2 PixelPosition)
+// PassType:
+//  0 Generic
+//  1 TAA
+bool ShouldSkipPostProcess(float2 PixelPosition, uint PassType = 0)
 {
-#if TEST_MOTION_BLUR || TEST_SMAA_EDGES
+#if TEST_MOTION_BLUR_TYPE || TEST_SMAA_EDGES
   return true;
-#endif // TEST_MOTION_BLUR || TEST_SMAA_EDGES
+#endif // TEST_MOTION_BLUR_TYPE || TEST_SMAA_EDGES
+#if TEST_TAA_TYPE
+  if (PassType != 1) { return true; }
+#endif // TEST_TAA_TYPE
 #if DRAW_LUT
 	const uint LUTMinPixel = 0;
 	uint LUTMaxPixel = LUT_MAX;
@@ -208,4 +255,20 @@ float3 FixUpSharpeningOrBlurring(float3 postSharpeningColor, float3 preSharpenin
   	return postSharpeningColor;
 }
 
-#endif  // SRC_COMMON_HLSL
+float2 RemapUV(float2 UV, float2 sourceResolution, float2 targetResolution)
+{
+  // First remap from a "+half source texel uv offset to 1-half source texel uv offset" range to a 0-1 range, then re-map acknowleding the half target texel uv offset.
+  UV -= 0.5 / sourceResolution;
+  UV *= (sourceResolution / (sourceResolution - 1.0)) * ((targetResolution - 1.0) / targetResolution); // Unified over one line to avoid shifting the UV range too many times
+  UV += 0.5 / targetResolution;
+  return UV;
+}
+
+// "resolutionsScale" is the "direct" resolution multiplier (e.g. 0.5 means 50% rendering resolution)
+float2 RemapUVFromScale(float2 UV, float2 resolutionScale /*= CV_HPosScale.xy*/, float2 sourceResolution /*= CV_ScreenSize.xy*/)
+{
+  // Avoid "degrading" the quality if the resolution scale is 1
+  return resolutionScale == 1 ? UV : RemapUV(UV, sourceResolution, sourceResolution / resolutionScale);
+}
+
+#endif // SRC_COMMON_HLSL

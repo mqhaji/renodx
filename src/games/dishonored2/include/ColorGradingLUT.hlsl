@@ -1,5 +1,6 @@
 #include "./Common.hlsl"
 #include "./Oklab.hlsl"
+#include "./DarktableUCS.hlsl"
 
 // Make sure to define these to your value, or set it to 0, so it retrieves the size from the LUT (in some functions)
 #ifndef LUT_SIZE
@@ -41,40 +42,16 @@ uint3 ConditionalConvert3DTo2DLUTCoordinates(uint3 Coordinates3D, uint lutSize =
 #endif
 }
 
-float calculateExtrapolationLength(float3 centeringNormal)
+//TODOFT
+float3 Linear_to_PQ2(float3 LinearColor, int clampType = 0)
 {
-    // Extrapolation lengths based on type of diagonal
-    static const float lengthCubeEdge = 1.0;
-    static const float lengthSideDiagonal = sqrt(2.0);
-    static const float lengthInternalDiagonal = sqrt(3.0);
-
-    // Unit vectors for each color
-    // Cube edge
-    float3 cubeEdgeVectors[3] = { float3(1, 0, 0), float3(0, 1, 0), float3(0, 0, 1) };
-    // Side diagonal
-    float3 sideDiagonalVectors[3] = { normalize(float3(1, 1, 0)), normalize(float3(1, 0, 1)), normalize(float3(0, 1, 1)) };
-    // Internal diagonal
-    float3 internalDiagonalVector = normalize(float3(1, 1, 1));
-
-    // Measure alignment with each axis
-    float dotCubeEdge = max(dot(centeringNormal, cubeEdgeVectors[0]), max(dot(centeringNormal, cubeEdgeVectors[1]), dot(centeringNormal, cubeEdgeVectors[2])));
-    float dotSideDiagonal = max(dot(centeringNormal, sideDiagonalVectors[0]), max(dot(centeringNormal, sideDiagonalVectors[1]), dot(centeringNormal, sideDiagonalVectors[2])));
-    float dotInternalDiagonal = dot(centeringNormal, internalDiagonalVector);
-
-    // Calculate angles in radians
-    float angleCubeEdge = acos(dotCubeEdge);
-    float angleSideDiagonal = acos(dotSideDiagonal);
-    float angleInternalDiagonal = acos(dotInternalDiagonal);
-
-    // Calculate weights based on angles (cosine values)
-    float weightCubeEdge = cos(angleCubeEdge);
-    float weightSideDiagonal = cos(angleSideDiagonal);
-    float weightInternalDiagonal = cos(angleInternalDiagonal);
-
-    // Combine lengths using weights to get final extrapolation length
-    float totalWeight = weightCubeEdge + weightSideDiagonal + weightInternalDiagonal;
-
-    return (lengthCubeEdge * weightCubeEdge + lengthSideDiagonal * weightSideDiagonal + lengthInternalDiagonal * weightInternalDiagonal) / totalWeight;
+	return Linear_to_PQ(LinearColor, clampType);
+	//return LinearColor;
+}
+float3 PQ_to_Linear2(float3 ST2084Color, int clampType = 0)
+{
+	return PQ_to_Linear(ST2084Color, clampType);
+	//return ST2084Color;
 }
 
 // 0 None
@@ -97,7 +74,9 @@ void FixColorGradingLUTNegativeLuminance(inout float3 col, uint type = 1)
       float3 negativeColor = min(col.xyz, 0.0);
       float positiveLuminance = GetLuminance(positiveColor);
       float negativeLuminance = GetLuminance(negativeColor);
+#pragma warning( disable : 4008 )
       float negativePositiveLuminanceRatio = positiveLuminance / -negativeLuminance;
+#pragma warning( default : 4008 )
       negativeColor.xyz *= negativePositiveLuminanceRatio;
       col.xyz = positiveColor + negativeColor;
     }
@@ -106,7 +85,7 @@ void FixColorGradingLUTNegativeLuminance(inout float3 col, uint type = 1)
       // This can break gradients as it snaps colors to brighter ones (it depends on how the displays clips HDR10 or scRGB invalid colors)
       col.xyz = max(col.xyz, 0.0);
     }
-    else // if (type >= 3)
+    else //if (type >= 3)
     {
       col.xyz = 0.0;
     }
@@ -138,6 +117,13 @@ float3 RestoreHue(float3 targetColor, float3 sourceColor, float amount = 0.5)
   correctedTargetOklch.y = targetOklch.y;
 
   return oklch_to_linear_srgb(correctedTargetOklch);
+}
+
+float3 RestoreLuminance(float3 targetColor, float3 sourceColor)
+{
+  float sourceColorLuminance = GetLuminance(sourceColor);
+  float targetColorLuminance = GetLuminance(targetColor);
+  return targetColor * max(safeDivision(sourceColorLuminance, targetColorLuminance, 1), 0.0);
 }
 
 // Takes any original color (before some post process is applied to it) and re-applies the same transformation the post process had applied to it on a different (but similar) color.
@@ -287,11 +273,12 @@ float3 AdjustLUTCoordinatesForLinearLUT(const float3 clampedLUTCoordinatesGammaS
 	{
 		return clampedLUTCoordinatesGammaSpace;
 	}
-	// if (!lutInputLinear && lutOutputLinear)
+	//if (!lutInputLinear && lutOutputLinear)
 #if FORCE_NEUTRAL_COLOR_GRADING_LUT_TYPE > 0 // This case will skip LUT sampling so we shouldn't correct the input coordinates
   // Low quality version with no linear input correction
   return clampedLUTCoordinatesGammaSpace;
 #else
+//TODOFT4: when this is branch runs, there's some speckles on the shotgun numerical decal in some scenes (e.g. when under a light, in front of the place where I tested AF on a decal a lot) (with DLSS they turn into black dots in the albedo view). Would this happen without "dev" settings enabled!? Probably not!
   // Given that we haven't scaled for the LUT half texel size, we floor and ceil with the LUT size as opposed to the LUT max
   float3 previousLUTCoordinatesGammaSpace = floor(clampedLUTCoordinatesGammaSpace * lutSize) / lutSize;
   float3 nextLUTCoordinatesGammaSpace = ceil(clampedLUTCoordinatesGammaSpace * lutSize) / lutSize;
@@ -354,27 +341,28 @@ float3 SampleLUT(LUT_TEXTURE_TYPE lut, SamplerState samplerState, float3 color, 
     return lerp(col0, col1, sliceFrac); // LUMA FT: changed to be a lerp (easier to read)
 #endif // LUT_3D
   }
-  else // LUMA FT: added tetrahedral LUT interpolation (from Lilium) (note that this ignores the texture sampler) //TODOFT3: to finish it... It's not working
+  else // LUMA FT: added tetrahedral LUT interpolation (from Lilium) (note that this ignores the texture sampler)
   {
-    const float lutTexelOffsetY = 0.5f /  chartDim;
-    const float lutTexelOffsetX = 0.5f / chartDimSqr;
-
     // We need to clip the input coordinates as LUT texture samples below are not clamped.
-    const float3 coords = saturate(color) * chartDimSqr; // Pixel coords 
+    const float3 coords = saturate(color) * chartMax; // Pixel coords 
 
     // floorCoords are on [0,chartMaxUint]
-    float3 floorBaseCoords = floor(coords);
-    float3 floorNextCoords = min(floorBaseCoords + 1.f, chartMaxUint);
+    uint3 floorBaseCoords = coords;
+    uint3 floorNextCoords = min(floorBaseCoords + 1u, chartMaxUint);
+    
+    // baseInd and nextInd are on [0,1]
+    uint3 baseInd = floorBaseCoords;
+    uint3 nextInd = floorNextCoords;
 
     // indV2 and indV3 are on [0,chartMaxUint]
-    float3 indV2;
-    float3 indV3;
+    uint3 indV2;
+    uint3 indV3;
 
     // fract is on [0,1]
     float3 fract = frac(coords);
 
-    const float3 v1 = lut.Load(ConditionalConvert3DTo2DLUTCoordinates(floorBaseCoords, chartDimUint)).rgb;
-    const float3 v4 = lut.Load(ConditionalConvert3DTo2DLUTCoordinates(floorNextCoords, chartDimUint)).rgb;
+    const float3 v1 = lut.Load(ConditionalConvert3DTo2DLUTCoordinates(baseInd, chartDimUint)).rgb;
+    const float3 v4 = lut.Load(ConditionalConvert3DTo2DLUTCoordinates(nextInd, chartDimUint)).rgb;
 
     float3 f1, f2, f3, f4;
 
@@ -384,10 +372,10 @@ float3 SampleLUT(LUT_TEXTURE_TYPE lut, SamplerState samplerState, float3 color, 
       [flatten]
       if (fract.g >= fract.b)  // R > G > B
       {
-        indV2 = float3(1.f, 0.f, 0.f);
-        indV3 = float3(1.f, 1.f, 0.f);
+        indV2 = uint3(1u, 0u, 0u);
+        indV3 = uint3(1u, 1u, 0u);
 
-        f1 = 1.f - fract.r;
+        f1 = 1u - fract.r;
         f4 = fract.b;
 
         f2 = fract.r - fract.g;
@@ -395,10 +383,10 @@ float3 SampleLUT(LUT_TEXTURE_TYPE lut, SamplerState samplerState, float3 color, 
       }
       else [flatten] if (fract.r >= fract.b)  // R > B > G
       {
-        indV2 = float3(1.f, 0.f, 0.f);
-        indV3 = float3(1.f, 0.f, 1.f);
+        indV2 = uint3(1u, 0u, 0u);
+        indV3 = uint3(1u, 0u, 1u);
 
-        f1 = 1.f - fract.r;
+        f1 = 1u - fract.r;
         f4 = fract.g;
 
         f2 = fract.r - fract.b;
@@ -406,10 +394,10 @@ float3 SampleLUT(LUT_TEXTURE_TYPE lut, SamplerState samplerState, float3 color, 
       }
       else  // B > R > G
       {
-        indV2 = float3(0.f, 0.f, 1.f);
-        indV3 = float3(1.f, 0.f, 1.f);
+        indV2 = uint3(0u, 0u, 1u);
+        indV3 = uint3(1u, 0u, 1u);
 
-        f1 = 1.f - fract.b;
+        f1 = 1u - fract.b;
         f4 = fract.g;
 
         f2 = fract.b - fract.r;
@@ -421,10 +409,10 @@ float3 SampleLUT(LUT_TEXTURE_TYPE lut, SamplerState samplerState, float3 color, 
       [flatten]
       if (fract.g <= fract.b)  // B > G > R
       {
-        indV2 = float3(0.f, 0.f, 1.f);
-        indV3 = float3(0.f, 1.f, 1.f);
+        indV2 = uint3(0u, 0u, 1u);
+        indV3 = uint3(0u, 1u, 1u);
 
-        f1 = 1.f - fract.b;
+        f1 = 1u - fract.b;
         f4 = fract.r;
 
         f2 = fract.b - fract.g;
@@ -432,10 +420,10 @@ float3 SampleLUT(LUT_TEXTURE_TYPE lut, SamplerState samplerState, float3 color, 
       }
       else [flatten] if (fract.r >= fract.b)  // G > R > B
       {
-        indV2 = float3(0.f, 1.f, 0.f);
-        indV3 = float3(1.f, 1.f, 0.f);
+        indV2 = uint3(0u, 1u, 0u);
+        indV3 = uint3(1u, 1u, 0u);
 
-        f1 = 1.f - fract.g;
+        f1 = 1u - fract.g;
         f4 = fract.b;
 
         f2 = fract.g - fract.r;
@@ -443,10 +431,10 @@ float3 SampleLUT(LUT_TEXTURE_TYPE lut, SamplerState samplerState, float3 color, 
       }
       else  // G > B > R
       {
-        indV2 = float3(0.f, 1.f, 0.f);
-        indV3 = float3(0.f, 1.f, 1.f);
+        indV2 = uint3(0u, 1u, 0u);
+        indV3 = uint3(0u, 1u, 1u);
 
-        f1 = 1.f - fract.g;
+        f1 = 1u - fract.g;
         f4 = fract.r;
 
         f2 = fract.g - fract.b;
@@ -471,7 +459,7 @@ struct LUTExtrapolationData
   // Note that this can be in any color space (e.g. sRGB, scRGB, Rec.709, Rec.2020, ...), it's agnostic from that.
   float3 inputColor;
   
-  // The vanilla color the game would have fed as LUT input (so usually after tonemapping, and SDR), it should roughly be in the 0-1 range (you can optionally manually saturate this to make sure of that).
+  // The vanilla color the game would have fed as LUT input (so usually after tonemapping, and SDR), it should roughly be in the 0-1 range (you can optionally manually saturate() this to make sure of that).
   // This is optional and only used if "vanillaLUTRestorationAmount" is > 0.
   float3 vanillaInputColor;
 };
@@ -505,7 +493,7 @@ struct LUTExtrapolationSettings
   uint transferFunctionOut;
   // 0 Basic sampling
   // 1 Linear corrected sampling (if "lutOutputLinear" is false this is equal to "0", but if true, the LUT input coordinates need to be adjusted with the inverse of the transfer function, otherwise even a neutral LUT would shift colors that didn't fall precisely on a LUT texel)
-  // 2 Linear corrected sampling + tetrahedral interpolation
+  // 2 Linear corrected sampling + tetrahedral interpolation (it won't necessarily look better, especially with LUTs close to neutral)
   uint samplingQuality;
   // Basically an inverse LUT intensity setting.
   // How much we blend back towards the "neutral" LUT color (the unclamped source color (e.g. HDR)).
@@ -514,7 +502,7 @@ struct LUTExtrapolationSettings
   // you might set this to a smallish value and get better results (e.g. better hues).
   float neutralLUTRestorationAmount;
   // How much we blend back towards the vanilla LUT color (or hue).
-  // It can be used to restore some of the vanilla hues on bright (or not bright) colors.
+  // It can be used to restore some of the vanilla hues on bright (or not bright) colors (they would likely be desaturated on highlights).
   // This adds one sample per pixel.
   float vanillaLUTRestorationAmount;
 
@@ -529,7 +517,7 @@ struct LUTExtrapolationSettings
   // LUT extrapolation works by taking more centered samples starting from the "clipped" LUT coordinates (in case the native ones were out of range).
   // This determines how much we go backwards towards the LUT center.
   // The value is supposed to be > 0 and <= 1, with 1 mapping to 50% centering (we shouldn't do any more than that or the extrapolation would not be accurate).
-  // The smaller this value, the more "accurate" extrapolation will be, respecting more lawfully the way the LUT changed around its edges (as long as it ends up mapped beyond the first texel center).
+  // The smaller this value, the more "accurate" extrapolation will be, respecting more lawfully the way the LUT changed around its edges (as long as it ends up mapped beyond the center of the first and second texels).
   // The higher the value, the "smoother" the extrapolation will be, with gradients possibly looking nicer.
   float backwardsAmount;
   // What white level does the LUT have for its input coordinates (e.g. what's the expected brightness of an input color of 1 1 1?).
@@ -537,7 +525,7 @@ struct LUTExtrapolationSettings
   // Ideally it would be set to the same brightness the developers of the LUTs had their screen set to, some good values for SDR LUTs are 80, 100 or 203.
   // Given that this is used as a scaler for PQ, using the Rec.709 white level of 100 nits is a good start, as that maps to ~50% of the PQ range.
   float whiteLevelNits;
-  // If our input color was too high (and thus out of range, (e.g. beyond 0-1)), we can temporarily tonemap it to avoid the LUT extrapolation math going wild (e.g. too saturated, or hue shifted),
+  // If our input color was too high (and thus out of range, (e.g. beyond 0-1)), we can temporarily tonemap it to avoid the LUT extrapolation math going wild (e.g. too saturated, or hue shifted, or generating too strong highlights),
   // this is especially useful in the following conditions:
   //  -With LUTs that change colors a lot in brightness, especially towards the edges
   //  -When using lower "extrapolationQuality" modes
@@ -593,6 +581,7 @@ float3 SampleLUT(LUT_TEXTURE_TYPE lut, SamplerState samplerState, float3 encoded
   const bool highQualityLUTCoordinateAdjustments = settings.samplingQuality >= 1;
   const bool tetrahedralInterpolation = settings.samplingQuality >= 2;
   
+#pragma warning( disable : 4000 ) // It's not clear why this function generates this error
   float3 sampleCoordinates = AdjustLUTCoordinatesForLinearLUT(encodedCoordinates, highQualityLUTCoordinateAdjustments, settings.transferFunctionIn, settings.lutInputLinear, settings.lutOutputLinear, settings.lutSize, specifyLinearColor, linearCoordinates);
   float3 color = SampleLUT(lut, samplerState, sampleCoordinates, settings.lutSize, tetrahedralInterpolation, settings.lutInputLinear, settings.lutOutputLinear, settings.transferFunctionIn);
   // We appply the transfer function even beyond 0-1 as if the color comes from a linear LUT, it shouldn't already have any kind of gamma correction applied to it (gamma correction runs later).
@@ -601,6 +590,7 @@ float3 SampleLUT(LUT_TEXTURE_TYPE lut, SamplerState samplerState, float3 encoded
 			return ColorGradingLUTTransferFunctionOut(color, settings.transferFunctionIn, true);
   }
   return color;
+#pragma warning( default : 4000 )
 }
 
 // LUT sample that allows to go beyond the 0-1 coordinates range through extrapolation.
@@ -652,23 +642,13 @@ float3 SampleLUTWithExtrapolation(LUT_TEXTURE_TYPE lut, SamplerState samplerStat
   // At the moment we simply use the LUT in transfer function for the whole range, as it's simple and tests shows it works fine.
 	if (settings.inputLinear)
 	{
-#if 0 //TODOFT4: mess around with applying gamma correction here, maybe 2.2 works better than sRGB beyond 0-1 now that we do PQ extrapolation. Below too (take else branch, it changes random stuff)
-		neutralLUTColorTransferFunctionEncoded = ColorGradingLUTTransferFunctionInCorrected(neutralLUTColorLinear, settings.transferFunctionIn, settings.transferFunctionOut);
-		neutralVanillaColorTransferFunctionEncoded = ColorGradingLUTTransferFunctionInCorrected(neutralVanillaColorLinear, settings.transferFunctionIn, settings.transferFunctionOut);
-#else
 		neutralLUTColorTransferFunctionEncoded = ColorGradingLUTTransferFunctionIn(neutralLUTColorLinear, settings.transferFunctionIn);
 		neutralVanillaColorTransferFunctionEncoded = ColorGradingLUTTransferFunctionIn(neutralVanillaColorLinear, settings.transferFunctionIn);
-#endif
 	}
 	else
 	{
-#if 0
-		neutralLUTColorLinear = ColorGradingLUTTransferFunctionOutCorrected(neutralLUTColorTransferFunctionEncoded, settings.transferFunctionIn, settings.transferFunctionOut);
-		neutralVanillaColorLinear = ColorGradingLUTTransferFunctionOutCorrected(neutralVanillaColorTransferFunctionEncoded, settings.transferFunctionIn, settings.transferFunctionOut);
-#else
 		neutralLUTColorLinear = ColorGradingLUTTransferFunctionOut(neutralLUTColorTransferFunctionEncoded, settings.transferFunctionIn);
 		neutralVanillaColorLinear = ColorGradingLUTTransferFunctionOut(neutralVanillaColorTransferFunctionEncoded, settings.transferFunctionIn);
-#endif
 	}
 	const float3 clampedNeutralLUTColorLinear = saturate(neutralLUTColorLinear);
 
@@ -679,8 +659,9 @@ float3 SampleLUTWithExtrapolation(LUT_TEXTURE_TYPE lut, SamplerState samplerStat
 	const float3 unclampedUV = neutralLUTColorTransferFunctionEncoded;
 	const float3 clampedUV = saturate(unclampedUV);
 	const float distanceFromUnclampedToClampedUV = length(unclampedUV - clampedUV);
-  //TODOFT4: verify this doesn't cause black dots in output due to normalizing smallish vectors (in quality mode 0)
-	const bool uvOutOfRange = distanceFromUnclampedToClampedUV > FLT_MIN; // Some threshold is needed to avoid divisions by tiny numbers
+  // Some threshold is needed to avoid divisions by tiny numbers.
+  // Ideally this check is enough to avoid black dots in output due to normalizing smallish vectors, if not, increase the threshold value (e.g. to FLT_EPSILON).
+	const bool uvOutOfRange = distanceFromUnclampedToClampedUV > FLT_MIN;
   const bool doExtrapolation = settings.enableExtrapolation && uvOutOfRange;
   // The current working space of this function (all colors samples from LUTs need to be in this space, whether they natively already were or not).
   // All rgb colors within the extrapolation branch need to be in linear space (and so are the ones that will come out of it)
@@ -702,6 +683,7 @@ float3 SampleLUTWithExtrapolation(LUT_TEXTURE_TYPE lut, SamplerState samplerStat
       // Tonemap it with a basic Reinhard (we could do something better but it likely wouldn't improve the results much)
 // We can either tonemap by channel or by max channel. Tonemapping by luminance here isn't a good idea because we are interested in reducing the range to a specific max channel value.
 #if 1 // By max channel (hue conserving (at least in the color in excess of 0-1), but has inconsistent results depending on the luminance)
+//TODOFT: this is causing incontiguous gradients!!! (it's neutralLUTColorLinearTonemappedRestoreRatio)
       float normalizedNeutralLUTColorInExcessLinear = max3(abs(neutralLUTColorInExcessLinear / maxExtrapolationColor));
       float normalizedNeutralLUTColorInExcessLinearTonemapped = normalizedNeutralLUTColorInExcessLinear / (normalizedNeutralLUTColorInExcessLinear + 1);
       float normalizedNeutralLUTColorInExcessLinearRestoreRatio = safeDivision(normalizedNeutralLUTColorInExcessLinearTonemapped, normalizedNeutralLUTColorInExcessLinear, 1);
@@ -719,7 +701,7 @@ float3 SampleLUTWithExtrapolation(LUT_TEXTURE_TYPE lut, SamplerState samplerStat
     // Going back 50% (e.g. from LUT coordinates 1 to 0.5, or 0 to 0.5) can be too much, so we should generally keep it lower than that.
     // Anything lower than 25% will be more accurate but prone to extrapolation looking more aggressive.
 		float backwardsAmount = settings.backwardsAmount * 0.5;
-// Extrapolation shouldn't run with a "backwards amount" smaller than half a texel, otherwise it will be like sampling the edge coordinates again.
+// Extrapolation shouldn't run with a "backwards amount" smaller than half a texel, otherwise it will be almost like sampling the edge coordinates again.
 // This is already explained in the settings description so we disabled the safety check.
 #if 0
     if (backwardsAmount < lutTexelRange)
@@ -730,10 +712,14 @@ float3 SampleLUTWithExtrapolation(LUT_TEXTURE_TYPE lut, SamplerState samplerStat
 
 		const float PQNormalizationFactor = HDR10_MaxWhiteNits / settings.whiteLevelNits;
 
-		float3 clampedUV_PQ = Linear_to_PQ(clampedNeutralLUTColorLinear / PQNormalizationFactor); // "clampedNeutralLUTColorLinear" is equal to "ColorGradingLUTTransferFunctionOut(clampedUV, settings.transferFunctionIn, false)"
-		float3 unclampedTonemappedUV_PQ = Linear_to_PQ(neutralLUTColorLinearTonemapped / PQNormalizationFactor, 3);
-		float3 clampedSample_PQ = Linear_to_PQ(clampedSample / PQNormalizationFactor);
-
+		const float3 clampedUV_PQ = Linear_to_PQ2(clampedNeutralLUTColorLinear / PQNormalizationFactor); // "clampedNeutralLUTColorLinear" is equal to "ColorGradingLUTTransferFunctionOut(clampedUV, settings.transferFunctionIn, false)"
+		const float3 unclampedTonemappedUV_PQ = Linear_to_PQ2(neutralLUTColorLinearTonemapped / PQNormalizationFactor, 3);
+		const float3 clampedSample_PQ = Linear_to_PQ2(clampedSample / PQNormalizationFactor, 3);
+		const float3 clampedUV_UCS = DarktableUcs::RGBToUCSLUV(clampedNeutralLUTColorLinear);
+		const float3 unclampedTonemappedUV_UCS = DarktableUcs::RGBToUCSLUV(neutralLUTColorLinearTonemapped);
+		const float3 clampedSample_UCS = DarktableUcs::RGBToUCSLUV(clampedSample);
+    
+#pragma warning( default : 4000 )
 		float3 extrapolatedSample;
 
     // Here we do the actual extrapolation logic, which is relatively different depending on the quality mode.
@@ -746,53 +732,166 @@ float3 SampleLUTWithExtrapolation(LUT_TEXTURE_TYPE lut, SamplerState samplerStat
     // -Linear just can't work for LUT extrapolation, because it would act very differently depending on the extrapolation direction (e.g. beyond 1 or below 0), given that it's not adjusted by perceptual
     //  (e.g.1 the extrapolation strength between -0.01 and 0.01 or 0.99 and 1.01 would be massively different, even if both of them have the same offset)
 		//  (e.g.2 if the LUT sampling coordinates are 1.1, we'd want to extrapolate ~10% more color, but in linear space it would be a lot less than that, thus the peak brightness would be compressed a lot more than it should).
-		if (settings.extrapolationQuality <= 0)
+		if (settings.extrapolationQuality <= 0) //TODOFT: muke oklab and also fix this not extrapolating contiguously... depending on the backwards factor
 		{
-		  static const float lutDiagonalLength = sqrt(3.0);
-
-      // Find the direction between the clamped and unclamped coordinates, flip it, and use it to determine how much we go backwards when taking the centered sample.
+      // Take the direction between the clamped and unclamped coordinates, flip it, and use it to determine how much to go backwards by when taking the centered sample.
       // For example, if our "centeringNormal" is -1 -1 -1, we'd want to go backwards by our fixed amount, but multiplied by sqrt(3) (the lenght of a cube internal diagonal),
       // while of -1 -1 0, we'd only want to go back by sqrt(2) (the length of a side diagonal), etc etc. This helps keep the centering results consistent independently of their "angle".
 		  const float3 centeringNormal = normalize(unclampedUV - clampedUV); // This should always be valid as "unclampedUV" and guaranteed to be different from "clampedUV".
-#if 1 // 100% accurate version (not too expensive)
-      const float lutBackwardsDiagonalMultiplier = getDistanceFromCubeEdge(centeringNormal);
-#elif 0 // Musa's version. Might be cheaper but it currently doesn't seem to work.
-      const float lutBackwardsDiagonalMultiplier = calculateExtrapolationLength(abs(centeringNormal)); //TODOFT: delete?
-#elif 0 // Approximate cheaper version (it's almost identical)
-      const float lutBackwardsDiagonalAlpha = (1.0 - max3(abs(centeringNormal))) / (1.0 - (1.0 / lutDiagonalLength));
-      const float lutBackwardsDiagonalMultiplier = lerp(1.0, lutDiagonalLength, lutBackwardsDiagonalAlpha);
-#else // Disabled, but can be enabled for a performance boost, ultimately this doesn't make that much difference
-      const float lutBackwardsDiagonalMultiplier = 1.0;
-#endif
+      const float3 centeringNormalAbs = abs(centeringNormal);
+      const float lutBackwardsDiagonalMultiplier = centeringNormalAbs.x + centeringNormalAbs.y + centeringNormalAbs.z; //TODOFT: this is unnecessary? it moves the vector in the same direction twice!??
 
-			const float3 centeredUV = clampedUV - (normalize(unclampedUV - clampedUV) * backwardsAmount * lutBackwardsDiagonalMultiplier);
+			const float3 centeredUV = clampedUV - (centeringNormal * backwardsAmount * lutBackwardsDiagonalMultiplier);
 			float3 centeredSample = SampleLUT(lut, samplerState, centeredUV, settings, lutOutputLinear);
-			float3 centeredSample_PQ = Linear_to_PQ(centeredSample / PQNormalizationFactor);
-			float3 centeredUV_PQ = Linear_to_PQ(ColorGradingLUTTransferFunctionOut(centeredUV, settings.transferFunctionIn, false) / PQNormalizationFactor);
+			float3 centeredSample_PQ = Linear_to_PQ2(centeredSample / PQNormalizationFactor, 3);
+			float3 centeredUV_PQ = Linear_to_PQ2(ColorGradingLUTTransferFunctionOut(centeredUV, settings.transferFunctionIn, false) / PQNormalizationFactor);
 
 			const float distanceFromUnclampedToClampedUV_PQ = length(unclampedTonemappedUV_PQ - clampedUV_PQ);
 			const float distanceFromClampedToCenteredUV_PQ = length(clampedUV_PQ - centeredUV_PQ);
 			const float extrapolationRatio = safeDivision(distanceFromUnclampedToClampedUV_PQ, distanceFromClampedToCenteredUV_PQ, 0);
-			extrapolatedSample = PQ_to_Linear(lerp(centeredSample_PQ, clampedSample_PQ, 1.0 + extrapolationRatio), 3) * PQNormalizationFactor;
+			extrapolatedSample = PQ_to_Linear2(lerp(centeredSample_PQ, clampedSample_PQ, 1.0 + extrapolationRatio), 3) * PQNormalizationFactor;
+
+#if DEVELOPMENT && 1
+    bool oklab = LumaSettings.DevSetting06 >= 0.5;
+#else
+    bool oklab = false;
+#endif
+      if (oklab) //TODOFT4: try oklab again? (update the starfield code ok extrapolation and oklab) And fix up oklab+PQ description above. Also try per channel (quality 1+) and try UCS.
+      {
+#if 0
+#define LINEAR_TO_OKLCH(x) DarktableUcs::RGBToUCSLUV(x)
+#define OKLCH_TO_LINEAR(x) DarktableUcs::UCSLUCToRGB(x)
+#else
+#define LINEAR_TO_OKLCH(x) linear_srgb_to_oklab(x)
+#define OKLCH_TO_LINEAR(x) oklch_to_linear_srgb(x)
+#endif
+        // OKLAB/OKLCH (it doesn't really look good, it limits the saturation too much, and though it retains vanilla hues more accurately, it just doesn't look that good, and it breaks on high luminances)
+        float3 unclampedUVOklch = LINEAR_TO_OKLCH(neutralLUTColorLinear);
+        float3 clampedUVOklch = LINEAR_TO_OKLCH(clampedNeutralLUTColorLinear);
+        float3 centeredUVOklch = LINEAR_TO_OKLCH(ColorGradingLUTTransferFunctionOut(centeredUV, settings.transferFunctionIn, false));
+        
+        const float3 distanceFromUnclampedToClampedOklch = unclampedUVOklch - clampedUVOklch;
+        const float3 distanceFromClampedToCenteredOklch = clampedUVOklch - centeredUVOklch;
+        const float3 extrapolationRatioOklch = safeDivision(distanceFromUnclampedToClampedOklch, distanceFromClampedToCenteredOklch, 0); //TODOFT: 0 or 1 on safe div? // This has borked uncontiguous values on x y and z, in oklab and oklch...
+        const float distanceFromUnclampedToClampedOklch2 = length(unclampedUVOklch.yz - clampedUVOklch.yz);
+        const float distanceFromClampedToCenteredOklch2 = length(clampedUVOklch.yz - centeredUVOklch.yz);
+        const float extrapolationRatioOklch2 = safeDivision(distanceFromUnclampedToClampedOklch2, distanceFromClampedToCenteredOklch2, 0);
+
+        float3 derivedLUTColor = LINEAR_TO_OKLCH(clampedSample);
+        float3 derivedLUTCenteredColor = LINEAR_TO_OKLCH(centeredSample);
+        float3 derivedLUTColorChangeOffset = derivedLUTColor - derivedLUTCenteredColor;
+        // Reproject the centererd color change ratio onto the full range
+#if 0
+        //float3 extrapolatedDerivedLUTColorChangeOffset = derivedLUTColorChangeOffset * extrapolationRatioOklch;
+        //float3 extrapolatedDerivedLUTColorChangeOffset = derivedLUTColorChangeOffset * abs(extrapolationRatioOklch);
+        float3 extrapolatedDerivedLUTColorChangeOffset = derivedLUTColorChangeOffset * float3(abs(extrapolationRatioOklch.x), extrapolationRatioOklch2.xx);
+        //float3 extrapolatedDerivedLUTColorChangeOffset = derivedLUTColorChangeOffset * float3(abs(extrapolationRatioOklch.x), extrapolationRatioOklch2.xx);
+#elif 1
+        float3 extrapolatedDerivedLUTColorChangeOffset = derivedLUTColorChangeOffset * extrapolationRatio;
+#else
+        float3 extrapolatedDerivedLUTColorChangeOffset = derivedLUTColorChangeOffset * float3(abs(distanceFromUnclampedToClampedOklch.x), length(distanceFromUnclampedToClampedOklch.yz).xx);
+#endif
+  #if LUT_EXTRAPOLATION_DESATURATE >= 1 // Not a desaturate here (simply conserve mode hue), but it achieves similar results
+        // only recover hue at 50%? Given that otherwise we use the one clipped from "SDR" with the wrong rgb ratio (e.g. if we try to extrapolate 5 3 2, it will clip to 1 1 1, so there won't be any hue...)?
+        //extrapolatedDerivedLUTColorChangeOffset.z *= 0.5;
+        //extrapolatedDerivedLUTColorChangeOffset.y *= 1.0 / 3.0;
+        extrapolatedDerivedLUTColorChangeOffset.yz *= 2.0 / 3.0;
+  #endif
+        //extrapolatedDerivedLUTColorChangeOffset.yz *= 2.5;
+        //extrapolatedDerivedLUTColorChangeOffset.yz *= 0.2;
+        //extrapolatedDerivedLUTColorChangeOffset.x *= 0.2;
+
+        //float3 extrapolatedDerivedLUTColor = derivedLUTColor + float3(0, extrapolatedDerivedLUTColorChangeOffset.yz);
+        float3 extrapolatedDerivedLUTColor = derivedLUTColor + extrapolatedDerivedLUTColorChangeOffset;
+        //float3 extrapolatedDerivedLUTColor = lerp(derivedLUTCenteredColor, derivedLUTColor, 1.0 + extrapolationRatioOklch);
+        // Avoid negative luminance. This can happen in case "derivedLUTColorChangeOffset" intensity/luminance was negative, even if we were at a bright/colorful LUT edge,
+        // especially if the input color is extremely bright. We can't really fix the color from ending up as black though, unless we find a way to auto detect it.
+        extrapolatedDerivedLUTColor.x = max(extrapolatedDerivedLUTColor.x, 0.f);
+
+        derivedLUTColor = oklab_to_oklch(derivedLUTColor);
+        derivedLUTCenteredColor = oklab_to_oklch(derivedLUTCenteredColor);
+        extrapolatedDerivedLUTColor = oklab_to_oklch(extrapolatedDerivedLUTColor);
+
+        // Avoid flipping ab direction, if we reached white, stay on white.
+        // We only do it on colors that have some chroma and brightness.
+        if (LumaSettings.DevSetting05 >= 0.5)
+        {
+          // do abs() before fmod() for safety
+          if ((fmod(abs(extrapolatedDerivedLUTColor.z - derivedLUTColor.z), PI * 2.0) >= PI / 1.f)
+              && extrapolatedDerivedLUTColor.x > 0.f && derivedLUTColor.x > 0.f
+              && extrapolatedDerivedLUTColor.y > 0.f && derivedLUTColor.y > 0.f)
+          {
+            extrapolatedDerivedLUTColor.z = derivedLUTColor.z;
+            extrapolatedDerivedLUTColor.y = 0.f;
+          }
+        }
+
+        unclampedUVOklch = oklab_to_oklch(unclampedUVOklch);
+        clampedUVOklch = oklab_to_oklch(clampedUVOklch);
+        centeredUVOklch = oklab_to_oklch(centeredUVOklch);
+        const float3 distanceFromUnclampedToClampedOklch3 = unclampedUVOklch - clampedUVOklch;
+        const float3 distanceFromClampedToCenteredOklch3 = clampedUVOklch - centeredUVOklch;
+        const float3 extrapolationRatioOklch3 = safeDivision(distanceFromUnclampedToClampedOklch3, distanceFromClampedToCenteredOklch3, 0);
+        float3 derivedLUTColorChangeOffset3 = derivedLUTColor - derivedLUTCenteredColor;
+        //float3 extrapolatedDerivedLUTColorChangeOffset3 = derivedLUTColorChangeOffset3 * abs(extrapolationRatioOklch3);
+        //float3 extrapolatedDerivedLUTColorChangeOffset3 = derivedLUTColorChangeOffset3 * float3(abs(extrapolationRatioOklch3.x), extrapolationRatioOklch2.xx);
+        float3 extrapolatedDerivedLUTColorChangeOffset3 = derivedLUTColorChangeOffset3 * extrapolationRatio;
+        float3 derivedLUTColorExtrap3 = derivedLUTColor + extrapolatedDerivedLUTColorChangeOffset3;
+#if 0
+        extrapolatedDerivedLUTColor.y = derivedLUTColorExtrap3.y;
+        //extrapolatedDerivedLUTColor.xy = derivedLUTColorExtrap3.xy;
+#endif
+
+        // Avoid negative chroma, as it would likely flip the hue. Theoretically this breaks the accuracy of some "LUTExtrapolationColorSpace" modes but the results would be visually bad without it.
+        //extrapolatedDerivedLUTColor.y = max(extrapolatedDerivedLUTColor.y, 0.f);
+        // Mirror hue (not sure this would be automatically done when converting back from oklch to sRGB)
+        //extrapolatedDerivedLUTColor.z = abs(extrapolatedDerivedLUTColor.z); // looks worse, hue can go negative...
+        //extrapolatedDerivedLUTColor.yz = max(extrapolatedDerivedLUTColor.yz, -3.f);
+        //extrapolatedDerivedLUTColor.yz = min(extrapolatedDerivedLUTColor.yz, 3.f);
+
+        // Keep other extrapolation luminance
+        float extrapolatedSampleLuminance = GetLuminance(extrapolatedSample);
+        
+        // Shift luminance and chroma to the extrapolated values, keep the original LUT edge hue (we can't just apply the same hue change, hue isn't really scalable).
+        // This has problems in case the LUT color was white, so basically the hue is picked at random.
+        extrapolatedSample = oklch_to_linear_srgb(extrapolatedDerivedLUTColor.xyz);
+        //extrapolatedSample = oklab_to_linear_srgb(extrapolatedDerivedLUTColor.xyz); // OKLCH_TO_LINEAR?
+        //extrapolatedSample = oklab_to_linear_srgb(float3(extrapolatedDerivedLUTColor.x, derivedLUTColor.yz)); // OKLCH_TO_LINEAR?
+  #if 0 // Looks bad without this
+        extrapolatedSample = oklch_to_linear_srgb(float3(extrapolatedDerivedLUTColor.xy, derivedLUTColor.z));
+  #endif
+        //extrapolatedSample = OKLCH_TO_LINEAR(float3(extrapolatedDerivedLUTColor.x, derivedLUTColor.yz));
+        //extrapolatedSample = OKLCH_TO_LINEAR(float3(derivedLUTColor.x, extrapolatedDerivedLUTColor.y, derivedLUTColor.z));
+        //extrapolatedSample = OKLCH_TO_LINEAR(float3(derivedLUTColor.xy, extrapolatedDerivedLUTColor.z));
+        //extrapolatedSample = abs(extrapolationRatioOklch);
+
+#if 0
+      float extrapolatedSampleLuminance2 = GetLuminance(extrapolatedSample);
+			extrapolatedSample = extrapolatedSample * lerp(1.0, max(safeDivision(extrapolatedSampleLuminance, extrapolatedSampleLuminance2, 1), 0.0), 0.5); //50%
+#endif
+      }
 		}
-		else if (settings.extrapolationQuality >= 1)
+    //TODOFT3: use Log (10?) instead of PQ?
+		else //if (settings.extrapolationQuality >= 1)
 		{
       // We always run the UV centering logic in the vanilla transfer function space (e.g. sRGB), not PQ, as all these transfer functions are reliable enough within the 0-1 range.
 			float3 centeredUV = clampedUV + (backwardsAmount * (clampedUV >= 0.5 ? -1 : 1));
 			float3 centeredSamples[3] = { clampedSample, clampedSample, clampedSample };
-			float3 centeredSamplesPQ[3] = { clampedSample_PQ, clampedSample_PQ, clampedSample_PQ };
+			float3 centeredSamples_PQ[3] = { clampedSample_PQ, clampedSample_PQ, clampedSample_PQ };
+		  const float3 clampedSample_UCS = DarktableUcs::RGBToUCSLUV(clampedSample);
+			float3 centeredSamples_UCS[3] = { clampedSample_UCS, clampedSample_UCS, clampedSample_UCS };
 
 #if 1
-      const bool secondSampleLessCentered = backwardsAmount > (0.25 + FLT_MIN);
-			float backwardsAmount_2 = secondSampleLessCentered ? (backwardsAmount / 2) : (backwardsAmount * 2); // Go in the most sensible direction
+      const bool secondSampleLessCentered = backwardsAmount > (0.25 + FLT_EPSILON);
+			const float backwardsAmount_2 = secondSampleLessCentered ? (backwardsAmount / 2) : (backwardsAmount * 2); // Go in the most sensible direction
 			float3 centeredUV_2 = clampedUV + (backwardsAmount_2 * (clampedUV >= 0.5 ? -1 : 1));
 #else // This might be more accurate, though it might be more aggressive, and fails to extrapolate properly in case the user set "backwardsAmount" was too close to "lutTexelRange", or if the LUT clipped to the max value before its edges.
       const bool secondSampleLessCentered = backwardsAmount > lutTexelRange;
-			float backwardsAmount_2 = secondSampleLessCentered ? lutTexelRange : (backwardsAmount * 2);
+			const float backwardsAmount_2 = secondSampleLessCentered ? lutTexelRange : (backwardsAmount * 2);
 			float3 centeredUV_2 = clampedUV + (backwardsAmount_2 * (clampedUV >= 0.5 ? -1 : 1));
 #endif
 			float3 centeredSamples_2[3] = { clampedSample, clampedSample, clampedSample };
-			float3 centeredSamplesPQ_2[3] = { clampedSample_PQ, clampedSample_PQ, clampedSample_PQ };
+			float3 centeredSamples_PQ_2[3] = { clampedSample_PQ, clampedSample_PQ, clampedSample_PQ };
 
       // Swap them to avoid having to write more branches below,
       // the second (2) sample is always meant to be closer to the edges (less centered).
@@ -803,44 +902,49 @@ float3 SampleLUTWithExtrapolation(LUT_TEXTURE_TYPE lut, SamplerState samplerStat
         centeredUV_2 = tempCenteredUV;
       }
 
+      float3 centeredUV_PQ = Linear_to_PQ2(ColorGradingLUTTransferFunctionOut(centeredUV, settings.transferFunctionIn, false) / PQNormalizationFactor);
+      float3 centeredUV_UCS = DarktableUcs::RGBToUCSLUV(ColorGradingLUTTransferFunctionOut(centeredUV, settings.transferFunctionIn, false));
+      float3 centeredUVs_UCS[3] = { centeredUV_UCS, centeredUV_UCS, centeredUV_UCS };
+
+      [unroll]
 			for (uint i = 0; i < 3; i++)
 			{
-				if (unclampedUV[i] != clampedUV[i])
+				if (unclampedUV[i] != clampedUV[i]) // Optional optimization to avoid taking samples that won't be used
 				{
 					float3 localCenteredUV = float3(i == 0 ? centeredUV.r : clampedUV.r, i == 1 ? centeredUV.g : clampedUV.g, i == 2 ? centeredUV.b : clampedUV.b);
 					centeredSamples[i] = SampleLUT(lut, samplerState, localCenteredUV, settings, lutOutputLinear);
-					centeredSamplesPQ[i] = Linear_to_PQ(centeredSamples[i] / PQNormalizationFactor);
+					centeredSamples_PQ[i] = Linear_to_PQ2(centeredSamples[i] / PQNormalizationFactor, 3);
+					centeredSamples_UCS[i] = DarktableUcs::RGBToUCSLUV(centeredSamples[i]);
+					centeredUVs_UCS[i] = DarktableUcs::RGBToUCSLUV(ColorGradingLUTTransferFunctionOut(localCenteredUV, settings.transferFunctionIn, false));
 
           // The highest quality takes more samples and then "averages" them later
 					if (settings.extrapolationQuality >= 2)
 					{
 						localCenteredUV = float3(i == 0 ? centeredUV_2.r : clampedUV.r, i == 1 ? centeredUV_2.g : clampedUV.g, i == 2 ? centeredUV_2.b : clampedUV.b);
 						centeredSamples_2[i] = SampleLUT(lut, samplerState, localCenteredUV, settings, lutOutputLinear);
-						centeredSamplesPQ_2[i] = Linear_to_PQ(centeredSamples_2[i] / PQNormalizationFactor);
+						centeredSamples_PQ_2[i] = Linear_to_PQ2(centeredSamples_2[i] / PQNormalizationFactor, 3);
 					}
 				}
 			}
 
-			float3 centeredUV_PQ = Linear_to_PQ(ColorGradingLUTTransferFunctionOut(centeredUV, settings.transferFunctionIn, false) / PQNormalizationFactor);
+#if 0 // OLD
       // Find the "velocity", or "rate of change" of the color.
       // This isn't simply an offset, it's an offset (the lut sample colors difference) normalized by another offset (the uv coordinates difference),
       // so it's basically the speed with which color changes at this point in the LUT.
-			float3 rgbRatioSpeed = safeDivision(clampedSample_PQ - float3(centeredSamplesPQ[0][0], centeredSamplesPQ[1][1], centeredSamplesPQ[2][2]), clampedUV_PQ - centeredUV_PQ);
+			float3 rgbRatioSpeed = safeDivision(clampedSample_PQ - float3(centeredSamples_PQ[0][0], centeredSamples_PQ[1][1], centeredSamples_PQ[2][2]), clampedUV_PQ - centeredUV_PQ);
       float3 rgbRatioAcceleration = 0;
-      // High quality: use two extrapolation samples per channel
+      // Extreme quality: use two extrapolation samples per channel
       // Note that it would be possibly to do the same thing with 3+ channels too, but further samples would have diminishing returns and not help at all in 99% of cases.
 			if (settings.extrapolationQuality >= 2)
 			{
-				float3 centeredUV_PQ_2 = Linear_to_PQ(ColorGradingLUTTransferFunctionOut(centeredUV_2, settings.transferFunctionIn, false) / PQNormalizationFactor);
-#if 0
+				float3 centeredUV_PQ_2 = Linear_to_PQ2(ColorGradingLUTTransferFunctionOut(centeredUV_2, settings.transferFunctionIn, false) / PQNormalizationFactor);
+#if 1
         // Find the acceleration of each color channel as the LUT coordinates move towards the (external) edge.
         // The second (2) sample is always more external, so it's "newer" if we consider time.
-        float3 centered2ToCenteredUVOffset = centeredUV_PQ_2 - centeredUV_PQ;
-        float3 clampedToCentered2UVOffset = clampedUV_PQ - centeredUV_PQ_2;
-			  rgbRatioSpeed = safeDivision(float3(centeredSamplesPQ_2[0][0], centeredSamplesPQ_2[1][1], centeredSamplesPQ_2[2][2]) - float3(centeredSamplesPQ[0][0], centeredSamplesPQ[1][1], centeredSamplesPQ[2][2]), centered2ToCenteredUVOffset);
-				float3 rgbRatioSpeed_2 = safeDivision(clampedSample_PQ - float3(centeredSamplesPQ_2[0][0], centeredSamplesPQ_2[1][1], centeredSamplesPQ_2[2][2]), clampedToCentered2UVOffset);
-#if 1 // Theoretically the best version, though it's very aggressive
-        rgbRatioAcceleration = safeDivision(rgbRatioSpeed_2 - rgbRatioSpeed, clampedToCentered2UVOffset - centered2ToCenteredUVOffset);
+			  rgbRatioSpeed = safeDivision(float3(centeredSamples_PQ_2[0][0], centeredSamples_PQ_2[1][1], centeredSamples_PQ_2[2][2]) - float3(centeredSamples_PQ[0][0], centeredSamples_PQ[1][1], centeredSamples_PQ[2][2]), centeredUV_PQ_2 - centeredUV_PQ);
+				float3 rgbRatioSpeed_2 = safeDivision(clampedSample_PQ - float3(centeredSamples_PQ_2[0][0], centeredSamples_PQ_2[1][1], centeredSamples_PQ_2[2][2]), clampedUV_PQ - centeredUV_PQ_2);
+#if 1 // Theoretically the best version, though it's very aggressive //TODOFT4
+        rgbRatioAcceleration = safeDivision(rgbRatioSpeed_2 - rgbRatioSpeed, abs(clampedUV_PQ - centeredUV_PQ) / 1.0);
         rgbRatioSpeed = rgbRatioSpeed_2; // Set the latest velocity we found as the final velocity (this is the velocity we'll start from at the edge of the LUT, before adding acceleration)
 #elif 0
         // Make an approximate prediction of what the next speed will be, based on the previous two samples (this doesn't consider for how long we travelled at that speed)
@@ -851,15 +955,15 @@ float3 SampleLUTWithExtrapolation(LUT_TEXTURE_TYPE lut, SamplerState samplerStat
 #endif
 #else // Smoother fallback case that doesn't use acceleration
         // Find the mid point between the two centered samples we had, to smooth out any inconsistencies and have a result that is closer to what would be expected by the ratio of change around the LUT edges.
-        float3 centeredSamplesPQAverage = lerp(float3(centeredSamplesPQ[0][0], centeredSamplesPQ[1][1], centeredSamplesPQ[2][2]), float3(centeredSamplesPQ_2[0][0], centeredSamplesPQ_2[1][1], centeredSamplesPQ_2[2][2]), 0.5);
+        float3 centeredSamples_PQAverage = lerp(float3(centeredSamples_PQ[0][0], centeredSamples_PQ[1][1], centeredSamples_PQ[2][2]), float3(centeredSamples_PQ_2[0][0], centeredSamples_PQ_2[1][1], centeredSamples_PQ_2[2][2]), 0.5);
         float3 centeredUV_PQAverage = lerp(centeredUV_PQ, centeredUV_PQ_2, 0.5);
-				rgbRatioSpeed = safeDivision(clampedSample_PQ - centeredSamplesPQAverage, clampedUV_PQ - centeredUV_PQAverage);
+				rgbRatioSpeed = safeDivision(clampedSample_PQ - centeredSamples_PQAverage, clampedUV_PQ - centeredUV_PQAverage);
 #endif
 			}
       
       // Find the actual extrapolation "time", we'll travel away from the LUT edge for this "duration"
 			float3 extrapolationRatio = unclampedTonemappedUV_PQ - clampedUV_PQ;
-
+      
       // Calculate the final extrapolation offset (a "distance") from "speed" and "time"
 			float3 extrapolatedOffset = rgbRatioSpeed * extrapolationRatio;
       // Higher quality modes use "acceleration" as opposed to "speed" only
@@ -868,23 +972,158 @@ float3 SampleLUTWithExtrapolation(LUT_TEXTURE_TYPE lut, SamplerState samplerStat
         // We are using the basic "distance from acceleration" formula "(v*t) + (0.5*a*t*t)".
         extrapolatedOffset = (rgbRatioSpeed * extrapolationRatio) + (0.5 * rgbRatioAcceleration * extrapolationRatio * extrapolationRatio);
       }
-			extrapolatedSample = PQ_to_Linear(clampedSample_PQ + extrapolatedOffset, 3) * PQNormalizationFactor;
+#else //TODOFT4: new rgb method...
+			float3 rgbRatioSpeeds[3];
+      [unroll]
+			for (uint i = 0; i < 3; i++)
+			{
+		    rgbRatioSpeeds[i] = safeDivision(clampedSample_PQ - centeredSamples_PQ[i], clampedUV_PQ[i] - centeredUV_PQ[i]);
+      }
+      float3 rgbRatioAccelerations[3] = { float3(0, 0, 0), float3(0, 0, 0), float3(0, 0, 0) };
+      if (settings.extrapolationQuality >= 2)
+      {
+        float3 centeredUV_PQ_2 = Linear_to_PQ2(ColorGradingLUTTransferFunctionOut(centeredUV_2, settings.transferFunctionIn, false) / PQNormalizationFactor);
+        [unroll]
+			  for (uint i = 0; i < 3; i++)
+			  {
+		      float3 rgbRatioSpeed_2 = safeDivision(centeredSamples_PQ_2[i] - centeredSamples_PQ[i], centeredUV_PQ_2[i] - centeredUV_PQ[i]); // "Velocity" more towards the center
+#if 0
+          rgbRatioSpeeds[i] = safeDivision(clampedSample_PQ - centeredSamples_PQ_2[i], clampedUV_PQ[i] - centeredUV_PQ_2[i]); // "Velocity" more towards the edge
+
+          if (LumaSettings.DevSetting05 <= 0.25) // Wrong
+            rgbRatioAccelerations[i] = safeDivision(rgbRatioSpeeds[i] - rgbRatioSpeed_2, abs(clampedUV_PQ[i] - centeredUV_PQ[i]) / 1.0); //TODOFT: / 2? Abs()?
+          else if (LumaSettings.DevSetting05 <= 0.5)
+            rgbRatioAccelerations[i] = safeDivision(rgbRatioSpeeds[i] - rgbRatioSpeed_2, abs(clampedUV_PQ[i] - centeredUV_PQ[i]) / 2.0);
+          else if (LumaSettings.DevSetting05 <= 0.75) // Looks best with proper ACC branch
+            rgbRatioAccelerations[i] = safeDivision(rgbRatioSpeeds[i] - rgbRatioSpeed_2, (clampedUV_PQ[i] - centeredUV_PQ[i]) / 2.0);
+          else // Looks best with bad ACC branch
+            rgbRatioAccelerations[i] = safeDivision(rgbRatioSpeeds[i] - rgbRatioSpeed_2, clampedUV_PQ[i] - centeredUV_PQ[i]);
+#elif 0
+				  rgbRatioSpeeds[i] = lerp(rgbRatioSpeed_2, rgbRatioSpeeds[i], 0.5);
+#else
+				  rgbRatioSpeeds[i] = rgbRatioSpeeds[i] + (rgbRatioSpeeds[i] - rgbRatioSpeed_2);
+#endif
+        }
+      }
+      
+			float3 extrapolationRatio = unclampedTonemappedUV_PQ - clampedUV_PQ;
+#if 0 // Bad test!!!? Testing what?
+      const float3 centeringNormal = normalize(unclampedUV - clampedUV);
+      const float3 centeringNormalAbs = abs(centeringNormal);
+      const float3 centeringVectorAbs = abs(unclampedUV - clampedUV); //NOTE: to be tonemapped?
+      float extrapolationRatioLength = length(extrapolationRatio);
+      //extrapolationRatio = centeringVectorAbs / (centeringVectorAbs.x + centeringVectorAbs.y + centeringVectorAbs.z);
+      extrapolationRatio = centeringNormalAbs * (length(extrapolationRatio) / length(centeringNormalAbs)) * sign(unclampedUV - clampedUV);
+#endif
+
+			float3 extrapolatedOffset = (rgbRatioSpeeds[0] * extrapolationRatio[0]) + (rgbRatioSpeeds[1] * extrapolationRatio[1]) + (rgbRatioSpeeds[2] * extrapolationRatio[2]);
+      //extrapolatedOffset *= extrapolationRatioLength;
+      if (settings.extrapolationQuality >= 2)
+			{
+#if 1
+        extrapolatedOffset =  (rgbRatioSpeeds[0] * extrapolationRatio[0]) + (0.5 * rgbRatioAccelerations[0] * extrapolationRatio[0] * extrapolationRatio[0])
+                            + (rgbRatioSpeeds[1] * extrapolationRatio[1]) + (0.5 * rgbRatioAccelerations[1] * extrapolationRatio[1] * extrapolationRatio[1])
+                            + (rgbRatioSpeeds[2] * extrapolationRatio[2]) + (0.5 * rgbRatioAccelerations[2] * extrapolationRatio[2] * extrapolationRatio[2]);
+#else
+        extrapolatedOffset =  (rgbRatioSpeeds[0] * extrapolationRatio[0]) + (rgbRatioAccelerations[0] * extrapolationRatio[0] * extrapolationRatio[0])
+                            + (rgbRatioSpeeds[1] * extrapolationRatio[1]) + (rgbRatioAccelerations[1] * extrapolationRatio[1] * extrapolationRatio[0])
+                            + (rgbRatioSpeeds[2] * extrapolationRatio[2]) + (rgbRatioAccelerations[2] * extrapolationRatio[2] * extrapolationRatio[0]);
+#endif
+      }
+#endif
+
+      //TODOFT: why is the LUT extrapolation debug preview running on top of the last LUT square?
+
+      //return (extrapolatedOffset) * 5;
+
+			extrapolatedSample = PQ_to_Linear2(clampedSample_PQ + extrapolatedOffset, 3) * PQNormalizationFactor;
+      
+#if DEVELOPMENT && 1
+    bool oklab = LumaSettings.DevSetting06 >= 0.5;
+#else
+    bool oklab = false;
+#endif
+      if (oklab)
+      {
+#define USE_LENGTH 1
+#define USE_PQ 0
+
+        [unroll]
+        for (uint i = 0; i < 3; i++)
+        {
+          float3 numerator = clampedSample_UCS - centeredSamples_UCS[i];
+#if USE_LENGTH
+          float divisor = length(clampedUV_UCS.yz - centeredUVs_UCS[i].yz);
+#else
+          float divisor = (abs(clampedUV_UCS.y - centeredUVs_UCS[i].y) + abs(clampedUV_UCS.z - centeredUVs_UCS[i].z)) * 0.5;
+#endif
+          rgbRatioSpeeds[i] = safeDivision(numerator, divisor); // This doesn't even need safe div
+#if USE_PQ
+          rgbRatioSpeeds[i] = safeDivision(numerator, abs(clampedUV_PQ[i] - centeredUV_PQ[i]));
+#endif
+        }
+        
+#if USE_LENGTH
+        float extrapolationRatioUCS = length(unclampedTonemappedUV_UCS.yz - clampedUV_UCS.yz);
+#else
+        float extrapolationRatioUCS = (abs(unclampedTonemappedUV_UCS.y - clampedUV_UCS.y) + abs(unclampedTonemappedUV_UCS.z - clampedUV_UCS.z)) * 0.5;
+#endif
+#if USE_PQ
+        extrapolationRatioUCS = length(unclampedTonemappedUV_PQ - clampedUV_PQ);
+#endif
+
+        extrapolationRatio = abs(extrapolationRatio); // This one is worse (more broken gradients), I can't explain why (what about with the last changes!???)
+        if (LumaSettings.DevSetting05 > 0.5) // Seems to look better even if it makes little sense
+        {
+          //float3 unclampedUV_PQ = Linear_to_PQ2(neutralLUTColorLinear / PQNormalizationFactor, 3);
+          //const float3 centeringNormal = normalize(unclampedUV_PQ - clampedUV_PQ);
+          const float3 centeringVectorAbs = abs(unclampedUV - clampedUV);
+          extrapolationRatio = centeringVectorAbs;
+          //return (extrapolationRatio - centeringVectorAbs) * 100;
+        }
+
+        extrapolationRatio /= extrapolationRatio.x + extrapolationRatio.y + extrapolationRatio.z;
+        //extrapolationRatio = normalize(extrapolationRatio);
+
+        extrapolatedOffset = (rgbRatioSpeeds[0] * extrapolationRatio[0]) + (rgbRatioSpeeds[1] * extrapolationRatio[1]) + (rgbRatioSpeeds[2] * extrapolationRatio[2]);
+        //extrapolatedOffset *= extrapolationRatioUCS * (1.0 - LumaSettings.DevSetting05);
+        extrapolatedOffset *= extrapolationRatioUCS;
+        //extrapolatedOffset = clamp(extrapolatedOffset, -3, 3);
+        // We exclusively extrapolate the color (hue and chroma) in UCS; we can't extrapolate the luminance for two major reasons:
+        // - LStar, the brightness component of UCS is not directly perceptual (e.g. doubling its value doesn't match double perceived brightness), in fact, it's very far from it, its whole range is 0 to ~2.1, with 2.1 representing infinite brightness, so we can't do velocity operations with it, without massive math
+        // - We find the color change on each channel (axis) before then extrapolating the color change in the target direction. To do so, we need to find the color velocity ratio on each axis. The "luminance" might not
+        //   be relevant at all, because if the green channel was turned into red by the LUT, the luminance would be completely different and not comparable. Also we compare the ratio between the "backwards"/"centered" samples and the target UV one, but they are in completely different directions, so neither the luminance or their chroma/hue can be compared, if not for a generic chroma length test.
+        const float3 extrapolatedSample_PQ = extrapolatedSample;
+        extrapolatedSample = DarktableUcs::UCSLUVToRGB(float3(clampedSample_UCS.x, clampedSample_UCS.yz + extrapolatedOffset.yz));
+        extrapolatedSample = RestoreLuminance(extrapolatedSample, extrapolatedSample_PQ); //TODOFT: this creates some broken gradients?
+      }
 		}
+#pragma warning( disable : 4000 )
 
     // Apply the inverse of the original tonemap ratio on the new out of range values (this time they are not necessary out the values beyond 0-1, but the values beyond the clamped/vanilla sample).
     // We don't directly apply the inverse tonemapper formula here as that would make no sense.
-#if 1 // Optional optimization in case "inputTonemapToPeakWhiteNits" was static (or not...)
-		if (settings.inputTonemapToPeakWhiteNits > 0)
-#endif
+		if (settings.inputTonemapToPeakWhiteNits > 0) // Optional optimization in case "inputTonemapToPeakWhiteNits" was static (or not...)
 		{
-#if 0
+#if 1 //TODOFT: fix text and polish code
       // Try to (partially) consider the new ratio for colors beyond 1, comparing the pre and post LUT (extrapolation) values.
       // For example, if after LUT extrapolation red has been massively compressed, we wouldn't want to apply the inverse of the original tonemapper up to a 100%, or red might go too bright again.
+      // Given that we might be extrapolating on the direction of one channel only (as in, the only UV that was beyond 0-1 was the red channel), but that the extrapolation from a single channel direction
+      // can actually change all 3 color channels, we can't adjust the tonemapping restoration by channel, and we are forced to do it by length.
       // Given this is about ratios and perception, it might arguably be better done in PQ space, but given the original tonemapper above was done in linear, for the sake of simplicity we also do this in linear.
-			float3 extrapolationRatio = safeDivision(extrapolatedSample - clampedSample, neutralLUTColorLinearTonemapped - saturate(neutralLUTColorLinearTonemapped), 1);
-      // To avoid too crazy results, we limit the min/max influence the extrapolation can have on the tonemap restoration. The higher the value, the more accurate and tolerant the results (theoretically, in reality they might cause outlier values).
+#if 1 // 1D path (length) for per max channel tonemapper
+			//float extrapolationRatio = safeDivision(length(Linear_to_PQ2(extrapolatedSample / PQNormalizationFactor, 3) - clampedSample_PQ), length(unclampedTonemappedUV_PQ - saturate(unclampedTonemappedUV_PQ)), 0);
+			float extrapolationRatio = safeDivision(length(extrapolatedSample - clampedSample), length(neutralLUTColorLinearTonemapped - saturate(neutralLUTColorLinearTonemapped)), 0);
+#else // Per channel path for per channel tonemapper
+			float3 extrapolationRatio = safeDivision(extrapolatedSample - clampedSample, neutralLUTColorLinearTonemapped - saturate(neutralLUTColorLinearTonemapped), 0); // This is the broken one
+#endif
+#if 0
+      // To avoid too crazy results, we limit the min/max influence the extrapolation can have on the tonemap restoration (at 1, it won't have any influence). The higher the value, the more accurate and tolerant the results (theoretically, in reality they might cause outlier values).
       static const float maxExtrapolationInfluence = 2.5; // Note: expose parameter if needed
 			extrapolatedSample = clampedSample + ((extrapolatedSample - clampedSample) * lerp(1, neutralLUTColorLinearTonemappedRestoreRatio, clamp(extrapolationRatio, 1.0 / maxExtrapolationInfluence, maxExtrapolationInfluence)));
+#else
+			//extrapolatedSample = clampedSample + ((extrapolatedSample - clampedSample) * lerp(1, neutralLUTColorLinearTonemappedRestoreRatio, abs(extrapolationRatio)));
+			extrapolatedSample = clampedSample + ((extrapolatedSample - clampedSample) * lerp(1, neutralLUTColorLinearTonemappedRestoreRatio, max(extrapolationRatio, 0)));
+#endif
 #else // Simpler and faster implementation that doesn't account for the LUT extrapolation ratio of change when applying the inverse of the original tonemap ratio.
 			extrapolatedSample = clampedSample + ((extrapolatedSample - clampedSample) * neutralLUTColorLinearTonemappedRestoreRatio);
 #endif
@@ -895,39 +1134,21 @@ float3 SampleLUTWithExtrapolation(LUT_TEXTURE_TYPE lut, SamplerState samplerStat
 		{
 #if 1
       // Restore the extrapolated sample luminance onto the clamped sample, so we keep the clamped hue and saturation while maintaining the extrapolated luminance.
-      float extrapolatedSampleLuminance = GetLuminance(extrapolatedSample);
-      float clampedSampleLuminance = GetLuminance(clampedSample);
-      float3 extrapolatedClampedSample = clampedSample * max(safeDivision(extrapolatedSampleLuminance, clampedSampleLuminance, 1), 0.0);
+      float3 extrapolatedClampedSample = RestoreLuminance(clampedSample, extrapolatedSample);
 #else // Disabled as this can have random results
-      float3 unclampedUV_PQ = Linear_to_PQ(neutralLUTColorLinear / PQNormalizationFactor, 3); // "neutralLUTColorLinear" is equal to "ColorGradingLUTTransferFunctionOut(unclampedUV, settings.transferFunctionIn, true)"
+      float3 unclampedUV_PQ = Linear_to_PQ2(neutralLUTColorLinear / PQNormalizationFactor, 3); // "neutralLUTColorLinear" is equal to "ColorGradingLUTTransferFunctionOut(unclampedUV, settings.transferFunctionIn, true)"
 			float3 extrapolationRatio = unclampedUV_PQ - clampedUV_PQ;
       // Restore the original unclamped color offset on the clamped sample in PQ space (so it's more perceptually accurate).
       // Note that this will cause hue shifts and possibly very random results, it only works on neutral LUTs.
       // This code is not far from "neutralLUTRestorationAmount".
       // Near black we opt for a sum as opposed to a multiplication, to avoid failing to restore the ratio when the source number is zero.
-			float3 extrapolatedClampedSample = PQ_to_Linear(lerp(clampedSample_PQ + extrapolationRatio, clampedSample_PQ * (1.0 + extrapolationRatio), saturate(abs(clampedSample_PQ))), 3) * PQNormalizationFactor;
+			float3 extrapolatedClampedSample = PQ_to_Linear2(lerp(clampedSample_PQ + extrapolationRatio, clampedSample_PQ * (1.0 + extrapolationRatio), saturate(abs(clampedSample_PQ))), 3) * PQNormalizationFactor;
 #endif
 			extrapolatedSample = lerp(extrapolatedSample, extrapolatedClampedSample, settings.clampedLUTRestorationAmount);
 		}
-    
-#if 0 // Moved outside of the LUT extrapolation path to apply on all LUT samples, thus avoiding breaking gradients.
-    // See the setting description for more information
-		if (settings.vanillaLUTRestorationAmount > 0)
-		{
-			// This is more conservative of Vanilla (e.g. SDR) and can prevent some unexpected extrapolated colors, but it also looks more flat (desaturated).
-			float3 vanillaSample = SampleLUT(lut, samplerState, saturate(neutralVanillaColorTransferFunctionEncoded), settings, lutOutputLinear, true, saturate(neutralVanillaColorLinear));
-      float extrapolatedSampleLuminance = GetLuminance(extrapolatedSample);
-      float vanillaSampleLuminance = GetLuminance(clampedSample);
-			float3 extrapolatedVanillaSample = vanillaSample * max(safeDivision(extrapolatedSampleLuminance, vanillaSampleLuminance, 1), 0.0);
-			// To avoid this causing incontiguous gradients (because it's only done in the active extrapolation branch),
-      // we only do it for colors that move away "enough" from the LUT range (0-1).
-      // Theoretically we could just run the vanilla LUT restoration in the non extrapolation branch too, but that would likely look lame.
-			extrapolatedSample = lerp(extrapolatedSample, extrapolatedVanillaSample, settings.vanillaLUTRestorationAmount * saturate(abs(extrapolatedSample - clampedSample) / MidGray)); // Note: parametrize the "MidGray" divisor if needed 
-		}
-#endif
 
 		// We can optionally leave or fix negative luminances colors here in case they were generated by the extrapolation, everything works by channel in Prey, not much is done by luminance, so this isn't needed until proven otherwise
-		if (settings.fixExtrapolationInvalidColors) //TODOFT4: test more: does this reduce HDR colors!?
+		if (settings.fixExtrapolationInvalidColors) //TODOFT4: test more: does this reduce HDR colors!? It seems fine?
 		{
       FixColorGradingLUTNegativeLuminance(extrapolatedSample);
 		}
@@ -956,14 +1177,19 @@ float3 SampleLUTWithExtrapolation(LUT_TEXTURE_TYPE lut, SamplerState samplerStat
   // See the setting description for more information
 	if (settings.vanillaLUTRestorationAmount > 0)
 	{
-    // Note that if the vanilla game had UNORM8 LUTs but for our mod they were modified to be FLOAT16, then maybe we'd want to saturate "vanillaSample", but it's not really needed until proved otherwise
+    // Note that if the vanilla game had UNORM8 LUTs but for our mod they were modified to be FLOAT16, then maybe we'd want to saturate() "vanillaSample", but it's not really needed until proved otherwise
 		float3 vanillaSample = SampleLUT(lut, samplerState, saturate(neutralVanillaColorTransferFunctionEncoded), settings, true, true, saturate(neutralVanillaColorLinear));
     if (!lutOutputLinear)
     {
 			outputSample = ColorGradingLUTTransferFunctionOut(outputSample, settings.transferFunctionIn, true);
       lutOutputLinear = true;
     }
+#if 1 // Advanced hue restoration
     outputSample = RestoreHue(outputSample, vanillaSample, settings.vanillaLUTRestorationAmount);
+#else // Restoration by luminance
+		float3 extrapolatedVanillaSample = RestoreLuminance(vanillaSample, outputSample);
+		outputSample = lerp(outputSample, extrapolatedVanillaSample, settings.vanillaLUTRestorationAmount);
+#endif
 	}
 
   // If the input and output transfer functions are different, this will perform a transfer function correction (e.g. the typical SDR gamma mismatch: game encoded with gamma sRGB and was decode with gamma 2.2).
@@ -983,7 +1209,7 @@ float3 SampleLUTWithExtrapolation(LUT_TEXTURE_TYPE lut, SamplerState samplerStat
 		  outputSample.xyz = ColorGradingLUTTransferFunctionIn(outputSample.xyz, settings.transferFunctionIn, true);
       ColorGradingLUTTransferFunctionInOutCorrected(outputSample.xyz, settings.transferFunctionIn, settings.transferFunctionOut, false);
 		}
-    else //TODOFT4: all "ENABLE_GAMMA_CORRECTION", "POST_PROCESS_SPACE_TYPE" "linear"... branches/defines
+    else
     {
 		  outputSample.xyz = ColorGradingLUTTransferFunctionIn(outputSample.xyz, settings.transferFunctionOut, true);
     }
@@ -1046,7 +1272,7 @@ float3 DrawLUTTexture(LUT_TEXTURE_TYPE lut, SamplerState samplerState, float2 Pi
     LUTCoordinates *= LUTSizeMultiplier;
     LUTCoordinates -= (LUTSizeMultiplier - 1.f) / 2.f;
 #if ENABLE_LUT_EXTRAPOLATION && TEST_LUT_EXTRAPOLATION
-    if (any(LUTCoordinates < -FLT_MIN) || any(LUTCoordinates > 1.f + FLT_MIN))
+    if (any(LUTCoordinates < -FLT_MIN) || any(LUTCoordinates > 1.f + FLT_EPSILON))
     {
 		  return 0;
     }
@@ -1059,9 +1285,14 @@ float3 DrawLUTTexture(LUT_TEXTURE_TYPE lut, SamplerState samplerState, float2 Pi
     extrapolationSettings.enableExtrapolation = bool(ENABLE_LUT_EXTRAPOLATION);
     extrapolationSettings.extrapolationQuality = LUT_EXTRAPOLATION_QUALITY;
 #if 1 // These match the settings defined in "HDRFinalScenePS" (in case you wanted to preview them)
-    extrapolationSettings.inputTonemapToPeakWhiteNits = 1000.0;
-    extrapolationSettings.clampedLUTRestorationAmount = 1.0 / 4.0;
-    extrapolationSettings.vanillaLUTRestorationAmount = 1.0 / 3.0;
+    //extrapolationSettings.inputTonemapToPeakWhiteNits = 1000.0;
+    extrapolationSettings.inputTonemapToPeakWhiteNits = 10000 * LumaSettings.DevSetting01;
+    //extrapolationSettings.clampedLUTRestorationAmount = 1.0 / 4.0;
+    //extrapolationSettings.vanillaLUTRestorationAmount = 1.0 / 3.0;
+    
+    extrapolationSettings.extrapolationQuality = LumaSettings.DevSetting03 * 2.99; //TODOFT
+    extrapolationSettings.backwardsAmount = LumaSettings.DevSetting04;
+    //if (extrapolationSettings.extrapolationQuality >= 2) extrapolationSettings.backwardsAmount = 2.0 / 3.0;
 #endif
     extrapolationSettings.inputLinear = false;
     extrapolationSettings.lutInputLinear = false;

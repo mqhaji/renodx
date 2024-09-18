@@ -82,4 +82,4 @@ float3 Tonemap_DICE(float3 color, float peakWhite, float paperWhite = 1.0)
 	return DICETonemap(color * paperWhite, peakWhite, settings);
 }
 
-#endif  // SRC_TONEMAP_HLSL
+#endif // SRC_TONEMAP_HLSL
