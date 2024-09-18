@@ -179,7 +179,20 @@ namespace DarktableUcs
 
   namespace xyYTo
   {
-    // Simplified version
+    // Simplified version (no white level adjustments)
+    float3 LUV
+    (
+      const s_xyY xyY
+    )
+    {
+      float LStar = YTo::LStar(xyY.Y);
+
+      float2 UVStarPrime = xyTo::UV(xyY.xy);
+
+      return float3(LStar, UVStarPrime);
+    }
+
+    // Simplified version (no white level adjustments)
     float3 LCH
     (
       const s_xyY xyY
@@ -239,6 +252,23 @@ namespace DarktableUcs
       return float3(J, C, H);
     }
   } //xyYTo
+
+  namespace LUVTo
+  {
+    s_xyY xyY
+    (
+      const float3 LUV
+    )
+    {
+      s_xyY xyY;
+
+      xyY.xy = UVTo::xy(LUV.yz);
+
+      xyY.Y = LStarTo::Y(LUV[0]);
+
+      return xyY;
+    }
+  } //LUVTo
   
   namespace LCHTo
   {
@@ -303,31 +333,46 @@ namespace DarktableUcs
   
   // scRGB/BT.709
   // Paper white is expected to not have been multiplied in yet
-  float3 RGBToUCS(float3 rgb, float paperWhite = ITU_WhiteLevelNits / sRGB_WhiteLevelNits)
+  float3 RGBToUCSLCH(float3 rgb, float paperWhite = ITU_WhiteLevelNits / sRGB_WhiteLevelNits)
   {
     float3 XYZ = CieXYZ::RGBTo::XZY(rgb);
     s_xyY xyY = CieXYZ::XYZTo::xyY(XYZ);
 #if 1
-    float3 JCH = xyYTo::JCH(xyY, paperWhite);
-    return JCH;
+    float3 UCSLCH = xyYTo::JCH(xyY, paperWhite);
 #else // Simplified implementation
     xyY.Y /= paperWhite;
-    float3 LCH = xyYTo::LCH(xyY);
-    return LCH;
+    float3 UCSLCH = xyYTo::LCH(xyY);
 #endif
+    return UCSLCH;
   }
 
   // scRGB/BT.709
-  float3 UCSToRGB(float3 UCS, float paperWhite = ITU_WhiteLevelNits / sRGB_WhiteLevelNits)
+  float3 UCSLCHToRGB(float3 UCSLCH, float paperWhite = ITU_WhiteLevelNits / sRGB_WhiteLevelNits)
   {
 #if 1
-    float3 JCH = UCS;
-    s_xyY xyY = JCHTo::xyY(JCH, paperWhite);
+    s_xyY xyY = JCHTo::xyY(UCSLCH, paperWhite);
 #else // Simplified implementation
-    float3 LCH = UCS;
-    s_xyY xyY = LCHTo::xyY(LCH);
+    s_xyY xyY = LCHTo::xyY(UCSLCH);
     xyY.Y *= paperWhite;
 #endif
+    float3 XYZ = CieXYZ::xyYTo::XYZ(xyY);
+    float3 rgb = CieXYZ::XYZTo::RGB(XYZ);
+    return rgb;
+  }
+
+  // scRGB/BT.709
+  float3 RGBToUCSLUV(float3 rgb)
+  {
+    float3 XYZ = CieXYZ::RGBTo::XZY(rgb);
+    s_xyY xyY = CieXYZ::XYZTo::xyY(XYZ);
+    float3 JCH = xyYTo::LUV(xyY);
+    return JCH;
+  }
+
+  // scRGB/BT.709
+  float3 UCSLUVToRGB(float3 UCSLUV)
+  {
+    s_xyY xyY = LUVTo::xyY(UCSLUV);
     float3 XYZ = CieXYZ::xyYTo::XYZ(xyY);
     float3 rgb = CieXYZ::XYZTo::RGB(XYZ);
     return rgb;
