@@ -1,6 +1,6 @@
 #include "./shared.h"
-// #include "./include/ColorGradingLUT.hlsl"
-#include "./include/DICE.hlsl"
+#include "./include/ColorGradingLUT.hlsl"
+// #include "./DICE.hlsl"
 
 // ---- Created with 3Dmigoto v1.3.16 on Mon Jun 03 21:42:02 2024
 
@@ -244,7 +244,7 @@ void main(
     r0.xyz = ro_tonemapping_finalcolorcube.SampleLevel(smp_linearclamp_s, r0.xyz, 0).xyz;
 
     r0.xyz = lerp(vanillaColor, r0.xyz, injectedData.colorGradeLUTStrength);
-  } else if (injectedData.toneMapType >= 2) {  // DICE
+  } else {
     float colorGradeHighlights = 1.08f;
     float colorGradeShadows = 1.14f;
     float colorGradeContrast = 1.15f;
@@ -252,10 +252,10 @@ void main(
     untonemapped = renodx::color::grade::UserColorGrading(
         untonemapped,
         1.f,
-        injectedData.colorGradeHighlights,
-        injectedData.colorGradeShadows,
-        injectedData.colorGradeContrast,
-        injectedData.colorGradeSaturation,
+        injectedData.colorGradeHighlights * colorGradeHighlights,
+        injectedData.colorGradeShadows * colorGradeShadows,
+        injectedData.colorGradeContrast * colorGradeContrast,
+        injectedData.colorGradeSaturation * colorGradeSaturation,
         injectedData.colorGradeBlowout,
         injectedData.toneMapHueCorrection,
         vanillaColor);
@@ -311,11 +311,32 @@ void main(
 
     // r0.xyz = lerp(untonemapped, outputColor, injectedData.colorGradeLUTStrength);
 
-    r0.xyz = untonemapped;
-  } else {
-    r0.xyz = untonemapped;
+
+    r0.xyz = SampleLUTWithExtrapolation(
+        ro_tonemapping_finalcolorcube,        // lut
+        smp_linearclamp_s,                    // samplerState
+        untonemapped,                         // neutralColor
+        true,                                 // inputLinear
+        true,                                 // lutInputLinear
+        true,                                 // lutOutputLinear
+        true,                                 // outputLinear
+        false,                                // gammaCorrectionInput
+        false,                                // gammaCorrectionOutput
+        true,                                 // lutExtrapolation
+        32                                    // lutSize
+    );
+
+    r0.xyz = lerp(untonemapped, r0.xyz, injectedData.colorGradeLUTStrength);
+
+    if (injectedData.toneMapType == 2) {
+      const float paperWhite = injectedData.toneMapGameNits / renodx::color::srgb::REFERENCE_WHITE;
+      r0.xyz *= paperWhite;
+      const float peakWhite = injectedData.toneMapPeakNits / renodx::color::srgb::REFERENCE_WHITE;
+      const float highlightsShoulderStart = paperWhite;
+      r0.xyz = renodx::tonemap::dice::BT709(r0.xyz, peakWhite, highlightsShoulderStart);
+      r0.xyz /= paperWhite;
+    }
   }
-  // r0.xyz = lerp(tonemapped, r0.xyz, injectedData.colorGradeLUTStrength);
 
   r0.xyz = cb_env_tonemapping_gamma_brightness.yyy * r0.xyz;
   o0.xyz = sign(r0.xyz) * pow(abs(r0.xyz), cb_env_tonemapping_gamma_brightness.xxx);

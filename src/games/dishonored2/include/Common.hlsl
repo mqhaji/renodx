@@ -1,46 +1,150 @@
 #ifndef SRC_COMMON_HLSL
 #define SRC_COMMON_HLSL
 
-// Silence pow(x, n) issue complaining about negative pow possibly failing
-#pragma warning( disable : 3571 )
-// Silence for loop issue where multiple int i declarations overlap each other (because hlsl doesn't have stack/scope like c++ thus variables don't pop after their scope dies)
-#pragma warning( disable : 3078 )
-
 // These should only ever be included through "Common.hlsl" and never individually
 #include "./Math.hlsl"
 #include "./Color.hlsl"
-#include "./Settings.hlsl"
 
-#define LUT_SIZE 16u
+/////////////////////////////////////////
+// Prey LUMA settings
+/////////////////////////////////////////
+
+#ifndef ENABLE_LINEAR_SPACE_POST_PROCESS
+#define ENABLE_LINEAR_SPACE_POST_PROCESS 1
+#endif
+// The LUMA mod changed LUTs textures from UNORM 8 bit to FP 16 bit, so their sRGB (scRGB) values can theoretically go negative to conserve HDR colors
+#define ENABLE_HDR_COLOR_GRADING_LUT 1
+// We changed LUT format to R16G16B16A16F so in their mixing shaders, we store them in linear space, for higher output quality and to keep output values beyond 1 (their input coordinates are still in gamma sRGB (and then need 2.2 gamma correction))
+#ifndef ENABLE_LINEAR_COLOR_GRADING_LUT
+#define ENABLE_LINEAR_COLOR_GRADING_LUT 1
+#endif
+// As many games, Prey rendered and tonemapped in linear space, though applied the sRGB gamma transfer function to apply the color grading LUT.
+// Almost all TVs follow gamma 2.2 and most monitors also do, so to mantain the SDR look (and near black level), we need to linearize with gamma 2.2 and not sRGB.
+// Disabling this will linearize with gamma sRGB, ignoring that the game would have been developed on (and for) gamma 2.2 displays.
+// Note that if "ENABLE_LINEAR_SPACE_POST_PROCESS" is off, this simply determines how gamma is linearized for intermediary operations, while everything stays in sRGB gamma when stored in textures,
+// so this would also go to determine how the final shader should linearize (if true, from 2.2, if false, from sRGB, thus causing raised blacks).
+#ifndef ENABLE_GAMMA_CORRECTION
+#define ENABLE_GAMMA_CORRECTION 1
+#endif
+// Necessary for HDR
+#ifndef ENABLE_LUT_EXTRAPOLATION
+#define ENABLE_LUT_EXTRAPOLATION 1
+#endif
+#ifndef LUT_EXTRAPOLATION_QUALITY
+//TODOFT: add more qualities?
+#define LUT_EXTRAPOLATION_QUALITY 0
+#endif
+// It's better to leave the classic LUT interpolation (bilinear/trilinear), LUTs in Prey are very close to being neutral so tetrahedral interpolation just shifts their colors without gaining much
+#define ENABLE_LUT_TETRAHEDRAL_INTERPOLATION 0
+// 0 Vanilla SDR, 1 Luma HDR (Vanilla+ Hable/DICE mix), 2 Untonemapped
+#ifndef TONEMAP_TYPE
+#define TONEMAP_TYPE 1
+#endif
+#ifndef DELAY_HDR_TONEMAP
+#define DELAY_HDR_TONEMAP 1
+#endif
+//TODOFT: delete? No, improve it
+#define ENABLE_HDR_BOOST 0
+// Especially needed if "ENABLE_LINEAR_SPACE_POST_PROCESS" is true
+#define ENABLE_HDR_SUNSHAFTS 1
+#define AUTO_HDR_VIDEOS 1
+#define DELAY_DITHERING 1
+// Do it higher than 8 bit for HDR
+#define DITHERING_BIT_DEPTH 9u
+// 0 None
+// 1 Reduce saturation and increase brightness until luminance is >= 0
+// 2 Clip negative colors (makes luminance >= 0)
+// 3 Snap to black
+#define INVALID_COLOR_GRADING_LUT_LUMINANCES_FIX_TYPE 1
+// 0 SSDO (Vanilla, CryEngine)
+// 1 GTAO (Luma)
+#define SSAO_TYPE 0
+// 0 Vanilla
+// 1 High (best balance for 2024 GPUs)
+// 2 Extreme (bad performance)
+#define SSAO_QUALITY 1
+
+//TODOFT2: fix "SpotTexArray"?
+//TODOFT2: fix GTAO
+//TODOFT2: add highlights saturation slider (desaturate is realistic, saturate is cooler)? Or try new RenoDX tonemapper
+//TODOFT1: keep LUT in gamma space for performance?
+//TODOFT: add "DEVELOPMENT" macro to skip defining all stuff???
+//TODOFT: remove CryEngine/Arkane references from source
+
+/////////////////////////////////////////
+// Rendering features toggles
+/////////////////////////////////////////
+
+//TODOFT: at the moment disabling motion bloom increases the quality of rendering as bloom is sourced from a R11G11B10F color texture and fully replaces the color buffer (even on pixel with no bloom)
+#define ENABLE_MOTION_BLUR 1
+#define ENABLE_BLOOM 1
+#define ENABLE_SSAO 1
+// Needs to be enabled from SSAO to look good
+#define ENABLE_SSAO_DENOISE 1
+// Requires TAA enabled to not look terrible
+#define ENABLE_SSAO_TEMPORAL 0
+#define ENABLE_TAA_DEJITTER 1
+// Disables all kinds of AA (SMAA, FXAA, TAA, ...)
+#define ENABLE_AA 1
+// Optional SMAA pass being run before TAA
+#define ENABLE_SMAA 0
+// Optional TAA pass being run after the optional SMAA pass
+#define ENABLE_TAA 1
+#ifndef ENABLE_COLOR_GRADING_LUT
+#define ENABLE_COLOR_GRADING_LUT 1
+#endif
+#define ENABLE_SUNSHAFTS 1
+#define ENABLE_ARK_CUSTOM_POST_PROCESS 1
+#define ENABLE_LENS_OPTICS 1
+#define ENABLE_SHARPENING 1
+#define ENABLE_CHROMATIC_ABERRATION 1
+#define ENABLE_VIGNETTE 1
+#define ENABLE_FILM_GRAIN 1
+// Disabled as we are now in HDR (10 or 16 bits)
+#define ENABLE_DITHERING 0
+// This might also disable interfaces in the 3D scene, like compute screens
+#define ENABLE_UI 1
+
+/////////////////////////////////////////
+// Debug toggles
+/////////////////////////////////////////
+
+// Test extra saturation to see if it passes through (HDR colors)
+#define TEST_HIGH_SATURATION_GAMUT 0
+#define TEST_TONEMAP_OUTPUT 0
+// 0 None
+// 1 Neutral LUT
+// 2 Neutral LUT + bypass extrapolation
+#ifndef FORCE_NEUTRAL_COLOR_GRADING_LUT_TYPE
+#define FORCE_NEUTRAL_COLOR_GRADING_LUT_TYPE 0
+#endif
+#define DRAW_LUT 1
+#define TEST_LUT_EXTRAPOLATION 0
+// Pixel scale
+//TODOFT: lower from 22 or 10 before submitting
+#define DRAW_LUT_TEXTURE_SCALE 10u
+#define TEST_TINT 0
+// Tests some alpha blends stuff
+#define TEST_UI 0
+#define TEST_MOTION_BLUR 0
+// 0 None
+// 1 Additive Bloom
+// 2 Native Bloom
+#define TEST_BLOOM_TYPE 0
+//TODOFT1: test it
+#define TEST_LENS_OPTICS 0
+#define TEST_DITHERING 0
+#define TEST_SMAA_EDGES 0
+
+#define LUT_SIZE 32u
 #define LUT_MAX (LUT_SIZE - 1u)
 
-// The aspect ratio the game was developed against, in case some effects weren't scaling properly for other aspect ratios.
-// For best results, we should consider the FOV Hor+ beyond 16:9 and Vert- below 16:9
-// (so the 16:9 image is always visible, and the aspect ratio either extends the vertical or horizontal view).
-static const float NativeAspectRatioWidth = 16.0;
-static const float NativeAspectRatioHeight = 9.0;
-static const float NativeAspectRatio = NativeAspectRatioWidth / NativeAspectRatioHeight;
-// The vertical resolution that most likely was the most used by the game developers,
-// we define this to scale up stuff that did not natively correctly scale by resolution.
-// According to the developers, the game was mostly developed on 1080p displays, and some 1440p ones, so
-// we are going for their middle point, but 1080 or 1440 would also work fine.
-static const float BaseVerticalResolution = 1260.0;
+//TODOFT: move params and set them used defined and set good defaults
+static const float GamePaperWhiteNits = ITU_WhiteLevelNits;
+static const float UIPaperWhiteNits = ITU_WhiteLevelNits;
+static const float PeakWhiteNits = 1000.0f;
 
-// Exposure multiplier for sunshafts. It's useful to shift them towards a better range for float textures to avoid banding.
-// This comes from vanilla values, it's not really meant to be changed.
-static const float SunShaftsBrightnessMultiplier = 4.0;
-// With "SUNSHAFTS_LOOK_TYPE" > 0 and "ENABLE_LENS_OPTICS_HDR", we apply exposure to sun shafts and lens optics as well.
-// Given that exposure can deviate a lot from a value of 1, to the point where it would make lens optics effects look weird, we diminish its effect on them so it's less jarring, but still applies (which is visually nicer).
-// The value should be between 0 and 1.
-static const float SunShaftsAndLensOpticsExposureAlpha = 0.25; // Anything more than 0.25 can cause sun effects to be blinding if the exposure is too high (it's pretty high in some scenes)
-
-//TODOFT: test increase?
-static const float BinkVideosAutoHDRPeakWhiteNits = 400; // Values beyond 700 will make AutoHDR look bad
-// The higher it is, the "later" highlights start
-static const float BinkVideosAutoHDRShoulderPow = 2.75; // A somewhat conservative value
-
-// Formulas that either uses 2.2 or sRGB gamma depending on a global definition.
-// Note that converting between linear and gamma space back and forth results in quality loss, especially over very high and very low values.
+// Formulas that either uses 2.2 or sRGB gamma depending on a global definition
 float3 game_gamma_to_linear_mirrored(float3 Color)
 {
 #if ENABLE_GAMMA_CORRECTION
@@ -58,114 +162,63 @@ float3 linear_to_game_gamma_mirrored(float3 Color)
 #endif
 }
 
-// Luma per pass or per frame data
-cbuffer LumaData : register(b8)
-{
-  struct
-  {
-    // If true, DLSS SR or other upscalers have already run before the game's original upscaling pass,
-    // and thus we need to work in full resolution space and not rendering resolution space.
-    uint PostEarlyUpscaling;
-    uint DummyPadding; // GPU has "32 32 32 32 | break" bits alignment on memory, so to not break the "float2" below, we need this (because we are using a unified struct).
-    // Camera jitters in UV space (rendering resolution) (not in projection matrix space, so they don't need to be divided by the rendering resolution). You might need to multiply this by 0.5 and invert the horizontal axis before using it.
-    float2 CameraJitters;
-    // Previous frame's camera jitters in UV space (relative to its own resolution).
-    float2 PreviousCameraJitters;
-    float2 RenderResolutionScale;
-    // This can be used instead of "CV_ScreenSize" in passes where "CV_ScreenSize" would have been
-    // replaced with 1 because DLSS SR upscaled the image earlier in the rendering.
-    float2 PreviousRenderResolutionScale;
-    row_major float4x4 ViewProjectionMatrix;
-    row_major float4x4 PreviousViewProjectionMatrix;
-    // Same as the one on "PostAA" "AA" but fixed to include jitters as well
-    row_major float4x4 ReprojectionMatrix;
-  } LumaData : packoffset(c0);
-}
-
-// AdvancedAutoHDR pass to generate some HDR brightess out of an SDR signal.
-// This is hue conserving and only really affects highlights.
-// "SDRColor" is meant to be in "SDR range", as in, a value of 1 matching SDR white (something between 80, 100, 203, 300 nits, or whatever else)
-// https://github.com/Filoppi/PumboAutoHDR
-float3 PumboAutoHDR(float3 SDRColor, float _PeakWhiteNits, float _PaperWhiteNits, float ShoulderPow = 2.75)
-{
-	const float SDRRatio = max(GetLuminance(SDRColor), 0.f);
-	// Limit AutoHDR brightness, it won't look good beyond a certain level.
-	// The paper white multiplier is applied later so we account for that.
-	const float AutoHDRMaxWhite = min(_PeakWhiteNits, PeakWhiteNits) / _PaperWhiteNits;
-	const float AutoHDRShoulderRatio = 1.f - max(1.f - SDRRatio, 0.f);
-	const float AutoHDRExtraRatio = pow(AutoHDRShoulderRatio, ShoulderPow) * (AutoHDRMaxWhite - 1.f);
-	const float AutoHDRTotalRatio = SDRRatio + AutoHDRExtraRatio;
-	return SDRColor * safeDivision(AutoHDRTotalRatio, SDRRatio, 1);
-}
-
 // LUMA FT: functions to convert an SDR color (optionally in gamma space) to an HDR one (optionally linear * paper white).
 // This should be used for any color that writes on the color buffer (or back buffer) from tonemapping on.
-float3 SDRToHDR(float3 Color, bool InGammaSpace = true, bool UI = false)
+float3 SDRToHDR(float3 Color, bool GammaSpace = true, bool UI = false)
 {
-  bool OutLinearSpace = bool(POST_PROCESS_SPACE_TYPE == 1) || (bool(POST_PROCESS_SPACE_TYPE >= 2) && !UI);
-  if (OutLinearSpace)
+#if ENABLE_LINEAR_SPACE_POST_PROCESS
+  if (GammaSpace)
   {
-    if (InGammaSpace)
-    {
-      Color.rgb = game_gamma_to_linear_mirrored(Color.rgb);
-    }
-    const float paperWhite = (UI ? UIPaperWhiteNits : GamePaperWhiteNits) / sRGB_WhiteLevelNits;
-    Color.rgb *= paperWhite;
+    Color.rgb = game_gamma_to_linear_mirrored(Color.rgb);
   }
-  else
+	const float paperWhite = (UI ? UIPaperWhiteNits : GamePaperWhiteNits) / sRGB_WhiteLevelNits;
+  Color.rgb *= paperWhite;
+#else // ENABLE_LINEAR_SPACE_POST_PROCESS
+  if (!GammaSpace)
   {
-    if (!InGammaSpace)
-    {
-      Color.rgb = linear_to_game_gamma_mirrored(Color.rgb);
-    }
+    Color.rgb = linear_to_game_gamma_mirrored(Color.rgb);
   }
+#endif // ENABLE_LINEAR_SPACE_POST_PROCESS
 	return Color;
 }
-float4 SDRToHDR(float4 Color, bool InGammaSpace = true, bool UI = false)
+float4 SDRToHDR(float4 Color, bool GammaSpace = true, bool FixAlpha = false, bool UI = false)
 {
-	return float4(SDRToHDR(Color.rgb, InGammaSpace, UI), Color.a);
+#if ENABLE_LINEAR_SPACE_POST_PROCESS
+  if (FixAlpha)
+  {
+    float HDRUIBlendPow = lerp(1.f, 1.f / DefaultGamma, 0.5f);
+    Color.a = pow(abs(Color.a), HDRUIBlendPow) * sign(Color.a);
+  }
+#endif // ENABLE_LINEAR_SPACE_POST_PROCESS
+	return float4(SDRToHDR(Color.rgb, GammaSpace, UI), Color.a);
 }
 
 // LUMA FT: added these functions to decode and re-encode the "back buffer" from any range to a range that roughly matched SDR linear space
-float3 EncodeBackBufferFromLinearSDRRange(float3 color, bool UI = false)
+float3 EncodeBackBufferFromLinearSDRRange(float3 color)
 {
-  bool InLinearSpace = bool(POST_PROCESS_SPACE_TYPE == 1) || (bool(POST_PROCESS_SPACE_TYPE >= 2) && !UI);
-  if (InLinearSpace)
-  {
-    const float paperWhite = GamePaperWhiteNits / sRGB_WhiteLevelNits;
-    return color * paperWhite;
-  }
-  else
-  {
-  	return linear_to_game_gamma_mirrored(color);
-  }
+#if ENABLE_LINEAR_SPACE_POST_PROCESS
+	const float paperWhite = GamePaperWhiteNits / sRGB_WhiteLevelNits;
+	return color * paperWhite;
+#else
+	return linear_to_game_gamma_mirrored(color);
+#endif
 }
-float3 DecodeBackBufferToLinearSDRRange(float3 color, bool UI = false)
+float3 DecodeBackBufferToLinearSDRRange(float3 color)
 {
-  bool InLinearSpace = bool(POST_PROCESS_SPACE_TYPE == 1) || (bool(POST_PROCESS_SPACE_TYPE >= 2) && !UI);
-  if (InLinearSpace)
-  {
-    const float paperWhite = GamePaperWhiteNits / sRGB_WhiteLevelNits;
-    return color / paperWhite;
-  }
-  else
-  {
-  	return game_gamma_to_linear_mirrored(color);
-  }
+#if ENABLE_LINEAR_SPACE_POST_PROCESS
+	const float paperWhite = GamePaperWhiteNits / sRGB_WhiteLevelNits;
+	return color / paperWhite;
+#else
+	return game_gamma_to_linear_mirrored(color);
+#endif
 }
 
 // Partially mirrors "DrawLUTTexture()".
-// PassType:
-//  0 Generic
-//  1 TAA
-bool ShouldSkipPostProcess(float2 PixelPosition, uint PassType = 0)
+bool ShouldSkipPostProcess(float2 PixelPosition)
 {
-#if TEST_MOTION_BLUR_TYPE || TEST_SMAA_EDGES
+#if TEST_MOTION_BLUR || TEST_SMAA_EDGES
   return true;
-#endif // TEST_MOTION_BLUR_TYPE || TEST_SMAA_EDGES
-#if TEST_TAA_TYPE
-  if (PassType != 1) { return true; }
-#endif // TEST_TAA_TYPE
+#endif // TEST_MOTION_BLUR || TEST_SMAA_EDGES
 #if DRAW_LUT
 	const uint LUTMinPixel = 0;
 	uint LUTMaxPixel = LUT_MAX;
@@ -177,10 +230,8 @@ bool ShouldSkipPostProcess(float2 PixelPosition, uint PassType = 0)
 	PixelScale = round(pow(PixelScale, 1.f / LUTSizeMultiplier));
 #endif // ENABLE_LUT_EXTRAPOLATION
 
-	PixelPosition -= 0.5f;
-
 	const uint LUTPixelSideSize = LUT_SIZE * LUTSizeMultiplier;
-	const uint2 LUTPixelPosition2D = round(PixelPosition / PixelScale);
+	const uint2 LUTPixelPosition2D = PixelPosition / PixelScale;
 	const uint3 LUTPixelPosition3D = uint3(LUTPixelPosition2D.x % LUTPixelSideSize, LUTPixelPosition2D.y, LUTPixelPosition2D.x / LUTPixelSideSize);
 	if (!any(LUTPixelPosition3D < LUTMinPixel) && !any(LUTPixelPosition3D > LUTMaxPixel))
 	{
@@ -194,13 +245,11 @@ void ApplyDithering(inout float3 color, float2 uv, bool gammaSpace = true, float
 {
   // LUMA FT: added in/out encoding
   color /= paperWhite;
-  float3 lastLinearColor = color;
   //TODO LUMA: use log10 gamma or HDR10 PQ, it should match human perception more accurately
   if (!gammaSpace)
   {
     color = linear_to_game_gamma_mirrored(color); // Just use the same gamma function we use across the code, to keep it simple
   }
-  float3 lastGammaColor = color;
 
   uint ditherRatio; // LUMA FT: added dither bith depth support, 8 bit might be too much for 16 bit HDR
   // Optimized (static) branches
@@ -222,53 +271,15 @@ void ApplyDithering(inout float3 color, float2 uv, bool gammaSpace = true, float
   }
 #if TEST_DITHERING
   color += rndValue;
-#else // TEST_DITHERING
+#else
   color += rndValue / ditherRatio;
-#endif // TEST_DITHERING
+#endif
 
   if (!gammaSpace)
   {
-#if HIGH_QUALITY_POST_PROCESS_SPACE_CONVERSIONS
-    color = lastLinearColor + (game_gamma_to_linear_mirrored(color) - game_gamma_to_linear_mirrored(lastGammaColor));
-#else // HIGH_QUALITY_POST_PROCESS_SPACE_CONVERSIONS
     color = game_gamma_to_linear_mirrored(color);
-#endif // HIGH_QUALITY_POST_PROCESS_SPACE_CONVERSIONS
   }
   color *= paperWhite;
 }
 
-// Fix up sharpening/blurring when done on HDR images in post processing. In SDR, the source color could only be between 0 and 1,
-// so the halos (rings) that could result from rapidly changing colors were limited, but in HDR lights can go much brighter so the halos got noticeable with default settings.
-// This should work with any "POST_PROCESS_SPACE_TYPE" setting.
-float3 FixUpSharpeningOrBlurring(float3 postSharpeningColor, float3 preSharpeningColor)
-{
-#if ENABLE_SHARPENING
-    // Either set it to 0.5, 0.75 or 1 to make results closer to SDR (this makes more sense when done in gamma space, but also works in linear space).
-    // Lower values slightly diminish the effect of sharpening, but further avoid halos issues.
-    static const float sharpeningMaxColorDifference = 0.5;
-    postSharpeningColor.rgb = clamp(postSharpeningColor.rgb, preSharpeningColor - sharpeningMaxColorDifference, preSharpeningColor + sharpeningMaxColorDifference);
-    
-#if 0 // Not necessary until proven otherwise, the whole shader code base works in r g b individually so even if we had an invalid luminance, it'd be fine (it will likely be clipped on output anyway)
-    postSharpeningColor.rgb = max(postSharpeningColor.rgb, min(preSharpeningColor.rgb, 0)); // Don't allow scRGB colors to go below the min we previously had
-#endif
-#endif // ENABLE_SHARPENING
-  	return postSharpeningColor;
-}
-
-float2 RemapUV(float2 UV, float2 sourceResolution, float2 targetResolution)
-{
-  // First remap from a "+half source texel uv offset to 1-half source texel uv offset" range to a 0-1 range, then re-map acknowleding the half target texel uv offset.
-  UV -= 0.5 / sourceResolution;
-  UV *= (sourceResolution / (sourceResolution - 1.0)) * ((targetResolution - 1.0) / targetResolution); // Unified over one line to avoid shifting the UV range too many times
-  UV += 0.5 / targetResolution;
-  return UV;
-}
-
-// "resolutionsScale" is the "direct" resolution multiplier (e.g. 0.5 means 50% rendering resolution)
-float2 RemapUVFromScale(float2 UV, float2 resolutionScale /*= CV_HPosScale.xy*/, float2 sourceResolution /*= CV_ScreenSize.xy*/)
-{
-  // Avoid "degrading" the quality if the resolution scale is 1
-  return resolutionScale == 1 ? UV : RemapUV(UV, sourceResolution, sourceResolution / resolutionScale);
-}
-
-#endif // SRC_COMMON_HLSL
+#endif  // SRC_COMMON_HLSL
