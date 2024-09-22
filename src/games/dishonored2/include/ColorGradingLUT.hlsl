@@ -595,7 +595,7 @@ float3 DrawLUTTexture(LUT_TEXTURE_TYPE lut, SamplerState samplerState, float2 Pi
     LUTCoordinates *= LUTSizeMultiplier;
     LUTCoordinates -= (LUTSizeMultiplier - 1.f) / 2.f;
 #if ENABLE_LUT_EXTRAPOLATION && TEST_LUT_EXTRAPOLATION
-    if (any(LUTCoordinates < -FLT_MIN) || any(LUTCoordinates > 1.f + FLT_EPSILON))
+    if (any(LUTCoordinates < -FLT_MIN) || any(LUTCoordinates > 1.f + FLT_MIN))
     {
 		  return 0;
     }
