@@ -5,7 +5,6 @@ static const float DefaultGamma = 2.2f;
 static const float3 Rec709_Luminance = float3( 0.2126f, 0.7152f, 0.0722f );
 static const float HDR10_MaxWhiteNits = 10000.0f;
 static const float ITU_WhiteLevelNits = 203.0f;
-static const float Rec709_WhiteLevelNits = 100.0f;
 static const float sRGB_WhiteLevelNits = 80.0f;
 
 static const float3x3 BT709_2_XYZ = float3x3
@@ -121,61 +120,30 @@ static const float PQ_constant_C1 =  0.8359375f;
 static const float PQ_constant_C2 = 18.8515625f;
 static const float PQ_constant_C3 = 18.6875f;
 
-// PQ (Perceptual Quantizer - ST.2084) encode/decode used for HDR10 BT.2100.
-// Clamp type:
-// 0 None
-// 1 Remove negative numbers
-// 2 Remove numbers beyond 0-1
-// 3 Mirror negative numbers
-float3 Linear_to_PQ(float3 LinearColor, int clampType = 0)
+// PQ (Perceptual Quantizer - ST.2084) encode/decode used for HDR10 BT.2100
+float3 Linear_to_PQ(float3 LinearColor, bool clampNegative = false)
 {
-	float3 LinearColorSign = sign(LinearColor);
-	if (clampType == 1)
-	{
-		LinearColor = max(LinearColor, 0.f);
-	}
-	else if (clampType == 2)
-	{
-		LinearColor = saturate(LinearColor);
-	}
-	else if (clampType == 3)
-	{
-		LinearColor = abs(LinearColor);
-	}
+  if (clampNegative)
+  {
+	  LinearColor = max(LinearColor, 0.f);
+  }
 	float3 colorPow = pow(LinearColor, PQ_constant_M1);
 	float3 numerator = PQ_constant_C1 + PQ_constant_C2 * colorPow;
 	float3 denominator = 1.f + PQ_constant_C3 * colorPow;
 	float3 pq = pow(numerator / denominator, PQ_constant_M2);
-	if (clampType == 3)
-	{
-		return pq * LinearColorSign;
-	}
 	return pq;
 }
 
-float3 PQ_to_Linear(float3 ST2084Color, int clampType = 0)
+float3 PQ_to_Linear(float3 ST2084Color, bool clampNegative = false)
 {
-	float3 ST2084ColorSign = sign(ST2084Color);
-	if (clampType == 1)
-	{
-		ST2084Color = max(ST2084Color, 0.f);
-	}
-	else if (clampType == 2)
-	{
-		ST2084Color = saturate(ST2084Color);
-	}
-	else if (clampType == 3)
-	{
-		ST2084Color = abs(ST2084Color);
-	}
+  if (clampNegative)
+  {
+	  ST2084Color = max(ST2084Color, 0.f);
+  }
 	float3 colorPow = pow(ST2084Color, 1.f / PQ_constant_M2);
 	float3 numerator = max(colorPow - PQ_constant_C1, 0.f);
 	float3 denominator = PQ_constant_C2 - (PQ_constant_C3 * colorPow);
 	float3 linearColor = pow(numerator / denominator, 1.f / PQ_constant_M1);
-	if (clampType == 3)
-	{
-		return linearColor * ST2084ColorSign;
-	}
 	return linearColor;
 }
 
