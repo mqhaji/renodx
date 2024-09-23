@@ -85,6 +85,19 @@ StructuredBuffer<postfx_luminance_autoexposure_t> ro_postfx_luminance_buffautoex
 // 3Dmigoto declarations
 #define cmp -
 
+float3 applyDICE(float3 inputColor) {
+    const float paperWhite = injectedData.toneMapGameNits / renodx::color::srgb::REFERENCE_WHITE;
+    const float peakWhite = injectedData.toneMapPeakNits / renodx::color::srgb::REFERENCE_WHITE;
+    const float highlightsShoulderStart = paperWhite;
+    float3 untonemapped = inputColor;
+    
+    untonemapped *= paperWhite;
+    float3 tonemapped = renodx::tonemap::dice::BT709(untonemapped, peakWhite, highlightsShoulderStart);
+    tonemapped /= paperWhite;
+
+    return tonemapped;
+}
+
 
 void main(
   float4 v0 : INTERP0,
@@ -236,84 +249,46 @@ void main(
   r2.z = r0.x / r0.y;
   // end vanilla run 2
 
-  float3 vanillaColor = r2.xyz;
-  float3 tonemapped;
-  if (injectedData.toneMapType == 0) {
-    r0.xyz = vanillaColor * float3(31,31,31) + float3(0.5,0.5,0.5);
+  float3 vanillaTonemap = r2.xyz;
+  float3 outputColor;
+  if (injectedData.toneMapType == 0) {  // Vanilla code path
+    r0.xyz = vanillaTonemap * float3(31,31,31) + float3(0.5,0.5,0.5);
     r0.xyz = float3(0.03125,0.03125,0.03125) * r0.xyz;
     r0.xyz = ro_tonemapping_finalcolorcube.SampleLevel(smp_linearclamp_s, r0.xyz, 0).xyz;
 
-    r0.xyz = lerp(vanillaColor, r0.xyz, injectedData.colorGradeLUTStrength);
-  } else {
-    float colorGradeHighlights = 1.08f;
-    float colorGradeShadows = 1.14f;
-    float colorGradeContrast = 1.15f;
-    float colorGradeSaturation = 1.1f;
+    outputColor = lerp(vanillaTonemap, r0.xyz, injectedData.colorGradeLUTStrength);
+
+  } else if (injectedData.toneMapType == 2) { // DICE
+
+    // apply color grading to vanillaTonemap so blending doesn't break sliders
+    vanillaTonemap = renodx::color::grade::UserColorGrading(
+        vanillaTonemap,
+        injectedData.colorGradeExposure,
+        1.f,                                // highlight only applies to HDR color
+        injectedData.colorGradeShadows,
+        injectedData.colorGradeContrast,
+        injectedData.colorGradeSaturation,
+        injectedData.colorGradeBlowout);
+    // declare SDR Lutted
+    float3 sdrColor = SampleLUT(ro_tonemapping_finalcolorcube, smp_linearclamp_s, vanillaTonemap, 32u);
+    sdrColor = lerp(vanillaTonemap, sdrColor, injectedData.colorGradeLUTStrength);
+
+    // make HDR tonemap resemble SDR tonemap to facilitate better blending
     untonemapped = renodx::color::grade::UserColorGrading(
         untonemapped,
-        1.f,
-        injectedData.colorGradeHighlights * colorGradeHighlights,
-        injectedData.colorGradeShadows * colorGradeShadows,
-        injectedData.colorGradeContrast * colorGradeContrast,
-        injectedData.colorGradeSaturation * colorGradeSaturation,
+        injectedData.colorGradeExposure,
+        injectedData.colorGradeHighlights * 1.08f,
+        injectedData.colorGradeShadows * 1.14f,
+        injectedData.colorGradeContrast * 1.15f,
+        injectedData.colorGradeSaturation * 1.1f,
         injectedData.colorGradeBlowout,
         injectedData.toneMapHueCorrection,
-        vanillaColor);
-
+        vanillaTonemap);
     untonemapped *= vanillaMidGray / 0.18f;
-
-    float3 intermediateColor = lerp(saturate(vanillaColor), untonemapped, saturate(vanillaColor));
-    if (injectedData.blackFloor) {
-      float3 incorrect_color = intermediateColor;
-      float3 correct_color = untonemapped;
-
-      float3 correct_lab = renodx::color::oklab::from::BT709(correct_color);
-      float3 correct_lch = renodx::color::oklch::from::OkLab(correct_lab);
-
-      float3 incorrect_lab = renodx::color::oklab::from::BT709(incorrect_color);
-      float3 incorrect_lch = renodx::color::oklch::from::OkLab(incorrect_lab);
-      incorrect_lch[0] = correct_lch[0];
-      float3 color = renodx::color::bt709::from::OkLCh(incorrect_lch);
-      untonemapped = renodx::color::bt709::clamp::AP1(color);
-
-
-      intermediateColor = lerp(saturate(untonemapped), incorrect_color, saturate(untonemapped / 0.18));
-    }
-    untonemapped = intermediateColor;
-
-    // LUTExtrapolationData extrapolationData = DefaultLUTExtrapolationData();
-    // extrapolationData.inputColor = untonemapped;
-    // extrapolationData.vanillaInputColor = vanillaColor;
-
-    // LUTExtrapolationSettings extrapolationSettings = DefaultLUTExtrapolationSettings();
-    // extrapolationSettings.lutSize = 32u;
-    // extrapolationSettings.inputLinear = true;
-    // extrapolationSettings.lutInputLinear = true;
-    // extrapolationSettings.lutOutputLinear = true;
-    // extrapolationSettings.outputLinear = true;
-    // extrapolationSettings.transferFunctionIn = LUT_EXTRAPOLATION_TRANSFER_FUNCTION_GAMMA_2_2;
-    // extrapolationSettings.transferFunctionOut = LUT_EXTRAPOLATION_TRANSFER_FUNCTION_GAMMA_2_2;
-    // extrapolationSettings.samplingQuality = 1;
-    // extrapolationSettings.neutralLUTRestorationAmount = 0;
-    // // extrapolationSettings.vanillaLUTRestorationAmount = 0;
-    // extrapolationSettings.vanillaLUTRestorationAmount = 0;
-    // extrapolationSettings.enableExtrapolation = true;
-    // extrapolationSettings.extrapolationQuality = 1;
-    // // extrapolationSettings.backwardsAmount = 0.5;
-    // extrapolationSettings.backwardsAmount = 0.5;
-    // extrapolationSettings.whiteLevelNits = Rec709_WhiteLevelNits;
-    // extrapolationSettings.inputTonemapToPeakWhiteNits = 0;
-    // extrapolationSettings.clampedLUTRestorationAmount = 0;
-    // extrapolationSettings.fixExtrapolationInvalidColors = true;
-
-
-    // float3 outputColor = SampleLUTWithExtrapolation(ro_tonemapping_finalcolorcube, smp_linearclamp_s, extrapolationData, extrapolationSettings);
-
-    // r0.xyz = lerp(untonemapped, outputColor, injectedData.colorGradeLUTStrength);
-
-
-    r0.xyz = SampleLUTWithExtrapolation(
-        ro_tonemapping_finalcolorcube,        // lut
+    
+    // apply extrapolated LUT to HDR
+    float3 hdrLUTOutput = SampleLUTWithExtrapolation(
+        ro_tonemapping_finalcolorcube,        // LUT
         smp_linearclamp_s,                    // samplerState
         untonemapped,                         // neutralColor
         true,                                 // inputLinear
@@ -325,20 +300,62 @@ void main(
         true,                                 // lutExtrapolation
         32                                    // lutSize
     );
+    hdrLUTOutput = lerp(untonemapped, hdrLUTOutput, injectedData.colorGradeLUTStrength);
 
-    r0.xyz = lerp(untonemapped, r0.xyz, injectedData.colorGradeLUTStrength);
+    // tonemap HDR Color
+    float3 hdrColor = applyDICE(hdrLUTOutput);
 
-    if (injectedData.toneMapType == 2) {
-      const float paperWhite = injectedData.toneMapGameNits / renodx::color::srgb::REFERENCE_WHITE;
-      r0.xyz *= paperWhite;
-      const float peakWhite = injectedData.toneMapPeakNits / renodx::color::srgb::REFERENCE_WHITE;
-      const float highlightsShoulderStart = paperWhite;
-      r0.xyz = renodx::tonemap::dice::BT709(r0.xyz, peakWhite, highlightsShoulderStart);
-      r0.xyz /= paperWhite;
+    // blend HDR with SDR
+    float3 negHDR = min(0, hdrColor); // save WCG
+    float3 blendedColor = lerp(saturate(sdrColor), max(0, hdrColor), saturate(sdrColor));
+    blendedColor += negHDR; // add back WCG
+
+    if (injectedData.blackFloor) {  // blend back lower black floor from hdrColor
+      float3 hdrLab = renodx::color::oklab::from::BT709(hdrColor);
+      float3 sdrLab = renodx::color::oklab::from::BT709(sdrColor);
+
+      sdrLab[0] = hdrLab[0];  // apply lightness from hdrColor to sdrColor
+
+      float3 newBlackFloor = renodx::color::bt709::from::OkLab(sdrLab);
+      float newBlackFloorLum = renodx::color::y::from::BT709(newBlackFloor);
+
+      negHDR = min(0, blendedColor); // save WCG
+      blendedColor = lerp(saturate(newBlackFloor), max(0, blendedColor), saturate(newBlackFloorLum / vanillaMidGray));
+      blendedColor += negHDR; // add back WCG
     }
+
+    outputColor = blendedColor;
+
+  } else {  // No Tonemapper
+    untonemapped = renodx::color::grade::UserColorGrading(
+        untonemapped,
+        injectedData.colorGradeExposure,
+        injectedData.colorGradeHighlights,
+        injectedData.colorGradeShadows,
+        injectedData.colorGradeContrast,
+        injectedData.colorGradeSaturation,
+        injectedData.colorGradeBlowout,
+        injectedData.toneMapHueCorrection,
+        vanillaTonemap);
+    
+    float3 hdrLUTOutput = SampleLUTWithExtrapolation(
+        ro_tonemapping_finalcolorcube,        // LUT
+        smp_linearclamp_s,                    // samplerState
+        untonemapped,                         // neutralColor
+        true,                                 // inputLinear
+        true,                                 // lutInputLinear
+        true,                                 // lutOutputLinear
+        true,                                 // outputLinear
+        false,                                // gammaCorrectionInput
+        false,                                // gammaCorrectionOutput
+        true,                                 // lutExtrapolation
+        32                                    // lutSize
+    );
+    outputColor = lerp(untonemapped, hdrLUTOutput, injectedData.colorGradeLUTStrength);
+
   }
 
-  r0.xyz = cb_env_tonemapping_gamma_brightness.yyy * r0.xyz;
+  r0.xyz = cb_env_tonemapping_gamma_brightness.yyy * outputColor;
   o0.xyz = sign(r0.xyz) * pow(abs(r0.xyz), cb_env_tonemapping_gamma_brightness.xxx);
   o0.w = 1;
   return;
