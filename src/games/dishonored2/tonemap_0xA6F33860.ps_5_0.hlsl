@@ -85,7 +85,7 @@ StructuredBuffer<postfx_luminance_autoexposure_t> ro_postfx_luminance_buffautoex
 // 3Dmigoto declarations
 #define cmp -
 
-float3 applyDICE(float3 inputColor) {
+float3 applyDICETonemap(float3 inputColor) {
     const float paperWhite = injectedData.toneMapGameNits / renodx::color::srgb::REFERENCE_WHITE;
     const float peakWhite = injectedData.toneMapPeakNits / renodx::color::srgb::REFERENCE_WHITE;
     const float highlightsShoulderStart = paperWhite;
@@ -97,6 +97,31 @@ float3 applyDICE(float3 inputColor) {
 
     return tonemapped;
 }
+
+float3 applyVanillaTonemap(float3 inputColor)
+{
+    float4 r0, r1, r2, r3;
+
+    r0.xyz = inputColor;
+
+    // Begin tonemapper calculations
+    r1.xyz = cmp(r0.xyz < cb_postfx_tonemapping_tonemappingparms.xxx);
+    r2.xyzw = r1.xxxx ? cb_postfx_tonemapping_tonemappingcoeffs0.xyzw : cb_postfx_tonemapping_tonemappingcoeffs1.xyzw;
+    r0.xw = r2.xy * r0.xx + r2.zw;
+    r2.x = r0.x / r0.w;
+
+    r3.xyzw = r1.yyyy ? cb_postfx_tonemapping_tonemappingcoeffs0.xyzw : cb_postfx_tonemapping_tonemappingcoeffs1.xyzw;
+    r0.xy = r3.xy * r0.yy + r3.zw;
+    r2.y = r0.x / r0.y;
+
+    r1.xyzw = r1.zzzz ? cb_postfx_tonemapping_tonemappingcoeffs0.xyzw : cb_postfx_tonemapping_tonemappingcoeffs1.xyzw;
+    r0.xy = r1.xy * r0.zz + r1.zw;
+    r2.z = r0.x / r0.y;
+
+    // The final tonemapped color is stored in r2.xyz
+    return r2.xyz;
+}
+
 
 
 void main(
@@ -210,58 +235,33 @@ void main(
     r0.xyz = r1.xyz * r2.xyz + r0.xyz;
   }
   r0.xyz = v0.zzz * r0.xyz; // auto exposure
-
   float3 untonemapped = r0.xyz;
 
-  r0.xyz = float3(0.18, 0.18, 0.18);
-
-  // store temp values for 2nd run of tonemapper
-  float tempR0w = r0.w;
-
-  // begin vanilla run 1
-  r1.xyz = cmp(r0.xyz < cb_postfx_tonemapping_tonemappingparms.xxx);
-  r2.xyzw = r1.xxxx ? cb_postfx_tonemapping_tonemappingcoeffs0.xyzw : cb_postfx_tonemapping_tonemappingcoeffs1.xyzw;
-  r0.xw = r2.xy * r0.xx + r2.zw;
-  r2.x = r0.x / r0.w;
-  r3.xyzw = r1.yyyy ? cb_postfx_tonemapping_tonemappingcoeffs0.xyzw : cb_postfx_tonemapping_tonemappingcoeffs1.xyzw;
-  r0.xy = r3.xy * r0.yy + r3.zw;
-  r2.y = r0.x / r0.y;
-  r1.xyzw = r1.zzzz ? cb_postfx_tonemapping_tonemappingcoeffs0.xyzw : cb_postfx_tonemapping_tonemappingcoeffs1.xyzw;
-  r0.xy = r1.xy * r0.zz + r1.zw;
-  r2.z = r0.x / r0.y;
-  // end vanilla run 1
-
-  float vanillaMidGray = renodx::color::y::from::BT709(r2.rgb);
-  // reset values for 2nd run of tonemapper
-  r0.xyz = untonemapped.rgb;
-  r0.w = tempR0w;
-
-  // begin vanilla run 2
-  r1.xyz = cmp(r0.xyz < cb_postfx_tonemapping_tonemappingparms.xxx);
-  r2.xyzw = r1.xxxx ? cb_postfx_tonemapping_tonemappingcoeffs0.xyzw : cb_postfx_tonemapping_tonemappingcoeffs1.xyzw;
-  r0.xw = r2.xy * r0.xx + r2.zw;
-  r2.x = r0.x / r0.w;
-  r3.xyzw = r1.yyyy ? cb_postfx_tonemapping_tonemappingcoeffs0.xyzw : cb_postfx_tonemapping_tonemappingcoeffs1.xyzw;
-  r0.xy = r3.xy * r0.yy + r3.zw;
-  r2.y = r0.x / r0.y;
-  r1.xyzw = r1.zzzz ? cb_postfx_tonemapping_tonemappingcoeffs0.xyzw : cb_postfx_tonemapping_tonemappingcoeffs1.xyzw;
-  r0.xy = r1.xy * r0.zz + r1.zw;
-  r2.z = r0.x / r0.y;
-  // end vanilla run 2
-
-  float3 vanillaTonemap = r2.xyz;
   float3 outputColor;
   if (injectedData.toneMapType == 0) {  // Vanilla code path
+    r1.xyz = cmp(r0.xyz < cb_postfx_tonemapping_tonemappingparms.xxx);
+    r2.xyzw = r1.xxxx ? cb_postfx_tonemapping_tonemappingcoeffs0.xyzw : cb_postfx_tonemapping_tonemappingcoeffs1.xyzw;
+    r0.xw = r2.xy * r0.xx + r2.zw;
+    r2.x = r0.x / r0.w;
+    r3.xyzw = r1.yyyy ? cb_postfx_tonemapping_tonemappingcoeffs0.xyzw : cb_postfx_tonemapping_tonemappingcoeffs1.xyzw;
+    r0.xy = r3.xy * r0.yy + r3.zw;
+    r2.y = r0.x / r0.y;
+    r1.xyzw = r1.zzzz ? cb_postfx_tonemapping_tonemappingcoeffs0.xyzw : cb_postfx_tonemapping_tonemappingcoeffs1.xyzw;
+    r0.xy = r1.xy * r0.zz + r1.zw;
+    r2.z = r0.x / r0.y;
+    float3 vanillaTonemap = r2.xyz;
+
     r0.xyz = vanillaTonemap * float3(31,31,31) + float3(0.5,0.5,0.5);
     r0.xyz = float3(0.03125,0.03125,0.03125) * r0.xyz;
     r0.xyz = ro_tonemapping_finalcolorcube.SampleLevel(smp_linearclamp_s, r0.xyz, 0).xyz;
 
     outputColor = lerp(vanillaTonemap, r0.xyz, injectedData.colorGradeLUTStrength);
-
   } else if (injectedData.toneMapType == 2) { // DICE
 
+    float3 vanillaTonemap = applyVanillaTonemap(untonemapped);
+    
     // apply color grading to vanillaTonemap so blending doesn't break sliders
-    vanillaTonemap = renodx::color::grade::UserColorGrading(
+    float3 adjustedVanillaTonemap = renodx::color::grade::UserColorGrading(
         vanillaTonemap,
         injectedData.colorGradeExposure,
         1.f,                                // highlight only applies to HDR color
@@ -270,8 +270,8 @@ void main(
         injectedData.colorGradeSaturation,
         injectedData.colorGradeBlowout);
     // declare SDR Lutted
-    float3 sdrColor = SampleLUT(ro_tonemapping_finalcolorcube, smp_linearclamp_s, vanillaTonemap, 32u);
-    sdrColor = lerp(vanillaTonemap, sdrColor, injectedData.colorGradeLUTStrength);
+    float3 sdrColor = SampleLUT(ro_tonemapping_finalcolorcube, smp_linearclamp_s, adjustedVanillaTonemap, 32u);
+    sdrColor = lerp(adjustedVanillaTonemap, sdrColor, injectedData.colorGradeLUTStrength);
 
     // make HDR tonemap resemble SDR tonemap to facilitate better blending
     untonemapped = renodx::color::grade::UserColorGrading(
@@ -284,6 +284,7 @@ void main(
         injectedData.colorGradeBlowout,
         injectedData.toneMapHueCorrection,
         vanillaTonemap);
+    float3 vanillaMidGray = applyVanillaTonemap(float3(0.18f, 0.18f, 0.18f));
     untonemapped *= vanillaMidGray / 0.18f;
     
     // apply extrapolated LUT to HDR
@@ -303,7 +304,7 @@ void main(
     hdrLUTOutput = lerp(untonemapped, hdrLUTOutput, injectedData.colorGradeLUTStrength);
 
     // tonemap HDR Color
-    float3 hdrColor = applyDICE(hdrLUTOutput);
+    float3 hdrColor = applyDICETonemap(hdrLUTOutput);
 
     // blend HDR with SDR
     float3 negHDR = min(0, hdrColor); // save WCG
@@ -325,8 +326,9 @@ void main(
     }
 
     outputColor = blendedColor;
-
   } else {  // No Tonemapper
+    float3 vanillaTonemap = applyVanillaTonemap(untonemapped);
+
     untonemapped = renodx::color::grade::UserColorGrading(
         untonemapped,
         injectedData.colorGradeExposure,
@@ -337,6 +339,8 @@ void main(
         injectedData.colorGradeBlowout,
         injectedData.toneMapHueCorrection,
         vanillaTonemap);
+    float3 vanillaMidGray = applyVanillaTonemap(float3(0.18f, 0.18f, 0.18f));
+    untonemapped *= vanillaMidGray / 0.18f;
     
     float3 hdrLUTOutput = SampleLUTWithExtrapolation(
         ro_tonemapping_finalcolorcube,        // LUT
@@ -351,8 +355,8 @@ void main(
         true,                                 // lutExtrapolation
         32                                    // lutSize
     );
-    outputColor = lerp(untonemapped, hdrLUTOutput, injectedData.colorGradeLUTStrength);
 
+    outputColor = lerp(untonemapped, hdrLUTOutput, injectedData.colorGradeLUTStrength);
   }
 
   r0.xyz = cb_env_tonemapping_gamma_brightness.yyy * outputColor;
