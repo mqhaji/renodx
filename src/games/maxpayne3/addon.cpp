@@ -7,6 +7,14 @@
 
 #define DEBUG_LEVEL_0
 
+// #include <embed/0x10ee0b20.h>   // tonemap1
+// #include <embed/0x62fbfd42.h>   // tonemap2
+// #include <embed/0xa631d7f8.h>   // tonemap3
+// #include <embed/0x0C569FD2.h>   // tonemap4
+// #include <embed/0x4F343009.h>   // tonemap5 (flash)
+
+
+
 #include <embed/0x30842A90.h>   // MSAA & FXAA Off
 #include <embed/0x77C2B3A7.h>   // MSAA & FXAA Normal
 #include <embed/0x3FA8CBC3.h>   // MSAA & FXAA High

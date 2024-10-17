@@ -66,6 +66,8 @@ void main(
     // Apply paper white scaling
     color.rgb *= injectedData.toneMapGameNits / 80.0f;
 
+    color.rgb = renodx::color::bt709::clamp::AP1(color.rgb);
+
     // Output the final color
     output.rgba = color;
 }

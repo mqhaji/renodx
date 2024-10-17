@@ -2,6 +2,7 @@
 #define SRC_GAMES_MAXPAYNE3_FROSTBITE_HLSL_
 
 #include "../../shaders/math.hlsl"
+#include "../../shaders/color.hlsl"
 
 namespace maxpayne3 {
 namespace tonemap {
@@ -35,7 +36,7 @@ float3 BT709(float3 col, float max_value) {
   // Hue-preserving range compression requires desaturation in order to achieve a natural look. We adaptively desaturate the input based on its luminance.
 
   float saturationAmount = pow(smoothstep(1.0, 0.3, ictcp.x), 1.3);
-  // col = renodx::color::bt709::from::ICtCp(ictcp * float3(1, saturationAmount.xx));
+  col = renodx::color::bt709::from::ICtCp(ictcp * float3(1, saturationAmount.xx));
 
   // Only compress luminance starting at a certain point. Dimmer inputs are passed through without modification.
   float linearSegmentEnd = 0.8;
@@ -62,7 +63,7 @@ float3 BT709(float3 col, float max_value) {
   // saturated colors lose luminance. By desaturating them more aggressively first, compressing, and then re-adding some saturation, we can preserve their brightness to a greater extent.
   ictcpMapped.yz = lerp(ictcpMapped.yz, ictcp.yz * ictcpMapped.x / max(1e-3, ictcp.x), postCompressionSaturationBoost);
 
-  // col = renodx::color::bt709::from::ICtCp(ictcpMapped);
+  col = renodx::color::bt709::from::ICtCp(ictcpMapped);
 
   return col;
 }
