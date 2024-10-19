@@ -17,7 +17,7 @@
 // #include <embed/0xEFF57007.h>    // Pause
 // #include <embed/0x936CE1A3.h>    // tonemap
 
-// #include <embed/0x675543CF.h>    // TAA
+#include <embed/0x675543CF.h>    // TAA
 // #include <embed/0xFEE901F4.h>    // FXAA?
 // #include <embed/0xA82C3C26.h>    // DoF
 #include <embed/0x9DA2366D.h>    // UI Images
@@ -49,7 +49,7 @@ renodx::mods::shader::CustomShaders custom_shaders = {
   CustomSwapchainShader(0xE510AF4E),      // Fog
   CustomSwapchainShader(0x74270930),      // Fog2
   
-//   CustomSwapchainShader(0x675543CF),      // TAA (broken)
+  CustomSwapchainShader(0x675543CF),      // TAA
 //   CustomShaderEntry(0xFEE901F4),          // FXAA?
 //   CustomSwapchainShader(0xA82C3C26),      // DoF
 //   CustomSwapchainShader(0x936CE1A3),      // tonemap
@@ -456,9 +456,18 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
           .new_format = reshade::api::format::r16g16b16a16_float,
       });
       renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
+          .old_format = reshade::api::format::b8g8r8a8_unorm,
+          .new_format = reshade::api::format::r16g16b16a16_float,
+      });
+      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
           .old_format = reshade::api::format::r10g10b10a2_unorm,
           .new_format = reshade::api::format::r16g16b16a16_float,
       });
+      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
+          .old_format = reshade::api::format::b10g10r10a2_unorm,
+          .new_format = reshade::api::format::r16g16b16a16_float,
+      });
+
 
       break;
     case DLL_PROCESS_DETACH:
