@@ -143,7 +143,6 @@ extern "C" __declspec(dllexport) const char* description = "RenoDX for Max Payne
 
 
 
-// Begin custom final copy pasta [ty Ersh/FF14]
 struct __declspec(uuid("1228220F-364A-46A2-BB29-1CCE591A018A")) DeviceData {
   reshade::api::effect_runtime* main_runtime = nullptr;
   std::atomic_bool rendered_effects = false;
@@ -153,10 +152,9 @@ struct __declspec(uuid("1228220F-364A-46A2-BB29-1CCE591A018A")) DeviceData {
   reshade::api::resource_view final_texture_view = {};
   reshade::api::sampler final_texture_sampler = {};
   reshade::api::pipeline_layout final_layout = {};
-  reshade::api::pipeline_layout copy_layout = {};
 };
 
-constexpr reshade::api::pipeline_layout PIPELINE_LAYOUT{0};
+constexpr reshade::api::pipeline_layout PIPELINE_LAYOUT{ 0 };
 
 void OnInitDevice(reshade::api::device* device) {
   auto& data = device->create_private_data<DeviceData>();
@@ -222,15 +220,6 @@ void OnInitDevice(reshade::api::device* device) {
     new_params.push_constants.dx_register_index = 13;
     new_params.push_constants.visibility = reshade::api::shader_stage::vertex | reshade::api::shader_stage::pixel | reshade::api::shader_stage::compute;
     device->create_pipeline_layout(1, &new_params, &data.final_layout);
-  }
-
-  {
-    reshade::api::pipeline_layout_param new_params;
-    new_params.type = reshade::api::pipeline_layout_param_type::push_constants;
-    new_params.push_constants.count = 1;
-    new_params.push_constants.dx_register_index = 12;
-    new_params.push_constants.visibility = reshade::api::shader_stage::vertex | reshade::api::shader_stage::pixel | reshade::api::shader_stage::compute;
-    device->create_pipeline_layout(1, &new_params, &data.copy_layout);
   }
 }
 
@@ -304,9 +293,9 @@ void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* swap
 
   // copy backbuffer
   {
-    const reshade::api::resource resources[2] = {back_buffer_resource, data.final_texture};
-    const reshade::api::resource_usage state_old[2] = {reshade::api::resource_usage::render_target, reshade::api::resource_usage::shader_resource};
-    const reshade::api::resource_usage state_new[2] = {reshade::api::resource_usage::copy_source, reshade::api::resource_usage::copy_dest};
+    const reshade::api::resource resources[2] = { back_buffer_resource, data.final_texture };
+    const reshade::api::resource_usage state_old[2] = { reshade::api::resource_usage::render_target, reshade::api::resource_usage::shader_resource };
+    const reshade::api::resource_usage state_new[2] = { reshade::api::resource_usage::copy_source, reshade::api::resource_usage::copy_dest };
 
     cmd_list->barrier(2, resources, state_old, state_new);
     cmd_list->copy_texture_region(back_buffer_resource, 0, nullptr, data.final_texture, 0, nullptr);
@@ -340,10 +329,9 @@ void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* swap
   cmd_list->barrier(back_buffer_resource, reshade::api::resource_usage::render_target, reshade::api::resource_usage::shader_resource);
 
   // reset the copy tracker, entirely unrelated to the final shader above
-  //track_next_copy = false; // We dont need this, just pasted from FF14 code
-  //shader_injection.copyTracker = 0; // We dont need this, just pasted from FF14 code
+  // track_next_copy = false;
+  // shader_injection.copyTracker = 0;
 }
-// End custom final copy pasta
 
 
 
@@ -387,6 +375,13 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
 
       break;
     case DLL_PROCESS_DETACH:
+
+      reshade::unregister_event<reshade::addon_event::init_device>(OnInitDevice);
+      reshade::unregister_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
+      reshade::unregister_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);
+      reshade::unregister_event<reshade::addon_event::destroy_swapchain>(OnDestroySwapchain);
+      reshade::unregister_event<reshade::addon_event::present>(OnPresent);
+
       reshade::unregister_addon(h_module);
       break;
   }

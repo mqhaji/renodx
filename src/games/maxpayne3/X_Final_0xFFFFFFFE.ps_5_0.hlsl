@@ -25,8 +25,8 @@ float SampleAverageLuminance(Texture2D<float4> sourceTexture, SamplerState sourc
   // Loop over sample points and accumulate luminance from linearized colors
   for (int i = 0; i < sampleCount; i++) {
     float4 sampledColor = sourceTexture.Sample(sourceSampler_s, samplePoints[i]);
-    // Linearize the sampled color (gamma to linear)
-    float3 linearColor = renodx::math::SafePow(sampledColor.rgb, 2.2f);
+    // Linearize the sampled color and clamp to reasonable range
+    float3 linearColor = min(pow(max(0, sampledColor.rgb), 2.2f), 125.f);
     // Calculate luminance from the linearized color
     sumLuminance += renodx::color::y::from::BT709(linearColor);
   }
@@ -41,6 +41,7 @@ void main(
     out float4 output: SV_Target0) {
   // Sample the texture and linearize the color (gamma to linear space)
   float4 color = sourceTexture.Sample(sourceSampler_s, texcoord.xy);
+  color.rgb = renodx::color::bt709::clamp::AP1(color.rgb);
   color.rgb = renodx::math::SafePow(color.rgb, 2.2f);
 
   if (injectedData.adaptiveTonemap) {

@@ -31,10 +31,12 @@ void main(
   if (r1.x != 0) discard;
   o0.xyzw = r0.xyzw;
 
+  o0.w = saturate(o0.w);
+  o0.rgb = renodx::color::bt709::clamp::AP1(o0.rgb);
   if (injectedData.toneMapUINits != injectedData.toneMapGameNits) {
-    o0.xyz = pow(o0.xyz, 2.2f);
+    o0.xyz = renodx::color::gamma::DecodeSafe(o0.xyz, 2.2f);
     o0.xyz *= injectedData.toneMapUINits / injectedData.toneMapGameNits;
-    o0.xyz = pow(o0.xyz, 1.f / 2.2f);
+    o0.xyz = renodx::color::gamma::EncodeSafe(o0.xyz, 2.2f);
   }
   return;
 }
