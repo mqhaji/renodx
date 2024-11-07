@@ -85,15 +85,19 @@ StructuredBuffer<postfx_luminance_autoexposure_t> ro_postfx_luminance_buffautoex
 // 3Dmigoto declarations
 #define cmp -
 
-float3 applyDICETonemap(float3 inputColor) {
+float3 applyDICETonemap(float3 inputColor, float vanillaMidGray) {
+    float3 gammaCorrectedColor = renodx::color::correct::GammaSafe(inputColor);
+
     const float paperWhite = injectedData.toneMapGameNits / renodx::color::srgb::REFERENCE_WHITE;
     const float peakWhite = injectedData.toneMapPeakNits / renodx::color::srgb::REFERENCE_WHITE;
-    const float highlightsShoulderStart = paperWhite;
-    float3 untonemapped = inputColor;
-    
+    const float highlightsShoulderStart = paperWhite * vanillaMidGray;
+    float3 untonemapped = gammaCorrectedColor;
+
     untonemapped *= paperWhite;
     float3 tonemapped = renodx::tonemap::dice::BT709(untonemapped, peakWhite, highlightsShoulderStart);
     tonemapped /= paperWhite;
+
+    tonemapped = renodx::color::correct::GammaSafe(tonemapped, true);
 
     return tonemapped;
 }
@@ -304,7 +308,7 @@ void main(
     hdrLUTOutput = lerp(untonemapped, hdrLUTOutput, injectedData.colorGradeLUTStrength);
 
     // tonemap HDR Color
-    float3 hdrColor = applyDICETonemap(hdrLUTOutput);
+    float3 hdrColor = applyDICETonemap(hdrLUTOutput, vanillaMidGray);
 
     // blend HDR with SDR
     float3 negHDR = min(0, hdrColor); // save WCG
