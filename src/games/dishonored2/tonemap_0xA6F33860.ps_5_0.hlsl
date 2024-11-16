@@ -102,7 +102,11 @@ float3 applyUserTonemap(float3 inputColor, float vanillaMidGray) {
     tonemapped = renodx::color::correct::GammaSafe(tonemapped, true);
   } else {
     const float peakWhite = injectedData.toneMapPeakNits / injectedData.toneMapGameNits;
-    tonemapped = renodx::tonemap::frostbite::BT709(inputColor, renodx::color::correct::GammaSafe(peakWhite, true));
+    if (injectedData.toneMapType == 3) {
+      tonemapped = renodx::tonemap::frostbite::BT709(inputColor, renodx::color::correct::GammaSafe(peakWhite, true));
+    } else {
+      tonemapped = renodx::tonemap::ReinhardScalable(inputColor, peakWhite);
+    }
   }
 
     return tonemapped;
@@ -266,7 +270,7 @@ void main(
     r0.xyz = ro_tonemapping_finalcolorcube.SampleLevel(smp_linearclamp_s, r0.xyz, 0).xyz;
 
     outputColor = lerp(vanillaTonemap, r0.xyz, injectedData.colorGradeLUTStrength);
-  } else if (injectedData.toneMapType == 2 || injectedData.toneMapType == 3) { // DICE or Frostbite
+  } else if (injectedData.toneMapType >= 2) { // DICE, Frostbite, Reinhard Scalable
 
     float3 vanillaTonemap = applyVanillaTonemap(untonemapped);
     

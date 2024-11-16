@@ -57,7 +57,7 @@ renodx::utils::settings::Settings settings = {
         .label = "Tone Mapper",
         .section = "Tone Mapping",
         .tooltip = "Sets the tone mapper type",
-        .labels = {"Vanilla", "None", "DICE", "Frostbite"},
+        .labels = {"Vanilla", "None", "DICE", "Frostbite", "Reinhard Scalable"},
     },
     new renodx::utils::settings::Setting{
         .key = "toneMapPeakNits",
