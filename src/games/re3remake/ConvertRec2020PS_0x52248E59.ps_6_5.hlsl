@@ -1,5 +1,4 @@
 #include "./DICE.hlsl"
-#include "./LUTBlackCorrection.hlsl"
 #include "./shared.h"
 
 Texture2D<float4> tLinearImage : register(t0);
@@ -18,12 +17,6 @@ float4 main(noperspective float4 SV_Position: SV_Position,
             linear float2 TEXCOORD: TEXCOORD)
     : SV_Target {
   float4 bt709Color = tLinearImage.SampleLevel(PointBorder, TEXCOORD.xy, 0.0f);
-
-#if 0  // HDR Gamma boost
-
-  bt709Color.rgb = AdjustGammaOnLuminance(bt709Color.rgb, HDRMapping_004y);
-
-#endif
 
 #if 1
   DICESettings config = DefaultDICESettings();
