@@ -124,7 +124,7 @@ void frag_main()
   TonemapParam_m0[0u] = float4(contrast, linearBegin, linearLength, toe);
   TonemapParam_m0[1u] = float4(maxNit, linearStart, displayMaxNitSubContrastFactor, contrastFactor);
   TonemapParam_m0[2u] = float4(mulLinearStartContrastFactor, invLinearBegin, madLinearStartContrastFactor, 0.0);
-#if 0
+#if 1
     TonemapParam_m0[0u].w = 1.f;  // toe
 #endif
     TonemapParam_m0[1u].x = 125;                                        // maxNit
