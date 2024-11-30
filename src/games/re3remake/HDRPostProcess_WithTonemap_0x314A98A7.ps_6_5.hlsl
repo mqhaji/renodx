@@ -1,5 +1,6 @@
 #include "./LUTBlackCorrection.hlsl"
 #include "./shared.h"
+#include "./DICE.hlsl"
 
 cbuffer SceneInfoUBO : register(b0, space0)
 {
@@ -138,6 +139,9 @@ void frag_main()
       renodx::lut::config::type::SRGB,
       renodx::lut::config::type::LINEAR,
       ColorCorrectTexture_m0[0u].x);
+  float3 sdrColor;
+  float3 untonemapped;
+  float3 hdrColor;
 
   uint4 _111 = asuint(CBControl_m0[0u]);
     uint _112 = _111.x;
@@ -663,6 +667,18 @@ void frag_main()
         float _1284;
         float _1285;
         float _1286;
+#if 1
+        untonemapped = float3(_655, _657, _659);
+        DICESettings config = DefaultDICESettings();
+        config.Type = 2;
+        config.ShoulderStart = 0.25f;
+        config.DesaturationAmount = 0.f;
+        config.DarkeningAmount = 0.f;
+        sdrColor = saturate(DICETonemap(untonemapped, 1, config));
+        hdrColor = DICETonemap(untonemapped, 125, config);
+#endif
+
+#if 0
         if (_927)
         {
             _1284 = _655 / _926;
@@ -675,6 +691,12 @@ void frag_main()
             _1285 = _657;
             _1286 = _659;
         }
+#else
+            _1284 = sdrColor.r;
+            _1285 = sdrColor.g;
+            _1286 = sdrColor.b;
+#endif
+
 #if 0
         float _1287 = ColorCorrectTexture_m0[0u].w * 0.5f;
         float _1977;
@@ -825,6 +847,7 @@ void frag_main()
         float frontier_phi_13_46_ladder;
         float frontier_phi_13_46_ladder_1;
         float frontier_phi_13_46_ladder_2;
+#if 0
         if (_927)
         {
             frontier_phi_13_46_ladder = _896 * _926;
@@ -840,6 +863,14 @@ void frag_main()
         _888 = frontier_phi_13_46_ladder_2;
         _891 = frontier_phi_13_46_ladder_1;
         _894 = frontier_phi_13_46_ladder;
+#else
+        float3 postprocessColor = float3(_890, _893, _896);
+        float3 upgradedColor = renodx::tonemap::UpgradeToneMap(hdrColor, sdrColor, postprocessColor, 1.f);
+        _888 = upgradedColor.r;
+        _891 = upgradedColor.g;
+        _894 = upgradedColor.b;
+#endif
+
     }
     float _1243;
     float _1245;
