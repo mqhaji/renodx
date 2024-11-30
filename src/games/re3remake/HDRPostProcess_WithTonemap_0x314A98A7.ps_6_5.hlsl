@@ -915,9 +915,8 @@ void frag_main()
     SV_Target.w = 0.0f;
 
 #if 0  // HDR Gamma boost
-
-  SV_Target.rgb = AdjustGammaOnLuminance(SV_Target.rgb, 1.1);
-
+    float gammaAdjustmentFactor = clamp(toe, 1.0, 1.2);
+    SV_Target.rgb = AdjustGammaOnLuminance(SV_Target.rgb, gammaAdjustmentFactor);
 #endif
 
 }
