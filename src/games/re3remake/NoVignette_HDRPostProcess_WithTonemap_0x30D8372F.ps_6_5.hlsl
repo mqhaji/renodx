@@ -641,6 +641,18 @@ void frag_main()
         float _1246;
         float _1247;
         float _1248;
+#if 1
+        untonemapped = float3(_618, _620, _622);
+        DICESettings config = DefaultDICESettings();
+        config.Type = 2;
+        config.ShoulderStart = 0.25f;
+        config.DesaturationAmount = 0.f;
+        config.DarkeningAmount = 0.f;
+        sdrColor = saturate(DICETonemap(untonemapped, 1, config));
+        hdrColor = DICETonemap(untonemapped, 125, config);
+#endif
+
+#if 0
         if (_889)
         {
             _1246 = _618 / _888;
@@ -653,6 +665,12 @@ void frag_main()
             _1247 = _620;
             _1248 = _622;
         }
+#else
+        _1246 = sdrColor.r;
+        _1247 = sdrColor.g;
+        _1248 = sdrColor.b;
+#endif
+
 #if 0
         float _1249 = ColorCorrectTexture_m0[0u].w * 0.5f;
         float _1940;
@@ -801,6 +819,7 @@ void frag_main()
         float frontier_phi_13_46_ladder;
         float frontier_phi_13_46_ladder_1;
         float frontier_phi_13_46_ladder_2;
+#if 0
         if (_889)
         {
             frontier_phi_13_46_ladder = _858 * _888;
@@ -816,6 +835,14 @@ void frag_main()
         _850 = frontier_phi_13_46_ladder_2;
         _853 = frontier_phi_13_46_ladder_1;
         _856 = frontier_phi_13_46_ladder;
+#else
+        float3 postprocessColor = float3(_852, _855, _858);
+        float3 upgradedColor = renodx::tonemap::UpgradeToneMap(hdrColor, sdrColor, postprocessColor, 1.f);
+        _850 = upgradedColor.r;
+        _853 = upgradedColor.g;
+        _856 = upgradedColor.b;
+#endif
+
     }
     float _1205;
     float _1207;
