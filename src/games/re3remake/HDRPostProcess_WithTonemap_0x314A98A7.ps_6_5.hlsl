@@ -1,6 +1,5 @@
 #include "./LUTBlackCorrection.hlsl"
 #include "./shared.h"
-#include "./DICE.hlsl"
 
 cbuffer SceneInfoUBO : register(b0, space0)
 {
@@ -667,21 +666,15 @@ void frag_main()
         float _1284;
         float _1285;
         float _1286;
-#if 1
+#if 1  // use UpgradeToneMap() for LUT sampling
         untonemapped = float3(_655, _657, _659);
-        untonemapped = min(untonemapped, 125);  // potentially prevent ugly artifacts
         hdrColor = untonemapped;
-        
-        DICESettings config = DefaultDICESettings();
-        config.Type = 2;
-        config.ShoulderStart = 0.25f;
-        config.DesaturationAmount = 0.f;
-        config.DarkeningAmount = 1.f;
-        // sdrColor = saturate(DICETonemap(untonemapped, 1, config));
-        sdrColor = saturate(renodx::tonemap::renodrt::BT709(untonemapped, 80.f, 0.18f, 18.f, 1.f, 1.f, 1.f, 1.1f, 1.05f, 0.f, 0.f, 0.f));
+
+        sdrColor = renoDRTSmoothClamp(untonemapped);  // use neutral RenoDRT as a smoothclamp
+
 #endif
 
-#if 0
+#if 0 // max channel LUT sampling
         if (_927)
         {
             _1284 = _655 / _926;
