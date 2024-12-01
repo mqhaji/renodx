@@ -3,6 +3,9 @@
  * Copyright (C) 2024 Carlos Lopez
  * SPDX-License-Identifier: MIT
  */
+#define ImTextureID ImU64
+
+#define DEBUG_LEVEL_0
 
 #include <embed/0x30D8372F.h>  // Tonemap + Postfx - No Vignette
 #include <embed/0x314A98A7.h>  // Tonemap + Postfx
