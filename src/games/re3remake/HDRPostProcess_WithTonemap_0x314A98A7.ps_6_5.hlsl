@@ -676,8 +676,9 @@ void frag_main()
         config.Type = 2;
         config.ShoulderStart = 0.25f;
         config.DesaturationAmount = 0.f;
-        config.DarkeningAmount = 0.f;
-        sdrColor = saturate(DICETonemap(untonemapped, 1, config));
+        config.DarkeningAmount = 1.f;
+        // sdrColor = saturate(DICETonemap(untonemapped, 1, config));
+        sdrColor = saturate(renodx::tonemap::renodrt::BT709(untonemapped, 80.f, 0.18f, 18.f, 1.f, 1.f, 1.f, 1.1f, 1.05f, 0.f, 0.f, 0.f));
 #endif
 
 #if 0
