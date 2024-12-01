@@ -885,6 +885,12 @@ void frag_main()
     SV_Target.y = _1782;
     SV_Target.z = _1784;
     SV_Target.w = 0.0f;
+
+#if 0  // HDR Gamma boost
+    float gammaAdjustmentFactor = clamp(toe, 1.0, 1.2);
+    SV_Target.rgb = AdjustGammaOnLuminance(SV_Target.rgb, gammaAdjustmentFactor);
+#endif
+
 }
 
 SPIRV_Cross_Output main(SPIRV_Cross_Input stage_input)
