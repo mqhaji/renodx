@@ -669,13 +669,15 @@ void frag_main()
         float _1286;
 #if 1
         untonemapped = float3(_655, _657, _659);
+        untonemapped = min(untonemapped, 125);  // potentially prevent ugly artifacts
+        hdrColor = untonemapped;
+        
         DICESettings config = DefaultDICESettings();
         config.Type = 2;
         config.ShoulderStart = 0.25f;
         config.DesaturationAmount = 0.f;
         config.DarkeningAmount = 0.f;
         sdrColor = saturate(DICETonemap(untonemapped, 1, config));
-        hdrColor = DICETonemap(untonemapped, 125, config);
 #endif
 
 #if 0
@@ -915,7 +917,7 @@ void frag_main()
     SV_Target.w = 0.0f;
 
 #if 0  // HDR Gamma boost
-    float gammaAdjustmentFactor = clamp(toe, 1.0, 1.2);
+    float gammaAdjustmentFactor = clamp(toe, 0.5, 1.5);
     SV_Target.rgb = AdjustGammaOnLuminance(SV_Target.rgb, gammaAdjustmentFactor);
 #endif
 

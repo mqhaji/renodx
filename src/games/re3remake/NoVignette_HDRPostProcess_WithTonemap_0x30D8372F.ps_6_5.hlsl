@@ -643,13 +643,15 @@ void frag_main()
         float _1248;
 #if 1
         untonemapped = float3(_618, _620, _622);
+        untonemapped = min(untonemapped, 125);  // potentially prevent ugly artifacts
+        hdrColor = untonemapped;
+
         DICESettings config = DefaultDICESettings();
         config.Type = 2;
         config.ShoulderStart = 0.25f;
         config.DesaturationAmount = 0.f;
         config.DarkeningAmount = 0.f;
         sdrColor = saturate(DICETonemap(untonemapped, 1, config));
-        hdrColor = DICETonemap(untonemapped, 125, config);
 #endif
 
 #if 0
