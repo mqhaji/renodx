@@ -132,6 +132,6 @@ void main(
   if (injectedData.toneMapType >= 2.f) {
     // preserve SDR color grading
     o0.xyz = renodx::tonemap::UpgradeToneMap(hdrColor, sdrColor, o0.xyz, injectedData.colorGradeStrength);
-  }
+    o0.xyz = applyUserColorGrading(o0.xyz);  }
   return;
 }

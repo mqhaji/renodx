@@ -1,4 +1,5 @@
 #include "./shared.h"
+#include "./RenoDRTSmoothClamp.hlsl"
 
 // ---- Created with 3Dmigoto v1.3.16 on Thu Aug 15 21:14:36 2024
 Texture2D<float4> t0 : register(t0);
@@ -22,15 +23,23 @@ void main(
   linear noperspective float2 v1 : TEXCOORD0,
   out float4 o0 : SV_Target0)
 {
-  float4 r0,r1,r2,r3;
-  uint4 bitmask, uiDest;
-  float4 fDest;
+  float4 r0, r1, r2, r3;
+  float3 hdrColor, sdrColor;
 
   r1.xyzw = t0.Sample(s0_s, v1.xy).xyzw;
   o0.w = r1.w;
-  if (injectedData.toneMapType != 0) {
+  if (injectedData.toneMapType != 0 && injectedData.toneMapType != 3) {
     o0.xyz = r1.xyz * cb0[5].xxx + cb0[5].yyy;  // fade to black
-  } else {  // inverse tonemapping garbage, also applies to UI
+  } else {                                      // inverse tonemapping garbage, also applies to UI
+
+    hdrColor = r1.xyz;
+    sdrColor = hdrColor;
+    if (injectedData.toneMapType == 3) {
+      sdrColor = renodx::color::gamma::DecodeSafe(sdrColor, 2.2f);
+      sdrColor = renoDRTSmoothClamp(sdrColor);
+      sdrColor = renodx::color::gamma::EncodeSafe(sdrColor, 2.2f);
+      r1.xyz = sdrColor;
+    }
     r0.x = cb0[7].z / cb0[7].x;
     r0.xy = float2(9.99999975e-005,-0.999899983) + r0.xx;
     r0.x = r0.x / r0.y;
@@ -61,7 +70,15 @@ void main(
     r0.w = min(r1.x, r0.w);
     r0.xyz = r0.www * cb0[6].www + r0.xyz;
     r0.xyz = r0.xyz * cb0[5].xxx + cb0[5].yyy;  // fade to black
-    o0.xyz = max(float3(0,0,0), r0.xyz);
+    o0.xyz = max(float3(0, 0, 0), r0.xyz);
+    if (injectedData.toneMapType == 3) {
+      float3 postProcessColor = o0.rgb;
+      postProcessColor = renodx::color::gamma::DecodeSafe(postProcessColor, 2.2f);
+      sdrColor = renodx::color::gamma::DecodeSafe(sdrColor, 2.2f);
+      hdrColor = renodx::color::gamma::DecodeSafe(hdrColor, 2.2f);
+      o0.rgb = renodx::tonemap::UpgradeToneMap(hdrColor, sdrColor, postProcessColor, 1.f);
+      o0.rgb = renodx::color::gamma::EncodeSafe(o0.rgb, 2.2f);
+    }
   }
   return;
 }

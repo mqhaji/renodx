@@ -141,6 +141,6 @@ r1.xyz = cb0[17].xyz * r0.xyz;  //    r1.xyz = saturate(cb0[17].xyz * r0.xyz);
 if (injectedData.toneMapType >= 2.f) {
     // preserve SDR color grading
     o0.xyz = renodx::tonemap::UpgradeToneMap(hdrColor, sdrColor, o0.xyz, injectedData.colorGradeStrength);
-}
+    o0.xyz = applyUserColorGrading(o0.xyz);}
   return;
 }

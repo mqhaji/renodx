@@ -6,6 +6,7 @@
 /// @param lutInputColor The color input that needs to be tonemapped.
 /// @return The tonemapped color compressed to the SDR range, ensuring that it can be applied to SDR color grading with `UpgradeToneMap`.
 float3 renoDRTSmoothClamp(float3 untonemapped) {
+
   renodx::tonemap::renodrt::Config renodrt_config = renodx::tonemap::renodrt::config::Create();
   renodrt_config.nits_peak = 100.f;
   renodrt_config.mid_gray_value = 0.18f;
@@ -28,7 +29,24 @@ float3 renoDRTSmoothClamp(float3 untonemapped) {
   float3 renoDRTColor = renodx::tonemap::renodrt::BT709(untonemapped, renodrt_config);
 
   float HDRBlendFactor = lerp(1.f, renodrt_config.mid_gray_value, saturate(injectedData.toneMapHDRBlendFactor));
+  if (injectedData.toneMapType == 3) {
+    HDRBlendFactor = 1.f;
+  }
   renoDRTColor = lerp(min(1.f, untonemapped), renoDRTColor, saturate(untonemapped / HDRBlendFactor));
 
   return renoDRTColor;
+}
+
+float3 applyUserColorGrading(float3 inputColor) {
+  if (injectedData.toneMapType == 3) return inputColor;
+
+  float3 colorGraded = renodx::color::grade::UserColorGrading(
+      inputColor,
+      1.f,
+      injectedData.colorGradeHighlights,
+      injectedData.colorGradeShadows,
+      injectedData.colorGradeContrast,
+      injectedData.colorGradeSaturation,
+      injectedData.colorGradeBlowout);
+  return colorGraded;
 }

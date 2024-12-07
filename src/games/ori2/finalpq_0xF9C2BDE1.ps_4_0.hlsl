@@ -32,7 +32,7 @@ void main(
 
   r0.xyz = sign(r0.xyz) * pow(abs(r0.xyz), 2.2f);  // linearize
 
-  if (injectedData.toneMapType == 0) {
+  if (injectedData.toneMapType == 0 || injectedData.toneMapType == 3) {
     // bt2020 conversion + gamut expansion
     r0.w = max(r0.x, r0.y);
     r0.w = max(r0.w, r0.z);
