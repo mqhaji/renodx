@@ -226,7 +226,16 @@ float3 SampleLUT(float4 lutSettings, const float3 inputColor, uint textureIndex,
 
         // Only applies on LUTs that are clamped (all?)
         if (lutMinY > 0) {
-          color = renodx::lut::CorrectBlack(inputColor, color, lutMinY, min(injectedData.processingLUTCorrection * 2.f, 1.f));
+          float3 vanillaLUTColor = color;
+          // color = renodx::lut::CorrectBlack(inputColor, color, lutMinY, min(injectedData.processingLUTCorrection * 2.f, 1.f));
+          // color = lerp(color, vanillaLUTColor, saturate(pow(color, 0.1f)));
+          // color = renodx::color::correct::Hue(color, vanillaLUTColor);
+          float3 gammaCorrectedInputColor = renodx::color::correct::GammaSafe(inputColor);
+          float3 gammaCorrectedOutputColor = renodx::color::correct::GammaSafe(color);
+          float gammaCorrectedLutMinY = renodx::color::y::from::BT709(renodx::color::correct::Gamma(abs(minBlack)));
+          color = renodx::lut::CorrectBlack(gammaCorrectedInputColor, gammaCorrectedOutputColor, gammaCorrectedLutMinY, min(injectedData.processingLUTCorrection * 2.f, 1.f));
+          color = renodx::color::correct::GammaSafe(color, true);
+          color = renodx::color::correct::Hue(color, vanillaLUTColor);
         }
 
         // Only scale up HDR LUTs
