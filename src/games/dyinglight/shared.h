@@ -24,6 +24,8 @@ struct ShaderInjectData {
   float fxBloom;
   float fxLensFlare;
   float fxFilmGrain;
+
+  float testRolloff;
 };
 
 #ifndef __cplusplus

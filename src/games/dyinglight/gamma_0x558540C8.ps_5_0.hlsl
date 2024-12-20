@@ -78,6 +78,11 @@ void main(
   r0.xyzw = t0.SampleLevel(s0_s, v1.xy, 0).xyzw;
   o0.xyzw = r0.xyzw;
 
+  if (injectedData.testRolloff) {
+    o0.rgb = renodx::tonemap::ExponentialRollOff(o0.rgb, 0.2, injectedData.toneMapPeakNits / injectedData.toneMapGameNits);
+    o0.rgb = renodx::tonemap::inverse::ExponentialRollOff(o0.rgb, 0.2, injectedData.toneMapPeakNits / injectedData.toneMapGameNits);
+  }
+
   // o0.xyz = sign(o0.xyz) * pow(abs(o0.xyz), cb0[0].xxx);  // disable in game gamma slider
 
   if (injectedData.toneMapGammaCorrection) {  // 2.2 Gamma

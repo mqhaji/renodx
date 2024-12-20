@@ -265,6 +265,16 @@ renodx::utils::settings::Settings settings = {
         .max = 100.f,
         .parse = [](float value) { return value * 0.02f; },
     },
+    new renodx::utils::settings::Setting{
+        .key = "testRolloff",
+        .binding = &shader_injection.testRolloff,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 0.f,
+        .can_reset = true,
+        .label = "testRolloff",
+        .section = "Debug",
+        .tooltip = "Tests the functionality of inverse exp rolloff by applying exp rolloff and its inverse",
+    },
 };
 
 void OnPresetOff() {
@@ -284,6 +294,7 @@ void OnPresetOff() {
   renodx::utils::settings::UpdateSetting("fxBloom", 50.f);
   renodx::utils::settings::UpdateSetting("fxLensFlare", 50.f);
   renodx::utils::settings::UpdateSetting("fxFilmGrain", 50.f);
+  renodx::utils::settings::UpdateSetting("testRolloff", 0.f);
 }
 
 }  // namespace
