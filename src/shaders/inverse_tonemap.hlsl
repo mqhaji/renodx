@@ -116,6 +116,22 @@ float3 BT709(float3 bt709, float sdr_nits, float target_nits) {
 }
 
 }  // namespace bt2446a
+
+#define EXPONENTIALROLLOFF_GENERATOR(T)                                                 \
+  T ExponentialRollOff(T input, float rolloff_start = 0.20f, float output_max = 1.0f) { \
+    float rolloff_size = output_max - rolloff_start;                                           \
+    T overage = -max((T)0, input - rolloff_start);                                             \
+                                                                                               \
+    T rolloff_value = log((overage + rolloff_size) / rolloff_size);                            \
+    T new_overage = rolloff_size * rolloff_value;                                              \
+                                                                                               \
+    return min(rolloff_start, input) - new_overage;                                            \
+  }
+
+EXPONENTIALROLLOFF_GENERATOR(float)
+EXPONENTIALROLLOFF_GENERATOR(float3)
+#undef EXPONENTIALROLLOFF_GENERATOR
+
 }  // namespace inverse
 }  // namespace tonemap
 }  // namespace renodx
