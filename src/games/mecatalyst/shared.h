@@ -26,6 +26,7 @@ struct ShaderInjectData {
   float colorGradeLUTStrength;
   float fxBloom;
   float fxVignette;
+  float fxDoF;
 };
 
 #ifndef __cplusplus

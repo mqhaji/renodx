@@ -1,3 +1,5 @@
+#include "./common.hlsl"
+
 // ---- Created with 3Dmigoto v1.3.16 on Wed Sep 18 20:05:14 2024
 
 cbuffer _Globals : register(b0) {
@@ -65,7 +67,7 @@ void main(
 
   // Adjust the normalized depth difference to get the blur factor
   float blurFactor = depthDiff.x - depthDiff.y;
-  outputColor.a = 1.0 - blurFactor;
+  outputColor.a = saturate(lerp(0, 1.0 - blurFactor, injectedData.fxDoF));  // scale depth of field
 
   // Sample the blurred texture at the current pixel position
   float3 blurredColor = dofBlurTexture.Sample(dofBlurTextureSampler_s, uv.xy).xyz;
