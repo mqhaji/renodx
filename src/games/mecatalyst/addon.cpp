@@ -26,7 +26,9 @@ renodx::mods::shader::CustomShaders custom_shaders = {
     CustomShaderEntry(0x35DF3BA8),  // Tonemap 2 - No Lens Dirt
     CustomShaderEntry(0x6C50EBC8),  // Lens Effect
     CustomShaderEntry(0xFB2ADDC7),  // Lens Effect 2
-    // CustomShaderEntry(0xC67F788C),  // DoF
+    CustomShaderEntry(0xC67F788C),  // DoF
+
+    CustomShaderEntry(0x041FA975),  // Video
 };
 
 ShaderInjectData shader_injection;
@@ -213,6 +215,15 @@ renodx::utils::settings::Settings settings = {
         .parse = [](float value) { return value * 0.02f; },
     },
     new renodx::utils::settings::Setting{
+        .key = "fxDoF",
+        .binding = &shader_injection.fxDoF,
+        .default_value = 50.f,
+        .label = "Depth of Field",
+        .section = "Effects",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.02f; },
+    },
+    new renodx::utils::settings::Setting{
         .key = "fxVignette",
         .binding = &shader_injection.fxVignette,
         .default_value = 50.f,
@@ -283,6 +294,7 @@ void OnPresetOff() {
   renodx::utils::settings::UpdateSetting("ColorGradeHighlightSaturation", 50.f);
   renodx::utils::settings::UpdateSetting("colorGradeLUTStrength", 100.f);
   renodx::utils::settings::UpdateSetting("fxBloom", 50.f);
+  renodx::utils::settings::UpdateSetting("fxDoF", 50.f);
   renodx::utils::settings::UpdateSetting("fxVignette", 50.f);
 }
 
@@ -491,7 +503,8 @@ extern "C" __declspec(dllexport) const char* name = "RenoDX";
 extern "C" __declspec(dllexport) const char* description = "RenoDX for Mirror's Edge: Catalyst";
 
 // NOLINTEND(readability-identifier-naming)
-
+const float SCREEN_WIDTH = static_cast<float>(GetSystemMetrics(SM_CXSCREEN));
+const float SCREEN_HEIGHT = static_cast<float>(GetSystemMetrics(SM_CYSCREEN));
 BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   switch (fdw_reason) {
     case DLL_PROCESS_ATTACH:
