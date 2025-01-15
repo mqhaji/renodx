@@ -154,7 +154,7 @@ renodx::tonemap::config::DualToneMap applyUserTonemap(float3 color, float vanill
   config.type = injectedData.toneMapType;
   config.peak_nits = injectedData.toneMapPeakNits;
   config.game_nits = injectedData.toneMapGameNits;
-  config.gamma_correction = 0;
+  config.gamma_correction = 1;
   config.mid_gray_value = vanillaMidGray;
   config.mid_gray_nits = vanillaMidGray * 100.f;
   config.highlights = injectedData.colorGradeHighlights;
