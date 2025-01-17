@@ -22,10 +22,14 @@
 namespace {
 
 renodx::mods::shader::CustomShaders custom_shaders = {
+    // CustomShaderEntry(0x09205E7E),  // TAA - broken
+
     CustomShaderEntry(0xE455F507),  // Tonemap 1
     CustomShaderEntry(0x35DF3BA8),  // Tonemap 2 - No Lens Dirt
+
     CustomShaderEntry(0x6C50EBC8),  // Lens Effect
     CustomShaderEntry(0xFB2ADDC7),  // Lens Effect 2
+
     CustomShaderEntry(0xC67F788C),  // DoF
 
     CustomShaderEntry(0x041FA975),  // Video
