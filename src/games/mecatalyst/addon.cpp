@@ -535,7 +535,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
           .old_format = reshade::api::format::r8g8b8a8_unorm,
           .new_format = reshade::api::format::r16g16b16a16_float,
-          .aspect_ratio = SCREEN_WIDTH / SCREEN_HEIGHT,
+          .aspect_ratio = -1,
       });
 
       // Final shader
