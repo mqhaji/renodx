@@ -237,6 +237,15 @@ renodx::utils::settings::Settings settings = {
         .parse = [](float value) { return value * 0.02f; },
     },
     new renodx::utils::settings::Setting{
+        .key = "fxLens",
+        .binding = &shader_injection.fxLens,
+        .default_value = 50.f,
+        .label = "Lens Effect",
+        .section = "Effects",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.02f; },
+    },
+    new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
         .label = "Discord",
         .section = "Links",
@@ -507,6 +516,7 @@ extern "C" __declspec(dllexport) const char* name = "RenoDX";
 extern "C" __declspec(dllexport) const char* description = "RenoDX for Mirror's Edge: Catalyst";
 
 // NOLINTEND(readability-identifier-naming)
+
 const float SCREEN_WIDTH = static_cast<float>(GetSystemMetrics(SM_CXSCREEN));
 const float SCREEN_HEIGHT = static_cast<float>(GetSystemMetrics(SM_CYSCREEN));
 BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
@@ -520,6 +530,13 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
 
       //   renodx::mods::swapchain::force_borderless = true;
       //   renodx::mods::swapchain::prevent_full_screen = true;
+
+      // DoF
+      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
+          .old_format = reshade::api::format::r8g8b8a8_unorm,
+          .new_format = reshade::api::format::r16g16b16a16_float,
+          .aspect_ratio = SCREEN_WIDTH / SCREEN_HEIGHT,
+      });
 
       // Final shader
       reshade::register_event<reshade::addon_event::init_device>(OnInitDevice);

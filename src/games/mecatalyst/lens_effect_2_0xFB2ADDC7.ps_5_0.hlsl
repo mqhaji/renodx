@@ -33,8 +33,6 @@ void main(
     float2 v1: TEXCOORD0,
     out float4 o0: SV_Target0) {
   float4 r0, r1, r2;
-  uint4 bitmask, uiDest;
-  float4 fDest;
 
   r0.xy = float2(1, -1) * planes[1].halfTextureScale;
   r0.z = dot(v1.xy, v1.xy);
@@ -79,6 +77,7 @@ void main(
   r1.yzw = r0.zzz * r1.yzw + planes[0].innerColor.xyz;
   o0.xyz = r1.yzw * r1.xxx + r0.xyw;
 
+  o0.rgb = lerp(0, o0.rgb, injectedData.fxLens);
   // scale lens effects with game brightness
   // not an ideal solution, transparencies will blend slightly differently
   o0.rgb = PostToneMapScale(o0.rgb);

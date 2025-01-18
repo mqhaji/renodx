@@ -33,8 +33,6 @@ void main(
     float2 v1: TEXCOORD0,
     out float4 o0: SV_Target0) {
   float4 r0, r1;
-  uint4 bitmask, uiDest;
-  float4 fDest;
 
   r0.x = dot(v1.xy, v1.xy);
   r0.y = sqrt(r0.x);
@@ -61,6 +59,7 @@ void main(
   o0.xyz = r0.yzw * r0.xxx;
   o0.w = 0;
 
+  o0.rgb = lerp(0, o0.rgb, injectedData.fxLens);
   // scale lens effects with game brightness
   // not an ideal solution, transparencies will blend slightly differently
   o0.rgb = PostToneMapScale(o0.rgb);
