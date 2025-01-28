@@ -187,7 +187,8 @@ void main(
         renodx::tonemap::Config aces_config = renodx::tonemap::config::Create();
         aces_config.peak_nits = 1000.f;
         aces_config.game_nits = 100.f;
-        aces_config.mid_gray_nits = 18.f;
+        // aces_config.mid_gray_nits = 10.f;
+        // aces_config.mid_gray_value = .1f;
         aces_config.gamma_correction = 0;
         // float3 reference_aces = renodx::color::srgb::DecodeSafe(RgbAcesHdrSrgb(color));
         float3 reference_aces = renodx::tonemap::config::ApplyACES(color, aces_config);
