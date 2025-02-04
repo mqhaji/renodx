@@ -87,7 +87,7 @@ renodx::utils::settings::Settings settings = {
         .key = "toneMapHueCorrection",
         .binding = &shader_injection.toneMapHueCorrection,
         .default_value = 0.f,
-        .can_reset = false,
+        .can_reset = true,
         .label = "Hue Correction",
         .section = "Tone Mapping",
         .tooltip = "Emulates hue shifting from the vanilla tonemapper",
@@ -123,7 +123,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 1.f,
         .label = "Exposure",
         .section = "Color Grading",
-        .max = 20.f,
+        .max = 2.f,
         .format = "%.2f",
         .is_enabled = []() { return shader_injection.toneMapType != 0 && shader_injection.toneMapBlend == 0; },
     },
@@ -197,7 +197,7 @@ renodx::utils::settings::Settings settings = {
         .label = "Grading Application",
         .section = "Color Grading",
         .tooltip = "Chooses method to apply grading for HDR.",
-        .labels = {"Luminance", "Per Channel"},
+        .labels = {"Luminance", "Per Channel", "Perceptual"},
         .is_enabled = []() { return shader_injection.toneMapType != 0; },
     },
     new renodx::utils::settings::Setting{
@@ -247,9 +247,22 @@ renodx::utils::settings::Settings settings = {
     },
     new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
+        .label = "Reset All",
+        .section = "Options",
+        .group = "button-line-1",
+        .on_change = []() {
+          for (auto* setting : settings) {
+            if (setting->key.empty()) continue;
+            if (!setting->can_reset) continue;
+            renodx::utils::settings::UpdateSetting(setting->key, setting->default_value);
+          }
+        },
+    },
+    new renodx::utils::settings::Setting{
+        .value_type = renodx::utils::settings::SettingValueType::BUTTON,
         .label = "Discord",
         .section = "Links",
-        .group = "button-line-1",
+        .group = "button-line-2",
         .tint = 0x5865F2,
         .on_change = []() {
           ShellExecute(0, "open", (std::string("https://discord.gg/") + "5WZXDpmbpP").c_str(), 0, 0, SW_SHOW);
@@ -259,7 +272,7 @@ renodx::utils::settings::Settings settings = {
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
         .label = "More Mods",
         .section = "Links",
-        .group = "button-line-1",
+        .group = "button-line-2",
         .tint = 0x2B3137,
         .on_change = []() {
           ShellExecute(0, "open", (std::string("https://github.com/") + "clshortfuse/renodx/wiki/Mods").c_str(), 0, 0, SW_SHOW);
@@ -269,7 +282,7 @@ renodx::utils::settings::Settings settings = {
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
         .label = "Github",
         .section = "Links",
-        .group = "button-line-1",
+        .group = "button-line-2",
         .tint = 0x2B3137,
         .on_change = []() {
           ShellExecute(0, "open", (std::string("https://github.com/") + "clshortfuse/renodx").c_str(), 0, 0, SW_SHOW);
@@ -279,7 +292,7 @@ renodx::utils::settings::Settings settings = {
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
         .label = "Musa's Ko-Fi",
         .section = "Links",
-        .group = "button-line-2",
+        .group = "button-line-3",
         .tint = 0xFF5A16,
         .on_change = []() {
           ShellExecute(0, "open", (std::string("https://ko-fi.com/") + "musaqh").c_str(), 0, 0, SW_SHOW);

@@ -104,11 +104,44 @@ float3 UpgradeToneMapByLuminance(float3 color_hdr, float3 color_sdr, float3 post
   return lerp(color_hdr, color_scaled, post_process_strength);
 }
 
+float3 UpgradeToneMapPerceptual(float3 untonemapped, float3 tonemapped, float3 post_processed, float strength) {
+  float3 lab_untonemapped = renodx::color::ictcp::from::BT709(untonemapped);
+  float3 lab_tonemapped = renodx::color::ictcp::from::BT709(tonemapped);
+  float3 lab_post_processed = renodx::color::ictcp::from::BT709(post_processed);
+
+  float3 lch_untonemapped = renodx::color::oklch::from::OkLab(lab_untonemapped);
+  float3 lch_tonemapped = renodx::color::oklch::from::OkLab(lab_tonemapped);
+  float3 lch_post_processed = renodx::color::oklch::from::OkLab(lab_post_processed);
+
+  float3 lch_upgraded = lch_untonemapped;
+  lch_upgraded.xz *= renodx::math::DivideSafe(lch_post_processed.xz, lch_tonemapped.xz, 0.f);
+
+  float3 lab_upgraded = renodx::color::oklab::from::OkLCh(lch_upgraded);
+
+  float c_untonemapped = length(lab_untonemapped.yz);
+  float c_tonemapped = length(lab_tonemapped.yz);
+  float c_post_processed = length(lab_post_processed.yz);
+
+  if (c_untonemapped > 0) {
+    float new_chrominance = c_untonemapped;
+    new_chrominance = min(max(c_untonemapped, 0.25f), c_untonemapped * (c_post_processed / c_tonemapped));
+    if (new_chrominance > 0) {
+      lab_upgraded.yz *= new_chrominance / c_untonemapped;
+    }
+  }
+
+  float3 upgraded = renodx::color::bt709::from::ICtCp(lab_upgraded);
+  return lerp(untonemapped, upgraded, strength);
+}
+
 float3 UpgradeToneMap(float3 color_hdr, float3 color_sdr, float3 post_process_color, float post_process_strength) {
   if (injectedData.colorGradeRestorationMethod == 1.f) {
     return UpgradeToneMapPerChannel(color_hdr, color_sdr, post_process_color, post_process_strength);
+  } else if (injectedData.colorGradeRestorationMethod == 2.f) {
+    return UpgradeToneMapPerceptual(color_hdr, color_sdr, post_process_color, post_process_strength);
+  } else {
+    return UpgradeToneMapByLuminance(color_hdr, color_sdr, post_process_color, post_process_strength);
   }
-  return UpgradeToneMapByLuminance(color_hdr, color_sdr, post_process_color, post_process_strength);
 }
 
 /// Applies a customized version of RenoDRT tonemapper that tonemaps down
@@ -162,7 +195,7 @@ renodx::tonemap::config::DualToneMap applyUserTonemap(float3 color, float vanill
   config.shadows = injectedData.colorGradeShadows;
   config.contrast = injectedData.colorGradeContrast;
   config.saturation = injectedData.colorGradeSaturation;
-  
+
   config.reno_drt_per_channel = injectedData.toneMapPerChannel != 0;
   config.reno_drt_highlights = 0.92f;
   config.reno_drt_contrast = 1.18f;
@@ -174,7 +207,7 @@ renodx::tonemap::config::DualToneMap applyUserTonemap(float3 color, float vanill
   config.reno_drt_tone_map_method = renodx::tonemap::renodrt::config::tone_map_method::DANIELE;
   config.reno_drt_hue_correction_method = renodx::tonemap::renodrt::config::hue_correction_method::OKLAB;
   config.hue_correction_strength = 0.f;
-  
+
   if (injectedData.toneMapBlend) {
     config.exposure = 1.f;
     config.shadows = 1.f;
@@ -182,7 +215,7 @@ renodx::tonemap::config::DualToneMap applyUserTonemap(float3 color, float vanill
     config.saturation = 1.f;
     config.reno_drt_flare = 0.01f;
   }
-  
+
   renodx::tonemap::Config sdr_config = config;
   sdr_config.peak_nits = 100.f;
   sdr_config.game_nits = 100.f;
@@ -192,13 +225,10 @@ renodx::tonemap::config::DualToneMap applyUserTonemap(float3 color, float vanill
   sdr_config.reno_drt_flare = 0.f;
   sdr_config.reno_drt_shadows = 1.f;
 
-  
   sdr_config.reno_drt_blowout = injectedData.colorGradeBlowout;
   sdr_config.reno_drt_highlights /= config.highlights;
   sdr_config.reno_drt_shadows /= config.shadows;
   sdr_config.reno_drt_contrast /= config.contrast;
-
-
 
   renodx::tonemap::config::DualToneMap dual_tone_map = renodx::tonemap::config::ApplyToneMaps(color, config, sdr_config);
 
