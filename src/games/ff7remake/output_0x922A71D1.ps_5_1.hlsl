@@ -189,8 +189,36 @@ void main(
 
     float3 graded_aces = r2.xyz;
 
-    if (RENODX_TONE_MAP_TYPE != 0) {
-      r2.xyz = ToneMap(t1Sample, graded_aces, v0.xy / cb0[34].zw);
+    if (injectedData.tone_map_type != 0) {
+      float3 color = t1Sample * 1.5f;
+
+      if (injectedData.color_grade_lut_strength != 0) {
+        renodx::tonemap::Config aces_config = renodx::tonemap::config::Create();
+        aces_config.peak_nits = 1000.f;
+        aces_config.game_nits = 100.f;
+        // aces_config.mid_gray_nits = 10.f;
+        // aces_config.mid_gray_value = .1f;
+        aces_config.gamma_correction = 0;
+        // float3 reference_aces = renodx::color::srgb::DecodeSafe(RgbAcesHdrSrgb(color));
+        float3 reference_aces = renodx::tonemap::config::ApplyACES(color, aces_config);
+
+        graded_aces = renodx::color::bt709::from::BT2020(r2.xyz / (250.f));
+
+        float3 color_graded;
+        if (injectedData.tone_map_per_channel == 1.f) {
+          color_graded = UpgradeToneMapPerChannel(color, reference_aces, graded_aces, 1);
+        } else {
+          color_graded = UpgradeToneMapByLuminance(color, reference_aces, graded_aces, 1);
+        }
+
+        float3 lut_color = color_graded;
+        // lut_color = corrected;
+
+        color = lerp(color, lut_color, injectedData.color_grade_lut_strength);
+      }
+      color = ToneMap(color, v0.xy / cb0[34].zw);
+
+      r2.xyz = color;
     }
 
     r1.xyzw = t4.SampleLevel(s2_s, r1.xy, 0).xyzw;
