@@ -24,7 +24,6 @@
 #define CUSTOM_FILM_GRAIN_TYPE                 shader_injection.custom_film_grain_type
 #define CUSTOM_VIGNETTE                        shader_injection.custom_vignette
 #define CUSTOM_LENS_FLARE                      shader_injection.custom_lens_flare
-#define CUSTOM_MOTION_BLUR                     shader_injection.custom_motion_blur
 #define CUSTOM_BLOOM                           shader_injection.custom_bloom
 // #define RENODX_PEAK_WHITE_NITS                 400
 // #define RENODX_DIFFUSE_WHITE_NITS              203
@@ -49,7 +48,6 @@
 // #define CUSTOM_FILM_GRAIN_TYPE                 0
 // #define CUSTOM_VIGNETTE                        1
 // #define CUSTOM_LENS_FLARE                      1
-// #define CUSTOM_MOTION_BLUR                     1
 // #define CUSTOM_BLOOM                           1
 
 
@@ -85,7 +83,6 @@ struct ShaderInjectData {
   float custom_film_grain_strength;
   float custom_random;
   float custom_lens_flare;
-  float custom_motion_blur;
   float custom_bloom;
 };
 
