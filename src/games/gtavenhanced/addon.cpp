@@ -270,15 +270,6 @@ renodx::utils::settings::Settings settings = {
         .parse = [](float value) { return value * 0.02f; },
     },
     new renodx::utils::settings::Setting{
-        .key = "FxMotionBlur",
-        .binding = &CUSTOM_MOTION_BLUR,
-        .default_value = 50.f,
-        .label = "Motion Blur",
-        .section = "Effects",
-        .max = 100.f,
-        .parse = [](float value) { return value * 0.02f; },
-    },
-    new renodx::utils::settings::Setting{
         .key = "FxVignette",
         .binding = &CUSTOM_VIGNETTE,
         .default_value = 50.f,
@@ -423,11 +414,9 @@ void OnPresetOff() {
   renodx::utils::settings::UpdateSetting("FxHDRVideos", 0.f);
   renodx::utils::settings::UpdateSetting("FxVignette", 50.f);
   renodx::utils::settings::UpdateSetting("FxBloom", 50.f);
-  renodx::utils::settings::UpdateSetting("FxFXAA", 100.f);
   renodx::utils::settings::UpdateSetting("FxDoF", 100.f);
   renodx::utils::settings::UpdateSetting("FxFilmGrainType", 0.f);
   renodx::utils::settings::UpdateSetting("FxFilmGrainStrength", 50.f);
-  renodx::utils::settings::UpdateSetting("FxScanLines", 100.f);
 }
 
 bool fired_on_init_swapchain = false;
