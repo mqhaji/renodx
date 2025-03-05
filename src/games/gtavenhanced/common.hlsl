@@ -1,7 +1,7 @@
 #include "./shared.h"
 
 float3 UIScale(float3 color) {
-  color = renodx::color::gamma::Decode(color, 2.2f);
+  color = renodx::color::gamma::Decode(max(0, color), 2.2f);
   color *= RENODX_GRAPHICS_WHITE_NITS / RENODX_DIFFUSE_WHITE_NITS;
   color = renodx::color::gamma::Encode(color, 2.2f);
   return color;
