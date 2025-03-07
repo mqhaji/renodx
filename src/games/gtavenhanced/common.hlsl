@@ -7,8 +7,9 @@ float3 UIScale(float3 color) {
   return color;
 }
 
-float3 FinalizeOutput(float3 color) {
-  color = renodx::color::gamma::DecodeSafe(color, 2.2f);
-  color *= RENODX_DIFFUSE_WHITE_NITS / renodx::color::srgb::REFERENCE_WHITE;
+float4 FinalizeOutput(float4 color) {
+  color.rgb = renodx::color::gamma::DecodeSafe(color.rgb, 2.2f);
+  color.rgb *= RENODX_DIFFUSE_WHITE_NITS / renodx::color::srgb::REFERENCE_WHITE;
+  color.a = saturate(color.a);
   return color;
 }
