@@ -285,7 +285,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 2.f,
         .label = "Film Grain Type",
         .section = "Effects",
-        .labels = {"Vanilla", "Perceptual", "Perceptual (DLSS)"},
+        .labels = {"Vanilla", "Perceptual"},
     },
     new renodx::utils::settings::Setting{
         .key = "FxFilmGrainStrength",
@@ -430,9 +430,11 @@ void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
   if (!peak.has_value()) {
     peak = 1000.f;
   }
-  settings[2]->default_value = peak.value();
-  settings[3]->default_value = std::clamp(roundf(powf(10.f, 0.03460730900256f + (0.757737096673107f * log10f(peak.value())))), 100.f, 203.f);  // Game Nits
-  settings[4]->default_value = std::clamp(roundf(powf(10.f, 0.03460730900256f + (0.757737096673107f * log10f(peak.value())))), 100.f, 203.f);  // UI Nits
+  settings[2]->default_value = peak.value();  // Peak Nits
+
+  float computed_diffuse = std::clamp(roundf(powf(10.f, 0.03460730900256f + (0.757737096673107f * log10f(peak.value())))), 100.f, 203.f);
+  settings[3]->default_value = computed_diffuse;  // Game Nits
+  settings[4]->default_value = computed_diffuse;  // UI Nits
 }
 
 }  // namespace
@@ -451,35 +453,56 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       renodx::mods::shader::force_pipeline_cloning = true;
       renodx::mods::swapchain::use_resource_cloning = true;
 
+      // Swapchain proxy
+      //   renodx::mods::swapchain::swap_chain_proxy_vertex_shader = __swap_chain_proxy_vertex_shader;
+      //   renodx::mods::swapchain::swap_chain_proxy_pixel_shader = __swap_chain_proxy_pixel_shader;
+      //   renodx::mods::swapchain::swapchain_proxy_compatibility_mode = true;
+      //   renodx::mods::swapchain::swapchain_proxy_revert_state = true;
+
       //   renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
       //       .old_format = reshade::api::format::r11g11b10_float,
       //       .new_format = reshade::api::format::r16g16b16a16_float,
       //   });
-      //   renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
-      //       .old_format = reshade::api::format::r8g8b8a8_unorm,
-      //       .new_format = reshade::api::format::r16g16b16a16_float,
-      //   });
-      //   renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
-      //       .old_format = reshade::api::format::r8g8b8a8_typeless,
-      //       .new_format = reshade::api::format::r16g16b16a16_float,
-      //   });
-      //   renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
-      //       .old_format = reshade::api::format::r8g8b8a8_unorm_srgb,
-      //       .new_format = reshade::api::format::r16g16b16a16_float,
-      //   });
-      //   renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
-      //       .old_format = reshade::api::format::b8g8r8a8_typeless,
-      //       .new_format = reshade::api::format::r16g16b16a16_float,
-      //   });
+      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
+          .old_format = reshade::api::format::r8g8b8a8_unorm,
+          .new_format = reshade::api::format::r16g16b16a16_float,
+          .use_resource_view_cloning = true,
+      });
+      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
+          .old_format = reshade::api::format::r8g8b8a8_typeless,
+          .new_format = reshade::api::format::r16g16b16a16_float,
+          .use_resource_view_cloning = true,
+      });
+      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
+          .old_format = reshade::api::format::r8g8b8a8_unorm_srgb,
+          .new_format = reshade::api::format::r16g16b16a16_float,
+          .use_resource_view_cloning = true,
+      });
+      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
+          .old_format = reshade::api::format::b8g8r8a8_typeless,
+          .new_format = reshade::api::format::r16g16b16a16_float,
+          .use_resource_view_cloning = true,
+      });
       renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
           .old_format = reshade::api::format::b8g8r8a8_unorm,
           .new_format = reshade::api::format::r16g16b16a16_float,
           .use_resource_view_cloning = true,
       });
-      //   renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
-      //       .old_format = reshade::api::format::b8g8r8a8_unorm_srgb,
-      //       .new_format = reshade::api::format::r16g16b16a16_float,
-      //   });
+      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
+          .old_format = reshade::api::format::b8g8r8a8_unorm_srgb,
+          .new_format = reshade::api::format::r16g16b16a16_float,
+          .use_resource_view_cloning = true,
+      });
+      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
+          .old_format = reshade::api::format::r10g10b10a2_typeless,
+          .new_format = reshade::api::format::r16g16b16a16_float,
+          .use_resource_view_cloning = true,
+      });
+      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
+          .old_format = reshade::api::format::r10g10b10a2_unorm,
+          .new_format = reshade::api::format::r16g16b16a16_float,
+          .use_resource_view_cloning = true,
+      });
 
       reshade::register_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);
       break;
