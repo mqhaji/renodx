@@ -25,6 +25,9 @@ ShaderInjectData shader_injection;
 
 renodx::mods::shader::CustomShaders custom_shaders = {
     CustomShaderEntry(0xFBCC3CBC),  // PS_BloomComposite
+    
+    // Tone Mapping
+    CustomShaderEntry(0xB3DDE381),  // PS_CompositeMBHighDOFExtraFX
 
     // UI
     CustomShaderEntry(0x914DF4CB),  // PS_Blit
