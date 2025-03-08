@@ -1,3 +1,5 @@
+#include "../common.hlsl"
+
 Texture2DArray<float> t0 : register(t1);
 
 Texture2D<float> t1 : register(t11, space1);
@@ -1062,7 +1064,7 @@ float4 main(
       }
     }
   }
-  float4 _1019 = t13.Sample(s2, float2((TEXCOORD.x), (TEXCOORD.y)));
+  float4 _1019 = t13.Sample(s2, float2((TEXCOORD.x), (TEXCOORD.y)));  // Scene
   float _1025 = (_1019.x) - _1016;
   float _1026 = (_1019.y) - _1017;
   float _1027 = (_1019.z) - _1018;
@@ -1203,53 +1205,62 @@ float4 main(
   float _1216 = _1154 * (TEXCOORD.z);
   float _1217 = _1155 * (TEXCOORD.z);
   float _1218 = _1156 * (TEXCOORD.z);
-  float _1219 = max(0.0f, _1216);
-  float _1220 = max(0.0f, _1217);
-  float _1221 = max(0.0f, _1218);
-  float _1222 = _1219 * _1181;
-  float _1223 = _1220 * _1181;
-  float _1224 = _1221 * _1181;
-  float _1225 = _1222 + _1203;
-  float _1226 = _1223 + _1203;
-  float _1227 = _1224 + _1203;
-  float _1228 = _1225 * _1219;
-  float _1229 = _1226 * _1220;
-  float _1230 = _1227 * _1221;
-  float _1231 = _1228 + _1206;
-  float _1232 = _1229 + _1206;
-  float _1233 = _1230 + _1206;
-  float _1234 = _1222 + _1182;
-  float _1235 = _1223 + _1182;
-  float _1236 = _1224 + _1182;
-  float _1237 = _1234 * _1219;
-  float _1238 = _1235 * _1220;
-  float _1239 = _1236 * _1221;
-  float _1240 = _1237 + _1210;
-  float _1241 = _1238 + _1210;
-  float _1242 = _1239 + _1210;
-  float _1243 = _1231 / _1240;
-  float _1244 = _1232 / _1241;
-  float _1245 = _1233 / _1242;
-  float _1246 = _1243 - _1213;
-  float _1247 = _1244 - _1213;
-  float _1248 = _1245 - _1213;
-  float _1249 = _1246 * _1215;
-  float _1250 = _1247 * _1215;
-  float _1251 = _1248 * _1215;
-  float _1252 = saturate(_1249);
-  float _1253 = saturate(_1250);
-  float _1254 = saturate(_1251);
-  float _1255 = dot(float3(_1252, _1253, _1254), float3(0.21250000596046448f, 0.715399980545044f, 0.07209999859333038f));
-  float _1258 = _1252 - _1255;
-  float _1259 = _1253 - _1255;
-  float _1260 = _1254 - _1255;
+
+  // not tonemapped
+  float _1249, _1250, _1251;
+  if (RENODX_TONE_MAP_TYPE == 0) {
+    float _1219 = max(0.0f, _1216);
+    float _1220 = max(0.0f, _1217);
+    float _1221 = max(0.0f, _1218);
+    float _1222 = _1219 * _1181;
+    float _1223 = _1220 * _1181;
+    float _1224 = _1221 * _1181;
+    float _1225 = _1222 + _1203;
+    float _1226 = _1223 + _1203;
+    float _1227 = _1224 + _1203;
+    float _1228 = _1225 * _1219;
+    float _1229 = _1226 * _1220;
+    float _1230 = _1227 * _1221;
+    float _1231 = _1228 + _1206;
+    float _1232 = _1229 + _1206;
+    float _1233 = _1230 + _1206;
+    float _1234 = _1222 + _1182;
+    float _1235 = _1223 + _1182;
+    float _1236 = _1224 + _1182;
+    float _1237 = _1234 * _1219;
+    float _1238 = _1235 * _1220;
+    float _1239 = _1236 * _1221;
+    float _1240 = _1237 + _1210;
+    float _1241 = _1238 + _1210;
+    float _1242 = _1239 + _1210;
+    float _1243 = _1231 / _1240;
+    float _1244 = _1232 / _1241;
+    float _1245 = _1233 / _1242;
+    float _1246 = _1243 - _1213;
+    float _1247 = _1244 - _1213;
+    float _1248 = _1245 - _1213;
+    _1249 = _1246 * _1215;
+    _1250 = _1247 * _1215;
+    _1251 = _1248 * _1215;
+  } else {
+    _1249 = _1216, _1250 = _1217, _1251 = _1218;
+  }
+  // remove saturate()
+  float _1252 = (_1249);
+  float _1253 = (_1250);
+  float _1254 = (_1251);
+
+  float grayscale = renodx::color::y::from::BT709(float3(_1252, _1253, _1254));
+  float _1258 = _1252 - grayscale;
+  float _1259 = _1253 - grayscale;
+  float _1260 = _1254 - grayscale;
   float _1261 = (cb3_067x)*_1258;
   float _1262 = (cb3_067x)*_1259;
   float _1263 = (cb3_067x)*_1260;
-  float _1264 = _1261 + _1255;
-  float _1265 = _1262 + _1255;
-  float _1266 = _1263 + _1255;
-  float _1269 = _1255 / (cb3_066w);
+  float _1264 = _1261 + grayscale;
+  float _1265 = _1262 + grayscale;
+  float _1266 = _1263 + grayscale;
+  float _1269 = grayscale / (cb3_066w);
   float _1270 = saturate(_1269);
   float _1278 = (cb3_065x) - (cb3_066x);
   float _1279 = (cb3_065y) - (cb3_066y);
@@ -1263,7 +1274,7 @@ float4 main(
   float _1287 = _1284 * _1264;
   float _1288 = _1285 * _1265;
   float _1289 = _1286 * _1266;
-  float _1291 = _1255 + -1.0f;
+  float _1291 = grayscale + -1.0f;
   float _1292 = _1291 + (cb3_065w);
   float _1293 = max(0.009999999776482582f, (cb3_065w));
   float _1294 = _1292 / _1293;
@@ -1277,21 +1288,10 @@ float4 main(
   float _1302 = _1299 + _1287;
   float _1303 = _1300 + _1288;
   float _1304 = _1301 + _1289;
-  float _1305 = saturate(_1302);
-  float _1306 = saturate(_1303);
-  float _1307 = saturate(_1304);
-  float _1309 = abs(_1305);
-  float _1310 = abs(_1306);
-  float _1311 = abs(_1307);
-  float _1312 = log2(_1309);
-  float _1313 = log2(_1310);
-  float _1314 = log2(_1311);
-  float _1315 = _1312 * (cb3_067y);
-  float _1316 = _1313 * (cb3_067y);
-  float _1317 = _1314 * (cb3_067y);
-  float _1318 = exp2(_1315);
-  float _1319 = exp2(_1316);
-  float _1320 = exp2(_1317);
+
+  float3 linear_color = float3(_1302, _1303, _1304);                     // remove abs() and saturate()
+  float3 gamma_color = renodx::math::SignPow(linear_color, 1.f / 2.2f);  // force 1.f / 2.2f instead of cb3_067y
+  float _1318 = gamma_color.r, _1319 = gamma_color.g, _1320 = gamma_color.b;
   float _1324 = (cb3_063w) + (TEXCOORD.y);
   float _1325 = _1324 * (cb3_063y);
   float _1326 = sin(_1325);
@@ -1324,83 +1324,95 @@ float4 main(
   float _1361 = _1360 + _1341;
   float _1362 = _1360 + _1342;
   float _1363 = _1360 + _1343;
-  float _1364 = max(0.0f, _1361);
-  float _1365 = max(0.0f, _1362);
-  float _1366 = max(0.0f, _1363);
-  float _1367 = saturate(_1364);
-  float _1368 = saturate(_1365);
-  float _1369 = saturate(_1366);
-  float _1370 = dot(float3(_1367, _1368, _1369), float3(0.29899999499320984f, 0.5870000123977661f, 0.11400000005960464f));
-  int _1373 = asint((cb3_089x));
-  bool _1374 = (_1373 == 0);
+
+  // remove saturate
+  float _1367 = (_1361);
+  float _1368 = (_1362);
+  float _1369 = (_1363);
+  float _1370 = renodx::color::luma::from::BT601(float3(_1367, _1368, _1369));
   _1459 = _1367;
   _1460 = _1368;
   _1461 = _1369;
-  if (!_1374) {
-    int _1378 = asint((cb3_092w));
-    bool _1379 = (_1378 != 0);
-    float _1380 = max(_1368, _1369);
-    float _1381 = max(_1367, _1380);
-    float _1382 = (_1379 ? _1367 : _1381);
-    float _1383 = (_1379 ? _1368 : _1381);
-    float _1384 = (_1379 ? _1369 : _1381);
-    float _1389 = _1382 - (cb3_093x);
-    float _1390 = _1383 - (cb3_093y);
-    float _1391 = _1384 - (cb3_093z);
-    float _1395 = _1389 * (cb3_092x);
-    float _1396 = _1390 * (cb3_092y);
-    float _1397 = _1391 * (cb3_092z);
-    float _1398 = saturate(_1395);
-    float _1399 = saturate(_1396);
-    float _1400 = saturate(_1397);
-    float _1402 = log2(_1398);
-    float _1403 = log2(_1399);
-    float _1404 = log2(_1400);
-    float _1405 = _1402 * (cb3_093w);
-    float _1406 = _1403 * (cb3_093w);
-    float _1407 = _1404 * (cb3_093w);
-    float _1408 = exp2(_1405);
-    float _1409 = exp2(_1406);
-    float _1410 = exp2(_1407);
-    float _1419 = (cb3_091x) - (cb3_090x);
-    float _1420 = (cb3_091y) - (cb3_090y);
-    float _1421 = (cb3_091z) - (cb3_090z);
-    float _1422 = _1419 * _1408;
-    float _1423 = _1420 * _1409;
-    float _1424 = _1421 * _1410;
-    float _1425 = _1422 + (cb3_090x);
-    float _1426 = _1423 + (cb3_090y);
-    float _1427 = _1424 + (cb3_090z);
-    uint _1428 = uint((SV_Position.x));
-    uint _1429 = uint((SV_Position.y));
-    int _1432 = _1428 & 63;
-    int _1433 = _1429 & 63;
-    int _1434 = ((uint)(cb2_022y)) & 31;
-    float _1435 = t0.Load(int4(_1432, _1433, _1434, 0));
-    float _1437 = (_1435.x) * 2.0f;
-    float _1438 = _1437 + -1.0f;
-    bool _1439 = (_1438 > 0.0f);
-    bool _1440 = (_1438 < 0.0f);
-    int _1441 = (uint)(_1439);
-    int _1442 = (uint)(_1440);
-    int _1443 = _1441 - _1442;
-    float _1444 = float(_1443);
-    float _1445 = abs(_1438);
-    float _1446 = 1.0f - _1445;
-    float _1447 = sqrt(_1446);
-    float _1448 = 1.0f - _1447;
-    float _1449 = _1448 * _1425;
-    float _1450 = _1449 * _1444;
-    float _1451 = _1448 * _1426;
-    float _1452 = _1451 * _1444;
-    float _1453 = _1448 * _1427;
-    float _1454 = _1453 * _1444;
-    float _1455 = _1450 + _1367;
-    float _1456 = _1452 + _1368;
-    float _1457 = _1454 + _1369;
-    _1459 = _1455;
-    _1460 = _1456;
-    _1461 = _1457;
+
+  if (bool(asint(cb3_089x))) {  // noise/dithering/grain
+    if (CUSTOM_FILM_GRAIN_TYPE) {
+      float3 grained_color = renodx::effects::ApplyFilmGrain(
+          float3(_1459, _1460, _1461),
+          float2(_1354, _1355),
+          _1354,
+          CUSTOM_FILM_GRAIN_STRENGTH * 0.0125f,
+          1.f);
+      _1459 = grained_color.r, _1460 = grained_color.g, _1461 = grained_color.b;
+    } else {
+      int _1378 = asint((cb3_092w));
+      bool _1379 = (_1378 != 0);
+      float _1380 = max(_1368, _1369);
+      float _1381 = max(_1367, _1380);
+      float _1382 = (_1379 ? _1367 : _1381);
+      float _1383 = (_1379 ? _1368 : _1381);
+      float _1384 = (_1379 ? _1369 : _1381);
+      float _1389 = _1382 - (cb3_093x);
+      float _1390 = _1383 - (cb3_093y);
+      float _1391 = _1384 - (cb3_093z);
+      float _1395 = _1389 * (cb3_092x);
+      float _1396 = _1390 * (cb3_092y);
+      float _1397 = _1391 * (cb3_092z);
+      float _1398 = saturate(_1395);
+      float _1399 = saturate(_1396);
+      float _1400 = saturate(_1397);
+      float _1402 = log2(_1398);
+      float _1403 = log2(_1399);
+      float _1404 = log2(_1400);
+      float _1405 = _1402 * (cb3_093w);
+      float _1406 = _1403 * (cb3_093w);
+      float _1407 = _1404 * (cb3_093w);
+      float _1408 = exp2(_1405);
+      float _1409 = exp2(_1406);
+      float _1410 = exp2(_1407);
+      float _1419 = (cb3_091x) - (cb3_090x);
+      float _1420 = (cb3_091y) - (cb3_090y);
+      float _1421 = (cb3_091z) - (cb3_090z);
+      float _1422 = _1419 * _1408;
+      float _1423 = _1420 * _1409;
+      float _1424 = _1421 * _1410;
+      float _1425 = _1422 + (cb3_090x);
+      float _1426 = _1423 + (cb3_090y);
+      float _1427 = _1424 + (cb3_090z);
+      uint _1428 = uint((SV_Position.x));
+      uint _1429 = uint((SV_Position.y));
+      int _1432 = _1428 & 63;
+      int _1433 = _1429 & 63;
+      int _1434 = ((uint)(cb2_022y)) & 31;
+      float _1435 = t0.Load(int4(_1432, _1433, _1434, 0));
+      float _1437 = (_1435.x) * 2.0f;
+      float _1438 = _1437 + -1.0f;
+      bool _1439 = (_1438 > 0.0f);
+      bool _1440 = (_1438 < 0.0f);
+      int _1441 = (uint)(_1439);
+      int _1442 = (uint)(_1440);
+      int _1443 = _1441 - _1442;
+      float _1444 = float(_1443);
+      float _1445 = abs(_1438);
+      float _1446 = 1.0f - _1445;
+      float _1447 = sqrt(_1446);
+      float _1448 = 1.0f - _1447;
+      float _1449 = _1448 * _1425;
+
+      float _1450 = _1449 * _1444;
+      float _1451 = _1448 * _1426;
+      float _1452 = _1451 * _1444;
+      float _1453 = _1448 * _1427;
+      float _1454 = _1453 * _1444;
+
+      _1450 *= CUSTOM_FILM_GRAIN_STRENGTH, _1452 *= CUSTOM_FILM_GRAIN_STRENGTH, _1454 *= CUSTOM_FILM_GRAIN_STRENGTH;
+
+      float _1455 = _1450 + _1367;
+      float _1456 = _1452 + _1368;
+      float _1457 = _1454 + _1369;
+      _1459 = _1455;
+      _1460 = _1456;
+      _1461 = _1457;
+    }
   }
   SV_Target.x = _1459;
   SV_Target.y = _1460;
