@@ -25,7 +25,7 @@ ShaderInjectData shader_injection;
 
 renodx::mods::shader::CustomShaders custom_shaders = {
     CustomShaderEntry(0xFBCC3CBC),  // PS_BloomComposite
-    
+
     // Tone Mapping
     CustomShaderEntry(0xB3DDE381),  // PS_CompositeMBHighDOFExtraFX
 
@@ -449,6 +449,10 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   switch (fdw_reason) {
     case DLL_PROCESS_ATTACH:
       if (!reshade::register_addon(h_module)) return FALSE;
+      if (!reshade::register_addon(h_module)) return FALSE;
+      renodx::mods::shader::on_init_pipeline_layout = [](reshade::api::device* device, auto, auto) {
+        return device->get_api() == reshade::api::device_api::d3d12;
+      };
 
       renodx::mods::shader::expected_constant_buffer_space = 50;
       renodx::mods::shader::expected_constant_buffer_index = 13;
