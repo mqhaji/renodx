@@ -1,4 +1,4 @@
-#include "../common.hlsl"
+#include "../shared.h"
 
 Texture2D<float4> t0 : register(t5, space1);
 
@@ -35,8 +35,8 @@ float4 main(
   SV_Target.y = _31;
   SV_Target.z = _32;
   SV_Target.w = _33;
- 
-  SV_Target.rgb = UIScale(SV_Target.rgb);
+
+  SV_Target.rgb = renodx::draw::RenderIntermediatePass(renodx::color::srgb::Decode(max(0, SV_Target.rgb)));
 
   return SV_Target;
 }

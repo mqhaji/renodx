@@ -1,4 +1,4 @@
-#include "../common.hlsl"
+#include "../shared.h"
 
 float4 main(
     noperspective float4 SV_Position: SV_Position,
@@ -6,7 +6,7 @@ float4 main(
     : SV_Target {
   float4 SV_Target = COLOR;
 
-  SV_Target.rgb = UIScale(SV_Target.rgb);
+  SV_Target.rgb = renodx::draw::RenderIntermediatePass(renodx::color::srgb::Decode(max(0, SV_Target.rgb)));
 
   return SV_Target;
 }

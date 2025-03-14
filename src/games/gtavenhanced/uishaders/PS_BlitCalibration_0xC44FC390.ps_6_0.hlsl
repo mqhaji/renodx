@@ -1,4 +1,4 @@
-#include "../common.hlsl"
+#include "../shared.h"
 
 Texture2D<float4> t0 : register(t5, space1);
 
@@ -22,7 +22,7 @@ float4 main(
   main_tex.rgb = renodx::color::gamma::Decode(main_tex.rgb, 2.2f);        // Linearize
   main_tex.rgb = renodx::color::gamma::Encode(main_tex.rgb, (cb1_002x));  // Apply gamma slider
 
-  main_tex.rgb = UIScale(main_tex.rgb);
+  main_tex.rgb = renodx::draw::RenderIntermediatePass(renodx::color::srgb::Decode(max(0, main_tex.rgb)));
 
   return float4(main_tex.rgb, float((main_tex.w) > 0.0f));
 }

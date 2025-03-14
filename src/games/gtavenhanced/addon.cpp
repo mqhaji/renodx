@@ -460,10 +460,11 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       renodx::mods::swapchain::use_resource_cloning = true;
 
       // Swapchain proxy
-      //   renodx::mods::swapchain::swap_chain_proxy_vertex_shader = __swap_chain_proxy_vertex_shader;
-      //   renodx::mods::swapchain::swap_chain_proxy_pixel_shader = __swap_chain_proxy_pixel_shader;
-      //   renodx::mods::swapchain::swapchain_proxy_compatibility_mode = true;
-      //   renodx::mods::swapchain::swapchain_proxy_revert_state = true;
+      renodx::mods::swapchain::expected_constant_buffer_space = 50;
+      renodx::mods::swapchain::expected_constant_buffer_index = 13;
+      renodx::mods::swapchain::swap_chain_proxy_vertex_shader = __swap_chain_proxy_vertex_shader;
+      renodx::mods::swapchain::swap_chain_proxy_pixel_shader = __swap_chain_proxy_pixel_shader;
+      renodx::mods::swapchain::swapchain_proxy_revert_state = true;
 
       //   renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
       //       .old_format = reshade::api::format::r11g11b10_float,
@@ -519,7 +520,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   }
 
   renodx::utils::settings::Use(fdw_reason, &settings, &OnPresetOff);
-  renodx::mods::swapchain::Use(fdw_reason);
+  renodx::mods::swapchain::Use(fdw_reason, &shader_injection);
   renodx::mods::shader::Use(fdw_reason, custom_shaders, &shader_injection);
 
   return TRUE;
