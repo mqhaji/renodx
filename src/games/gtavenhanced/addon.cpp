@@ -449,7 +449,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   switch (fdw_reason) {
     case DLL_PROCESS_ATTACH:
       if (!reshade::register_addon(h_module)) return FALSE;
-      if (!reshade::register_addon(h_module)) return FALSE;
       renodx::mods::shader::on_init_pipeline_layout = [](reshade::api::device* device, auto, auto) {
         return device->get_api() == reshade::api::device_api::d3d12;
       };
