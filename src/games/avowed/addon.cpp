@@ -20,17 +20,8 @@
 namespace {
 
 renodx::mods::shader::CustomShaders custom_shaders = {
-    CustomShaderEntry(0x0D5CC3D6),
-    CustomShaderEntry(0x1C7099E6),
-    CustomShaderEntry(0x2C8B0AF1),
-    CustomShaderEntry(0x9D0A7301),
-    CustomShaderEntry(0x9DFC1E29),
-    CustomShaderEntry(0x32D614BD),
-    CustomShaderEntry(0x87C99513),
-    CustomShaderEntry(0x52743DD3),
-    CustomShaderEntry(0x99EEAAEE),
-    CustomShaderEntry(0xE67895B2),
-    CustomShaderEntry(0xC3E6BD60),
+    CustomShaderEntry(0x484B4E2B),
+    CustomShaderEntry(0xF890095A),
 };
 
 ShaderInjectData shader_injection;
@@ -47,8 +38,7 @@ renodx::utils::settings::Settings settings = {
         .label = "Tone Mapper",
         .section = "Tone Mapping",
         .tooltip = "Sets the tone mapper type",
-        .labels = {"Vanilla", "RenoDRT"},
-        .parse = [](float value) { return value * 3.f; },
+        .labels = {"Vanilla (Fake ACES)", "None", "ACES"},
     },
     new renodx::utils::settings::Setting{
         .key = "toneMapPeakNits",
@@ -136,7 +126,6 @@ renodx::utils::settings::Settings settings = {
         .section = "Color Grading",
         .tooltip = "Adds or removes highlight color.",
         .max = 100.f,
-        .is_enabled = []() { return shader_injection.toneMapType == 3; },
         .parse = [](float value) { return value * 0.02f; },
     },
     new renodx::utils::settings::Setting{
@@ -147,8 +136,7 @@ renodx::utils::settings::Settings settings = {
         .section = "Color Grading",
         .tooltip = "Adds highlight desaturation due to overexposure.",
         .max = 100.f,
-        .is_enabled = []() { return shader_injection.toneMapType == 3; },
-        .parse = [](float value) { return fmax(0.00001f, value * 0.01f); },
+        .parse = [](float value) { return value * 0.01f; },
     },
     new renodx::utils::settings::Setting{
         .key = "ColorGradeFlare",
@@ -158,7 +146,6 @@ renodx::utils::settings::Settings settings = {
         .section = "Color Grading",
         .tooltip = "Flare/Glare Compensation",
         .max = 100.f,
-        .is_enabled = []() { return shader_injection.toneMapType == 3; },
         .parse = [](float value) { return value * 0.01f; },
     },
     new renodx::utils::settings::Setting{
@@ -250,8 +237,8 @@ void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
 
 // NOLINTBEGIN(readability-identifier-naming)
 
-extern "C" __declspec(dllexport) const char* NAME = "RenoDX Avowed";
-extern "C" __declspec(dllexport) const char* DESCRIPTION = "RenoDX Avowed";
+extern "C" __declspec(dllexport) const char* NAME = "RenoDX for Avowed";
+extern "C" __declspec(dllexport) const char* DESCRIPTION = "RenoDX for Avowed";
 
 // NOLINTEND(readability-identifier-naming)
 

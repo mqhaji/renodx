@@ -13,6 +13,7 @@
 #define RENODX_TONE_MAP_HIGHLIGHT_SATURATION   shader_injection.colorGradeHighlightSaturation
 #define RENODX_TONE_MAP_BLOWOUT                shader_injection.colorGradeBlowout
 #define RENODX_TONE_MAP_FLARE                  shader_injection.colorGradeFlare
+#define RENODX_TONE_MAP_HUE_CORRECTION         shader_injection.tone_map_hue_correction
 #define RENODX_TONE_MAP_CLAMP_COLOR_SPACE      color::convert::COLOR_SPACE_BT2020
 #define RENODX_SWAP_CHAIN_ENCODING_COLOR_SPACE color::convert::COLOR_SPACE_BT2020
 #define RENODX_SWAP_CHAIN_ENCODING             4.f
@@ -45,11 +46,7 @@ struct ShaderInjectData {
 };
 
 #ifndef __cplusplus
-#if ((__SHADER_TARGET_MAJOR == 5 && __SHADER_TARGET_MINOR >= 1) || __SHADER_TARGET_MAJOR >= 6)
 cbuffer injectedBuffer : register(b13, space50) {
-#elif (__SHADER_TARGET_MAJOR < 5) || ((__SHADER_TARGET_MAJOR == 5) && (__SHADER_TARGET_MINOR < 1))
-cbuffer injectedBuffer : register(b13) {
-#endif
   ShaderInjectData shader_injection : packoffset(c0);
 }
 
