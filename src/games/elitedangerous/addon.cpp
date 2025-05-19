@@ -399,6 +399,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
             .old_format = reshade::api::format::r8g8b8a8_typeless,
             .new_format = reshade::api::format::r16g16b16a16_float,
             .index = index,
+            // .dimensions = {.width = 4800, .height = 2700},
         });
       }
 #endif
