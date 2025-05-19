@@ -163,3 +163,76 @@ void ApplyUserDualToneMap(float3 untonemapped, inout float3 color_hdr, inout flo
 
   return;
 }
+
+void ApplyUserToneMap(float3 untonemapped, inout float3 color_hdr) {
+  const float vanilla_mid_gray = pow(ApplyVanillaTonemap(0.18f), 2.2f);  // ~ 0.28f
+
+  if (RENODX_TONE_MAP_TYPE == 2.f) {
+    const float ACES_MIN = 0.0001f;
+    const float ACES_MID_GRAY = 0.10f;
+    const float MID_GRAY_SCALE = vanilla_mid_gray / ACES_MID_GRAY;
+
+    float aces_min = ACES_MIN / RENODX_DIFFUSE_WHITE_NITS / MID_GRAY_SCALE;
+    float aces_max = (RENODX_PEAK_WHITE_NITS / RENODX_DIFFUSE_WHITE_NITS) / MID_GRAY_SCALE;
+
+    // exposure, highlights, shadows, contrast
+    untonemapped = renodx::color::grade::UserColorGrading(
+        untonemapped,
+        RENODX_TONE_MAP_EXPOSURE,
+        RENODX_TONE_MAP_HIGHLIGHTS,
+        RENODX_TONE_MAP_SHADOWS,
+        RENODX_TONE_MAP_CONTRAST,
+        1.f,
+        0.f,
+        0.f);
+
+    color_hdr = renodx::tonemap::aces::ODT(renodx::color::ap1::from::BT709(untonemapped), aces_min * 48.f, aces_max * 48.f) / 48.f * MID_GRAY_SCALE;
+
+    color_hdr =
+        renodx::color::grade::UserColorGrading(
+            color_hdr,
+            1.f,
+            1.f,
+            1.f,
+            1.f,
+            RENODX_TONE_MAP_SATURATION,
+            RENODX_TONE_MAP_BLOWOUT,
+            RENODX_TONE_MAP_HUE_CORRECTION,
+            untonemapped);
+
+  } else {
+    renodx::tonemap::Config config = renodx::tonemap::config::Create();
+    config.type = RENODX_TONE_MAP_TYPE;
+    config.peak_nits = 10000.f;
+    config.game_nits = 100.f;
+    config.gamma_correction = 0.f;
+    config.mid_gray_value = vanilla_mid_gray;
+    config.mid_gray_nits = config.mid_gray_value * 100.f;
+    config.exposure = RENODX_TONE_MAP_EXPOSURE;
+    config.highlights = RENODX_TONE_MAP_HIGHLIGHTS;
+    config.shadows = RENODX_TONE_MAP_SHADOWS;
+    config.contrast = RENODX_TONE_MAP_CONTRAST;
+    config.saturation = RENODX_TONE_MAP_SATURATION;
+
+    // RenoDRT Settings
+    config.reno_drt_per_channel = RENODX_TONE_MAP_PER_CHANNEL != 0;
+    config.reno_drt_highlights = 0.795f;
+    config.reno_drt_contrast = 1.24f;
+    config.reno_drt_saturation = 1.2f;
+    config.reno_drt_flare = 0.00125 * pow(RENODX_TONE_MAP_FLARE, 10.f);
+    config.reno_drt_shadows = 0.575f;
+    config.reno_drt_working_color_space = 0u;
+    config.reno_drt_blowout = RENODX_TONE_MAP_HIGHLIGHT_SATURATION;
+    config.reno_drt_dechroma = RENODX_TONE_MAP_BLOWOUT;
+    config.reno_drt_tone_map_method = renodx::tonemap::renodrt::config::tone_map_method::REINHARD;
+    config.reno_drt_hue_correction_method = renodx::tonemap::renodrt::config::hue_correction_method::OKLAB;
+    config.hue_correction_type = renodx::tonemap::config::hue_correction_type::INPUT;
+    config.hue_correction_strength = RENODX_TONE_MAP_HUE_CORRECTION;
+
+    float3 tonemapped = renodx::tonemap::config::Apply(untonemapped, config);
+
+    color_hdr = tonemapped;
+  }
+
+  return;
+}
