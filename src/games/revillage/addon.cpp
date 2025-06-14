@@ -7,22 +7,14 @@
 
 #define DEBUG_LEVEL_0
 
-#include <embed/0x2F362206.h>  // Tonemap + Postfx
-#include <embed/0x16906EB5.h>  // Tonemap + Postfx - No Vignette
-
-#include <embed/0x1405D21D.h>  // BT.2020 + PQ Encoding
+#include <embed/shaders.h>
 
 #include <include/reshade.hpp>
 #include "../../mods/shader.hpp"
 
 namespace {
 
-renodx::mods::shader::CustomShaders custom_shaders = {
-    CustomShaderEntry(0x2F362206),  // Tonemap + Postfx
-    CustomShaderEntry(0x16906EB5),  // Tonemap + Postfx - No Vignette
-
-    CustomShaderEntry(0x1405D21D),  // BT.2020 + PQ Encoding
-};
+renodx::mods::shader::CustomShaders custom_shaders = {__ALL_CUSTOM_SHADERS};
 
 }  // namespace
 
