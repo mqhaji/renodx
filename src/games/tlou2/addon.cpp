@@ -67,15 +67,25 @@ renodx::utils::settings::Settings settings = {
         .format = "%.3f",
     },
     new renodx::utils::settings::Setting{
-        .key = "ToneMapHueCorrection",
-        .binding = &shader_injection.tone_map_hue_correction,
-        .default_value = 50.f,
-        .label = "Hue Correction",
+        .key = "ToneMapHueShift",
+        .binding = &shader_injection.tone_map_hue_shift,
+        .default_value = 0.f,
+        .label = "Hue Shift",
         .section = "Tone Mapping",
-        .tooltip = "Hue retention strength.",
+        .tooltip = "Hue-shift emulation strength.",
         .min = 0.f,
         .max = 100.f,
         .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "ToneMapGammaCorrectionType",
+        .binding = &shader_injection.gamma_correction_type,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 1.f,
+        .label = "Gamma Correction",
+        .section = "Tone Mapping",
+        .tooltip = "Overrides in-game contrast slider, emulates a 2.2 EOTF",
+        .labels = {"Channel", "Luminance (Hue preserving)"},
     },
     new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
@@ -148,7 +158,8 @@ void OnPresetOff() {
       {"ToneMapPeakNits", 10000.f},
       {"ToneMapGameNits", 300.f},
       {"ToneMapShoulderStart", 0.375f},
-      {"ToneMapHueCorrection", 0.f},
+      {"ToneMapHueShift", 0.f},
+      {"ToneMapGammaCorrectionType", 0.f},
   });
 }
 

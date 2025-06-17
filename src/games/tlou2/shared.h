@@ -14,7 +14,8 @@ struct ShaderInjectData {
   float peak_white_nits;
   float tone_map_shoulder_start;
   float diffuse_white_nits;
-  float tone_map_hue_correction;
+  float tone_map_hue_shift;
+  float gamma_correction_type;
 };
 
 #ifndef __cplusplus
@@ -26,7 +27,8 @@ cbuffer shader_injection : register(b13, space50) {
 #define RENODX_PEAK_WHITE_NITS         shader_injection.peak_white_nits
 #define RENODX_DIFFUSE_WHITE_NITS      shader_injection.diffuse_white_nits
 #define RENODX_TONE_MAP_SHOULDER_START shader_injection.tone_map_shoulder_start
-#define RENODX_TONE_MAP_HUE_CORRECTION shader_injection.tone_map_hue_correction
+#define RENODX_TONE_MAP_HUE_SHIFT      shader_injection.tone_map_hue_shift
+#define RENODX_GAMMA_CORRECTION_TYPE   shader_injection.gamma_correction_type
 
 #include "../../shaders/renodx.hlsl"
 #endif
