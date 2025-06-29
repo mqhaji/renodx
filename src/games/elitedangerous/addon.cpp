@@ -23,13 +23,74 @@ namespace {
 
 ShaderInjectData shader_injection;
 
-renodx::mods::shader::CustomShaders custom_shaders = {__ALL_CUSTOM_SHADERS};
+#define UpgradeRTVReplaceShader(value)       \
+  {                                          \
+      value,                                 \
+      {                                      \
+          .crc32 = value,                    \
+          .code = __##value,                 \
+          .on_draw = [](auto* cmd_list) {                                                             \
+            auto rtvs = renodx::utils::swapchain::GetRenderTargets(cmd_list);                         \
+            bool changed = false;                                                                     \
+            for (auto rtv : rtvs) {                                                                   \
+              changed = renodx::mods::swapchain::ActivateCloneHotSwap(cmd_list->get_device(), rtv);   \
+            }                                                                                         \
+            if (changed) {                                                                            \
+              renodx::mods::swapchain::FlushDescriptors(cmd_list);                                    \
+              renodx::mods::swapchain::RewriteRenderTargets(cmd_list, rtvs.size(), rtvs.data(), {0}); \
+            }                                                                                         \
+            return true; }, \
+      },                                     \
+  }
+
+#define UpgradeRTVShader(value)              \
+  {                                          \
+      value,                                 \
+      {                                      \
+          .crc32 = value,                    \
+          .on_draw = [](auto* cmd_list) {                                                           \
+            auto rtvs = renodx::utils::swapchain::GetRenderTargets(cmd_list);                       \
+            bool changed = false;                                                                   \
+            for (auto rtv : rtvs) {                                                                 \
+              changed = renodx::mods::swapchain::ActivateCloneHotSwap(cmd_list->get_device(), rtv); \
+            }                                                                                       \
+            if (changed) {                                                                          \
+              renodx::mods::swapchain::FlushDescriptors(cmd_list);                                  \
+              renodx::mods::swapchain::RewriteRenderTargets(cmd_list, rtvs.size(), rtvs.data(), {0});      \
+            }                                                                                       \
+            return true; }, \
+      },                                     \
+  }
+
+renodx::mods::shader::CustomShaders custom_shaders = {
+    CustomShaderEntry(0xDEAFF53A),  // bloom
+    CustomShaderEntry(0x2F04633E),  // video
+
+    // Upgrades
+    UpgradeRTVReplaceShader(0xD7E646E3),  // tonemap
+    UpgradeRTVReplaceShader(0x6BE69EF3),  // tonemap, no bloom
+    UpgradeRTVReplaceShader(0xEBD83636),  // tonemap, no bloom, no lut
+
+    UpgradeRTVShader(0x723CBF3F),  // AA?
+    UpgradeRTVShader(0x315EA715),  // AA?
+
+    UpgradeRTVShader(0x7561AC83),  // MLAAx2/x4
+    UpgradeRTVShader(0x44FAE038),  // MLAAx2/x4
+
+    UpgradeRTVShader(0x8A421A14),  // FXAA
+    UpgradeRTVShader(0x0B263009),  // FXAA
+
+    // UpgradeRTVShader(0x5647AAC2),  // FSR1 Compute Shader
+
+};
 
 const std::unordered_map<std::string, float> RECOMMENDED_VALUES = {
     {"ToneMapScaling", 0.f},
-    {"ColorGradeFlare", 40.f},
-    {"ColorGradePostLUTSaturation", 65.f},
-    {"ColorGradePostLUTBlowout", 50.f},
+    {"ColorGradeShadows", 45.f},
+    {"ColorGradeHighlightSaturation", 55.f},
+    {"ColorGradeBlowout", 85.f},
+    {"ColorGradeFlare", 45.f},
+    {"ColorGradePostLUTSaturation", 100.f},
     {"FxBloom", 75.f},
     {"FxGrainStrength", 50.f},
 };
@@ -93,10 +154,10 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "ToneMapHueShift",
         .binding = &shader_injection.tone_map_hue_shift,
-        .default_value = 50.f,
+        .default_value = 0.f,
         .label = "Hue Shift",
         .section = "Tone Mapping",
-        .tooltip = "Emulates hue shifts from per-channel grading.",
+        .tooltip = "Emulates hue shifts from per-channel tonemapping.",
         .min = 0.f,
         .max = 100.f,
         .is_enabled = []() { return shader_injection.tone_map_type == 1.f || shader_injection.tone_map_type == 3.f; },
@@ -384,16 +445,25 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       renodx::mods::shader::expected_constant_buffer_index = 13;
       renodx::mods::shader::force_pipeline_cloning = true;
 
-      // swapchain proxy
+      // Swapchain Proxy
       renodx::mods::swapchain::use_resource_cloning = true;
       renodx::mods::swapchain::expected_constant_buffer_index = 13;
       renodx::mods::swapchain::swap_chain_proxy_vertex_shader = __swap_chain_proxy_vertex_shader;
       renodx::mods::swapchain::swap_chain_proxy_pixel_shader = __swap_chain_proxy_pixel_shader;
 
-      // film grain
+      // Film Grain
       renodx::utils::random::binds.push_back(&shader_injection.custom_random);
 
-#if 1  // NOLINT main textures
+      // On Demand Upgrades
+      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
+          .old_format = reshade::api::format::r8g8b8a8_typeless,
+          .new_format = reshade::api::format::r16g16b16a16_float,
+          .ignore_size = true,
+          .use_resource_view_cloning = true,
+          .use_resource_view_hot_swap = true,
+      });
+
+#if 0  // NOLINT main textures
       for (auto index : {3, 4}) {
         renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
             .old_format = reshade::api::format::r8g8b8a8_typeless,
