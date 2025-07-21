@@ -1,8 +1,8 @@
 // LUT + TONEMAPPER
 
-#include "./aces_cdpr.hlsl"
-#include "./cp2077.h"
-#include "./injectedBuffer.hlsl"
+#include "../aces_cdpr.hlsl"
+#include "../cp2077.h"
+#include "../injectedBuffer.hlsl"
 
 static const float HEATMAP_COLORS[27] = {
   0.0f, 0.0f, 0.0f,  // Black
@@ -161,6 +161,82 @@ struct SPIRV_Cross_Input {
   uint3 gl_GlobalInvocationID : SV_DispatchThreadID;
 };
 
+float3 ApplyExposureContrastFlareHighlightsShadowsByLuminance(float3 untonemapped, float y, renodx::color::grade::Config config, float mid_gray = 0.18f) {
+  if (config.exposure == 1.f && config.shadows == 1.f && config.highlights == 1.f && config.contrast == 1.f && config.flare == 0.f) {
+    return untonemapped;
+  }
+  float3 color = untonemapped;
+
+  color *= config.exposure;
+
+  const float y_normalized = y / mid_gray;
+  const float highlight_mask = 1.f / mid_gray;
+  const float shadow_mask = 0.08f;
+
+  // contrast & flare
+  float flare = renodx::math::DivideSafe(y_normalized + config.flare, y_normalized, 1.f);
+  float exponent = config.contrast * flare;
+  const float y_contrasted = pow(y_normalized, exponent);
+
+  // highlights
+  float y_highlighted = pow(y_contrasted, config.highlights);
+  y_highlighted = lerp(y_contrasted, y_highlighted, saturate(y_contrasted / highlight_mask));
+
+  // shadows
+  float y_shadowed = pow(y_highlighted, -1.f * (config.shadows - 2.f));
+  y_shadowed = lerp(y_shadowed, y_highlighted, saturate(y_highlighted / shadow_mask));
+
+  const float y_final = y_shadowed * mid_gray;
+
+  color *= (y > 0 ? (y_final / y) : 0);
+
+  return color;
+}
+
+float3 ApplySaturationBlowoutHueCorrectionHighlightSaturation(float3 tonemapped, float3 hue_reference_color, float y, renodx::color::grade::Config config) {
+  float3 color = tonemapped;
+  if (config.saturation != 1.f || config.dechroma != 0.f || config.hue_correction_strength != 0.f || config.blowout != 0.f) {
+    float3 perceptual_new = renodx::color::ictcp::from::BT709(color);
+
+    if (config.hue_correction_strength != 0.f) {
+      float3 perceptual_old = renodx::color::ictcp::from::BT709(hue_reference_color);
+
+      // Save chrominance to apply black
+      float chrominance_pre_adjust = distance(perceptual_new.yz, 0);
+
+      perceptual_new.yz = lerp(perceptual_new.yz, perceptual_old.yz, config.hue_correction_strength);
+
+      float chrominance_post_adjust = distance(perceptual_new.yz, 0);
+
+      // Apply back previous chrominance
+      perceptual_new.yz *= renodx::math::DivideSafe(chrominance_pre_adjust, chrominance_post_adjust, 1.f);
+    }
+
+    if (config.dechroma != 0.f) {
+      perceptual_new.yz *= lerp(1.f, 0.f, saturate(pow(y / (10000.f / 100.f), (1.f - config.dechroma))));
+    }
+
+    if (config.blowout != 0.f) {
+      float percent_max = saturate(y * 100.f / 10000.f);
+      // positive = 1 to 0, negative = 1 to 2
+      float blowout_strength = 100.f;
+      float blowout_change = pow(1.f - percent_max, blowout_strength * abs(config.blowout));
+      if (config.blowout < 0) {
+        blowout_change = (2.f - blowout_change);
+      }
+
+      perceptual_new.yz *= blowout_change;
+    }
+
+    perceptual_new.yz *= config.saturation;
+
+    color = renodx::color::bt709::from::ICtCp(perceptual_new);
+
+    color = renodx::color::bt709::clamp::AP1(color);
+  }
+  return color;
+}
+
 float3 SampleLUT(float4 lutSettings, const float3 inputColor, uint textureIndex, bool force_sdr = false) {
   float3 color = inputColor;
   if (lutSettings.x > 0.0f) {           // LUT Strength
@@ -226,7 +302,8 @@ float3 SampleLUT(float4 lutSettings, const float3 inputColor, uint textureIndex,
 
         // Only applies on LUTs that are clamped (all?)
         if (lutMinY > 0) {
-          color = renodx::lut::CorrectBlack(inputColor, color, lutMinY, min(injectedData.processingLUTCorrection * 2.f, 1.f));
+          float lut_mid_gray_ratio = renodx::color::y::from::BT709(LUT_TEXTURES[textureIndex].SampleLevel(SAMPLER, renodx::color::arri::logc::c800::Encode(0.18.xxx), 0.0f).rgb) / 0.18f;
+          color = renodx::lut::CorrectBlack(inputColor * lut_mid_gray_ratio, color, lutMinY, (injectedData.toneMapGammaCorrection == 2.f) ? 75.f : min(injectedData.processingLUTCorrection * 2.f, 1.f));
         }
 
         // Only scale up HDR LUTs
@@ -545,34 +622,67 @@ float4 tonemap(bool isACESMode = false) {
 
       outputRGB = odtUnknown;
     } else {
-      renodx::tonemap::Config config = renodx::tonemap::config::Create();
+      float game_nits = injectedData.toneMapGameNits;
+      if (injectedData.toneMapType == 2.f) {  // Exponential Rolloff
 
-      config.type = injectedData.toneMapType;
-      config.peak_nits = injectedData.toneMapPeakNits;
-      config.game_nits = (injectedData.toneMapType == 2.f ? (100.f / 203.f) : 1.f) * injectedData.toneMapGameNits;
-      config.gamma_correction = (injectedData.toneMapGammaCorrection == 2.f) ? 1.f : 0.f;
-      config.exposure = injectedData.colorGradeExposure;
-      config.highlights = injectedData.colorGradeHighlights;
-      config.shadows = injectedData.colorGradeShadows;
-      config.contrast = injectedData.colorGradeContrast;
-      config.saturation = injectedData.colorGradeSaturation;
-      config.mid_gray_value = 2.3f * (midGrayNits / 100.f);
-      config.mid_gray_nits = midGrayNits;
-      config.reno_drt_highlights = 1.20f;
-      config.reno_drt_shadows = 1.20f;
-      config.reno_drt_contrast = 1.3f;
-      config.reno_drt_saturation = 1.20f;
-      config.reno_drt_blowout = -1.f * (injectedData.colorGradeHighlightSaturation - 1.f);
-      if (injectedData.toneMapPerChannel == 1.f) {
-        config.reno_drt_per_channel = true;
-        config.reno_drt_working_color_space = 2u;
-        config.hue_correction_strength = 0;
+        renodx::color::grade::Config cg_config = renodx::color::grade::config::Create();
+        float custom_highlights = 55.f / 50.f;
+        float custom_shadows = 40.f / 50.f;
+        float custom_contrast = 57.f / 50.f;
+        float custom_saturation = 78.f / 50.f;
+        // float custom_dechroma = 75.f / 100.f;
+        cg_config.exposure = injectedData.colorGradeExposure;
+        cg_config.highlights = injectedData.colorGradeHighlights * custom_highlights;
+        cg_config.shadows = injectedData.colorGradeShadows * custom_shadows;
+        cg_config.contrast = injectedData.colorGradeContrast * custom_contrast;
+        cg_config.flare = 0.10f * pow(injectedData.colorGradeFlare, 10.f);
+        cg_config.saturation = injectedData.colorGradeSaturation * custom_saturation;
+        cg_config.dechroma = injectedData.colorGradeBlowout;
+        // cg_config.hue_correction_strength = injectedData.toneMapHueCorrection;
+        float untonemapped_lum = renodx::color::y::from::BT709(outputRGB);
+        cg_config.blowout = -1.f * (injectedData.colorGradeHighlightSaturation - 1.f);
+        float3 ungraded = outputRGB;
+
+        float peak_ratio = injectedData.toneMapPeakNits / injectedData.toneMapGameNits;
+        if (injectedData.toneMapGammaCorrection == 2.f) peak_ratio = renodx::color::correct::GammaSafe(peak_ratio, true);
+        outputRGB *= 0.12f / 0.18f;
+        outputRGB = ApplyExposureContrastFlareHighlightsShadowsByLuminance(outputRGB, untonemapped_lum, cg_config, 0.12);
+        outputRGB = renodx::tonemap::ExponentialRollOff(outputRGB, 0.f, peak_ratio);
+        outputRGB = ApplySaturationBlowoutHueCorrectionHighlightSaturation(outputRGB, ungraded, untonemapped_lum, cg_config);
+
+      } else {  // None and RenoDRT
+        renodx::tonemap::Config config = renodx::tonemap::config::Create();
+
+        config.type = injectedData.toneMapType;
+        config.peak_nits = injectedData.toneMapPeakNits;
+        config.game_nits = (injectedData.toneMapType == 2.f ? (100.f / 203.f) : 1.f) * injectedData.toneMapGameNits;
+        config.gamma_correction = (injectedData.toneMapGammaCorrection == 2.f) ? 1.f : 0.f;
+        config.exposure = injectedData.colorGradeExposure;
+        config.highlights = injectedData.colorGradeHighlights;
+        config.shadows = injectedData.colorGradeShadows;
+        config.contrast = injectedData.colorGradeContrast;
+        config.saturation = injectedData.colorGradeSaturation;
+        config.mid_gray_value = 2.3f * (midGrayNits / 100.f);
+        config.mid_gray_nits = midGrayNits;
+        config.reno_drt_highlights = 1.20f;
+        config.reno_drt_shadows = 1.20f;
+        config.reno_drt_contrast = 1.3f;
+        config.reno_drt_saturation = 1.20f;
+        config.reno_drt_blowout = -1.f * (injectedData.colorGradeHighlightSaturation - 1.f);
+        if (injectedData.toneMapPerChannel == 1.f) {
+          config.reno_drt_per_channel = true;
+          config.reno_drt_working_color_space = 2u;
+          config.hue_correction_strength = 0;
+        }
+        config.reno_drt_dechroma = injectedData.colorGradeBlowout;
+        config.reno_drt_flare = 0.005 * injectedData.colorGradeFlare;
+        config.reno_drt_hue_correction_method = (uint)injectedData.toneMapHueProcessor;
+
+        outputRGB = renodx::tonemap::config::Apply(outputRGB, config);
+
+        game_nits = config.game_nits;
       }
-      config.reno_drt_dechroma = injectedData.colorGradeBlowout;
-      config.reno_drt_flare = 0.005 * injectedData.colorGradeFlare;
-      config.reno_drt_hue_correction_method = (uint)injectedData.toneMapHueProcessor;
 
-      outputRGB = renodx::tonemap::config::Apply(outputRGB, config);
       bool useD60 = (injectedData.colorGradeWhitePoint == -1.0f || (injectedData.colorGradeWhitePoint == 0.f && cb6[28u].z == 0.f));
       if (useD60) {
         outputRGB = mul(renodx::color::BT709_TO_BT709D60_MAT, outputRGB);
@@ -582,7 +692,7 @@ float4 tonemap(bool isACESMode = false) {
         outputRGB = renodx::color::correct::GammaSafe(outputRGB);
       }
 
-      outputRGB *= config.game_nits / 100.f;
+      outputRGB *= game_nits / 100.f;
     }
 
   } else {
