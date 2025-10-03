@@ -1,9 +1,13 @@
+#include "./shared.h"
+
 cbuffer RootSrtCbv : register(b14, space0) {
   int bufferIndex : packoffset(c0);
   int unknown1 : packoffset(c0);
 }
 
+// Texture2D<float4> ResourceDescriptorHeap[] : register(t0, space0); // don't declare this for some reason
 ByteAddressBuffer bufferT1 : register(t1, space1);
+
 SamplerState _22 : register(s12, space0);
 SamplerState _23 : register(s1, space0);
 
@@ -11,13 +15,34 @@ static float2 TEXCOORD;
 static float4 SV_Target;
 
 struct SPIRV_Cross_Input {
-  float4 gl_FragCoord : SV_Position;
+  float4 SV_Position : SV_Position;  // missing from decomp
   float2 TEXCOORD : TEXCOORD0;
 };
 
 struct SPIRV_Cross_Output {
   float4 SV_Target : SV_Target0;
 };
+
+float3 ApplyPQApproximation(float3 bt2020_color) {
+  float3 bt2020_sqrt = sqrt(bt2020_color);
+  return (((((((bt2020_sqrt * 0.16258220374584197998046875f) + 8.06964778900146484375f) * bt2020_sqrt) + 3.5209205150604248046875f) * bt2020_sqrt) + 0.000487781013362109661102294921875f) / ((((bt2020_sqrt * 7.96455097198486328125f) + 10.5308475494384765625f) * bt2020_sqrt) + 1.0f));
+}
+
+namespace rec709 {
+static const float REFERENCE_WHITE = 100.f;
+
+float OETF(float channel) {
+  return (channel < 0.018f)
+             ? (channel * 4.5f)
+             : (1.099f * pow(channel, 0.45f) - 0.099f);
+}
+float InverseOETF(float channel) {
+  return (channel < 0.018f)
+             ? (channel / 4.5f)
+             : pow((channel + 0.099f) / 1.099f, 1 / 0.45f);
+}
+
+}  // namespace rec709
 
 void frag_main() {
   SV_Target.x = 0.0f;
@@ -49,40 +74,55 @@ void frag_main() {
   float4 _82 = res0.Sample(_22, float2(TEXCOORD.x, TEXCOORD.y));
   float3 srgbInputColor = _82.rgb;
 
-  float3 scaledColor = (((((((((bufferT1.Load<float>(_50 + 112u)
-                                * _82.rgb)
-                               + bufferT1.Load<float>(_50 + 108u))
-                              * _82.rgb)
-                             + bufferT1.Load<float>(_50 + 104u))
-                            * _82.rgb)
-                           + bufferT1.Load<float>(_50 + 100u))
-                          * _82.rgb)
-                         + bufferT1.Load<float>(index96))
-                        * _82.rgb)
-                       / ((((((bufferT1.Load<float>(_50 + 124u) * _82.rgb)
-                              + bufferT1.Load<float>(_50 + 120u))
+#if 1 // controlled by brightness slider
+  float3 scaled_color = (((((((((bufferT1.Load<float>(_50 + 112u)
+                                 * _82.rgb)
+                                + bufferT1.Load<float>(_50 + 108u))
+                               * _82.rgb)
+                              + bufferT1.Load<float>(_50 + 104u))
                              * _82.rgb)
-                            + bufferT1.Load<float>(_50 + 116u))
+                            + bufferT1.Load<float>(_50 + 100u))
                            * _82.rgb)
-                          + 1.0f);
+                          + bufferT1.Load<float>(index96))
+                         * _82.rgb)
+                        / ((((((bufferT1.Load<float>(_50 + 124u) * _82.rgb)
+                               + bufferT1.Load<float>(_50 + 120u))
+                              * _82.rgb)
+                             + bufferT1.Load<float>(_50 + 116u))
+                            * _82.rgb)
+                           + 1.0f);
+#else
+  float3 scaled_color = renodx::color::gamma::DecodeSafe(srgbInputColor, 2.2f) * 4.f;
+  // scaled_color = renodx::tonemap::ACESFittedAP1(scaled_color);
+#endif
 
-  float3 bt2020Color = mul(
+#if 0
+  scaled_color = renodx::math::SignPow(scaled_color, 1.f / 2.4f);
+  scaled_color = renodx::math::SignPow(scaled_color, 2.2f);
+  // scaled_color.r = rec709::InverseOETF(scaled_color.r);
+  // scaled_color.g = rec709::InverseOETF(scaled_color.g);
+  // scaled_color.b = rec709::InverseOETF(scaled_color.b);
+  // scaled_color = renodx::color::correct::GammaSafe(scaled_color);
+#endif
+  float3 bt2020_color = mul(
       float3x3(
           0.627403736114501953125f, 0.329281747341156005859375f, 0.043313510715961456298828125f,
           0.06909702718257904052734375f, 0.9195404052734375f, 0.01136207766830921173095703125f,
           0.01639144308865070343017578125f, 0.088013507425785064697265625f, 0.895595014095306396484375f),
-      scaledColor);
+      scaled_color);
 
-  float3 sqrtOfBt2020 = sqrt(bt2020Color);
+  float3 pq_color;
+#if 0
+  pq_color = ApplyPQApproximation(bt2020_color);
+#else
+  pq_color = renodx::color::pq::EncodeSafe(bt2020_color, 100.f);
+#endif
+  uint resIndex = bufferT1.Load<uint>(index32);
+  Texture2D<float> res1 = (Texture2D<float>)ResourceDescriptorHeap[resIndex];
+  float resSample = res1.SampleLevel(_23, float2((_64.x * TEXCOORD.x) + 0.5f, (_64.y * TEXCOORD.y) + 0.5f), 0.0f).x;
+  float _260 = (resSample * 0.0009775171f) + (-0.0004887586f);
 
-  float3 pqColor = (((((((sqrtOfBt2020 * 0.16258220374584197998046875f) + 8.06964778900146484375f) * sqrtOfBt2020) + 3.5209205150604248046875f) * sqrtOfBt2020) + 0.000487781013362109661102294921875f) / ((((sqrtOfBt2020 * 7.96455097198486328125f) + 10.5308475494384765625f) * sqrtOfBt2020) + 1.0f));
-
-  Texture2D<float> res1 = ResourceDescriptorHeap[bufferT1.Load<uint>(index32)];
-  // float _260 = (_9[bufferT1.Load((_50 + 32u)).x].SampleLevel(_23, float2((_64.x * TEXCOORD.x) + 0.5f, (_64.y * TEXCOORD.y) + 0.5f), 0.0f).x * 0.000977517105638980865478515625f) + (-0.0004887585528194904327392578125f);
-
-  float4 _260 = (res1.SampleLevel(_23, float2((_64.x * TEXCOORD.x) + 0.5f, (_64.y * TEXCOORD.y) + 0.5f), 0.0f).x * 0.000977517105638980865478515625f) + (-0.0004887585528194904327392578125f);
-
-  SV_Target.xyz = _260.rgb + pqColor;
+  SV_Target.xyz = pq_color + _260;
   SV_Target.w = 1.0f;
 }
 

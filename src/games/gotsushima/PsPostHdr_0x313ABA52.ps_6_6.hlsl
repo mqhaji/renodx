@@ -1,3 +1,5 @@
+#include "./shared.h"
+
 cbuffer RootSrtCbv : register(b14, space0) {
   int bufferIndex : packoffset(c0);
   int unknown1 : packoffset(c0);
@@ -5,9 +7,11 @@ cbuffer RootSrtCbv : register(b14, space0) {
 
 // cbuffer _24_26 : register(b14, space0) { float4 _26_m0[1] : packoffset(c0); };
 
+// all part of `ResourceDescriptorHeap`
 // Texture2D<float4> _9[] : register(t0, space0);
 // Texture3D<float4> _13[] : register(t0, space0);
 // Buffer<uint4> _18[] : register(t0, space0);
+
 ByteAddressBuffer bufferT1 : register(t1, space1);
 SamplerState sampler12 : register(s12, space0);
 SamplerState sampler0 : register(s0, space0);
@@ -26,17 +30,6 @@ struct SPIRV_Cross_Output {
   float4 SV_Target : SV_Target0;
   float SV_Target_1 : SV_Target1;
 };
-
-float3 pqFromLinear(float3 linearColor) {
-  static const float m1 = 0.1593017578125f;
-  static const float m2 = 78.84375f;
-  static const float c1 = 0.8359375f;
-  static const float c2 = 18.8515625f;
-  static const float c3 = 18.6875f;
-
-  float3 yM1 = pow(linearColor, m1);
-  return pow((c1 + c2 * yM1) / (1.f + c3 * yM1), m2);
-}
 
 void frag_main() {
   SV_Target.x = 0.0f;
@@ -230,11 +223,18 @@ void frag_main() {
   float _702 = 1.0f - _700;
   float _707 = saturate((_702 * 0.95238101482391357421875f) + 0.5f);
 
-  // SmoothClamp
+// SmoothClamp
+#if 1
   float _714 = (1.0f - ((_702 < 0.52499997615814208984375f) ? ((_707 * _707) * 0.52499997615814208984375f) : _702)) / _700;
   float _715 = _714 * _695;
   float _716 = _714 * _696;
   float _717 = _714 * _697;
+#else
+  float _715 = _695;
+  float _716 = _696;
+  float _717 = _697;
+#endif
+
   // float4 _731 = _13[bufferT1.Load((_59 + 128u)).x].Sample(sampler1, float3((_715 * _310) + _311, (_716 * _310) + _311, (_717 * _310) + _311));
   Texture3D<float4> res128 = ResourceDescriptorHeap[bufferT1.Load<uint>(res128Index)];
   float _310 = _309.x;
@@ -264,9 +264,19 @@ void frag_main() {
     _793 = _734;
     _794 = _735;
   }
+#if 0
   float _795 = _792 / _714;
   float _796 = _793 / _714;
   float _797 = _794 / _714;
+#else
+
+  float3 color_sdr = float3(_715, _716, _717), color_hdr = float3(_695, _696, _697), color_post_process = float3(_792, _793, _794);
+
+  float3 upgraded_color = renodx::tonemap::UpgradeToneMap(color_hdr, color_sdr, color_post_process, 1.f);
+
+  float _795 = upgraded_color.r, _796 = upgraded_color.g, _797 = upgraded_color.b;
+
+#endif
   // float _815 = (_9[bufferT1.Load((_59 + 96u)).x].Sample(sampler0, float2(_403.x * TEXCOORD.x, _403.y * TEXCOORD.y)).x * 0.000977517105638980865478515625f) + (-0.0004887585528194904327392578125f);
   Texture2D<float> res96 = ResourceDescriptorHeap[bufferT1.Load<uint>(res96Index)];
   float _815 = (res96.Sample(sampler0, float2(_403.x * TEXCOORD.x, _403.y * TEXCOORD.y)).x * 0.000977517105638980865478515625f) + (-0.0004887585528194904327392578125f);
@@ -287,6 +297,7 @@ void frag_main() {
   SV_Target.y = _834 ? 0.0f : (_815 + (_796 * _174));
   SV_Target.z = _834 ? 0.0f : (_815 + (_797 * _174));
   SV_Target.w = _835;
+
 }
 
 SPIRV_Cross_Output main(SPIRV_Cross_Input stage_input) {
