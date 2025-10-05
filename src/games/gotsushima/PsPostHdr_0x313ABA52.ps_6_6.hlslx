@@ -199,50 +199,84 @@ void frag_main() {
   float _589 = _329.y * (TEXCOORD.y + (-0.5f));
   float _596 = saturate((sqrt((_588 * _588) + (_589 * _589)) * _329.z) + _329.w);
   float _600 = ((_596 - (_596 * _596)) * _596) + _596;
-  float _604 = max(0.0f, (((((_471 - _465) * _281) + _465) * _528) * _581) * _600);
-  float _605 = max(0.0f, (((((_471 - _467) * _281) + _467) * _528) * _581) * _600);
-  float _606 = max(0.0f, (((((_471 - _469) * _281) + _469) * _528) * _581) * _600);
-  float _609 = mad(_606, _110.z, mad(_605, _90.w, _604 * _90.x));
-  float _612 = mad(_606, _110.w, mad(_605, _110.x, _604 * _90.y));
-  // float _615 = mad(_606, asfloat(bufferT1.Load((_59 + 304u)).x), mad(_605, _110.y, _604 * _90.z));
-  float _615 = mad(_606, _615a, mad(_605, _110.y, _604 * _90.z));
+
+#if 0
+  float3 untonemapped = float3(_465, _467, _469);
+  // default / dramatic contrast
+  float3 contrasted = max(0.0f, (((((_471 - _469) * _281) + untonemapped) * _528) * _581) * _600);
+
+  // BT.709 -> custom AP1 with color temp?
+  float3 color_custom_csp;
+  color_custom_csp.r = mad(contrasted.b, _110.z, mad(contrasted.g, _90.w, contrasted.r * _90.x));
+  color_custom_csp.g = mad(contrasted.b, _110.w, mad(contrasted.g, _110.x, contrasted.r * _90.y));
+  color_custom_csp.b = mad(contrasted.b, _615a, mad(contrasted.g, _110.y, contrasted.r * _90.z));  // float _615 = mad(_606, asfloat(bufferT1.Load((_59 + 304u)).x), mad(_605, _110.y, _604 * _90.z));
+
+  // tonemap
   float _621 = asfloat(bufferT1.Load((_59 + 352u)).x);
   float _630 = asfloat(bufferT1.Load((_59 + 348u)).x);
   float _640 = bufferT1.Load<float>(_640a);
   float _652 = asfloat(bufferT1.Load((_59 + 364u)).x);
   float _661 = asfloat(bufferT1.Load((_59 + 360u)).x);
   float _673 = asfloat(bufferT1.Load((_59 + 356u)).x);
-  float _683 = (((((_621 * _609) + _630) * _609) + _640) * _609) / ((((((_652 * _609) + _661) * _609) + _673) * _609) + 1.0f);
-  float _684 = (((((_621 * _612) + _630) * _612) + _640) * _612) / ((((((_652 * _612) + _661) * _612) + _673) * _612) + 1.0f);
-  float _685 = (((((_621 * _615) + _630) * _615) + _640) * _615) / ((((((_652 * _615) + _661) * _615) + _673) * _615) + 1.0f);
-  float _695 = sqrt(mad(_685, _156.z, mad(_684, _136.w, _683 * _136.x)));
-  float _696 = sqrt(mad(_685, _156.w, mad(_684, _156.x, _683 * _136.y)));
-  // float _697 = sqrt(mad(_685, asfloat(bufferT1.Load((_59 + 340u)).x), mad(_684, _156.y, _683 * _136.z)));
-  float _697 = sqrt(mad(_685, _697a, mad(_684, _156.y, _683 * _136.z)));
+  float3 tonemapped_custom_csp = (((((_621 * color_custom_csp) + _630) * color_custom_csp) + _640) * color_custom_csp) / ((((((_652 * color_custom_csp) + _661) * color_custom_csp) + _673) * color_custom_csp) + 1.0f);
+
+  // custom AP1 with color temp -> BT.709?
+  float3 tonemapped_bt709;
+  tonemapped_bt709.r = (mad(tonemapped_custom_csp.b, _156.z, mad(tonemapped_custom_csp.g, _136.w, tonemapped_custom_csp.r * _136.x)));
+  tonemapped_bt709.g = (mad(tonemapped_custom_csp.b, _156.w, mad(tonemapped_custom_csp.g, _156.x, tonemapped_custom_csp.r * _136.y)));
+  tonemapped_bt709.b = (mad(tonemapped_custom_csp.b, _697a, mad(tonemapped_custom_csp.g, _156.y, tonemapped_custom_csp.r * _136.z)));  // float _697 = sqrt(mad(_685, asfloat(bufferT1.Load((_59 + 340u)).x), mad(_684, _156.y, _683 * _136.z)));
+
+  float _695 = tonemapped_bt709.r, _696 = tonemapped_bt709.g, _697 = tonemapped_bt709.b;
+#else
+
+  float3 untonemapped = float3(_465, _467, _469);
+  // default / dramatic contrast
+  float3 contrasted = max(0.0f, (((((_471 - _469) * _281) + untonemapped) * _528) * _581) * _600);
+
+  // BT.709 -> custom AP1 with color temp adjustment?
+  float3 color_custom_csp;
+  color_custom_csp.r = mad(contrasted.b, _110.z, mad(contrasted.g, _90.w, contrasted.r * _90.x));
+  color_custom_csp.g = mad(contrasted.b, _110.w, mad(contrasted.g, _110.x, contrasted.r * _90.y));
+  color_custom_csp.b = mad(contrasted.b, _615a, mad(contrasted.g, _110.y, contrasted.r * _90.z));  // float _615 = mad(_606, asfloat(bufferT1.Load((_59 + 304u)).x), mad(_605, _110.y, _604 * _90.z));
+
+  // tonemap
+  float _621 = asfloat(bufferT1.Load((_59 + 352u)).x);
+  float _630 = asfloat(bufferT1.Load((_59 + 348u)).x);
+  float _640 = bufferT1.Load<float>(_640a);
+  float _652 = asfloat(bufferT1.Load((_59 + 364u)).x);
+  float _661 = asfloat(bufferT1.Load((_59 + 360u)).x);
+  float _673 = asfloat(bufferT1.Load((_59 + 356u)).x);
+  float3 tonemapped_custom_csp = (((((_621 * color_custom_csp) + _630) * color_custom_csp) + _640) * color_custom_csp) / ((((((_652 * color_custom_csp) + _661) * color_custom_csp) + _673) * color_custom_csp) + 1.0f);
+
+  // custom AP1 -> BT.709?
+  float3 tonemapped_bt709;
+  tonemapped_bt709.r = (mad(tonemapped_custom_csp.b, _156.z, mad(tonemapped_custom_csp.g, _136.w, tonemapped_custom_csp.r * _136.x)));
+  tonemapped_bt709.g = (mad(tonemapped_custom_csp.b, _156.w, mad(tonemapped_custom_csp.g, _156.x, tonemapped_custom_csp.r * _136.y)));
+  tonemapped_bt709.b = (mad(tonemapped_custom_csp.b, _697a, mad(tonemapped_custom_csp.g, _156.y, tonemapped_custom_csp.r * _136.z)));  // float _697 = sqrt(mad(_685, asfloat(bufferT1.Load((_59 + 340u)).x), mad(_684, _156.y, _683 * _136.z)));
+
+  float _695 = tonemapped_bt709.r, _696 = tonemapped_bt709.g, _697 = tonemapped_bt709.b;
+#endif
+  _695 = sqrt(_695);
+  _696 = sqrt(_696);
+  _697 = sqrt(_697);
   float _700 = max(max(_695, max(_696, _697)), 9.9999999747524270787835121154785e-07f);
   float _702 = 1.0f - _700;
   float _707 = saturate((_702 * 0.95238101482391357421875f) + 0.5f);
 
-// SmoothClamp
-#if 1
-  float _714 = (1.0f - ((_702 < 0.52499997615814208984375f) ? ((_707 * _707) * 0.52499997615814208984375f) : _702)) / _700;
+  // SmoothClamp to SDR
+  float _714 = (1.0f - ((_702 < 0.525f) ? ((_707 * _707) * 0.525f) : _702)) / _700;
   float _715 = _714 * _695;
   float _716 = _714 * _696;
   float _717 = _714 * _697;
-#else
-  float _715 = _695;
-  float _716 = _696;
-  float _717 = _697;
-#endif
 
-  // float4 _731 = _13[bufferT1.Load((_59 + 128u)).x].Sample(sampler1, float3((_715 * _310) + _311, (_716 * _310) + _311, (_717 * _310) + _311));
   Texture3D<float4> res128 = ResourceDescriptorHeap[bufferT1.Load<uint>(res128Index)];
   float _310 = _309.x;
   float _311 = _309.y;
   float _312 = _309.z;
   float _313 = _309.w;
 
-  float4 _731 = res128.Sample(sampler1, float3((_715 * _310) + _311, (_716 * _310) + _311, (_717 * _310) + _311));
+  // Apply SDR LUT
+  float4 _731 = res128.Sample(sampler1, float3((_715 * _310) + _311, (_716 * _310) + _311, (_717 * _310) + _311));  // float4 _731 = _13[bufferT1.Load((_59 + 128u)).x].Sample(sampler1, float3((_715 * _310) + _311, (_716 * _310) + _311, (_717 * _310) + _311));
 
   float _733 = _731.x;
   float _734 = _731.y;
@@ -251,8 +285,7 @@ void frag_main() {
   float _793;
   float _794;
   if (_293 > 0.0f) {
-    // float4 _778 = _13[bufferT1.Load((_59 + 160u)).x].Sample(sampler1, float3((_312 * _715) + _313, (_312 * _716) + _313, (_312 * _717) + _313));
-    Texture3D<float4> res160 = ResourceDescriptorHeap[bufferT1.Load<uint>(res160Index)];
+    Texture3D<float4> res160 = ResourceDescriptorHeap[bufferT1.Load<uint>(res160Index)];  // float4 _778 = _13[bufferT1.Load((_59 + 160u)).x].Sample(sampler1, float3((_312 * _715) + _313, (_312 * _716) + _313, (_312 * _717) + _313));
 
     float4 _778 = res160.Sample(sampler1, float3((_312 * _715) + _313, (_312 * _716) + _313, (_312 * _717) + _313));
 
@@ -264,22 +297,16 @@ void frag_main() {
     _793 = _734;
     _794 = _735;
   }
-#if 0
+
+  // Invert SmoothClamp from SDR, return to HDR
   float _795 = _792 / _714;
   float _796 = _793 / _714;
   float _797 = _794 / _714;
-#else
 
-  float3 color_sdr = float3(_715, _716, _717), color_hdr = float3(_695, _696, _697), color_post_process = float3(_792, _793, _794);
+  _795 = lerp(_695, _795, RENODX_COLOR_GRADE_STRENGTH), _796 = lerp(_696, _796, RENODX_COLOR_GRADE_STRENGTH), _797 = lerp(_697, _797, RENODX_COLOR_GRADE_STRENGTH);
 
-  float3 upgraded_color = renodx::tonemap::UpgradeToneMap(color_hdr, color_sdr, color_post_process, 1.f);
-
-  float _795 = upgraded_color.r, _796 = upgraded_color.g, _797 = upgraded_color.b;
-
-#endif
-  // float _815 = (_9[bufferT1.Load((_59 + 96u)).x].Sample(sampler0, float2(_403.x * TEXCOORD.x, _403.y * TEXCOORD.y)).x * 0.000977517105638980865478515625f) + (-0.0004887585528194904327392578125f);
   Texture2D<float> res96 = ResourceDescriptorHeap[bufferT1.Load<uint>(res96Index)];
-  float _815 = (res96.Sample(sampler0, float2(_403.x * TEXCOORD.x, _403.y * TEXCOORD.y)).x * 0.000977517105638980865478515625f) + (-0.0004887585528194904327392578125f);
+  float _815 = (res96.Sample(sampler0, float2(_403.x * TEXCOORD.x, _403.y * TEXCOORD.y)).x * 0.000977517105638980865478515625f) + (-0.0004887585528194904327392578125f);  // float _815 = (_9[bufferT1.Load((_59 + 96u)).x].Sample(sampler0, float2(_403.x * TEXCOORD.x, _403.y * TEXCOORD.y)).x * 0.000977517105638980865478515625f) + (-0.0004887585528194904327392578125f);
 
   float _823 = dot(float3(_795, _796, _797), float3(0.2125999927520751953125f, 0.715200006961822509765625f, 0.072200000286102294921875f)) * _174;
   SV_Target_1 = _823;
@@ -297,7 +324,6 @@ void frag_main() {
   SV_Target.y = _834 ? 0.0f : (_815 + (_796 * _174));
   SV_Target.z = _834 ? 0.0f : (_815 + (_797 * _174));
   SV_Target.w = _835;
-
 }
 
 SPIRV_Cross_Output main(SPIRV_Cross_Input stage_input) {

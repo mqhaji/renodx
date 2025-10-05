@@ -5,7 +5,7 @@ cbuffer RootSrtCbv : register(b14, space0) {
   int unknown1 : packoffset(c0);
 }
 
-// Texture2D<float4> ResourceDescriptorHeap[] : register(t0, space0); // don't declare this for some reason
+// Texture2D<float4> ResourceDescriptorHeap[] : register(t0, space0); // don't declare
 ByteAddressBuffer bufferT1 : register(t1, space1);
 
 SamplerState _22 : register(s12, space0);
@@ -74,10 +74,8 @@ void frag_main() {
   float4 _82 = res0.Sample(_22, float2(TEXCOORD.x, TEXCOORD.y));
   float3 srgbInputColor = _82.rgb;
 
-#if 1 // controlled by brightness slider
-  float3 scaled_color = (((((((((bufferT1.Load<float>(_50 + 112u)
-                                 * _82.rgb)
-                                + bufferT1.Load<float>(_50 + 108u))
+#if 1  // controlled by brightness slider
+  float3 scaled_color = (((((((((bufferT1.Load<float>(_50 + 112u) * _82.rgb) + bufferT1.Load<float>(_50 + 108u))
                                * _82.rgb)
                               + bufferT1.Load<float>(_50 + 104u))
                              * _82.rgb)
@@ -92,8 +90,12 @@ void frag_main() {
                             * _82.rgb)
                            + 1.0f);
 #else
-  float3 scaled_color = renodx::color::gamma::DecodeSafe(srgbInputColor, 2.2f) * 4.f;
-  // scaled_color = renodx::tonemap::ACESFittedAP1(scaled_color);
+  float3 scaled_color = renodx::color::srgb::DecodeSafe(srgbInputColor) * (10.f / 3.f);
+  scaled_color = renodx::color::correct::GammaSafe(scaled_color, false, 2.4f);
+  SV_Target.rgb = renodx::color::bt2020::from::BT709(scaled_color);
+  SV_Target.rgb = renodx::color::pq::EncodeSafe(SV_Target.rgb, 100.f);
+  SV_Target.w = 1.0f;
+  return;
 #endif
 
 #if 0
@@ -115,7 +117,7 @@ void frag_main() {
 #if 0
   pq_color = ApplyPQApproximation(bt2020_color);
 #else
-  pq_color = renodx::color::pq::EncodeSafe(bt2020_color, 100.f);
+  pq_color = renodx::color::pq::EncodeSafe(bt2020_color, RENODX_DIFFUSE_WHITE_NITS);
 #endif
   uint resIndex = bufferT1.Load<uint>(index32);
   Texture2D<float> res1 = (Texture2D<float>)ResourceDescriptorHeap[resIndex];

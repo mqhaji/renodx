@@ -1,0 +1,83 @@
+#include "./shared.h"
+
+cbuffer _17_19 : register(b14, space0) {
+  float4 _19_m0[1] : packoffset(c0);
+};
+
+// Texture2D<float4> _9[] : register(t0, space0);
+Buffer<uint4> _13 : register(t1, space1);
+SamplerState _22 : register(s0, space0);
+
+static float2 TEXCOORD;
+static float4 SV_Target;
+
+struct SPIRV_Cross_Input {
+  float2 TEXCOORD : TEXCOORD1;
+};
+
+struct SPIRV_Cross_Output {
+  float4 SV_Target : SV_Target0;
+};
+
+namespace rec709 {
+static const float REFERENCE_WHITE = 100.f;
+
+float OETF(float channel) {
+  return (channel < 0.018f)
+             ? (channel * 4.5f)
+             : (1.099f * pow(channel, 0.45f) - 0.099f);
+}
+float InverseOETF(float channel) {
+  return (channel < 0.018f)
+             ? (channel / 4.5f)
+             : pow((channel + 0.099f) / 1.099f, 1 / 0.45f);
+}
+}  // namespace rec709
+
+void frag_main() {
+  SV_Target.x = 0.0f;
+  SV_Target.y = 0.0f;
+  SV_Target.z = 0.0f;
+  SV_Target.w = 0.0f;
+  uint4 _48 = asuint(_19_m0[0u]);
+  uint _49 = _48.x;
+  uint _53 = (_49 + 72u) >> 2u;
+  float4 _66 = asfloat(uint4(_13.Load(_53).x, _13.Load(_53 + 1u).x, _13.Load(_53 + 2u).x, _13.Load(_53 + 3u).x));
+  float _67 = _66.x;
+  float _68 = _66.y;
+  float _69 = _66.z;
+  float _70 = _66.w;
+  SV_Target.x = 0.0f;
+  SV_Target.y = 0.0f;
+  SV_Target.z = 0.0f;
+  SV_Target.w = 0.0f;
+
+  uint descriptorIndex = _13.Load(_49 >> 2u).x;
+  Texture2D<float4> inputTexture = ResourceDescriptorHeap[descriptorIndex];
+
+  float4 _84 = inputTexture.Sample(_22, float2(TEXCOORD.x, TEXCOORD.y));
+  float _86 = _84.x;
+  float _87 = _84.y;
+  float _88 = _84.z;
+
+  // Encode with sRGB
+  float _113 = (_86 <= 0.003130800090730190277099609375f) ? (_86 * _67) : ((exp2(log2(_86) * _68) * _69) + _70);
+  float _114 = (_87 <= 0.003130800090730190277099609375f) ? (_87 * _67) : ((exp2(log2(_87) * _68) * _69) + _70);
+  float _115 = (_88 <= 0.003130800090730190277099609375f) ? (_88 * _67) : ((exp2(log2(_88) * _68) * _69) + _70);
+  float _140 = (_113 <= 0.0392800010740756988525390625f) ? (_113 * 0.077399380505084991455078125f) : exp2(log2((_113 + 0.054999999701976776123046875f) * 0.947867333889007568359375f) * 2.400000095367431640625f);
+  float _142 = (_114 <= 0.0392800010740756988525390625f) ? (_114 * 0.077399380505084991455078125f) : exp2(log2((_114 + 0.054999999701976776123046875f) * 0.947867333889007568359375f) * 2.400000095367431640625f);
+  float _144 = (_115 <= 0.0392800010740756988525390625f) ? (_115 * 0.077399380505084991455078125f) : exp2(log2((_115 + 0.054999999701976776123046875f) * 0.947867333889007568359375f) * 2.400000095367431640625f);
+
+  SV_Target.x = (_140 <= 0.017999999225139617919921875f) ? (_140 * 4.5f) : ((exp2(log2(_140) * 0.449999988079071044921875f) * 1.09899997711181640625f) + (-0.098999999463558197021484375f));
+  SV_Target.y = (_142 <= 0.017999999225139617919921875f) ? (_142 * 4.5f) : ((exp2(log2(_142) * 0.449999988079071044921875f) * 1.09899997711181640625f) + (-0.098999999463558197021484375f));
+  SV_Target.z = (_144 <= 0.017999999225139617919921875f) ? (_144 * 4.5f) : ((exp2(log2(_144) * 0.449999988079071044921875f) * 1.09899997711181640625f) + (-0.098999999463558197021484375f));
+  SV_Target.w = 1.0f;
+}
+
+SPIRV_Cross_Output main(SPIRV_Cross_Input stage_input) {
+  TEXCOORD = stage_input.TEXCOORD;
+  frag_main();
+  SPIRV_Cross_Output stage_output;
+  stage_output.SV_Target = SV_Target;
+  return stage_output;
+}
