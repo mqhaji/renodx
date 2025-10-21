@@ -52,6 +52,9 @@ renodx::mods::shader::CustomShaders custom_shaders = {
 
     CustomShaderEntryCallback(0x2339C673, &OnUILutBuilderReplace),  // UI - sRGB to HDR
     CustomShaderEntry(0xBD751592),                                  // UI - Video sRGB to HDR
+
+    CustomShaderEntry(0x08E97002),  // UI Compositing
+
 };
 
 const std::unordered_map<std::string, float> HDR_LOOK_VALUES = {
