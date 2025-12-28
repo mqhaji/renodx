@@ -29,6 +29,8 @@ message("SLANGC_BIN: " ${SLANGC_BIN})
 
 project(renodx VERSION 0.1.0 LANGUAGES CXX)
 
+find_package(Vulkan REQUIRED)
+
 include(CTest)
 enable_testing()
 
@@ -307,6 +309,12 @@ function(build_shader_target ADDON ADDON_PATH)
   foreach(FILE ${SHADER_SLANG_SOURCES})
     cmake_path(GET FILE FILENAME FILENAME)
     cmake_path(GET FILE PARENT_PATH TARGET_PATH)
+    cmake_path(GET TARGET_PATH FILENAME FOLDER_NAME)
+    # If the folder name starts with a dot, skip
+    if(FOLDER_NAME MATCHES "^\\.")
+      continue()
+    endif()
+
     string(REGEX MATCH "(.*)\\.([^.]+)\\.slang$" _ ${FILENAME})
     set(SHADER_NAME ${CMAKE_MATCH_1})
     set(SHADER_TARGET ${CMAKE_MATCH_2})
@@ -655,6 +663,7 @@ foreach(FILE ${ADDON_FILES})
   add_dependencies(${ADDON} ${ADDON}-shaders)
   add_dependencies(${ADDON} detours)
   target_link_libraries(${ADDON} PRIVATE detours)
+  target_link_libraries(${ADDON} PRIVATE Vulkan::Vulkan)
   target_include_directories(${ADDON} SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/external/Detours/include)
   target_include_directories(${ADDON} SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/external/json/include)
   target_include_directories(${ADDON} SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/external/frozen/include)

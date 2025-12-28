@@ -50,6 +50,24 @@ static reshade::api::pipeline_subobject* ClonePipelineSubObjects(const reshade::
         memcpy(new_subobjects[i].data, subobject.data, sizeof(reshade::api::shader_desc));
         auto* old_desc = static_cast<reshade::api::shader_desc*>(subobject.data);
         auto* new_desc = static_cast<reshade::api::shader_desc*>(new_subobjects[i].data);
+
+        if (new_desc->entry_point != nullptr && new_desc->entry_point[0] == '\0') {
+          new_desc->entry_point = nullptr;
+        } else if (new_desc->entry_point != nullptr) {
+          new_desc->entry_point = _strdup(new_desc->entry_point);
+        }
+
+#ifdef DEBUG_LEVEL_2
+        {
+          std::stringstream s;
+          s << "utils::pipeline::ClonePipelineSubObjects(entry point ";
+          s << " from " << (old_desc->entry_point != nullptr ? old_desc->entry_point : "(null)");
+          s << " to " << (new_desc->entry_point != nullptr ? new_desc->entry_point : "(null)");
+          s << ")";
+          reshade::log::message(reshade::log::level::debug, s.str().c_str());
+        }
+#endif
+
         if (old_desc->code_size != 0u) {
           void* code_copy = malloc(old_desc->code_size);
           memcpy(code_copy, old_desc->code, old_desc->code_size);
@@ -143,6 +161,10 @@ static void DestroyPipelineSubobjects(std::span<reshade::api::pipeline_subobject
       case reshade::api::pipeline_subobject_type::compute_shader:
       case reshade::api::pipeline_subobject_type::pixel_shader:   {
         auto* desc = static_cast<reshade::api::shader_desc*>(subobject.data);
+        if (desc->entry_point != nullptr) {
+          free(const_cast<char*>(desc->entry_point));
+          desc->entry_point = nullptr;
+        }
         free(const_cast<void*>(desc->code));
         desc->code = nullptr;
         break;

@@ -3,11 +3,13 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <include/reshade_api_device.hpp>
+#include <include/reshade_api_pipeline.hpp>
 #define ImTextureID ImU64
 
 #define DEBUG_LEVEL_0
-#define DEBUG_LEVEL_1
-#define DEBUG_LEVEL_2
+// #define DEBUG_LEVEL_1
+// #define DEBUG_LEVEL_2
 
 #include <embed/shaders.h>
 
@@ -150,17 +152,17 @@ bool initialized = false;
 }  // namespace
 
 extern "C" __declspec(dllexport) constexpr const char* NAME = "RenoDX";
-extern "C" __declspec(dllexport) constexpr const char* DESCRIPTION = "RenoDX for Smash Bros Ultimate";
+extern "C" __declspec(dllexport) constexpr const char* DESCRIPTION = "RenoDX for Wonderful101";
 
 BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   auto use_resource_view_cloning = false;
   const auto target_format = reshade::api::format::r16g16b16a16_float;
   const auto view_upgrades = renodx::utils::resource::VIEW_UPGRADES_RGBA16F;
   auto common_aspect_ratio = 16.f / 9.f;
-  auto common_ignore_size = false;
-  auto weird_aspect_ratio = 3840.f / 1986.f;
+  auto common_ignore_size = true;
+  auto weird_aspect_ratio = 2562.f / 1440.f;
   const renodx::utils::resource::ResourceUpgradeInfo::Dimensions min_dimensions = {
-      .width = 720,
+      .width = 721,
       .height = renodx::utils::resource::ResourceUpgradeInfo::ANY,
       .depth = renodx::utils::resource::ResourceUpgradeInfo::ANY,
   };
@@ -171,9 +173,13 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       renodx::mods::shader::allow_multiple_push_constants = true;
       renodx::mods::swapchain::use_resource_cloning = use_resource_view_cloning;
       renodx::mods::swapchain::target_format = target_format;
-      renodx::mods::shader::force_align_constant_buffers_to_16 = true;
-      renodx::mods::shader::expand_existing_constant_buffer = true;
-      renodx::mods::shader::minimum_constant_buffer_stages = reshade::api::shader_stage::pixel;
+      renodx::mods::swapchain::ignored_device_apis = {
+        reshade::api::device_api::d3d11
+      };
+
+      // renodx::mods::shader::expand_existing_constant_buffer = false;
+      // We only care about pixel stage
+      // renodx::mods::shader::minimum_constant_buffer_stages = reshade::api::shader_stage::pixel;
 
       renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
           .old_format = reshade::api::format::r8g8b8a8_unorm_srgb,
@@ -182,7 +188,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
           .use_resource_view_cloning = use_resource_view_cloning,
           .aspect_ratio = common_aspect_ratio,
           .view_upgrades = view_upgrades,
-          .min_dimensions = min_dimensions,
+        .min_dimensions = min_dimensions,
       });
 
       renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
@@ -196,31 +202,11 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       });
 
       renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
-          .old_format = reshade::api::format::r10g10b10a2_typeless,
-          .new_format = target_format,
-          .ignore_size = common_ignore_size,
-          .use_resource_view_cloning = use_resource_view_cloning,
-          .aspect_ratio = common_aspect_ratio,
-          .view_upgrades = view_upgrades,
-          .min_dimensions = min_dimensions,
-      });
-
-      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
           .old_format = reshade::api::format::r8g8b8a8_unorm,
           .new_format = target_format,
           .ignore_size = common_ignore_size,
           .use_resource_view_cloning = use_resource_view_cloning,
           .aspect_ratio = common_aspect_ratio,
-          .view_upgrades = view_upgrades,
-          .min_dimensions = min_dimensions,
-      });
-
-      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
-          .old_format = reshade::api::format::r8g8b8a8_unorm,
-          .new_format = target_format,
-          .ignore_size = common_ignore_size,
-          .use_resource_view_cloning = use_resource_view_cloning,
-          .aspect_ratio = weird_aspect_ratio,
           .view_upgrades = view_upgrades,
           .min_dimensions = min_dimensions,
       });
@@ -246,31 +232,11 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       });
 
       renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
-          .old_format = reshade::api::format::r8g8b8a8_typeless,
-          .new_format = target_format,
-          .ignore_size = common_ignore_size,
-          .use_resource_view_cloning = use_resource_view_cloning,
-          .aspect_ratio = weird_aspect_ratio,
-          .view_upgrades = view_upgrades,
-          .min_dimensions = min_dimensions,
-      });
-
-      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
           .old_format = reshade::api::format::b8g8r8a8_unorm,
           .new_format = target_format,
           .ignore_size = common_ignore_size,
           .use_resource_view_cloning = use_resource_view_cloning,
           .aspect_ratio = common_aspect_ratio,
-          .view_upgrades = view_upgrades,
-          .min_dimensions = min_dimensions,
-      });
-
-      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
-          .old_format = reshade::api::format::b8g8r8a8_unorm,
-          .new_format = target_format,
-          .ignore_size = common_ignore_size,
-          .use_resource_view_cloning = use_resource_view_cloning,
-          .aspect_ratio = weird_aspect_ratio,
           .view_upgrades = view_upgrades,
           .min_dimensions = min_dimensions,
       });
