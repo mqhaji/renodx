@@ -110,10 +110,13 @@ static bool trace_unmodified_shaders = false;
 static bool allow_multiple_push_constants = false;
 static bool push_injections_on_present = false;
 static bool revert_constant_buffer_ranges = false;
+static bool force_align_constant_buffers_to_16 = false;
+static bool expand_existing_constant_buffer = true;
 static float* resource_tag_float = nullptr;
 static int32_t expected_constant_buffer_index = -1;
 static uint32_t expected_constant_buffer_space = 0;
 static uint32_t constant_buffer_offset = 0;
+static auto minimum_constant_buffer_stages = reshade::api::shader_stage::pixel | reshade::api::shader_stage::compute | reshade::api::shader_stage::vertex;
 
 static std::shared_mutex unmodified_shaders_mutex;
 static std::unordered_set<uint32_t> unmodified_shaders;
@@ -211,6 +214,13 @@ static bool OnCreatePipelineLayout(
   bool is_dx = (device_api == reshade::api::device_api::d3d9
                 || device_api == reshade::api::device_api::d3d11
                 || device_api == reshade::api::device_api::d3d12);
+  bool is_vulkan = device_api == reshade::api::device_api::vulkan;
+
+  // Track existing push constant range (for Vulkan) so we can extend it
+  int32_t vk_pc_index = -1;
+  // all shader stages include properietary stages (e.g. Huawei)
+  auto pc_unused_stages = is_vulkan ? minimum_constant_buffer_stages : reshade::api::shader_stage::all;
+  auto force_expand_existing_constant_buffer = expand_existing_constant_buffer;
 
   for (uint32_t param_index = 0; param_index < param_count; ++param_index) {
     const auto& param = params[param_index];
@@ -233,6 +243,18 @@ static bool OnCreatePipelineLayout(
           && param.push_constants.dx_register_space == data->expected_constant_buffer_space
           && cbv_index < param.push_constants.dx_register_index + param.push_constants.count) {
         cbv_index = param.push_constants.dx_register_index + param.push_constants.count;
+      } else if (is_vulkan) {
+        const auto& current_visibility = param.push_constants.visibility;
+        // If pc param has all relevant stages, then we ignore addon and force it
+        force_expand_existing_constant_buffer = renodx::utils::bitwise::HasFlag(current_visibility, minimum_constant_buffer_stages) || expand_existing_constant_buffer;
+
+        pc_unused_stages = renodx::utils::bitwise::UnsetFlag(pc_unused_stages, current_visibility);
+        // VULKAN PATH: remember the correct stage push constants, we'll expand it
+        if (vk_pc_index == -1) {
+          if (renodx::utils::bitwise::HasAnyFlag(current_visibility, minimum_constant_buffer_stages)) {
+            vk_pc_index = param_index;
+          }
+        }
       }
     } else if (is_dx && param.type == reshade::api::pipeline_layout_param_type::push_descriptors) {
       dword_count += 2;
@@ -290,7 +312,10 @@ static bool OnCreatePipelineLayout(
   }
 
   const uint32_t old_count = param_count;
-  const uint32_t new_count = old_count + 1;
+  // Vulkan doesn't allow different push constant ranges to target similar stages
+  // So we have to adjust the existing one
+  const uint32_t new_count = (force_expand_existing_constant_buffer && vk_pc_index != -1) ? old_count : old_count + 1;
+
   auto* new_params = reinterpret_cast<reshade::api::pipeline_layout_param*>(malloc(sizeof(reshade::api::pipeline_layout_param) * new_count));
 
   // Store reference to free later
@@ -309,44 +334,99 @@ static bool OnCreatePipelineLayout(
     memcpy(new_params + pdss_index + 1, params + pdss_index, sizeof(reshade::api::pipeline_layout_param) * (old_count - pdss_index));
   }
 
-  // Fill in extra param
-  const uint32_t slots = shader_injection_size;
-  const uint32_t max_count = 64u - dword_count;
+  if (is_vulkan && force_expand_existing_constant_buffer && vk_pc_index != -1) {  // Adjust specific pc if a valid one exists, otherwise add new param
+    auto& pc = new_params[vk_pc_index];
+    if (pc.type != reshade::api::pipeline_layout_param_type::push_constants) {
+      assert(false);
+#ifdef DEBUG_LEVEL_2
+      std::stringstream s;
+      s << "mods::shader::OnCreatePipelineLayout(";
+      s << "(Vulkan) unexpected push constant param type, actual: " << pc.type;
+      s << ", expected: push_constant";
+      s << " )";
+      reshade::log::message(reshade::log::level::error, s.str().c_str());
+#endif
+      return false;
+    }
+    assert(renodx::utils::bitwise::HasAnyFlag(pc.push_constants.visibility, minimum_constant_buffer_stages));
 
-  new_params[injection_index] = reshade::api::pipeline_layout_param(
-      reshade::api::constant_range{
-          .binding = 0,
-          .dx_register_index = cbv_index,
-          .dx_register_space = data->expected_constant_buffer_space,
-          .count = (slots > max_count) ? max_count : slots,
-          .visibility = reshade::api::shader_stage::all,
-      });
+    // Reshade uses 32 bit dwords
+    uint32_t vk_aligned_pc_count = pc.push_constants.count;
+    uint32_t aligned_dword_count = dword_count;  // All push constants, not only the injection point
+
+    if (force_align_constant_buffers_to_16) {
+      vk_aligned_pc_count = ((vk_aligned_pc_count + 3u) & ~3u);
+      aligned_dword_count = ((aligned_dword_count + 3u) & ~3u);
+    }
+    const uint32_t vk_new_pc_count = vk_aligned_pc_count + shader_injection_size;
+    const uint32_t vk_new_total_pc_count = aligned_dword_count + shader_injection_size;
+    constexpr uint32_t vk_max_pc_count = 64u;  // Vulkan PC ranges, but 64(256 bytes) is a common limit
+
+    if (vk_new_total_pc_count > vk_max_pc_count) {
+      std::stringstream s;
+      s << "mods::shader::OnCreatePipelineLayout((Vulkan)";
+      s << " shader injection oversized";
+      s << ", original count: " << dword_count;
+      s << ", new count: " << vk_new_total_pc_count;
+      s << ", local count: " << vk_aligned_pc_count << " => " << vk_new_pc_count;
+      s << ")";
+      reshade::log::message(reshade::log::level::info, s.str().c_str());
+    }
+    pc.push_constants.count = vk_new_pc_count;
+    // pc.push_constants.visibility = utils::bitwise::SetFlag(pc.push_constants.visibility, pc_allowed_stages);
+
+    std::stringstream s;
+    s << "mods::shader::OnCreatePipelineLayout((Vulkan)";
+    s << " at root_index " << vk_pc_index;
+    s << " with constants size " << aligned_dword_count;
+    s << " creating new size of " << vk_new_total_pc_count;
+    s << ", aligned count: " << aligned_dword_count;
+    s << ", local count: " << vk_aligned_pc_count << " => " << vk_new_pc_count;
+    s << " )";
+    reshade::log::message(reshade::log::level::info, s.str().c_str());
+  } else {
+    // Fill in extra param
+    const uint32_t slots = shader_injection_size;
+    const uint32_t max_count = 64u - dword_count;
+
+    new_params[injection_index] = reshade::api::pipeline_layout_param(
+        reshade::api::constant_range{
+            .binding = 0,
+            .dx_register_index = cbv_index,
+            .dx_register_space = data->expected_constant_buffer_space,
+            .count = (slots > max_count) ? max_count : slots,
+            .visibility = pc_unused_stages,
+        });
+
+    if (slots > max_count) {
+      std::stringstream s;
+      s << "mods::shader::OnCreatePipelineLayout(";
+      s << "shader injection oversized: ";
+      s << slots << "/" << max_count;
+      s << " )";
+      reshade::log::message(reshade::log::level::warning, s.str().c_str());
+    }
+
+    std::stringstream s;
+    s << "mods::shader::OnCreatePipelineLayout(";
+    if (is_dx) {
+      s << "will insert cbuffer " << cbv_index;
+    } else {
+      s << "will insert push constants";
+    }
+    s << " at root_index " << injection_index;
+    s << " with slot count " << slots;
+    s << " creating new size of " << (old_count + 1u + slots);
+    if (is_vulkan) {
+      s << ", visibility: 0x" << std::hex << static_cast<uint32_t>(pc_unused_stages) << std::dec;
+    }
+    s << ", newParams: " << PRINT_PTR(reinterpret_cast<uintptr_t>(new_params));
+    s << ")";
+    reshade::log::message(reshade::log::level::info, s.str().c_str());
+  }
 
   param_count = new_count;
   params = new_params;
-
-  if (slots > max_count) {
-    std::stringstream s;
-    s << "mods::shader::OnCreatePipelineLayout(";
-    s << "shader injection oversized: ";
-    s << slots << "/" << max_count;
-    s << " )";
-    reshade::log::message(reshade::log::level::warning, s.str().c_str());
-  }
-
-  std::stringstream s;
-  s << "mods::shader::OnCreatePipelineLayout(";
-  if (is_dx) {
-    s << "will insert cbuffer " << cbv_index;
-  } else {
-    s << "will insert push constants ";
-  }
-  s << " at root_index " << injection_index;
-  s << " with slot count " << slots;
-  s << " creating new size of " << (old_count + 1u + slots);
-  s << ", newParams: " << reinterpret_cast<uintptr_t>(new_params);
-  s << " )";
-  reshade::log::message(reshade::log::level::info, s.str().c_str());
 
   return true;
 }
@@ -358,7 +438,7 @@ static void OnInitPipelineLayout(
     const reshade::api::pipeline_layout_param* params,
     reshade::api::pipeline_layout layout) {
   assert(layout.handle != 0u);
-
+  const auto original_layout = layout;
   if (on_init_pipeline_layout != nullptr) {
     if (!on_init_pipeline_layout(device, layout, {params, param_count})) return;
   }
@@ -370,10 +450,13 @@ static void OnInitPipelineLayout(
   uint32_t cbv_index = 0;
   uint32_t pc_count = 0;
   uint32_t pdss_index = -1;
+  int32_t vk_pc_index = -1;
+  int32_t vk_pc_offset = 0;
 
   bool is_dx = (device_api == reshade::api::device_api::d3d9
                 || device_api == reshade::api::device_api::d3d11
                 || device_api == reshade::api::device_api::d3d12);
+  bool is_vulkan = device_api == reshade::api::device_api::vulkan;
 
   for (uint32_t param_index = 0; param_index < param_count; ++param_index) {
     auto param = params[param_index];
@@ -394,6 +477,17 @@ static void OnInitPipelineLayout(
           param.push_constants.dx_register_space == data->expected_constant_buffer_space
           && cbv_index < param.push_constants.dx_register_index + param.push_constants.count) {
         cbv_index = param.push_constants.dx_register_index + param.push_constants.count;
+      }
+
+      if (is_vulkan) {
+        vk_pc_offset += param.push_constants.count;
+
+        // Unused for now
+        if (vk_pc_index == -1) {
+          if (renodx::utils::bitwise::HasAnyFlag(param.push_constants.visibility, minimum_constant_buffer_stages)) {
+            vk_pc_index = param_index;
+          }
+        }
       }
     } else if (param.type == reshade::api::pipeline_layout_param_type::push_descriptors) {
       if (param.push_descriptors.type == reshade::api::descriptor_type::constant_buffer) {
@@ -534,6 +628,7 @@ static void OnInitPipelineLayout(
 
       cbv_index = 0;
       for (uint32_t param_index = 0; param_index < param_count; ++param_index) {
+        // TODO(Ritsu): Shouldn't always take the last push constant
         if (params[param_index].type == reshade::api::pipeline_layout_param_type::push_constants) {
           injection_index = param_index;
           cbv_index = params[param_index].push_constants.dx_register_index;
@@ -605,20 +700,25 @@ static void OnInitPipelineLayout(
       pipeline_data.injection_index = injection_index;
       pipeline_data.injection_layout = injection_layout;
       pipeline_data.injection_register_index = cbv_index;
+      pipeline_data.injection_constant_buffer_offset = std::max(vk_pc_offset - static_cast<int32_t>(shader_injection_size), 0);
       pipeline_data.failed_injection = false;
     });
   }
 
   std::stringstream s;
   s << "mods::shader::OnInitPipelineLayout(";
-  s << PRINT_PTR(layout.handle);
+  s << PRINT_PTR(original_layout.handle);
   s << ", injection index: " << injection_index;
   s << ", injection layout: " << PRINT_PTR(injection_layout.handle);
-  if (is_dx) {
-    s << ", cbvIndex:" << cbv_index;
+  if (is_vulkan) {
+    s << ", injection offset: " << pipeline_data.injection_constant_buffer_offset;
   }
-  s << " )";
+  if (is_dx) {
+    s << ", cbvIndex: " << cbv_index;
+  }
+  s << ")";
   reshade::log::message(reshade::log::level::info, s.str().c_str());
+}
 }
 
 static void OnDestroyPipelineLayout(
@@ -858,16 +958,17 @@ inline DrawResponse HandleStatesAndBypass(
 #endif
       return response;
     }
-
+    auto pc_param = state.pipeline_details->layout_data->params[state.pipeline_details->layout_data->injection_index];
     renodx::utils::constants::PushShaderInjections(
         cmd_list,
         state.pipeline_details->layout_data->injection_layout,
         state.pipeline_details->layout_data->injection_index,
         index == renodx::utils::shader::COMPUTE_INDEX,
         {shader_injection, shader_injection_size},
-        constant_buffer_offset,
+        constant_buffer_offset != 0 ? constant_buffer_offset : state.pipeline_details->layout_data->injection_constant_buffer_offset,
         resource_tag_float,
-        resource_tag);
+        resource_tag,
+        pc_param.push_constants.visibility);
     if (revert_constant_buffer_ranges) {
       switch (cmd_list->get_device()->get_api()) {
         case reshade::api::device_api::d3d10:

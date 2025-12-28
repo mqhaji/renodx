@@ -26,6 +26,11 @@ static void SetFlag(T1* a, const T2 value) {
 }
 
 template <typename T1 = int, typename T2 = int>
+static bool HasAnyFlag(const T1 a, T2 b) {
+  return (a & b) != 0;
+}
+
+template <typename T1 = int, typename T2 = int>
 static void UnsetFlag(T1* a, const T2 value) {
   if constexpr (std::is_same_v<T1, float>) {
     uint32_t bits = std::bit_cast<uint32_t>(*a);

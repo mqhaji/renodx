@@ -46,7 +46,9 @@ const std::unordered_map<
         ViewUpgradeAll(r8g8b8a8_unorm, r16g16b16a16_float),
         ViewUpgradeAll(b8g8r8a8_unorm, r16g16b16a16_float),
         ViewUpgradeAll(r8g8b8a8_snorm, r16g16b16a16_float),
+        ViewUpgradeAll(r8g8b8x8_unorm, r16g16b16a16_float),
         ViewUpgradeAll(r8g8b8a8_unorm_srgb, r16g16b16a16_float),
+        ViewUpgradeAll(r8g8b8x8_unorm_srgb, r16g16b16a16_float),
         ViewUpgradeAll(b8g8r8a8_unorm_srgb, r16g16b16a16_float),
         ViewUpgradeAll(r11g11b10_float, r16g16b16a16_float),
         ViewUpgradeAll(b8g8r8x8_unorm, r16g16b16a16_float),
@@ -75,8 +77,10 @@ const std::unordered_map<
         ViewUpgradeAll(r10g10b10a2_unorm, r10g10b10a2_unorm),
         ViewUpgradeAll(b10g10r10a2_unorm, r10g10b10a2_unorm),
         ViewUpgradeAll(r8g8b8a8_unorm, r10g10b10a2_unorm),
+        ViewUpgradeAll(r8g8b8x8_unorm, r10g10b10a2_unorm),
         ViewUpgradeAll(b8g8r8a8_unorm, r10g10b10a2_unorm),
         ViewUpgradeAll(r8g8b8a8_unorm_srgb, r10g10b10a2_unorm),
+        ViewUpgradeAll(r8g8b8x8_unorm_srgb, r10g10b10a2_unorm),
         ViewUpgradeAll(b8g8r8a8_unorm_srgb, r10g10b10a2_unorm),
         ViewUpgradeAll(b8g8r8x8_unorm, r10g10b10a2_unorm),
         ViewUpgradeAll(b8g8r8x8_unorm_srgb, r10g10b10a2_unorm),
@@ -91,8 +95,10 @@ const std::unordered_map<
         ViewUpgradeAll(r10g10b10a2_unorm, r11g11b10_float),
         ViewUpgradeAll(b10g10r10a2_unorm, r11g11b10_float),
         ViewUpgradeAll(r8g8b8a8_unorm, r11g11b10_float),
+        ViewUpgradeAll(r8g8b8x8_unorm, r11g11b10_float),
         ViewUpgradeAll(b8g8r8a8_unorm, r11g11b10_float),
         ViewUpgradeAll(r8g8b8a8_unorm_srgb, r11g11b10_float),
+        ViewUpgradeAll(r8g8b8x8_unorm_srgb, r11g11b10_float),
         ViewUpgradeAll(b8g8r8a8_unorm_srgb, r11g11b10_float),
         ViewUpgradeAll(b8g8r8x8_unorm, r11g11b10_float),
         ViewUpgradeAll(b8g8r8x8_unorm_srgb, r11g11b10_float),
@@ -158,6 +164,7 @@ struct ResourceUpgradeInfo {
   };
   Dimensions dimensions = {.width = BACK_BUFFER, .height = BACK_BUFFER, .depth = BACK_BUFFER};
   Dimensions new_dimensions = {.width = ANY, .height = ANY, .depth = ANY};
+  Dimensions min_dimensions = {.width = ANY, .height = ANY, .depth = ANY};
 
   reshade::api::resource_usage usage_include = reshade::api::resource_usage::undefined;
   reshade::api::resource_usage usage_exclude = reshade::api::resource_usage::undefined;
@@ -201,6 +208,18 @@ struct ResourceUpgradeInfo {
           if (desc.texture.depth_or_layers != dimensions.depth) return false;
         }
       } else {
+        if (min_dimensions.height >= 0) {
+          if (desc.texture.height <= min_dimensions.height) return false;
+        }
+
+        if (min_dimensions.width >= 0) {
+          if (desc.texture.width <= min_dimensions.width) return false;
+        }
+
+        if (min_dimensions.depth >= 0) {
+          if (desc.texture.depth_or_layers <= min_dimensions.depth) return false;
+        }
+
         const float view_ratio = static_cast<float>(desc.texture.width) / static_cast<float>(desc.texture.height);
         float target_ratio;
         if (this->aspect_ratio == BACK_BUFFER) {
@@ -712,14 +731,18 @@ inline reshade::api::resource_view_desc PopulateUnknownResourceViewDesc(
     reshade::api::resource_usage usage_type,
     ResourceInfo* resource_info) {
   reshade::api::resource_view_desc new_desc = desc;
+  // Vulkan resource views have their own format that we want swapchain upgrades to handle
+  bool is_vulkan = device->get_api() == reshade::api::device_api::vulkan;
+
   switch (device->get_api()) {
     case reshade::api::device_api::d3d9:
       // DX9 will always be unknown. Games may used special Nvidia types or 'NULL'
       return new_desc;
     case reshade::api::device_api::d3d10:
     case reshade::api::device_api::d3d11:
-      // Set this parameter to NULL to create a view that accesses the entire
-      // resource (using the format the resource was created with).
+    // Set this parameter to NULL to create a view that accesses the entire
+    // resource (using the format the resource was created with).
+    case reshade::api::device_api::vulkan:
     case reshade::api::device_api::d3d12:
       // A null pDesc is used to initialize a default descriptor, if possible.
       // This behavior is identical to the D3D11 null descriptor behavior,
@@ -735,7 +758,7 @@ inline reshade::api::resource_view_desc PopulateUnknownResourceViewDesc(
       switch (resource_info->desc.type) {
         case reshade::api::resource_type::buffer:
           new_desc.type = reshade::api::resource_view_type::buffer;
-          new_desc.format = reshade::api::format::unknown;
+          if (!is_vulkan) new_desc.format = reshade::api::format::unknown;
           break;
         case reshade::api::resource_type::texture_1d:
           if (resource_info->desc.texture.depth_or_layers > 1) {
@@ -745,7 +768,7 @@ inline reshade::api::resource_view_desc PopulateUnknownResourceViewDesc(
           }
           new_desc.texture.level_count = UINT32_MAX;
           new_desc.texture.layer_count = resource_info->desc.texture.depth_or_layers;
-          new_desc.format = resource_info->desc.texture.format;
+          if (!is_vulkan) new_desc.format = resource_info->desc.texture.format;
           break;
         case reshade::api::resource_type::surface:
         case reshade::api::resource_type::texture_2d:
@@ -772,10 +795,10 @@ inline reshade::api::resource_view_desc PopulateUnknownResourceViewDesc(
           } else {
             new_desc.type = reshade::api::resource_view_type::texture_2d;
           }
-          new_desc.format = resource_info->desc.texture.format;
+          if (!is_vulkan) new_desc.format = resource_info->desc.texture.format;
           break;
         case reshade::api::resource_type::texture_3d:
-          new_desc.format = resource_info->desc.texture.format;
+          if (!is_vulkan) new_desc.format = resource_info->desc.texture.format;
           new_desc.texture.level_count = UINT32_MAX;
           new_desc.texture.layer_count = UINT32_MAX;
           break;
@@ -906,6 +929,56 @@ inline reshade::api::resource GetResourceFromView(const reshade::api::resource_v
   if (resource_view_info->destroyed) return {0u};
   if (resource_view_info->resource_info == nullptr) return {0u};
   return resource_view_info->resource_info->resource;
+}
+
+static bool IsImageLikeBuffer(const reshade::api::resource_desc& desc) {
+  if (desc.type != reshade::api::resource_type::buffer) {
+    assert(false);
+    return false;
+  }
+
+  const auto buffer_size = desc.buffer.size;
+
+  constexpr uint64_t k_min_size = 480ull * 240ull * 4ull;
+  constexpr uint64_t k_max_size = 3840ull * 2160ull * 4ull;
+
+  if (buffer_size < k_min_size || buffer_size > k_max_size) {
+    return false;
+  }
+
+  // Must be a staging buffer (transfer usage)
+  constexpr auto k_staging_usage =
+      reshade::api::resource_usage::copy_source | reshade::api::resource_usage::copy_dest;
+
+  if (!renodx::utils::bitwise::HasAnyFlag(desc.usage, k_staging_usage)) {
+    return false;
+  }
+
+  // Standard display resolutions only (16:9)
+  // Excludes square textures (cubemaps, shadow maps) and non-standard aspects
+  struct Resolution {
+    uint64_t width;
+    uint64_t height;
+  };
+
+  constexpr std::array<Resolution, 5> k_display_resolutions = {{
+      {.width = 1280, .height = 720},
+      {.width = 1600, .height = 900},
+      {.width = 1920, .height = 1080},
+      {.width = 2560, .height = 1440},
+      {.width = 3840, .height = 2160},
+  }};
+
+  constexpr uint64_t k_bpp = 4;            // 32bit
+  constexpr uint64_t k_row_padding = 256;  // Vulkan optimal alignment
+
+  return std::ranges::any_of(k_display_resolutions, [&](const auto& res) {
+    const uint64_t expected_min = res.width * res.height * k_bpp;
+    const uint64_t expected_max = (res.width + k_row_padding) * res.height * k_bpp;
+    return buffer_size >= expected_min && buffer_size <= expected_max;
+  });
+
+  return false;
 }
 
 static bool IsResourceViewEmpty(reshade::api::device* device, const reshade::api::resource_view& view) {

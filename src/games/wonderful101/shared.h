@@ -1,5 +1,5 @@
-#ifndef SRC_SMASH_BROS_ULTIMATE_SHARED_H_
-#define SRC_SMASH_BROS_ULTIMATE_SHARED_H_
+#ifndef SRC_WONDERFUL101_SHARED_H_
+#define SRC_WONDERFUL101_SHARED_H_
 
 // Must be 32bit aligned
 // Should be 4x32
@@ -53,18 +53,9 @@ struct ShaderInjectData {
 
 #ifndef __cplusplus
 #ifdef __SLANG__
-#ifdef USE_OUTPUT_PUSHCONSTANTS
-#define PUSH_CONSTANTS_OFFSET 48
-#endif
-
-// Fallback
-#ifndef PUSH_CONSTANTS_OFFSET
-#define PUSH_CONSTANTS_OFFSET 0
-#endif
-
 struct PushData
 {
-    [[vk::offset(PUSH_CONSTANTS_OFFSET)]]
+    [[vk::offset(48)]]
     ShaderInjectData shader_injection;
 };
 
@@ -86,4 +77,4 @@ cbuffer injected_buffer : register(b13) {
 
 #endif
 
-#endif  // SRC_SMASH_BROS_ULTIMATE_SHARED_H_
+#endif  // SRC_WONDERFUL101_SHARED_H_

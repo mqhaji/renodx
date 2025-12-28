@@ -29,6 +29,7 @@ struct PipelineLayoutData {
   reshade::api::pipeline_layout injection_layout = {0u};
   int32_t injection_index = -1;
   int32_t injection_register_index = -1;
+  int32_t injection_constant_buffer_offset = 0;
   bool failed_injection = false;
 };
 

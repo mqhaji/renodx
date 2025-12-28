@@ -78,10 +78,20 @@ static void AddShaderReplacement(
     reshade::api::pipeline_subobject* subobject,
     std::span<const uint8_t> new_shader) {
   auto* desc = static_cast<reshade::api::shader_desc*>(subobject->data);
+  /*
+    Some games use different entry points (e.g. ps_main) but we hardcode main as
+    entry point in our slang compiler. Reshade converts null entry_point to main
+    but we'd rather manually control it ourselves
+  */
+  if (desc->entry_point != nullptr) {
+    free(const_cast<char*>(desc->entry_point));
+    desc->entry_point = nullptr;
+  }
+  desc->entry_point = _strdup("main");
+
   if (desc->code_size != 0u) {
     free(const_cast<void*>(desc->code));  // Release clone's shader
   }
-
   desc->code_size = new_shader.size();
   if (desc->code_size == 0) {
     desc->code = nullptr;
@@ -165,9 +175,9 @@ struct PipelineShaderDetails {
       s << ", Index: " << i;
       s << ", Type: " << subobject.type;
       s << ", Stage: " << COMPATIBLE_STAGES[shader_type_index];
+      s << ", Entry Point: " << desc.entry_point;
       s << ", Count: " << subobject.count;
       s << ", Code Size: " << desc.code_size;
-
       if (desc.code_size == 0) {
         s << ", Code: (empty)";
         s << ")";

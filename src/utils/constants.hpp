@@ -325,7 +325,8 @@ inline void PushShaderInjections(
     std::span<float> shader_injection = {},
     uint32_t offset = 0.f,
     float* resource_tag_float = nullptr,
-    float resource_tag = 0.f) {
+    float resource_tag = 0.f,
+    reshade::api::shader_stage shader_stage = reshade::api::shader_stage::all) {
   auto device_api = cmd_list->get_device()->get_api();
   bool use_root_constants = (device_api == reshade::api::device_api::d3d12 || device_api == reshade::api::device_api::vulkan);
 
@@ -335,6 +336,7 @@ inline void PushShaderInjections(
   s << "layout: " << PRINT_PTR(layout.handle) << "[" << layout_param << "]";
   s << ", dispatch: " << (is_dispatch ? "true" : "false");
   s << ", resource_tag: " << resource_tag;
+  s << ", offset: " << offset;
   s << ")";
   reshade::log::message(reshade::log::level::debug, s.str().c_str());
 #endif
@@ -344,9 +346,11 @@ inline void PushShaderInjections(
     *resource_tag_float = resource_tag;
   }
 
-  reshade::api::shader_stage shader_stage;
   if (device_api == reshade::api::device_api::d3d9) {
     shader_stage = reshade::api::shader_stage::pixel;
+  } else if (device_api == reshade::api::device_api::vulkan) {
+    // Leave it at default for vulkan
+    // shader_stage = reshade::api::shader_stage::all
   } else if (is_dispatch) {
     shader_stage = reshade::api::shader_stage::all_compute;
   } else {
