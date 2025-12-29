@@ -55,6 +55,7 @@
 #include "../../utils/pipeline_layout.hpp"
 #include "../../utils/shader.hpp"
 #include "../../utils/shader_compiler_directx.hpp"
+#include "../../utils/shader_compiler_slang.hpp"
 #include "../../utils/shader_compiler_watcher.hpp"
 #include "../../utils/shader_decompiler_dxc.hpp"
 #include "../../utils/shader_dump.hpp"
@@ -435,6 +436,8 @@ bool ComputeDisassemblyForShaderDetails(reshade::api::device* device, DeviceData
         shader_details->disassembly = std::string(
             shader_details->shader_data.data(),
             shader_details->shader_data.data() + shader_details->shader_data.size());
+      } else if (device->get_api() == reshade::api::device_api::vulkan) {
+        shader_details->disassembly = renodx::utils::shader::compiler::slang::DisassembleSpirv(shader_details->shader_data, shader_details->shader_hash);
       } else {
         throw std::runtime_error("Unsupported device API.");
       }
@@ -460,6 +463,10 @@ bool ComputeDecompilationForShaderDetails(reshade::api::device* device, DeviceDa
             {
                 .flatten = true,
             });
+      } else if (device->get_api() == reshade::api::device_api::vulkan) {
+        shader_details->decompilation = renodx::utils::shader::compiler::slang::DecompileSpirvToGlsl(
+            shader_details->shader_data,
+            shader_details->shader_hash);
       } else if (device->get_api() == reshade::api::device_api::opengl) {
         shader_details->decompilation = std::string(
             shader_details->shader_data.data(),
@@ -6426,7 +6433,9 @@ void RenderShaderViewLive(reshade::api::device* device, DeviceData* data, Shader
   if (shader_details->disk_shader.has_value()) {
     if (!shader_details->disk_shader->IsCompilationOK()) {
       live_string = shader_details->disk_shader->GetCompilationException().what();
-    } else if (shader_details->disk_shader->is_hlsl || shader_details->disk_shader->is_glsl) {
+    } else if (shader_details->disk_shader->is_hlsl
+               || shader_details->disk_shader->is_glsl
+               || shader_details->disk_shader->is_slang) {
       try {
         live_string = renodx::utils::path::ReadTextFile(shader_details->disk_shader->file_path);
       } catch (std::exception& e) {
