@@ -167,6 +167,7 @@ struct PipelineShaderDetails {
           continue;
       }
 
+      const auto is_vulkan = device->get_api() == reshade::api::device_api::vulkan;
       const reshade::api::shader_desc desc = *static_cast<const reshade::api::shader_desc*>(subobject.data);
 
       std::stringstream s;
@@ -175,7 +176,9 @@ struct PipelineShaderDetails {
       s << ", Index: " << i;
       s << ", Type: " << subobject.type;
       s << ", Stage: " << COMPATIBLE_STAGES[shader_type_index];
-      s << ", Entry Point: " << desc.entry_point;
+      if (is_vulkan) {
+        s << ", Entry Point: " << desc.entry_point;
+      }
       s << ", Count: " << subobject.count;
       s << ", Code Size: " << desc.code_size;
       if (desc.code_size == 0) {
