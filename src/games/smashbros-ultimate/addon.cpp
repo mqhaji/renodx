@@ -6,8 +6,8 @@
 #define ImTextureID ImU64
 
 #define DEBUG_LEVEL_0
-#define DEBUG_LEVEL_1
-#define DEBUG_LEVEL_2
+// #define DEBUG_LEVEL_1
+// #define DEBUG_LEVEL_2
 
 #include <embed/shaders.h>
 

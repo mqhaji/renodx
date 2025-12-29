@@ -166,6 +166,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       .depth = renodx::utils::resource::ResourceUpgradeInfo::BACK_BUFFER,
   };
 
+  // Self explanatory
   const renodx::utils::resource::ResourceUpgradeInfo::Dimensions min_dimensions = {
       .width = 720,
       .height = renodx::utils::resource::ResourceUpgradeInfo::ANY,
