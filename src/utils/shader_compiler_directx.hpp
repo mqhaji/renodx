@@ -12,6 +12,7 @@
 #include <mmiscapi.h>
 #include <winsock.h>
 
+#include <cassert>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -20,8 +21,8 @@
 #include <shared_mutex>
 #include <span>
 #include <string>
-#include <cassert>
 #include <vector>
+
 
 #include "./path.hpp"
 
@@ -41,6 +42,9 @@ inline HMODULE dxc_compiler_library = nullptr;
 inline std::filesystem::path dxc_tools_path;
 inline std::shared_mutex mutex_fxc_compiler;
 inline std::shared_mutex mutex_dxc_compiler;
+static std::once_flag dxc_compiler_library_once;
+constexpr bool USE_FXC_MUTEX = true;
+constexpr bool USE_DXC_MUTEX = false;
 
 class FxcD3DInclude : public ID3DInclude {
  public:
@@ -150,9 +154,7 @@ inline HMODULE LoadDXCompiler(const std::string& path) {
 
 inline HRESULT CreateLibrary(IDxcLibrary** dxc_library) {
   // HMODULE dxil_loader = LoadLibraryW(L"dxil.dll");
-  if (dxc_compiler_library == nullptr) {
-    dxc_compiler_library = LoadDXCompiler();
-  }
+  dxc_compiler_library = LoadDXCompiler();
   if (dxc_compiler_library == nullptr) {
     return -1;
   }
@@ -396,7 +398,10 @@ inline std::vector<uint8_t> CompileShaderFromFileFXC(
   // Create a new Custom D3DInclude that supports relative imports
   auto custom_include = FxcD3DInclude(file_path);
 
-  std::unique_lock lock(mutex_fxc_compiler);
+  std::unique_lock lock(mutex_fxc_compiler, std::defer_lock);
+  if constexpr (USE_FXC_MUTEX) {
+    lock.lock();
+  }
   ID3DBlobPtr error_blob;
   if (FAILED(d3d_compilefromfile(
           file_path,
@@ -429,7 +434,10 @@ inline std::vector<uint8_t> CompileShaderFromFileDXC(
 
   ID3DBlobPtr out_blob;
   ID3DBlobPtr error_blob;
-  std::unique_lock lock(mutex_dxc_compiler);
+  std::unique_lock lock(mutex_dxc_compiler, std::defer_lock);
+  if constexpr (USE_DXC_MUTEX) {
+    lock.lock();
+  }
   if (FAILED(internal::BridgeD3DCompileFromFile(
           file_path,
           defines,
@@ -462,7 +470,10 @@ inline std::string DisassembleShaderFXC(std::span<uint8_t> blob) {
   if (d3d_disassemble == nullptr) throw std::exception("Could not to load D3DDisassemble in D3DCompiler_47.dll");
 
   // Function may not be thread-safe
-  std::unique_lock lock(mutex_fxc_compiler);
+  std::unique_lock lock(mutex_fxc_compiler, std::defer_lock);
+  if constexpr (USE_FXC_MUTEX) {
+    lock.lock();
+  }
   ID3DBlobPtr out_blob;
   if (FAILED(d3d_disassemble(
           blob.data(),
@@ -485,7 +496,10 @@ inline std::string DisassembleShaderDXC(std::span<uint8_t> blob) {
   IDxcBlobEncodingPtr disassembly_text;
   ID3DBlobPtr disassembly;
 
-  std::unique_lock lock(mutex_dxc_compiler);
+  std::unique_lock lock(mutex_dxc_compiler, std::defer_lock);
+  if constexpr (USE_DXC_MUTEX) {
+    lock.lock();
+  }
   if (FAILED(internal::CreateLibrary(&library))) throw std::exception("Could not create library.");
   if (FAILED(library->CreateBlobWithEncodingFromPinned(blob.data(), blob.size(), CP_ACP, &source))) throw std::exception("Could not prepare blob.");
   if (FAILED(internal::CreateCompiler(&compiler))) throw std::exception("Could not create compiler object.");
