@@ -26,7 +26,7 @@
 
 namespace {
 
-renodx::mods::shader::CustomShaders custom_shaders = {__ALL_CUSTOM_SHADERS};
+renodx::mods::shader::CustomShaders custom_shaders = {};
 
 ShaderInjectData shader_injection;
 
@@ -36,27 +36,27 @@ renodx::utils::settings::Settings settings = renodx::templates::settings::JoinSe
         {"ToneMapPeakNits", &shader_injection.peak_white_nits},
         {"ToneMapGameNits", &shader_injection.diffuse_white_nits},
         {"ToneMapUINits", &shader_injection.graphics_white_nits},
-        {"ToneMapGammaCorrection", &shader_injection.gamma_correction},
+        // {"ToneMapGammaCorrection", &shader_injection.gamma_correction},
         {"ColorGradeExposure", &shader_injection.tone_map_exposure},
         {"ColorGradeHighlights", &shader_injection.tone_map_highlights},
         {"ColorGradeShadows", &shader_injection.tone_map_shadows},
         {"ColorGradeContrast", &shader_injection.tone_map_contrast},
-        {"ColorGradeSaturation", &shader_injection.tone_map_saturation},
-        {"ColorGradeHighlightSaturation", &shader_injection.tone_map_highlight_saturation},
-        {"ColorGradeBlowout", &shader_injection.tone_map_blowout},
-        {"ColorGradeFlare", &shader_injection.tone_map_flare},
+        // {"ColorGradeSaturation", &shader_injection.tone_map_saturation},
+        // {"ColorGradeHighlightSaturation", &shader_injection.tone_map_highlight_saturation},
+        // {"ColorGradeBlowout", &shader_injection.tone_map_blowout},
+        // {"ColorGradeFlare", &shader_injection.tone_map_flare},
     }),
     {
-        new renodx::utils::settings::Setting{
-            .key = "FxBloom",
-            .binding = &shader_injection.custom_bloom,
-            .default_value = 25.f,
-            .label = "Bloom Strength",
-            .section = "Color Grading",
-            .max = 100.f,
-            .parse = [](float value) { return value * 0.01f; },
-            .is_visible = []() { return settings[0]->GetValue() >= 2.f; },
-        },
+        // new renodx::utils::settings::Setting{
+        //     .key = "FxBloom",
+        //     .binding = &shader_injection.custom_bloom,
+        //     .default_value = 25.f,
+        //     .label = "Bloom Strength",
+        //     .section = "Color Grading",
+        //     .max = 100.f,
+        //     .parse = [](float value) { return value * 0.01f; },
+        //     .is_visible = []() { return settings[0]->GetValue() >= 2.f; },
+        // },
         new renodx::utils::settings::Setting{
             .value_type = renodx::utils::settings::SettingValueType::BUTTON,
             .label = "RenoDX Discord",
@@ -173,93 +173,90 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       renodx::mods::shader::allow_multiple_push_constants = true;
       renodx::mods::swapchain::use_resource_cloning = use_resource_view_cloning;
       renodx::mods::swapchain::target_format = target_format;
-      renodx::mods::swapchain::ignored_device_apis = {
-        reshade::api::device_api::d3d11
-      };
 
       // renodx::mods::shader::expand_existing_constant_buffer = false;
       // We only care about pixel stage
       // renodx::mods::shader::minimum_constant_buffer_stages = reshade::api::shader_stage::pixel;
 
-      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
-          .old_format = reshade::api::format::r8g8b8a8_unorm_srgb,
-          .new_format = target_format,
-          .ignore_size = common_ignore_size,
-          .use_resource_view_cloning = use_resource_view_cloning,
-          .aspect_ratio = common_aspect_ratio,
-          .view_upgrades = view_upgrades,
-        .min_dimensions = min_dimensions,
-      });
+      // renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
+      //     .old_format = reshade::api::format::r8g8b8a8_unorm_srgb,
+      //     .new_format = target_format,
+      //     .ignore_size = common_ignore_size,
+      //     .use_resource_view_cloning = use_resource_view_cloning,
+      //     .aspect_ratio = common_aspect_ratio,
+      //     .view_upgrades = view_upgrades,
+      //   .min_dimensions = min_dimensions,
+      // });
 
-      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
-          .old_format = reshade::api::format::r10g10b10a2_unorm,
-          .new_format = target_format,
-          .ignore_size = common_ignore_size,
-          .use_resource_view_cloning = use_resource_view_cloning,
-          .aspect_ratio = common_aspect_ratio,
-          .view_upgrades = view_upgrades,
-          .min_dimensions = min_dimensions,
-      });
+      // renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
+      //     .old_format = reshade::api::format::r10g10b10a2_unorm,
+      //     .new_format = target_format,
+      //     .ignore_size = common_ignore_size,
+      //     .use_resource_view_cloning = use_resource_view_cloning,
+      //     .aspect_ratio = common_aspect_ratio,
+      //     .view_upgrades = view_upgrades,
+      //     .min_dimensions = min_dimensions,
+      // });
 
-      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
-          .old_format = reshade::api::format::r8g8b8a8_unorm,
-          .new_format = target_format,
-          .ignore_size = common_ignore_size,
-          .use_resource_view_cloning = use_resource_view_cloning,
-          .aspect_ratio = common_aspect_ratio,
-          .view_upgrades = view_upgrades,
-          .min_dimensions = min_dimensions,
-      });
+      // renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
+      //     .old_format = reshade::api::format::r8g8b8a8_unorm,
+      //     .new_format = target_format,
+      //     .ignore_size = common_ignore_size,
+      //     .use_resource_view_cloning = use_resource_view_cloning,
+      //     .aspect_ratio = common_aspect_ratio,
+      //     .view_upgrades = view_upgrades,
+      //     .min_dimensions = min_dimensions,
+      // });
 
-      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
-          .old_format = reshade::api::format::r8g8b8a8_unorm_srgb,
-          .new_format = target_format,
-          .ignore_size = common_ignore_size,
-          .use_resource_view_cloning = use_resource_view_cloning,
-          .aspect_ratio = common_aspect_ratio,
-          .view_upgrades = view_upgrades,
-          .min_dimensions = min_dimensions,
-      });
+      // renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
+      //     .old_format = reshade::api::format::r8g8b8a8_unorm_srgb,
+      //     .new_format = target_format,
+      //     .ignore_size = common_ignore_size,
+      //     .use_resource_view_cloning = use_resource_view_cloning,
+      //     .aspect_ratio = common_aspect_ratio,
+      //     .view_upgrades = view_upgrades,
+      //     .min_dimensions = min_dimensions,
+      // });
 
-      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
-          .old_format = reshade::api::format::r8g8b8a8_typeless,
-          .new_format = target_format,
-          .ignore_size = common_ignore_size,
-          .use_resource_view_cloning = use_resource_view_cloning,
-          .aspect_ratio = common_aspect_ratio,
-          .view_upgrades = view_upgrades,
-          .min_dimensions = min_dimensions,
-      });
+      // renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
+      //     .old_format = reshade::api::format::r8g8b8a8_typeless,
+      //     .new_format = target_format,
+      //     .ignore_size = common_ignore_size,
+      //     .use_resource_view_cloning = use_resource_view_cloning,
+      //     .aspect_ratio = common_aspect_ratio,
+      //     .view_upgrades = view_upgrades,
+      //     .min_dimensions = min_dimensions,
+      // });
 
-      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
-          .old_format = reshade::api::format::b8g8r8a8_unorm,
-          .new_format = target_format,
-          .ignore_size = common_ignore_size,
-          .use_resource_view_cloning = use_resource_view_cloning,
-          .aspect_ratio = common_aspect_ratio,
-          .view_upgrades = view_upgrades,
-          .min_dimensions = min_dimensions,
-      });
+      // renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
+      //     .old_format = reshade::api::format::b8g8r8a8_unorm,
+      //     .new_format = target_format,
+      //     .ignore_size = common_ignore_size,
+      //     .use_resource_view_cloning = use_resource_view_cloning,
+      //     .aspect_ratio = common_aspect_ratio,
+      //     .view_upgrades = view_upgrades,
+      //     .min_dimensions = min_dimensions,
+      // });
 
-      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
-          .old_format = reshade::api::format::b8g8r8a8_typeless,
-          .new_format = target_format,
-          .ignore_size = common_ignore_size,
-          .use_resource_view_cloning = use_resource_view_cloning,
-          .aspect_ratio = common_aspect_ratio,
-          .view_upgrades = view_upgrades,
-          .min_dimensions = min_dimensions,
-      });
+      // renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
+      //     .old_format = reshade::api::format::b8g8r8a8_typeless,
+      //     .new_format = target_format,
+      //     .ignore_size = common_ignore_size,
+      //     .use_resource_view_cloning = use_resource_view_cloning,
+      //     .aspect_ratio = common_aspect_ratio,
+      //     .view_upgrades = view_upgrades,
+      //     .min_dimensions = min_dimensions,
+      // });
 
-      renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
-          .old_format = reshade::api::format::b8g8r8a8_typeless,
-          .new_format = target_format,
-          .ignore_size = common_ignore_size,
-          .use_resource_view_cloning = use_resource_view_cloning,
-          .aspect_ratio = weird_aspect_ratio,
-          .view_upgrades = view_upgrades,
-          .min_dimensions = min_dimensions,
-      });
+      // renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
+      //     .old_format = reshade::api::format::b8g8r8a8_typeless,
+      //     .new_format = target_format,
+      //     .ignore_size = common_ignore_size,
+      //     .use_resource_view_cloning = use_resource_view_cloning,
+      //     .aspect_ratio = weird_aspect_ratio,
+      //     .view_upgrades = view_upgrades,
+      //     .min_dimensions = min_dimensions,
+      // });
 
       if (!initialized) {
         initialized = true;

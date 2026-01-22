@@ -14,15 +14,15 @@ struct ShaderInjectData {
   float tone_map_shadows;
   float tone_map_contrast;
 
-  float tone_map_saturation;
-  float tone_map_highlight_saturation;
-  float tone_map_blowout;
-  float tone_map_flare;
+  // float tone_map_saturation;
+  // float tone_map_highlight_saturation;
+  // float tone_map_blowout;
+  // float tone_map_flare;
 
-  float gamma_correction;
-  float custom_bloom;
-  float custom_dof;
-  float swap_chain_output_dither_bits;
+  // float gamma_correction;
+  // float custom_bloom;
+  // float custom_dof;
+  // float swap_chain_output_dither_bits;
 };
 
 #define RENODX_PEAK_WHITE_NITS                        shader_injection.peak_white_nits
@@ -33,10 +33,10 @@ struct ShaderInjectData {
 #define RENODX_TONE_MAP_HIGHLIGHTS                    shader_injection.tone_map_highlights
 #define RENODX_TONE_MAP_SHADOWS                       shader_injection.tone_map_shadows
 #define RENODX_TONE_MAP_CONTRAST                      shader_injection.tone_map_contrast
-#define RENODX_TONE_MAP_SATURATION                    shader_injection.tone_map_saturation
-#define RENODX_TONE_MAP_HIGHLIGHT_SATURATION          shader_injection.tone_map_highlight_saturation
-#define RENODX_TONE_MAP_BLOWOUT                       shader_injection.tone_map_blowout
-#define RENODX_TONE_MAP_FLARE                         shader_injection.tone_map_flare
+// #define RENODX_TONE_MAP_SATURATION                    shader_injection.tone_map_saturation
+// #define RENODX_TONE_MAP_HIGHLIGHT_SATURATION          shader_injection.tone_map_highlight_saturation
+// #define RENODX_TONE_MAP_BLOWOUT                       shader_injection.tone_map_blowout
+// #define RENODX_TONE_MAP_FLARE                         shader_injection.tone_map_flare
 #define RENODX_RENO_DRT_WHITE_CLIP                    100.f
 #define RENODX_RENO_DRT_TONE_MAP_METHOD               renodx::tonemap::renodrt::config::tone_map_method::HERMITE_SPLINE
 #define RENODX_RENO_DRT_NEUTRAL_SDR_CLAMP_PEAK        -1.0f
@@ -53,16 +53,9 @@ struct ShaderInjectData {
 
 #ifndef __cplusplus
 #ifdef __SLANG__
-struct PushData
-{
-    [[vk::offset(48)]]
-    ShaderInjectData shader_injection;
-};
-
-[[vk::push_constant]]
-PushData gPush;
-
-#define shader_injection gPush.shader_injection
+layout(push_constant) uniform PushData {
+  ShaderInjectData shader_injection;
+}
 #else
 #if ((__SHADER_TARGET_MAJOR == 5 && __SHADER_TARGET_MINOR >= 1) || __SHADER_TARGET_MAJOR >= 6)
 cbuffer injected_buffer : register(b13, space50) {
