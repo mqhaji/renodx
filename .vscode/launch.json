@@ -2,22 +2,163 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "(msvc) Attach",
+      "name": "Eden",
       "type": "cppvsdbg",
-      "request": "attach",
-      "processId": "${command:pickProcess}"
+      "request": "launch",
+      "program": "D:/Downloads/Eden-Windows-v0.0.4-mingw-amd64-clang-pgo/eden.exe",
+      "args": [
+        "-g",
+        "D:/Games/Switch Games/Smash Bros/Super Smash Bros. Ultimate (01006A800016E000)(v0).nsp"
+      ],
+      "stopAtEntry": false,
+      "cwd": "${fileDirname}",
+      "preLaunchTask": "CMake: build",
+      "requireExactSource": false,
+      "symbolSearchPath": "D:/GitHub/eden/cmake-relwithdebinfo/bin"
     },
     {
-      "name": "Deploy Early Access",
-      "type": "PowerShell",
+      "name": "Citron",
+      "type": "cppvsdbg",
       "request": "launch",
-      "script": "${workspaceFolder}/scripts/deploy-early-access.ps1",
-      "cwd": "${cwd}",
+      "program": "D:/Downloads/Citron-windows-stable_0.11.0_PGO_x64/citron 0.11.0 PGO Optimized/citron.exe",
       "args": [
-        "--target", "${command:cmake.buildTargetName}",
-        "--description", "\"${input:deployDescription}\""
+        "-g",
+        "D:/Games/Switch Games/Smash Bros/Super Smash Bros. Ultimate (01006A800016E000)(v0).nsp"
       ],
+      "stopAtEntry": false,
+      "cwd": "${fileDirname}",
+      "preLaunchTask": "CMake: build",
+      "requireExactSource": false,
+      "symbolSearchPath": "D:/Downloads/Citron-windows-stable_0.11.0_PGO_x64/citron 0.11.0 PGO Optimized"
     },
+    {
+      "name": "Ryujinx Vanilla",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "D:/Downloads/ryujinx-1.3.3-win_x64/publish/Ryujinx.exe",
+      "args": [
+        "D:/Games/Switch Games/Smash Bros/Super Smash Bros. Ultimate (01006A800016E000)(v0).nsp"
+      ],
+      "stopAtEntry": false,
+      "cwd": "${fileDirname}",
+      "preLaunchTask": "CMake: build",
+      "requireExactSource": false,
+      "symbolSearchPath": "D:/Downloads/ryujinx-1.3.3-win_x64/publish/"
+    },
+    {
+      "name": "ShadPS4",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "D:/GitHub/shadPS4/Build/x64-Clang-RelWithDebInfo/shadps4.exe",
+      "args": ["D:/Games/ShadPS4/Bloodborne/eboot.bin"],
+      "stopAtEntry": false,
+      "cwd": "${fileDirname}",
+      "preLaunchTask": "CMake: build",
+      "requireExactSource": false,
+      "logging": { "exceptions": false }
+    },
+    {
+      "name": "BG3",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "C:/Program Files (x86)/Steam/steamapps/common/Baldurs Gate 3/bin/bg3.exe",
+      "args": ["--skip-launcher"],
+      "stopAtEntry": false,
+      "cwd": "${fileDirname}",
+      "environment": [],
+      "preLaunchTask": "CMake: build",
+      "requireExactSource": false
+    },
+    {
+      "name": "Wonderful 101",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "F:/Games/The Wonderful 101 Remastered/exe/TheWonderful101.exe",
+      "args": ["--skip-launcher"],
+      "stopAtEntry": false,
+      "cwd": "${fileDirname}",
+      "environment": [],
+      "preLaunchTask": "CMake: build",
+      "requireExactSource": false
+    },
+    {
+      "name": "TinyGlade",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "D:/Games/Vulkan/Tiny Glade/tiny-glade.exe",
+      "stopAtEntry": false,
+      "cwd": "${fileDirname}",
+      "environment": [],
+      "preLaunchTask": "CMake: build",
+      "requireExactSource": false,
+      "symbolSearchPath": "D:/Games/Vulkan/Tiny Glade/"
+    },
+    {
+      "name": "DOOM (2016)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "F:/Games/DOOM (2016)/DOOM/DOOMx64vk.exe",
+      "args": ["+r_allowBlackListedLayers", "1"],
+      "stopAtEntry": false,
+      "cwd": "F:/Games/DOOM (2016)/DOOM/",
+      "environment": [],
+      "console": "internalConsole",
+      "symbolSearchPath": "C:/ProgramData/ReShade/",
+      "requireExactSource": false,
+      "preLaunchTask": "CMake: build"
+    },
+    {
+      "name": "DOOM Eternal",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "F:/Games/DOOM Eternal (2020)/DOOM Eternal/DOOMEternalx64vk.exe",
+      "args": ["+r_allowBlackListedLayers", "1"],
+      "stopAtEntry": false,
+      "cwd": "F:/Games/DOOM Eternal (2020)/DOOM Eternal/",
+      "environment": [],
+      "console": "internalConsole",
+      "symbolSearchPath": "C:/ProgramData/ReShade/",
+      "preLaunchTask": "CMake: build",
+      "requireExactSource": false
+    },
+    {
+      "name": "Indiana Jones",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "F:/Games/Indiana Jones and the Great Circle (2024)/The Great Circle/TheGreatCircle.exe",
+      "args": ["+r_allowBlackListedLayers", "1"],
+      "stopAtEntry": false,
+      "cwd": "F:/Games/Indiana Jones and the Great Circle (2024)/The Great Circle/",
+      "environment": [],
+      "console": "internalConsole",
+      "symbolSearchPath": "C:/ProgramData/ReShade/",
+      "requireExactSource": false,
+      "preLaunchTask": "CMake: build"
+    },
+    {
+      "name": "Exp33",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "F:/Games/Clair Obscur. Expedition 33 (2025)/Expedition 33/Sandfall/Binaries/Win64/SandFall-Win64-Shipping.exe",
+      "stopAtEntry": false,
+      "environment": [],
+      "console": "internalConsole",
+      "symbolSearchPath": "C:/ProgramData/ReShade/",
+      "requireExactSource": false,
+      "preLaunchTask": "CMake: build"
+    },
+    {
+      "name": "GTAIV",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "D:/Games/Grand Theft Auto IV - The Complete Edition/GTAIV.exe",
+      "stopAtEntry": false,
+      "environment": [],
+      "console": "internalConsole",
+      "symbolSearchPath": "C:/ProgramData/ReShade/",
+      "requireExactSource": false,
+      "preLaunchTask": "CMake: build"
+    }
   ],
   "inputs": [
     {
