@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <include/reshade_api_device.hpp>
 #define ImTextureID ImU64
 
 #define DEBUG_LEVEL_0
@@ -169,11 +170,16 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     case DLL_PROCESS_ATTACH:
       if (!reshade::register_addon(h_module)) return FALSE;
       renodx::mods::shader::allow_multiple_push_constants = true;
-      renodx::mods::swapchain::use_resource_cloning = use_resource_view_cloning;
+      renodx::mods::swapchain::use_resource_cloning = false;
       renodx::mods::swapchain::target_format = target_format;
-      renodx::mods::shader::force_align_constant_buffers_to_16 = true;
       renodx::mods::shader::expand_existing_constant_buffer = true;
       renodx::mods::shader::minimum_constant_buffer_stages = reshade::api::shader_stage::pixel;
+      renodx::mods::swapchain::ignored_device_apis = {
+          reshade::api::device_api::d3d11,
+      };
+
+      renodx::mods::swapchain::swap_chain_proxy_vertex_shader = __swap_chain_proxy_vertex_shader;
+      renodx::mods::swapchain::swap_chain_proxy_pixel_shader = __swap_chain_proxy_pixel_shader;
 
       renodx::mods::swapchain::swap_chain_upgrade_targets.push_back({
           .old_format = reshade::api::format::r8g8b8a8_unorm_srgb,
@@ -306,7 +312,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   }
 
   renodx::utils::random::Use(DLL_PROCESS_ATTACH);
-  renodx::mods::swapchain::Use(fdw_reason);
+  renodx::mods::swapchain::Use(fdw_reason, &shader_injection);
   renodx::utils::settings::Use(fdw_reason, &settings, &OnPresetOff);
   renodx::mods::shader::Use(fdw_reason, custom_shaders, &shader_injection);
 

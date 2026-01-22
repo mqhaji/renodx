@@ -60,7 +60,7 @@ static reshade::api::pipeline_subobject* ClonePipelineSubObjects(const reshade::
 #ifdef DEBUG_LEVEL_2
         {
           std::stringstream s;
-          s << "utils::pipeline::ClonePipelineSubObjects(entry point ";
+          s << "utils::pipeline::ClonePipelineSubObjects(entry point";
           s << " from " << (old_desc->entry_point != nullptr ? old_desc->entry_point : "(null)");
           s << " to " << (new_desc->entry_point != nullptr ? new_desc->entry_point : "(null)");
           s << ")";

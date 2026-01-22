@@ -687,7 +687,7 @@ inline void OnDestroyResource(reshade::api::device* device, reshade::api::resour
         if (resource_info->destroyed) {
           log::w("utils::resource::OnDestroyResource(Resource already destroyed: ",
                  log::AsPtr(resource.handle), ")");
-          assert(!resource_info->destroyed);
+          // assert(!resource_info->destroyed);
           return;
         }
         if (resource_info->device != device) {

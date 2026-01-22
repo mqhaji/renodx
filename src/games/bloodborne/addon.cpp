@@ -188,7 +188,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
         Aux constant buffer (Check shared.h) size is 120, but we force align it to 128.
         This also helps if our shader_injection isn't aligned properly
       */
-      renodx::mods::shader::force_align_constant_buffers_to_16 = true;
+      // renodx::mods::shader::force_align_constant_buffers_to_16 = true;
 
       /*
         True means it'll attempt to expand current cbuffer definitions instead of adding a new push constant

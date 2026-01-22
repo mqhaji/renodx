@@ -110,7 +110,7 @@ static bool trace_unmodified_shaders = false;
 static bool allow_multiple_push_constants = false;
 static bool push_injections_on_present = false;
 static bool revert_constant_buffer_ranges = false;
-static bool force_align_constant_buffers_to_16 = false;
+// static bool force_align_constant_buffers_to_16 = false;
 static bool expand_existing_constant_buffer = true;
 static float* resource_tag_float = nullptr;
 static int32_t expected_constant_buffer_index = -1;
@@ -352,12 +352,15 @@ static bool OnCreatePipelineLayout(
 
     // Reshade uses 32 bit dwords
     uint32_t vk_aligned_pc_count = pc.push_constants.count;
+    uint32_t vk_aligned_offset = pc.push_constants.binding;
     uint32_t aligned_dword_count = dword_count;  // All push constants, not only the injection point
 
-    if (force_align_constant_buffers_to_16) {
-      vk_aligned_pc_count = ((vk_aligned_pc_count + 3u) & ~3u);
-      aligned_dword_count = ((aligned_dword_count + 3u) & ~3u);
-    }
+    // NOTE: Has to align binding, just complicates stuff.
+    // if (force_align_constant_buffers_to_16) {
+    //   vk_aligned_pc_count = ((vk_aligned_pc_count + 3u) & ~3u);
+    //   vk_aligned_offset = ((vk_aligned_offset + 3u) & ~3u);
+    //   aligned_dword_count = ((aligned_dword_count + 3u) & ~3u);
+    // }
     const uint32_t vk_new_pc_count = vk_aligned_pc_count + shader_injection_size;
     const uint32_t vk_new_total_pc_count = aligned_dword_count + shader_injection_size;
     constexpr uint32_t vk_max_pc_count = 64u;  // Vulkan PC ranges, but 64(256 bytes) is a common limit
@@ -379,6 +382,7 @@ static bool OnCreatePipelineLayout(
     s << "mods::shader::OnCreatePipelineLayout((Vulkan)";
     s << " at root_index " << vk_pc_index;
     s << " with constants size " << aligned_dword_count;
+    s << " with offset " << vk_aligned_offset;
     s << " creating new size of " << vk_new_total_pc_count;
     s << ", aligned count: " << aligned_dword_count;
     s << ", local count: " << vk_aligned_pc_count << " => " << vk_new_pc_count;
@@ -391,7 +395,7 @@ static bool OnCreatePipelineLayout(
 
     new_params[injection_index] = reshade::api::pipeline_layout_param(
         reshade::api::constant_range{
-            .binding = 0,
+            .binding = is_vulkan ? dword_count : 0,
             .dx_register_index = cbv_index,
             .dx_register_space = data->expected_constant_buffer_space,
             .count = (slots > max_count) ? max_count : slots,
@@ -416,9 +420,12 @@ static bool OnCreatePipelineLayout(
     }
     s << " at root_index " << injection_index;
     s << " with slot count " << slots;
-    s << " creating new size of " << (old_count + 1u + slots);
+    s << " and binding " << new_params[injection_index].push_constants.binding;
     if (is_vulkan) {
+      s << " creating new size of " << (dword_count + slots);
       s << ", visibility: 0x" << std::hex << static_cast<uint32_t>(pc_unused_stages) << std::dec;
+    } else {
+      s << " creating new size of " << (old_count + 1u + slots);
     }
     s << ", newParams: " << PRINT_PTR(reinterpret_cast<uintptr_t>(new_params));
     s << ")";
@@ -567,7 +574,7 @@ static void OnInitPipelineLayout(
 
         new_params[injection_index] = reshade::api::pipeline_layout_param(
             reshade::api::constant_range{
-                .binding = 0,
+                .binding = static_cast<uint32_t>(vk_pc_offset),  // Default is 0 so won't affect d3d
                 .dx_register_index = cbv_index,
                 .dx_register_space = data->expected_constant_buffer_space,
                 .count = (slots > max_count) ? max_count : slots,
@@ -965,7 +972,7 @@ inline DrawResponse HandleStatesAndBypass(
         state.pipeline_details->layout_data->injection_index,
         index == renodx::utils::shader::COMPUTE_INDEX,
         {shader_injection, shader_injection_size},
-        constant_buffer_offset != 0 ? constant_buffer_offset : state.pipeline_details->layout_data->injection_constant_buffer_offset,
+        constant_buffer_offset != 0 ? constant_buffer_offset : (state.pipeline_details->layout_data->injection_constant_buffer_offset),
         resource_tag_float,
         resource_tag,
         pc_param.push_constants.visibility);
