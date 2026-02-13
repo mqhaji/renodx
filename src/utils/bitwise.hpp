@@ -15,29 +15,11 @@ template <typename T1 = int, typename T2 = int>
 }
 
 template <typename T1 = int, typename T2 = int>
-static void SetFlag(T1* a, const T2 value) {
+[[nodiscard]] static bool HasAnyFlag(const T1 a, const T2 b) {
   if constexpr (std::is_same_v<T1, float>) {
-    uint32_t bits = std::bit_cast<uint32_t>(*a);
-    bits |= static_cast<uint32_t>(value);
-    *a = std::bit_cast<float>(bits);
+    return (std::bit_cast<uint32_t>(a) & static_cast<uint32_t>(b)) != 0;
   } else {
-    *a |= value;
-  }
-}
-
-template <typename T1 = int, typename T2 = int>
-static bool HasAnyFlag(const T1 a, T2 b) {
-  return (a & b) != 0;
-}
-
-template <typename T1 = int, typename T2 = int>
-static void UnsetFlag(T1* a, const T2 value) {
-  if constexpr (std::is_same_v<T1, float>) {
-    uint32_t bits = std::bit_cast<uint32_t>(*a);
-    bits &= ~static_cast<uint32_t>(value);
-    *a = std::bit_cast<float>(bits);
-  } else {
-    *a &= ~value;
+    return (a & b) != 0;
   }
 }
 

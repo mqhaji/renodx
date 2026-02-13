@@ -557,7 +557,7 @@ inline bool ApplyReplacement(reshade::api::command_list* cmd_list, StageState* s
     std::stringstream s;
     s << "utils::shader::ApplyReplacement(Applying replacement ";
     s << stage_state->stage;
-    s << ", pipeline: " << static_cast<uintptr_t>(details->replacement_pipeline.handle);
+    s << ", pipeline: " << PRINT_PTR(details->replacement_pipeline.handle);
     s << ", shader: " << PRINT_CRC32(GetCurrentShaderHash(stage_state));
     s << ")";
     reshade::log::message(reshade::log::level::debug, s.str().c_str());
