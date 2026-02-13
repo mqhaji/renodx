@@ -16,6 +16,7 @@
 #include "../../mods/swapchain.hpp"
 #include "../../utils/date.hpp"
 #include "../../utils/random.hpp"
+#include "../../utils/resource_upgrade.hpp"
 #include "../../utils/settings.hpp"
 #include "./shared.h"
 
@@ -348,6 +349,20 @@ void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
   fired_on_init_swapchain = true;
 }
 
+void OnInitDevice(reshade::api::device* device) {
+  std::vector<renodx::utils::resource::ResourceUpgradeInfo> upgrade_infos = {};
+
+  auto upgrade_info = renodx::utils::resource::ResourceUpgradeInfo{};
+  upgrade_info.old_format = reshade::api::format::b8g8r8x8_unorm;
+  upgrade_info.new_format = reshade::api::format::r16g16b16a16_float;
+  upgrade_infos.push_back(upgrade_info);
+
+  upgrade_info.old_format = reshade::api::format::b8g8r8a8_unorm;
+  upgrade_infos.push_back(upgrade_info);
+
+  renodx::utils::resource::upgrade::SetUpgradeInfos(device, upgrade_infos);
+}
+
 bool initialized = false;
 
 }  // namespace
@@ -360,6 +375,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     case DLL_PROCESS_ATTACH:
       if (!reshade::register_addon(h_module)) return FALSE;
 
+      renodx::utils::resource::upgrade::Use(fdw_reason);  // fp16 upgrades
+
       if (!initialized) {
         renodx::mods::shader::force_pipeline_cloning = true;
         renodx::mods::shader::expected_constant_buffer_space = 50;
@@ -367,14 +384,13 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
         renodx::mods::shader::allow_multiple_push_constants = true;
         renodx::mods::shader::constant_buffer_offset = 50 * 4;
 
+#if ENABLE_HDR
         renodx::mods::swapchain::expected_constant_buffer_index = 13;
         renodx::mods::swapchain::expected_constant_buffer_space = 50;
 
         renodx::mods::swapchain::prevent_full_screen = false;
         renodx::mods::swapchain::force_screen_tearing = false;
         renodx::mods::swapchain::use_resource_cloning = true;
-
-#if ENABLE_HDR
         renodx::mods::swapchain::set_color_space = false;
         renodx::mods::swapchain::use_device_proxy = true;
         renodx::mods::swapchain::swap_chain_proxy_shaders = {
@@ -398,10 +414,14 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
         initialized = true;
       }
 
+      reshade::register_event<reshade::addon_event::init_device>(OnInitDevice);
       renodx::utils::random::binds.push_back(&shader_injection.custom_random);  // film grain
 
       break;
     case DLL_PROCESS_DETACH:
+      renodx::utils::resource::upgrade::Use(fdw_reason);  // fp16 upgrades
+      reshade::unregister_event<reshade::addon_event::init_device>(OnInitDevice);
+
 #if ENABLE_HDR
       reshade::unregister_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);  // detect peak nits
 #endif
