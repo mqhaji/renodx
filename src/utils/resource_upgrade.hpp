@@ -17,6 +17,33 @@
 
 namespace renodx::utils::resource::upgrade {
 
+constexpr uint32_t kAddonEventOverrideResource = 101;
+constexpr uint32_t kAddonEventOverrideResourceView = 102;
+
+template <typename T>
+inline void RegisterAddonEventRaw(uint32_t ev, T callback) {
+#if defined(RESHADE_API_LIBRARY)
+  ReShadeRegisterEvent(static_cast<reshade::addon_event>(ev), reinterpret_cast<void*>(callback));
+#else
+  static const auto func = reinterpret_cast<void (*)(reshade::addon_event, void*)>(
+      GetProcAddress(reshade::internal::get_reshade_module_handle(), "ReShadeRegisterEvent"));
+  if (func == nullptr) return;
+  func(static_cast<reshade::addon_event>(ev), reinterpret_cast<void*>(callback));
+#endif
+}
+
+template <typename T>
+inline void UnregisterAddonEventRaw(uint32_t ev, T callback) {
+#if defined(RESHADE_API_LIBRARY)
+  ReShadeUnregisterEvent(static_cast<reshade::addon_event>(ev), reinterpret_cast<void*>(callback));
+#else
+  static const auto func = reinterpret_cast<void (*)(reshade::addon_event, void*)>(
+      GetProcAddress(reshade::internal::get_reshade_module_handle(), "ReShadeUnregisterEvent"));
+  if (func == nullptr) return;
+  func(static_cast<reshade::addon_event>(ev), reinterpret_cast<void*>(callback));
+#endif
+}
+
 struct BoundDescriptorInfo {
   reshade::api::shader_stage stages;
   reshade::api::pipeline_layout layout;
@@ -1480,6 +1507,77 @@ inline bool OnCreateResourceView(
   return true;
 }
 
+inline bool OnOverrideResourceView(
+    reshade::api::device* device,
+    reshade::api::resource resource,
+    reshade::api::resource_usage usage_type,
+    const reshade::api::resource_view_desc& desc,
+    reshade::api::resource_view& out_view) {
+  if (!is_primary_hook) return false;
+  if (!use_resource_cloning) return false;
+  if (device == nullptr || out_view.handle == 0u) return false;
+  if (device->get_api() != reshade::api::device_api::vulkan) return false;
+
+  // TODO(Ritsu): Add resource view if buffer
+  auto* resource_view_info = utils::resource::GetResourceViewInfo(out_view, desc.type == reshade::api::resource_view_type::buffer);
+  if (resource_view_info == nullptr || resource_view_info->destroyed || resource_view_info->is_clone) return false;
+
+  const auto original_view = out_view;
+  auto clone = GetResourceViewClone(resource_view_info);
+  if (clone.handle == 0u) return false;
+
+#ifdef DEBUG_LEVEL_1
+  {
+    std::stringstream s;
+    s << "utils::resource::upgrade::OnOverrideResourceView(";
+    s << "resource: " << PRINT_PTR(resource.handle);
+    s << ", view: " << PRINT_PTR(original_view.handle);
+    s << " => clone: " << PRINT_PTR(clone.handle);
+    s << ")";
+    reshade::log::message(reshade::log::level::debug, s.str().c_str());
+  }
+#endif
+
+  out_view = clone;
+  return true;
+}
+
+inline bool OnOverrideResource(
+    reshade::api::device* device,
+    const reshade::api::resource_desc& desc,
+    const reshade::api::subresource_data* initial_data,
+    reshade::api::resource_usage initial_state,
+    reshade::api::resource& out_resource) {
+  (void)desc;
+  (void)initial_data;
+  (void)initial_state;
+  if (!is_primary_hook) return false;
+  if (!use_resource_cloning) return false;
+  if (device == nullptr || out_resource.handle == 0u) return false;
+  if (device->get_api() != reshade::api::device_api::vulkan) return false;
+
+  auto* resource_info = utils::resource::GetResourceInfo(out_resource, false);
+  if (resource_info == nullptr || resource_info->destroyed || resource_info->is_clone) return false;
+
+  const auto original_resource = out_resource;
+  auto clone = GetResourceClone(resource_info);
+  if (clone.handle == 0u) return false;
+
+#ifdef DEBUG_LEVEL_1
+  {
+    std::stringstream s;
+    s << "utils::resource::upgrade::OnOverrideResource(";
+    s << "resource: " << PRINT_PTR(original_resource.handle);
+    s << " => clone: " << PRINT_PTR(clone.handle);
+    s << ")";
+    reshade::log::message(reshade::log::level::debug, s.str().c_str());
+  }
+#endif
+
+  out_resource = clone;
+  return true;
+}
+
 inline void OnInitResourceViewInfo(utils::resource::ResourceViewInfo* resource_view_info) {
   if (local_original_resource_view_desc.has_value()) {
     resource_view_info->fallback_desc = local_original_resource_view_desc.value();
@@ -2514,6 +2612,10 @@ static void Use(DWORD fdw_reason) {
       reshade::register_event<reshade::addon_event::copy_buffer_to_texture>(OnCopyBufferToTexture);
 
       if (use_resource_cloning) {
+        // Workaround for now
+        RegisterAddonEventRaw(kAddonEventOverrideResource, OnOverrideResource);
+        RegisterAddonEventRaw(kAddonEventOverrideResourceView, OnOverrideResourceView);
+
         reshade::register_event<reshade::addon_event::init_command_list>(OnInitCommandList);
         reshade::register_event<reshade::addon_event::destroy_command_list>(OnDestroyCommandList);
 
@@ -2551,6 +2653,8 @@ static void Use(DWORD fdw_reason) {
       renodx::utils::resource::UnregisterOnDestroyResourceInfoCallback(&OnDestroyResourceInfo);
       renodx::utils::resource::UnregisterOnInitResourceViewInfoCallback(&OnInitResourceViewInfo);
       renodx::utils::resource::UnregisterOnDestroyResourceViewInfoCallback(&OnDestroyResourceViewInfo);
+      UnregisterAddonEventRaw(kAddonEventOverrideResource, OnOverrideResource);
+      UnregisterAddonEventRaw(kAddonEventOverrideResourceView, OnOverrideResourceView);
 
       reshade::unregister_event<reshade::addon_event::copy_resource>(OnCopyResource);
 
