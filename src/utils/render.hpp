@@ -558,6 +558,10 @@ class RenderPass {
         reshade::api::render_pass_render_target_desc rt_desc{
             .view = {this->render_target_slots.views[insert_index]},
         };
+        if (device->get_api() == reshade::api::device_api::vulkan) {
+          rt_desc.load_op = reshade::api::render_pass_load_op::load;
+          rt_desc.store_op = reshade::api::render_pass_store_op::store;
+        }
         this->render_target_slots.render_pass_descs[insert_index] = rt_desc;
         ++insert_index;
       }

@@ -42,7 +42,7 @@ struct ShaderInjectData {
 #define RENODX_RENO_DRT_NEUTRAL_SDR_CLAMP_PEAK        -1.0f
 #define RENODX_RENO_DRT_NEUTRAL_SDR_CLAMP_COLOR_SPACE -1.0f
 #define RENODX_RENO_DRT_NEUTRAL_SDR_TONE_MAP_METHOD   renodx::tonemap::renodrt::config::tone_map_method::HERMITE_SPLINE
-#define RENODX_SWAP_CHAIN_OUTPUT_PRESET               SWAP_CHAIN_OUTPUT_PRESET_SCRGB
+#define RENODX_SWAP_CHAIN_OUTPUT_PRESET               SWAP_CHAIN_OUTPUT_PRESET_HDR10
 #define RENODX_GAMMA_CORRECTION                       shader_injection.gamma_correction
 #define CUSTOM_BLOOM                                  shader_injection.custom_bloom
 #define CUSTOM_DOF                                    shader_injection.custom_dof

@@ -10,6 +10,7 @@
 #include <d3d9.h>
 #include <dxgi.h>
 #include <dxgi1_6.h>
+#include <vulkan/vulkan_core.h>
 #include <windef.h>
 
 #include <frozen/unordered_map.h>
@@ -573,14 +574,18 @@ static bool OnCreateSwapchain(reshade::api::swapchain_desc& desc, void* hwnd) {
   }
 
   bool is_dxgi = false;
+  bool is_vulkan = false;
   switch (device_api) {
     case reshade::api::device_api::d3d10:
     case reshade::api::device_api::d3d11:
     case reshade::api::device_api::d3d12:
       is_dxgi = true;
+      break;
+    case reshade::api::device_api::vulkan:
+      is_vulkan = true;
+      break;
     case reshade::api::device_api::d3d9:
     case reshade::api::device_api::opengl:
-    case reshade::api::device_api::vulkan:
       break;
     default:
       assert(false);
@@ -603,9 +608,12 @@ static bool OnCreateSwapchain(reshade::api::swapchain_desc& desc, void* hwnd) {
   auto old_present_flags = desc.present_flags;
   auto old_buffer_count = desc.back_buffer_count;
 
-  if (is_dxgi) {
+  if (is_dxgi || is_vulkan) {
     if (!use_resize_buffer && !use_device_proxy) {
       desc.back_buffer.texture.format = target_format;
+      if (is_vulkan && (old_format != target_format)) {
+        desc.present_flags = renodx::utils::bitwise::UnsetFlag(desc.present_flags, VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR);
+      }
 
       if (desc.back_buffer_count == 1) {
         // 0 is only for resize, so if game uses more than 2 buffers, that will be retained
@@ -613,27 +621,29 @@ static bool OnCreateSwapchain(reshade::api::swapchain_desc& desc, void* hwnd) {
       }
     }
 
-    if (!use_device_proxy) {
-      switch (desc.present_mode) {
-        case static_cast<uint32_t>(DXGI_SWAP_EFFECT_SEQUENTIAL):
-          desc.present_mode = static_cast<uint32_t>(DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL);
-          break;
-        case static_cast<uint32_t>(DXGI_SWAP_EFFECT_DISCARD):
-          desc.present_mode = static_cast<uint32_t>(DXGI_SWAP_EFFECT_FLIP_DISCARD);
-          break;
+    if (is_dxgi) {
+      if (!use_device_proxy) {
+        switch (desc.present_mode) {
+          case static_cast<uint32_t>(DXGI_SWAP_EFFECT_SEQUENTIAL):
+            desc.present_mode = static_cast<uint32_t>(DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL);
+            break;
+          case static_cast<uint32_t>(DXGI_SWAP_EFFECT_DISCARD):
+            desc.present_mode = static_cast<uint32_t>(DXGI_SWAP_EFFECT_FLIP_DISCARD);
+            break;
+        }
       }
-    }
 
-    if (!use_resize_buffer) {
-      if (prevent_full_screen) {
-        desc.present_flags &= ~DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
-      }
-      if (force_screen_tearing) {
-        if (desc.present_mode != static_cast<uint32_t>(DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL)
-            && desc.present_mode != static_cast<uint32_t>(DXGI_SWAP_EFFECT_FLIP_DISCARD)) {
-          reshade::log::message(reshade::log::level::warning, "mods::swapchain::OnCreateSwapchain(Force ALLOW_TEARING flag with non-flip present mode)");
-        } else {
-          desc.present_flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+      if (!use_resize_buffer) {
+        if (prevent_full_screen) {
+          desc.present_flags &= ~DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+        }
+        if (force_screen_tearing) {
+          if (desc.present_mode != static_cast<uint32_t>(DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL)
+              && desc.present_mode != static_cast<uint32_t>(DXGI_SWAP_EFFECT_FLIP_DISCARD)) {
+            reshade::log::message(reshade::log::level::warning, "mods::swapchain::OnCreateSwapchain(Force ALLOW_TEARING flag with non-flip present mode)");
+          } else {
+            desc.present_flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+          }
         }
       }
     }
@@ -686,44 +696,46 @@ static bool OnCreateSwapchain(reshade::api::swapchain_desc& desc, void* hwnd) {
   s << ", present mode: 0x" << std::hex << old_present_mode << std::dec << " => 0x" << std::hex << desc.present_mode << std::dec;
   s << ", present flag: 0x" << std::hex << old_present_flags << std::dec;
 
-  static constexpr auto DXGI_SWAP_CHAIN_FLAG_NAMES = frozen::make_unordered_map<uint32_t, const char*>({
-      {DXGI_SWAP_CHAIN_FLAG_NONPREROTATED, "NONPREROTATED"},
-      {DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH, "ALLOW_MODE_SWITCH"},
-      {DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE, "GDI_COMPATIBLE"},
-      {DXGI_SWAP_CHAIN_FLAG_RESTRICTED_CONTENT, "RESTRICTED_CONTENT"},
-      {DXGI_SWAP_CHAIN_FLAG_RESTRICT_SHARED_RESOURCE_DRIVER, "RESTRICT_SHARED_RESOURCE_DRIVER"},
-      {DXGI_SWAP_CHAIN_FLAG_DISPLAY_ONLY, "DISPLAY_ONLY"},
-      {DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, "FRAME_LATENCY_WAITABLE_OBJECT"},
-      {DXGI_SWAP_CHAIN_FLAG_FOREGROUND_LAYER, "FOREGROUND_LAYER"},
-      {DXGI_SWAP_CHAIN_FLAG_FULLSCREEN_VIDEO, "FULLSCREEN_VIDEO"},
-      {DXGI_SWAP_CHAIN_FLAG_YUV_VIDEO, "YUV_VIDEO"},
-      {DXGI_SWAP_CHAIN_FLAG_HW_PROTECTED, "HW_PROTECTED"},
-      {DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, "ALLOW_TEARING"},
-      {DXGI_SWAP_CHAIN_FLAG_RESTRICTED_TO_ALL_HOLOGRAPHIC_DISPLAYS, "RESTRICTED_TO_ALL_HOLOGRAPHIC_DISPLAYS"},
-  });
-  {
-    bool has_flag = false;
-    for (const auto& [flag_value, flag_string] : DXGI_SWAP_CHAIN_FLAG_NAMES) {
-      if (renodx::utils::bitwise::HasFlag(old_present_flags, flag_value)) {
-        s << (has_flag ? " | " : " (") << flag_string;
-        has_flag = true;
+  if (is_dxgi) {
+    static constexpr auto DXGI_SWAP_CHAIN_FLAG_NAMES = frozen::make_unordered_map<uint32_t, const char*>({
+        {DXGI_SWAP_CHAIN_FLAG_NONPREROTATED, "NONPREROTATED"},
+        {DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH, "ALLOW_MODE_SWITCH"},
+        {DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE, "GDI_COMPATIBLE"},
+        {DXGI_SWAP_CHAIN_FLAG_RESTRICTED_CONTENT, "RESTRICTED_CONTENT"},
+        {DXGI_SWAP_CHAIN_FLAG_RESTRICT_SHARED_RESOURCE_DRIVER, "RESTRICT_SHARED_RESOURCE_DRIVER"},
+        {DXGI_SWAP_CHAIN_FLAG_DISPLAY_ONLY, "DISPLAY_ONLY"},
+        {DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, "FRAME_LATENCY_WAITABLE_OBJECT"},
+        {DXGI_SWAP_CHAIN_FLAG_FOREGROUND_LAYER, "FOREGROUND_LAYER"},
+        {DXGI_SWAP_CHAIN_FLAG_FULLSCREEN_VIDEO, "FULLSCREEN_VIDEO"},
+        {DXGI_SWAP_CHAIN_FLAG_YUV_VIDEO, "YUV_VIDEO"},
+        {DXGI_SWAP_CHAIN_FLAG_HW_PROTECTED, "HW_PROTECTED"},
+        {DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, "ALLOW_TEARING"},
+        {DXGI_SWAP_CHAIN_FLAG_RESTRICTED_TO_ALL_HOLOGRAPHIC_DISPLAYS, "RESTRICTED_TO_ALL_HOLOGRAPHIC_DISPLAYS"},
+    });
+    {
+      bool has_flag = false;
+      for (const auto& [flag_value, flag_string] : DXGI_SWAP_CHAIN_FLAG_NAMES) {
+        if (renodx::utils::bitwise::HasFlag(old_present_flags, flag_value)) {
+          s << (has_flag ? " | " : " (") << flag_string;
+          has_flag = true;
+        }
       }
+      if (has_flag) s << ")";
     }
-    if (has_flag) s << ")";
-  }
 
-  s << " => ";
-  s << "0x" << std::hex << desc.present_flags << std::dec;
+    s << " => ";
+    s << "0x" << std::hex << desc.present_flags << std::dec;
 
-  if (old_present_flags != desc.present_flags) {
-    bool has_flag = false;
-    for (const auto& [flag_value, flag_string] : DXGI_SWAP_CHAIN_FLAG_NAMES) {
-      if (renodx::utils::bitwise::HasFlag(desc.present_flags, flag_value)) {
-        s << (has_flag ? " | " : " (") << flag_string;
-        has_flag = true;
+    if (old_present_flags != desc.present_flags) {
+      bool has_flag = false;
+      for (const auto& [flag_value, flag_string] : DXGI_SWAP_CHAIN_FLAG_NAMES) {
+        if (renodx::utils::bitwise::HasFlag(desc.present_flags, flag_value)) {
+          s << (has_flag ? " | " : " (") << flag_string;
+          has_flag = true;
+        }
       }
+      if (has_flag) s << ")";
     }
-    if (has_flag) s << ")";
   }
 
   s << ", buffers:" << old_buffer_count << " => " << desc.back_buffer_count;
