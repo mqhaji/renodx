@@ -457,6 +457,32 @@ inline std::pair<ResourceViewInfo*, bool> EmplaceResourceViewInfoOrReuse(
   return {&it->second, inserted};
 }
 
+// Vulkan resource views are always undefined
+// Derive a single intended view usage from resource usage flags
+inline reshade::api::resource_usage NormalizeResourceViewUsage(
+    reshade::api::device* device,
+    reshade::api::resource_usage usage_type,
+    const ResourceInfo* resource_info) {
+  if (device == nullptr
+      || device->get_api() != reshade::api::device_api::vulkan
+      || resource_info == nullptr) {
+    return usage_type;
+  }
+
+  const auto resource_usage = resource_info->desc.usage;
+  if (renodx::utils::bitwise::HasAnyFlag(resource_usage, reshade::api::resource_usage::render_target)) {
+    return reshade::api::resource_usage::render_target;
+  }
+  if (renodx::utils::bitwise::HasAnyFlag(resource_usage, reshade::api::resource_usage::shader_resource)) {
+    return reshade::api::resource_usage::shader_resource;
+  }
+  if (renodx::utils::bitwise::HasAnyFlag(resource_usage, reshade::api::resource_usage::unordered_access)) {
+    return reshade::api::resource_usage::unordered_access;
+  }
+
+  return usage_type;
+}
+
 struct __declspec(uuid("3c7a0a1f-4bf3-4e7a-ac02-6f63fdc70187")) DeviceData {
   Store* store;
 };
@@ -848,6 +874,7 @@ inline void OnInitResourceView(
   if (resource.handle != 0u) {
     new_data.resource_info = GetResourceInfo(resource, false);
     if (new_data.resource_info != nullptr) {
+      new_data.usage = NormalizeResourceViewUsage(device, new_data.usage, new_data.resource_info);
       new_data.clone_target = new_data.resource_info->clone_target;
     } else {
       assert(new_data.resource_info != nullptr);
@@ -858,7 +885,7 @@ inline void OnInitResourceView(
       || (desc.format == reshade::api::format::unknown
           && desc.type != reshade::api::resource_view_type::buffer
           && desc.type != reshade::api::resource_view_type::acceleration_structure)) {
-    new_data.desc = PopulateUnknownResourceViewDesc(device, desc, usage_type, new_data.resource_info);
+    new_data.desc = PopulateUnknownResourceViewDesc(device, desc, new_data.usage, new_data.resource_info);
   }
 
   auto [pair, inserted] = store->resource_view_infos.try_emplace_p(view.handle, new_data);
@@ -967,8 +994,11 @@ static bool IsCompressible(
           return false;
       }
     // 64 bit width / 8 bytes per 4x4 block
+    // NOTE: Typeless entries below are kept for Vulkan compatibility in some titles
+    case reshade::api::format::r16g16b16a16_typeless:
     case reshade::api::format::r16g16b16a16_uint:
     case reshade::api::format::r16g16b16a16_sint:
+    case reshade::api::format::r32g32_typeless:
     case reshade::api::format::r32g32_uint:
     case reshade::api::format::r32g32_sint:
       switch (compressed) {

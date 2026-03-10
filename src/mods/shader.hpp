@@ -972,7 +972,7 @@ inline DrawResponse HandleStatesAndBypass(
 #endif
       return response;
     }
-    // NOTE(Ritsu): pipeline layout cloning doesn't save the newly created param
+    // NOTE: pipeline layout cloning doesn't save the newly created param
     auto visibility = reshade::api::shader_stage::all;
     if (!use_pipeline_layout_cloning) {
       visibility = state.pipeline_details->layout_data->params[state.pipeline_details->layout_data->injection_index].push_constants.visibility;
