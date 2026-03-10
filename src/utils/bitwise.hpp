@@ -45,4 +45,14 @@ template <typename T1 = int, typename T2 = int>
   }
 }
 
+template <typename T1 = int, typename T2 = int>
+[[nodiscard]] static T1 MaskFlags(const T1 a, const T2 mask) {
+  if constexpr (std::is_same_v<T1, float>) {
+    uint32_t bits = std::bit_cast<uint32_t>(a);
+    bits &= static_cast<uint32_t>(mask);
+    return std::bit_cast<float>(bits);
+  } else {
+    return a & mask;
+  }
+}
 }  // namespace renodx::utils::bitwise

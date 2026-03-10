@@ -720,8 +720,13 @@ static bool OnCreateResource(
       break;
     case reshade::api::resource_type::buffer:
       if (is_vulkan) {
-        is_buffer = true;
-        break;
+        // Vulkan buffer cloning is handled at copy-time in OnCopyBufferToTexture.
+#ifdef DEBUG_LEVEL_2
+        std::stringstream s;
+        s << "utils::resource::upgrade::OnCreateResource((Vulkan) Buffer resource type, skipping)";
+        reshade::log::message(reshade::log::level::info, s.str().c_str());
+#endif
+        return false;
       }
     case reshade::api::resource_type::unknown:
       assert(false);
@@ -768,8 +773,9 @@ static bool OnCreateResource(
       renodx::utils::resource::ResourceUpgradeInfo* target = &upgrade_infos[i];
       if (target->completed) continue;
       if (
-          !target->use_resource_view_cloning
-          && !target->use_resource_view_cloning_and_upgrade
+          ((is_vulkan && use_resource_cloning)  // skip on Vulkan
+           || (!target->use_resource_view_cloning
+               && !target->use_resource_view_cloning_and_upgrade))
           && target->CheckResourceDesc(desc, device_back_buffer_desc, initial_state)) {
 #ifdef DEBUG_LEVEL_0
         std::stringstream s;
@@ -903,7 +909,8 @@ inline void OnInitResourceInfo(renodx::utils::resource::ResourceInfo* resource_i
       break;
     case reshade::api::resource_type::buffer:
       if (is_vulkan) {
-        break;
+        // Vulkan buffer cloning is handled at copy-time in OnCopyBufferToTexture.
+        return;
       }
     case reshade::api::resource_type::unknown:
       reshade::log::message(reshade::log::level::warning, "utils::resource::upgrade::OnInitResource(Unknown resource type)");
@@ -936,7 +943,7 @@ inline void OnInitResourceInfo(renodx::utils::resource::ResourceInfo* resource_i
 
     local_applied_target = nullptr;
 
-  } else if (use_resource_cloning) {
+  } else if (use_resource_cloning && !is_vulkan) {  // We don't clone for vulkan, just upgrade original resources
     auto* private_data = renodx::utils::data::Get<DeviceData>(device);
     if (private_data == nullptr) {
       assert(private_data != nullptr);
@@ -953,16 +960,16 @@ inline void OnInitResourceInfo(renodx::utils::resource::ResourceInfo* resource_i
 
     if (device_back_buffer_desc.type == reshade::api::resource_type::unknown) {
 #ifdef DEBUG_LEVEL_1
-    std::stringstream s;
-    s << "utils::resource::upgrade::OnInitResource(No swapchain desc: ";
-    s << ", device: " << PRINT_PTR(reinterpret_cast<uintptr_t>(device));
-    s << ", flags: 0x" << std::hex << static_cast<uint32_t>(desc.flags) << std::dec;
-    s << ", state: 0x" << std::hex << static_cast<uint32_t>(initial_state) << std::dec;
-    s << ", format: " << desc.texture.format;
-    s << ", width: " << desc.texture.width;
-    s << ", height: " << desc.texture.height;
-    s << ", usage: " << desc.usage << "(" << std::hex << static_cast<uint32_t>(desc.usage) << std::dec << ")";
-    s << ")";
+      std::stringstream s;
+      s << "utils::resource::upgrade::OnInitResource(No swapchain desc: ";
+      s << ", device: " << PRINT_PTR(reinterpret_cast<uintptr_t>(device));
+      s << ", flags: 0x" << std::hex << static_cast<uint32_t>(desc.flags) << std::dec;
+      s << ", state: 0x" << std::hex << static_cast<uint32_t>(initial_state) << std::dec;
+      s << ", format: " << desc.texture.format;
+      s << ", width: " << desc.texture.width;
+      s << ", height: " << desc.texture.height;
+      s << ", usage: " << desc.usage << "(" << std::hex << static_cast<uint32_t>(desc.usage) << std::dec << ")";
+      s << ")";
 #endif
       // New, upgrade infos can now handle unknown back buffer state
       // return;
@@ -1137,9 +1144,6 @@ inline bool OnCopyBufferToTexture(
     uint32_t dest_subresource,
     const reshade::api::subresource_box* dest_box) {
   if (!is_primary_hook) return false;
-  const auto is_vulkan = cmd_list->get_device()->get_api() == reshade::api::device_api::vulkan;
-  if (!is_vulkan && !use_resource_cloning) return false;
-
   auto* source_info = utils::resource::GetResourceInfo(source);
   if (source_info == nullptr) return false;
 
@@ -1147,7 +1151,82 @@ inline bool OnCopyBufferToTexture(
 
   if (destination_info == nullptr) return false;
 
-  if (use_resource_cloning) {
+  const auto is_vulkan = cmd_list->get_device()->get_api() == reshade::api::device_api::vulkan;
+
+  // Clone and upgrade Vulkan buffers based on destination format.
+  // Required for Vulkan upgrades whether we're using cloning or not
+  // VK buffers don't have format except in buffer views, and not all buffers get one
+  // But can be used to store textures
+  if (is_vulkan) {
+    reshade::api::resource source_buffer_clone = {0u};
+    auto* destination_upgrade_target = destination_info->upgrade_target;
+    if (destination_upgrade_target == nullptr
+        && use_resource_cloning
+        && destination_info->clone_target != nullptr
+        && destination_info->clone_target->use_resource_view_cloning) {
+      destination_upgrade_target = destination_info->clone_target;
+    }
+
+    if (destination_upgrade_target != nullptr) {
+      if (source_info->clone.handle == 0u) {
+        const auto old_format_bit_depth = reshade::api::format_bit_depth(destination_upgrade_target->old_format);
+        const auto new_format_bit_depth = reshade::api::format_bit_depth(destination_upgrade_target->new_format);
+
+        // Avoid division by 0.
+        if (old_format_bit_depth != 0 && new_format_bit_depth != 0) {
+          const auto bit_depth_ratio = (new_format_bit_depth + old_format_bit_depth - 1) / old_format_bit_depth;  // Integer ceil
+
+          if (bit_depth_ratio > 1) {
+            constexpr auto shader_device_usages = reshade::api::resource_usage::shader_resource
+                                                  | reshade::api::resource_usage::unordered_access
+                                                  | reshade::api::resource_usage::acceleration_structure;
+            constexpr auto copy_usages = reshade::api::resource_usage::copy_dest
+                                         | reshade::api::resource_usage::copy_source;
+
+            source_info->clone_enabled = true;
+            source_info->desc.buffer.size *= bit_depth_ratio;
+            const auto original_usage = source_info->desc.usage;
+            // These usages add VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT to our clone, which can fail allocation.
+            source_info->desc.usage = renodx::utils::bitwise::UnsetFlag(source_info->desc.usage, shader_device_usages);
+            // Need these flags to copy to and from the buffer.
+            source_info->desc.usage = renodx::utils::bitwise::SetFlag(source_info->desc.usage, copy_usages);
+
+            source_buffer_clone = GetResourceClone(source_info);
+            source_info->desc.buffer.size /= bit_depth_ratio;
+            source_info->desc.usage = original_usage;
+          }
+        }
+      } else {
+        source_buffer_clone = source_info->clone;
+      }
+
+      assert(source_buffer_clone.handle != 0u);
+
+      if (source_buffer_clone.handle != 0u) {
+        constexpr auto offset = 0;
+        // Copy smaller buffer into our larger cloned buffer
+        cmd_list->copy_buffer_region(source, offset, source_buffer_clone, offset, source_info->desc.buffer.size);
+      }
+    }
+
+    if (source_buffer_clone.handle != 0u
+        && destination_info->upgraded
+        && destination_info->upgrade_target != nullptr) {
+      cmd_list->copy_buffer_to_texture(source_buffer_clone, source_offset, row_length, slice_height, dest, dest_subresource, dest_box);
+
+#ifdef DEBUG_LEVEL_0
+      std::stringstream s;
+      s << "utils::resource::upgrade::OnCopyBufferToTexture(Redirecting VK buffer to clone ";
+      s << PRINT_PTR(source.handle);
+      s << " => " << PRINT_PTR(source_info->clone.handle);
+      s << ", source buffer size: " << source_info->desc.buffer.size << " => " << source_info->clone_desc.buffer.size;
+      s << ", dest texture format: " << destination_info->upgrade_target->old_format << " => " << destination_info->upgrade_target->new_format;
+      s << ")";
+      reshade::log::message(reshade::log::level::debug, s.str().c_str());
+#endif
+      return true;
+    }
+  } else if (use_resource_cloning) {
     const auto source_clone = GetResourceClone(source_info);
     const auto dest_clone = GetResourceClone(destination_info);
 
@@ -1185,74 +1264,9 @@ inline bool OnCopyBufferToTexture(
 
     reshade::log::message(reshade::log::level::warning, s.str().c_str());
 
-    if (is_vulkan) {
-      // Perform blit
-      cmd_list->copy_texture_region(dest, dest_subresource, dest_box, dest_clone, dest_subresource, dest_box);
-      return true;
-    } else {
-      // Perform DirectX blit
-      return true;
-    }
-  } else {
-    // TODO(Ritsu) Move this up to support use_resource_cloning
-    // Clone and upgrade buffer based on destination format.
-    // VK buffers don't have format except in buffer views, and not all buffers get one.
-    if (source_info->desc.type == reshade::api::resource_type::buffer
-        && destination_info->upgraded
-        && destination_info->upgrade_target != nullptr) {
-      if (source_info->clone.handle == 0u) {
-        const auto old_format_bit_depth = reshade::api::format_bit_depth(destination_info->upgrade_target->old_format);
-        const auto new_format_bit_depth = reshade::api::format_bit_depth(destination_info->upgrade_target->new_format);
-
-        // Avoid division by 0.
-        if (old_format_bit_depth != 0 && new_format_bit_depth != 0) {
-          const auto bit_depth_ratio = new_format_bit_depth / old_format_bit_depth;
-
-          if (bit_depth_ratio > 1) {
-            constexpr auto shader_device_usages = reshade::api::resource_usage::shader_resource
-                                                  | reshade::api::resource_usage::unordered_access
-                                                  | reshade::api::resource_usage::acceleration_structure;
-            constexpr auto copy_usages = reshade::api::resource_usage::copy_dest
-                                         | reshade::api::resource_usage::copy_source;
-
-            source_info->clone_enabled = true;
-            source_info->desc.buffer.size *= bit_depth_ratio;
-            const auto original_usage = source_info->desc.usage;
-            // These usages add VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT to our clone, which can fail allocation.
-            source_info->desc.usage = renodx::utils::bitwise::UnsetFlag(source_info->desc.usage, shader_device_usages);
-            // Need these flags to copy to and from the buffer.
-            source_info->desc.usage = renodx::utils::bitwise::SetFlag(source_info->desc.usage, copy_usages);
-
-            auto source_clone = GetResourceClone(source_info);
-            (void)source_clone;
-            source_info->desc.buffer.size /= bit_depth_ratio;
-            source_info->desc.usage = original_usage;
-          }
-        }
-      }
-
-      if (source_info->clone.handle == 0u) return false;
-      constexpr auto offset = 0;
-      cmd_list->copy_buffer_region(source, offset, source_info->clone, offset, source_info->desc.buffer.size);
-
-      cmd_list->copy_buffer_to_texture(source_info->clone, source_offset, row_length, slice_height, dest, dest_subresource, dest_box);
-
-#ifdef DEBUG_LEVEL_0
-      std::stringstream s;
-      s << "utils::resource::upgrade::OnCopyBufferToTexture(Redirecting VK buffer to clone ";
-      s << PRINT_PTR(source.handle);
-      s << " => " << PRINT_PTR(source_info->clone.handle);
-      s << ", source buffer size: " << source_info->desc.buffer.size << " => " << source_info->clone_desc.buffer.size;
-      s << ", dest texture format: " << destination_info->upgrade_target->old_format << " => " << destination_info->upgrade_target->new_format;
-      s << ")";
-      reshade::log::message(reshade::log::level::debug, s.str().c_str());
-#endif
-      return true;
-    }
-    return false;
+    return true;
   }
-
-  return true;
+  return false;
 }
 
 inline bool OnCreateResourceView(
@@ -1279,9 +1293,6 @@ inline bool OnCreateResourceView(
     if (resource_info == nullptr) return false;
     current_desc = utils::resource::PopulateUnknownResourceViewDesc(device, desc, usage_type, resource_info);
   }
-#ifdef DEBUG_LEVEL_1
-  auto old_usage_type = usage_type;
-#endif
 
   switch (current_desc.type) {
     case reshade::api::resource_view_type::texture_1d:
@@ -1293,19 +1304,9 @@ inline bool OnCreateResourceView(
     case reshade::api::resource_view_type::texture_3d:
     case reshade::api::resource_view_type::texture_cube:
     case reshade::api::resource_view_type::texture_cube_array:
-      // Images either have cpu_access or undefined usage only,
-      // isn't returned to reshade so doesn't matter.
-      if (is_vulkan && usage_type == reshade::api::resource_usage::undefined) {
-        usage_type = reshade::api::resource_usage::render_target;
-      }
       break;
     case reshade::api::resource_view_type::buffer:
-      if (is_vulkan) {
-        if (usage_type == reshade::api::resource_usage::undefined) {
-          usage_type = resource_info->desc.usage;
-        }
-        break;
-      }
+      if (is_vulkan) break;  // TODO(Ritsu): Do we want to upgrade buffer views too?
       return false;
     case reshade::api::resource_view_type::unknown:
       assert(false);
@@ -1313,18 +1314,6 @@ inline bool OnCreateResourceView(
     case reshade::api::resource_view_type::acceleration_structure:
       return false;
   }
-
-#ifdef DEBUG_LEVEL_1
-  if (old_usage_type != usage_type) {
-    std::stringstream s;
-    s << "utils::resource::upgrade::OnCreateResourceView(Override usage type";
-    s << ", resource: " << PRINT_PTR(resource.handle);
-    s << ", resource usage: 0x" << std::hex << static_cast<uint32_t>(usage_type) << std::dec;
-    s << ", view usage: 0x" << std::hex << static_cast<uint32_t>(old_usage_type) << std::dec << " => 0x" << std::hex << static_cast<uint32_t>(usage_type) << std::dec;
-    s << ")";
-    reshade::log::message(reshade::log::level::debug, s.str().c_str());
-  }
-#endif
 
   utils::resource::ResourceInfo temp_resource_info = {};
   if (resource_info == nullptr) {
@@ -1352,6 +1341,24 @@ inline bool OnCreateResourceView(
 #endif
     }
   }
+
+#ifdef DEBUG_LEVEL_2
+  auto old_usage_type = usage_type;
+#endif
+
+  usage_type = utils::resource::NormalizeResourceViewUsage(device, usage_type, resource_info);
+
+#ifdef DEBUG_LEVEL_2
+  if (old_usage_type != usage_type) {
+    std::stringstream s;
+    s << "utils::resource::upgrade::OnCreateResourceView(Override usage type";
+    s << ", resource: " << PRINT_PTR(resource.handle);
+    s << ", resource usage: 0x" << std::hex << static_cast<uint32_t>(usage_type) << std::dec;
+    s << ", view usage: 0x" << std::hex << static_cast<uint32_t>(old_usage_type) << std::dec << " => 0x" << std::hex << static_cast<uint32_t>(usage_type) << std::dec;
+    s << ")";
+    reshade::log::message(reshade::log::level::debug, s.str().c_str());
+  }
+#endif
 
   if (current_desc.format == reshade::api::format::unknown) {
     current_desc = utils::resource::PopulateUnknownResourceViewDesc(device, desc, usage_type, resource_info);
@@ -1451,8 +1458,7 @@ inline bool OnCreateResourceView(
     reshade::log::message(reshade::log::level::info, s.str().c_str());
   };
 
-  // TODO(Ritsu) Vulkan clone resource here?
-  if (use_resource_cloning) {
+  if (use_resource_cloning && !is_vulkan) {
     if (resource_info->clone_target != nullptr) {
       auto* upgrade_info = resource_info->clone_target;
       if (!upgrade_info->use_resource_view_cloning_and_upgrade) {
@@ -1623,6 +1629,8 @@ inline bool OnUpdateDescriptorTables(
     const reshade::api::descriptor_table_update* updates) {
   if (!is_primary_hook) return false;
   if (count == 0u) return false;
+  const bool is_vulkan = device->get_api() == reshade::api::device_api::vulkan;
+  if (is_vulkan) return false;  // Use override_resource_view instead
 #ifdef DEBUG_LEVEL_3
   reshade::log::message(reshade::log::level::debug, "utils::resource::upgrade::OnUpdateDescriptorTables()");
 #endif
@@ -1971,6 +1979,7 @@ inline void OnPushDescriptors(
     const reshade::api::descriptor_table_update& update) {
   if (!is_primary_hook) return;
   if (update.count == 0u) return;
+  if (cmd_list->get_device()->get_api() == reshade::api::device_api::vulkan) return;  // We override_resource_view instead
 
   reshade::api::descriptor_table_update new_update;
 
@@ -2086,6 +2095,7 @@ static void OnBeginRenderPass(
   if (!is_primary_hook) return;
   auto* cmd_list_data = renodx::utils::data::Get<CommandListData>(cmd_list);
   if (cmd_list_data == nullptr) return;
+  if (cmd_list->get_device()->get_api() == reshade::api::device_api::vulkan) return;
 
   // Ignore subpasses
   if (cmd_list_data->pass_count++ != 0) return;
@@ -2101,6 +2111,8 @@ static void OnEndRenderPass(reshade::api::command_list* cmd_list) {
   if (!is_primary_hook) return;
   auto* cmd_list_data = renodx::utils::data::Get<CommandListData>(cmd_list);
   if (cmd_list_data == nullptr) return;
+  if (cmd_list->get_device()->get_api() == reshade::api::device_api::vulkan) return;
+
   cmd_list_data->pass_count--;
 }
 
@@ -2111,6 +2123,8 @@ inline bool OnClearRenderTargetView(
     uint32_t rect_count,
     const reshade::api::rect* rects) {
   if (!is_primary_hook) return false;
+  const bool is_vulkan = cmd_list->get_device()->get_api() == reshade::api::device_api::vulkan;
+  if (is_vulkan) return false;  // Use override_resource
   if (rtv.handle == 0) return false;
   auto clone = GetResourceViewClone(rtv);
   if (clone.handle != 0) {
@@ -2118,7 +2132,7 @@ inline bool OnClearRenderTargetView(
     const reshade::api::rect* clone_rects = rects;
     // clear_render_target_view calls CmdClearColorImage but hook
     // could come from vkCmdClearAttachments which allows partial clears
-    if (cmd_list->get_device()->get_api() == reshade::api::device_api::vulkan
+    if (is_vulkan
         && (rect_count > 0 && rects != nullptr)) {
       auto* view_info = utils::resource::GetResourceViewInfo(rtv);
       auto* resource_info = view_info != nullptr ? view_info->resource_info : nullptr;
@@ -2127,13 +2141,33 @@ inline bool OnClearRenderTargetView(
         return false;
       }
 
-      const auto width = static_cast<int32_t>(resource_info->desc.texture.width);
-      const auto height = static_cast<int32_t>(resource_info->desc.texture.height);
-      if (rect_count == 1
-          && rects[0].left == 0
-          && rects[0].top == 0
-          && rects[0].right == width
-          && rects[0].bottom == height) {
+      uint32_t width_u32 = resource_info->desc.texture.width;
+      uint32_t height_u32 = resource_info->desc.texture.height;
+
+      if (view_info != nullptr) {
+        const auto first_level = view_info->desc.texture.first_level;
+        for (uint32_t i = 0; i < first_level; ++i) {
+          if (width_u32 > 1u) width_u32 >>= 1u;
+          if (height_u32 > 1u) height_u32 >>= 1u;
+          if (width_u32 == 1u && height_u32 == 1u) break;
+        }
+      }
+
+      const auto width = static_cast<int32_t>(width_u32);
+      const auto height = static_cast<int32_t>(height_u32);
+      bool is_full_clear = true;
+      for (uint32_t i = 0; i < rect_count; ++i) {
+        const auto& rect = rects[i];
+        if (rect.left != 0
+            || rect.top != 0
+            || rect.right != width
+            || rect.bottom != height) {
+          is_full_clear = false;
+          break;
+        }
+      }
+
+      if (is_full_clear) {
         clone_rect_count = 0;
         clone_rects = nullptr;
       } else {
@@ -2141,6 +2175,7 @@ inline bool OnClearRenderTargetView(
       }
     }
     cmd_list->clear_render_target_view(clone, color, clone_rect_count, clone_rects);
+    if (is_vulkan) return true;  // Skip original
   }
   return false;
 }
@@ -2203,6 +2238,9 @@ inline bool OnResolveTextureRegion(
     uint32_t dest_z,
     reshade::api::format format) {
   if (!is_primary_hook) return false;
+  const auto is_vulkan = cmd_list->get_device()->get_api() == reshade::api::device_api::vulkan;
+  if (is_vulkan && use_resource_cloning) return false;  // Use override_resource instead
+
   auto* source_info = utils::resource::GetResourceInfo(source);
   if (source_info == nullptr) return false;
 
@@ -2293,7 +2331,7 @@ inline bool OnResolveTextureRegion(
 
   // Mismatched (don't resolve);
   assert(false);
-#ifndef DEBUG_LEVEL_1
+#ifdef DEBUG_LEVEL_1
   std::stringstream s;
   s << "utils::resource::upgrade::OnResolveTextureRegion(";
   s << "prevent texture resolve: ";
@@ -2318,6 +2356,7 @@ inline void OnBarrier(
     const reshade::api::resource_usage* new_states) {
   if (!is_primary_hook) return;
   if (count == 0u) return;
+  if (cmd_list->get_device()->get_api() == reshade::api::device_api::vulkan) return;  // We override_resource instead
 
   std::unordered_set<uint64_t> checked_resources;
   // std::vector<std::pair<int, utils::resource::ResourceInfo*>> infos;
@@ -2347,8 +2386,9 @@ inline bool OnCopyTextureRegion(
     const reshade::api::subresource_box* dest_box,
     reshade::api::filter_mode filter) {
   if (!is_primary_hook) return false;
-  // Reshade's get_resource_desc is more complex on D3D12, so we use our own
+  if (cmd_list->get_device()->get_api() == reshade::api::device_api::vulkan) return false;  // Use override_resource_instead
 
+  // Reshade's get_resource_desc is more complex on D3D12, so we use our own
   auto* source_info = utils::resource::GetResourceInfo(source);
   if (source_info == nullptr) return false;
   auto& source_desc = source_info->desc;
@@ -2425,14 +2465,13 @@ inline bool OnCopyTextureRegion(
 
   if (cmd_list->get_device()->get_api() == reshade::api::device_api::vulkan) {
     // perform blit
-    cmd_list->copy_texture_region(source, source_subresource, source_box, dest, dest_subresource, dest_box);
+    cmd_list->copy_texture_region(source, source_subresource, source_box, dest, dest_subresource, dest_box, filter);
     return true;
   } else {
     // Perform DirectX blit
     return true;
   }
 }
-
 
 // clang-format off
 

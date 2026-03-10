@@ -1287,6 +1287,15 @@ static void OnBindDescriptorTables(
       // Skip unbounded ranges
       if (range.count == UINT32_MAX) continue;
 
+      // Reshade lets these passthrough in vulkan
+      constexpr auto k_vk_uniform_buffer_dynamic = static_cast<reshade::api::descriptor_type>(8u);  // VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC
+      constexpr auto k_vk_storage_buffer_dynamic = static_cast<reshade::api::descriptor_type>(9u);  // VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC
+
+      if (device->get_api() == reshade::api::device_api::vulkan &&
+          (range.type == k_vk_uniform_buffer_dynamic || range.type == k_vk_storage_buffer_dynamic)) {
+        continue;
+      }
+
       switch (range.type) {
         case reshade::api::descriptor_type::sampler_with_resource_view:
         case reshade::api::descriptor_type::texture_shader_resource_view:
