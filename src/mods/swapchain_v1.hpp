@@ -1909,7 +1909,7 @@ inline bool OnCreateResource(
       std::stringstream s;
       s << "mods::swapchain::OnCreateResource(counting target";
       s << ", format: " << target->old_format;
-      s << ", usage: " << std::hex << static_cast<uint32_t>(desc.usage) << std::dec;
+      s << ", usage: 0x" << std::hex << static_cast<uint32_t>(desc.usage) << std::dec;
       s << ", index: " << target->index;
       s << ", counted: " << target->counted;
       // s << ", data: " << PRINT_PTR(initial_data);
@@ -2111,7 +2111,7 @@ inline void OnInitResourceInfo(renodx::utils::resource::ResourceInfo* resource_i
         std::stringstream s;
         s << "mods::swapchain::OnInitResource(counting target";
         s << ", format: " << target->old_format;
-        s << ", usage: " << std::hex << static_cast<uint32_t>(desc.usage) << std::dec;
+        s << ", usage: 0x" << std::hex << static_cast<uint32_t>(desc.usage) << std::dec;
         s << ", index: " << target->index;
         s << ", counted: " << target->counted;
         s << ") [" << i << "/" << len << "]";

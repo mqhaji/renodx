@@ -1030,7 +1030,7 @@ static void OnInitResource(
   s << ", flags: " << std::hex << static_cast<uint32_t>(desc.flags) << std::dec;
   s << ", state: " << std::hex << static_cast<uint32_t>(initial_state) << std::dec;
   s << ", type: " << desc.type;
-  s << ", usage: " << std::hex << static_cast<uint32_t>(desc.usage) << std::dec;
+  s << ", usage: 0x" << std::hex << static_cast<uint32_t>(desc.usage) << std::dec;
 
   switch (desc.type) {
     case reshade::api::resource_type::buffer:

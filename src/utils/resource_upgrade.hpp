@@ -389,7 +389,7 @@ inline reshade::api::resource_view GetResourceViewClone(
         s << ", view_upgrades format: " << new_desc.format;
         s << ", clone: " << PRINT_PTR(resource_clone.handle);
         s << ", type: " << new_desc.type;
-        s << ", usage: " << static_cast<uint32_t>(usage) << "(" << usage << ")";
+        s << ", usage: 0x" << std::hex << static_cast<uint32_t>(usage) << std::dec << "(" << usage << ") ";
         s << ")";
         reshade::log::message(reshade::log::level::debug, s.str().c_str());
 #endif
@@ -630,7 +630,7 @@ static bool SetUpgradeInfos(reshade::api::device* device, std::span<renodx::util
 
 // THIS SPACE INTENTIONALLY LEFT BLANK
 
-// clang-format off
+// clang-format on
 
 // Hooks
 
@@ -775,7 +775,7 @@ static bool OnCreateResource(
         std::stringstream s;
         s << "utils::resource::upgrade::OnCreateResource(counting target";
         s << ", format: " << target->old_format;
-        s << ", usage: " << std::hex << static_cast<uint32_t>(desc.usage) << std::dec;
+        s << ", usage: 0x" << std::hex << static_cast<uint32_t>(desc.usage) << std::dec;
         s << ", index: " << target->index;
         s << ", counted: " << target->counted;
         // s << ", data: " << PRINT_PTR(initial_data);
@@ -985,7 +985,7 @@ inline void OnInitResourceInfo(renodx::utils::resource::ResourceInfo* resource_i
         std::stringstream s;
         s << "utils::resource::upgrade::OnInitResource(counting target";
         s << ", format: " << target->old_format;
-        s << ", usage: " << std::hex << static_cast<uint32_t>(desc.usage) << std::dec;
+        s << ", usage: 0x" << std::hex << static_cast<uint32_t>(desc.usage) << std::dec;
         s << ", index: " << target->index;
         s << ", counted: " << target->counted;
         s << ") [" << i << "/" << len << "]";
@@ -1052,6 +1052,7 @@ inline void OnInitResourceInfo(renodx::utils::resource::ResourceInfo* resource_i
     s << ", device: " << PRINT_PTR(reinterpret_cast<uintptr_t>(device));
     s << ", flags: " << std::hex << static_cast<uint32_t>(desc.flags) << std::dec;
     s << ", state: " << std::hex << static_cast<uint32_t>(initial_state) << std::dec;
+    s << ", usage: 0x" << std::hex << static_cast<uint32_t>(desc.usage) << std::dec;
     s << ", width: " << desc.texture.width;
     s << ", height: " << desc.texture.height;
     //  s << ", initial_data: " << (initial_data == nullptr ? "false" : "true");
@@ -1318,7 +1319,8 @@ inline bool OnCreateResourceView(
     std::stringstream s;
     s << "utils::resource::upgrade::OnCreateResourceView(Override usage type";
     s << ", resource: " << PRINT_PTR(resource.handle);
-    s << ", usage: " << old_usage_type << " => " << usage_type;
+    s << ", resource usage: 0x" << std::hex << static_cast<uint32_t>(usage_type) << std::dec;
+    s << ", view usage: 0x" << std::hex << static_cast<uint32_t>(old_usage_type) << std::dec << " => 0x" << std::hex << static_cast<uint32_t>(usage_type) << std::dec;
     s << ")";
     reshade::log::message(reshade::log::level::debug, s.str().c_str());
   }
@@ -2387,8 +2389,9 @@ inline bool OnCopyTextureRegion(
   }
   // Mismatched (don't copy);
 
+#ifdef DEBUG_LEVEL_1
   std::stringstream s;
-  s << "OnCopyTextureRegion";
+  s << "utils::resource::upgrade::OnCopyTextureRegion";
   s << "(mismatched: " << PRINT_PTR(source.handle);
   s << "[" << source_subresource << "]";
   if (source.handle != source_new.handle) {
@@ -2403,7 +2406,7 @@ inline bool OnCopyTextureRegion(
   }
   s << " => " << PRINT_PTR(dest.handle);
   if (dest.handle != dest_new.handle) {
-    s << " (clone: " << PRINT_PTR(source_new.handle);
+    s << " (clone: " << PRINT_PTR(dest_new.handle);
   }
   s << "[" << dest_subresource << "]";
   s << " (" << dest_desc.texture.format << ")";
@@ -2416,6 +2419,7 @@ inline bool OnCopyTextureRegion(
   s << ")";
 
   reshade::log::message(reshade::log::level::warning, s.str().c_str());
+#endif
 
   // assert(false);
 
