@@ -559,7 +559,7 @@ static void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
         s << ", depth_or_layers: " << desc.texture.depth_or_layers;
         s << ", levels: " << desc.texture.levels;
       }
-      s << ", usage: " << std::hex << static_cast<uint32_t>(desc.usage) << std::dec;
+      s << ", usage: 0x" << std::hex << static_cast<uint32_t>(desc.usage) << std::dec;
       s << ", inserted: " << (inserted ? "true" : "false");
       s << ", was_destroyed: " << (was_destroyed ? "true" : "false");
       s << ")";
@@ -655,7 +655,7 @@ inline void OnInitResource(
       s << ", depth_or_layers: " << desc.texture.depth_or_layers;
       s << ", levels: " << desc.texture.levels;
     }
-    s << ", usage: " << std::hex << static_cast<uint32_t>(desc.usage) << std::dec;
+    s << ", usage: 0x" << std::hex << static_cast<uint32_t>(desc.usage) << std::dec;
     if (initial_data != nullptr) {
       s << ", initial_data: " << initial_data;
     } else {

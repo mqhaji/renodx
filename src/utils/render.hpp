@@ -156,7 +156,7 @@ struct ResourceViewSlots {
           s << "utils::render::ResourceViewSlots::Populate(view_from_resource_info, view="
             << PRINT_PTR(view.handle)
             << ", resource=" << PRINT_PTR(res_info->resource.handle)
-            << ", usage=" << static_cast<uint32_t>(this->usage)
+            << ", usage= 0x" << std::hex << static_cast<uint32_t>(this->usage) << std::dec
             << ", format=" << view_desc.format
             << ")";
           reshade::log::message(reshade::log::level::info, s.str().c_str());
@@ -178,7 +178,7 @@ struct ResourceViewSlots {
             std::stringstream s;
             s << "utils::render::ResourceViewSlots::Populate(resource info missing, resource="
               << PRINT_PTR(resource.handle)
-              << ", usage=" << static_cast<uint32_t>(this->usage)
+              << ", usage= 0x" << std::hex << static_cast<uint32_t>(this->usage) << std::dec
               << ")";
             reshade::log::message(reshade::log::level::debug, s.str().c_str());
           }
@@ -204,7 +204,7 @@ struct ResourceViewSlots {
           s << "utils::render::ResourceViewSlots::Populate(view_from_resource, view="
             << PRINT_PTR(view.handle)
             << ", resource=" << PRINT_PTR(resource.handle)
-            << ", usage=" << static_cast<uint32_t>(this->usage)
+            << ", usage= 0x" << std::hex << static_cast<uint32_t>(this->usage) << std::dec
             << ", format=" << view_desc.format
             << ")";
           reshade::log::message(reshade::log::level::info, s.str().c_str());

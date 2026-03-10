@@ -614,7 +614,7 @@ static void OnInitPipelineLayout(
       s << PRINT_PTR(layout.handle);
       s << " => ";
       s << PRINT_PTR(injection_layout.handle);
-      s << ", b" << cbv_index << ",space" << data->expected_constant_buffer_space;
+      s << ", b" << cbv_index << ", space" << data->expected_constant_buffer_space;
       s << ", param_index: " << injection_index;
       s << ", slots : " << shader_injection_size;
       s << ": " << (result ? "OK" : "FAILED");
@@ -901,7 +901,7 @@ inline DrawResponse HandleStatesAndBypass(
   }
 
   auto& custom_shader_info = custom_shader_info_pair->second;
-#ifdef DEBUG_LEVEL_1
+#ifdef DEBUG_LEVEL_2
   std::stringstream s;
   s << "mods::shader::HandlePreDraw(found shader: ";
   s << PRINT_CRC32(shader_hash);
@@ -912,7 +912,7 @@ inline DrawResponse HandleStatesAndBypass(
   if (custom_shader_info.on_draw != nullptr) {
     bool should_draw = custom_shader_info.on_draw(cmd_list);
     if (!should_draw) {
-#ifdef DEBUG_LEVEL_1
+#ifdef DEBUG_LEVEL_2
       std::stringstream s;
       s << "mods::shader::HandlePreDraw(bypass draw: ";
       s << PRINT_CRC32(shader_hash);
@@ -929,7 +929,7 @@ inline DrawResponse HandleStatesAndBypass(
   if (custom_shader_info.on_replace != nullptr) {
     bool should_replace = custom_shader_info.on_replace(cmd_list);
     if (!should_replace) {
-#ifdef DEBUG_LEVEL_1
+#ifdef DEBUG_LEVEL_2
       std::stringstream s;
       s << "mods::shader::HandlePreDraw(Not replacing: ";
       s << PRINT_CRC32(shader_hash);
