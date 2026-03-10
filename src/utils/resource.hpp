@@ -731,7 +731,7 @@ inline reshade::api::resource_view_desc PopulateUnknownResourceViewDesc(
     reshade::api::resource_usage usage_type,
     ResourceInfo* resource_info) {
   reshade::api::resource_view_desc new_desc = desc;
-  // Vulkan resource views have their own format that we want swapchain upgrades to handle
+  // Vulkan resource views have their own format that we want upgrades to handle
   bool is_vulkan = device->get_api() == reshade::api::device_api::vulkan;
 
   switch (device->get_api()) {
@@ -929,56 +929,6 @@ inline reshade::api::resource GetResourceFromView(const reshade::api::resource_v
   if (resource_view_info->destroyed) return {0u};
   if (resource_view_info->resource_info == nullptr) return {0u};
   return resource_view_info->resource_info->resource;
-}
-
-static bool IsImageLikeBuffer(const reshade::api::resource_desc& desc) {
-  if (desc.type != reshade::api::resource_type::buffer) {
-    assert(false);
-    return false;
-  }
-
-  const auto buffer_size = desc.buffer.size;
-
-  constexpr uint64_t k_min_size = 480ull * 240ull * 4ull;
-  constexpr uint64_t k_max_size = 3840ull * 2160ull * 4ull;
-
-  if (buffer_size < k_min_size || buffer_size > k_max_size) {
-    return false;
-  }
-
-  // Must be a staging buffer (transfer usage)
-  constexpr auto k_staging_usage =
-      reshade::api::resource_usage::copy_source | reshade::api::resource_usage::copy_dest;
-
-  if (!renodx::utils::bitwise::HasAnyFlag(desc.usage, k_staging_usage)) {
-    return false;
-  }
-
-  // Standard display resolutions only (16:9)
-  // Excludes square textures (cubemaps, shadow maps) and non-standard aspects
-  struct Resolution {
-    uint64_t width;
-    uint64_t height;
-  };
-
-  constexpr std::array<Resolution, 5> k_display_resolutions = {{
-      {.width = 1280, .height = 720},
-      {.width = 1600, .height = 900},
-      {.width = 1920, .height = 1080},
-      {.width = 2560, .height = 1440},
-      {.width = 3840, .height = 2160},
-  }};
-
-  constexpr uint64_t k_bpp = 4;            // 32bit
-  constexpr uint64_t k_row_padding = 256;  // Vulkan optimal alignment
-
-  return std::ranges::any_of(k_display_resolutions, [&](const auto& res) {
-    const uint64_t expected_min = res.width * res.height * k_bpp;
-    const uint64_t expected_max = (res.width + k_row_padding) * res.height * k_bpp;
-    return buffer_size >= expected_min && buffer_size <= expected_max;
-  });
-
-  return false;
 }
 
 static bool IsResourceViewEmpty(reshade::api::device* device, const reshade::api::resource_view& view) {

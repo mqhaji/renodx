@@ -11,5 +11,5 @@ layout(location = 0) in vec2 tex_coord;
 
 void main() {
   colour = vec4(texture(tex, tex_coord).xyz, 1.0);
-  colour = renodx::draw::SwapChainPass(colour);
+  // colour = renodx::draw::SwapChainPass(colour);
 }
