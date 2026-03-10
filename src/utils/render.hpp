@@ -267,6 +267,9 @@ class RenderPass {
 
   std::unordered_map<ConstantBuffersSlots, std::span<const float>, ConstantBuffersSlotsHash> push_constants;
 
+  reshade::api::render_pass_load_op render_target_load_op = reshade::api::render_pass_load_op::load;
+  reshade::api::render_pass_store_op render_target_store_op = reshade::api::render_pass_store_op::store;
+
   bool auto_generate_descriptor_table_updates{true};
   std::vector<reshade::api::descriptor_table_update> descriptor_table_updates;
 
@@ -304,6 +307,7 @@ class RenderPass {
 
     auto* device = cmd_list->get_device();
     if (device == nullptr) return false;
+    const auto is_vulkan = device->get_api() == reshade::api::device_api::vulkan;
 
 #ifdef DEBUG_LEVEL_2
     reshade::log::message(reshade::log::level::info, "utils::render::RenderPass(DEBUG_LEVEL_2 active)");
@@ -379,40 +383,84 @@ class RenderPass {
 
     if (this->auto_generate_descriptor_table_updates) {
       descriptor_table_updates.clear();
-      // Samplers
-      if (!samplers.empty()) {
-        descriptor_table_updates.push_back({
-            .table = {},
-            .binding = 0,
-            .array_offset = 0,
-            .count = static_cast<uint32_t>(samplers.size()),
-            .type = reshade::api::descriptor_type::sampler,
-            .descriptors = samplers.data(),
-        });
-      }
+      if (is_vulkan) {
+        uint32_t current_vk_binding = 0;
 
-      // SRVs
-      if (!this->shader_resource_slots.views.empty()) {
-        descriptor_table_updates.push_back({
-            .table = {},
-            .binding = 0,
-            .array_offset = 0,
-            .count = static_cast<uint32_t>(this->shader_resource_slots.views.size()),
-            .type = reshade::api::descriptor_type::texture_shader_resource_view,
-            .descriptors = this->shader_resource_slots.views.data(),
-        });
-      }
+        // Match HLSL register declaration order in Vulkan set 0.
+        if (!this->shader_resource_slots.views.empty()) {
+          const auto srv_count = static_cast<uint32_t>(this->shader_resource_slots.views.size());
+          descriptor_table_updates.push_back({
+              .table = {},
+              .binding = current_vk_binding++,
+              .array_offset = 0,
+              .count = srv_count,
+              .type = reshade::api::descriptor_type::texture_shader_resource_view,
+              .descriptors = this->shader_resource_slots.views.data(),
+          });
+          current_vk_binding += (srv_count > 0u ? (srv_count - 1u) : 0u);
+        }
 
-      // UAVs
-      if (!this->unordered_access_slots.views.empty()) {
-        descriptor_table_updates.push_back({
-            .table = {},
-            .binding = 0,
-            .array_offset = 0,
-            .count = static_cast<uint32_t>(this->unordered_access_slots.views.size()),
-            .type = reshade::api::descriptor_type::texture_unordered_access_view,
-            .descriptors = this->unordered_access_slots.views.data(),
-        });
+        if (!samplers.empty()) {
+          const auto sampler_count = static_cast<uint32_t>(samplers.size());
+          descriptor_table_updates.push_back({
+              .table = {},
+              .binding = current_vk_binding++,
+              .array_offset = 0,
+              .count = sampler_count,
+              .type = reshade::api::descriptor_type::sampler,
+              .descriptors = samplers.data(),
+          });
+          current_vk_binding += (sampler_count > 0u ? (sampler_count - 1u) : 0u);
+        }
+
+        if (!this->unordered_access_slots.views.empty()) {
+          const auto uav_count = static_cast<uint32_t>(this->unordered_access_slots.views.size());
+          descriptor_table_updates.push_back({
+              .table = {},
+              .binding = current_vk_binding++,
+              .array_offset = 0,
+              .count = uav_count,
+              .type = reshade::api::descriptor_type::texture_unordered_access_view,
+              .descriptors = this->unordered_access_slots.views.data(),
+          });
+          current_vk_binding += (uav_count > 0u ? (uav_count - 1u) : 0u);
+        }
+      } else {
+        // Samplers
+        if (!samplers.empty()) {
+          descriptor_table_updates.push_back({
+              .table = {},
+              .binding = 0,
+              .array_offset = 0,
+              .count = static_cast<uint32_t>(samplers.size()),
+              .type = reshade::api::descriptor_type::sampler,
+              .descriptors = samplers.data(),
+          });
+        }
+
+        // SRVs
+        if (!this->shader_resource_slots.views.empty()) {
+          descriptor_table_updates.push_back({
+              .table = {},
+              .binding = 0,
+              .array_offset = 0,
+              .count = static_cast<uint32_t>(this->shader_resource_slots.views.size()),
+              .type = reshade::api::descriptor_type::texture_shader_resource_view,
+              .descriptors = this->shader_resource_slots.views.data(),
+          });
+        }
+
+        // UAVs
+        if (!this->unordered_access_slots.views.empty()) {
+          descriptor_table_updates.push_back({
+              .table = {},
+              .binding = 0,
+              .array_offset = 0,
+              .count = static_cast<uint32_t>(this->unordered_access_slots.views.size()),
+              .type = reshade::api::descriptor_type::texture_unordered_access_view,
+              .descriptors = this->unordered_access_slots.views.data(),
+          });
+        }
       }
       this->auto_generate_descriptor_table_updates = false;
     }
@@ -433,36 +481,96 @@ class RenderPass {
     // Build pipeline layout if not supplied
     if (this->layout.handle == 0u) {
       std::vector<reshade::api::pipeline_layout_param> layout_params = {};
-      // Samplers
-      if (!samplers.empty()) {
-        reshade::api::pipeline_layout_param param_sampler;
-        param_sampler.type = reshade::api::pipeline_layout_param_type::push_descriptors;
-        param_sampler.push_descriptors.count = samplers.size();
-        param_sampler.push_descriptors.type = reshade::api::descriptor_type::sampler;
-        layout_params.push_back(param_sampler);
-      }
+      std::vector<reshade::api::descriptor_range> vk_set0_ranges;
 
-      if (!this->shader_resource_slots.views.empty()) {
-        reshade::api::pipeline_layout_param param_srv;
-        param_srv.type = reshade::api::pipeline_layout_param_type::push_descriptors;
-        param_srv.push_descriptors.count = this->shader_resource_slots.views.size();
-        param_srv.push_descriptors.type = reshade::api::descriptor_type::texture_shader_resource_view;
-        layout_params.push_back(param_srv);
-      }
+      // DXGI assigns to different registers, but vulkan relies on order so we add textures first
+      if (is_vulkan) {
+        uint32_t current_vk_binding = 0;  // Keeps track of the Vulkan binding index
 
-      if (!this->unordered_access_slots.views.empty()) {
-        reshade::api::pipeline_layout_param param_uav;
-        param_uav.type = reshade::api::pipeline_layout_param_type::push_descriptors;
-        param_uav.push_descriptors.count = this->unordered_access_slots.views.size();
-        param_uav.push_descriptors.type = reshade::api::descriptor_type::texture_unordered_access_view;
-        layout_params.push_back(param_uav);
+        /*
+          [[vk::binding(0, 0)]]
+          Texture2D t0 : register(t0);
+          [[vk::binding(1, 0)]]
+          SamplerState s0 : register(s0);
+          [[vk::binding(2, 0)]]
+          RWTexture2D<float4> u0 : register(u0);
+        */
+
+        // Textures (SRVs) Define t0 (Texture) for Set 0, Binding 0
+        if (!this->shader_resource_slots.views.empty()) {
+          const auto srv_count = static_cast<uint32_t>(this->shader_resource_slots.views.size());
+          reshade::api::descriptor_range srv_range = {};
+          srv_range.binding = current_vk_binding++;
+          srv_range.count = srv_count;
+          srv_range.type = reshade::api::descriptor_type::texture_shader_resource_view;
+          vk_set0_ranges.push_back(srv_range);
+          current_vk_binding += (srv_count > 0u ? (srv_count - 1u) : 0u);
+        }
+
+        // Samplers
+        if (!samplers.empty()) {
+          const auto sampler_count = static_cast<uint32_t>(samplers.size());
+          reshade::api::descriptor_range sampler_range = {};
+          sampler_range.binding = current_vk_binding++;
+          sampler_range.count = sampler_count;
+          sampler_range.type = reshade::api::descriptor_type::sampler;
+          vk_set0_ranges.push_back(sampler_range);
+          current_vk_binding += (sampler_count > 0u ? (sampler_count - 1u) : 0u);
+        }
+
+        if (!this->unordered_access_slots.views.empty()) {
+          const auto uav_count = static_cast<uint32_t>(this->unordered_access_slots.views.size());
+          reshade::api::descriptor_range uav_range = {};
+          uav_range.binding = current_vk_binding++;
+          uav_range.count = uav_count;
+          // Use the UAV descriptor type
+          uav_range.type = reshade::api::descriptor_type::texture_unordered_access_view;
+          vk_set0_ranges.push_back(uav_range);
+          current_vk_binding += (uav_count > 0u ? (uav_count - 1u) : 0u);
+        }
+
+        // Pack them into a single pipeline parameter (Set 0)
+        if (!vk_set0_ranges.empty()) {
+          reshade::api::pipeline_layout_param param_set0 = {};
+          // Use the specific type that reads the 'descriptor_table' struct but flags as pushed
+          param_set0.type = reshade::api::pipeline_layout_param_type::push_descriptors_with_ranges;
+          param_set0.descriptor_table.count = static_cast<uint32_t>(vk_set0_ranges.size());
+          param_set0.descriptor_table.ranges = vk_set0_ranges.data();
+
+          layout_params.push_back(param_set0);  // Pushed at index 0 -> Becomes Set 0
+        }
+      } else {
+        if (!samplers.empty()) {
+          reshade::api::pipeline_layout_param param_sampler;
+          param_sampler.type = reshade::api::pipeline_layout_param_type::push_descriptors;
+          param_sampler.push_descriptors.count = samplers.size();
+          param_sampler.push_descriptors.type = reshade::api::descriptor_type::sampler;
+          layout_params.push_back(param_sampler);
+        }
+
+        if (!this->shader_resource_slots.views.empty()) {
+          reshade::api::pipeline_layout_param param_srv;
+          param_srv.type = reshade::api::pipeline_layout_param_type::push_descriptors;
+          param_srv.push_descriptors.count = this->shader_resource_slots.views.size();
+          param_srv.push_descriptors.type = reshade::api::descriptor_type::texture_shader_resource_view;
+          layout_params.push_back(param_srv);
+        }
+
+        // UAVs
+        if (!this->unordered_access_slots.views.empty()) {
+          reshade::api::pipeline_layout_param param_uav;
+          param_uav.type = reshade::api::pipeline_layout_param_type::push_descriptors;
+          param_uav.push_descriptors.count = this->unordered_access_slots.views.size();
+          param_uav.push_descriptors.type = reshade::api::descriptor_type::texture_unordered_access_view;
+          layout_params.push_back(param_uav);
+        }
       }
 
       if (!push_constants.empty()) {
         for (const auto& [slot_space, span] : push_constants) {
           reshade::api::pipeline_layout_param param_push_constants;
           param_push_constants.type = reshade::api::pipeline_layout_param_type::push_constants;
-          if (device->get_api() == reshade::api::device_api::d3d12 || device->get_api() == reshade::api::device_api::vulkan) {
+          if (device->get_api() == reshade::api::device_api::d3d12 || is_vulkan) {
             param_push_constants.push_constants.count = span.size();
           } else {
             param_push_constants.push_constants.count = 1;
@@ -549,21 +657,13 @@ class RenderPass {
     }
 
     auto render_target_views_size = this->render_target_slots.views.size();
-    auto render_pass_render_target_descs_size = this->render_target_slots.render_pass_descs.size();
 
-    if (render_pass_render_target_descs_size < render_target_views_size) {
-      this->render_target_slots.render_pass_descs.resize(render_target_views_size);
-      auto insert_index = render_pass_render_target_descs_size;
-      while (insert_index < render_target_views_size) {
-        reshade::api::render_pass_render_target_desc rt_desc{
-            .view = {this->render_target_slots.views[insert_index]},
-        };
-        if (device->get_api() == reshade::api::device_api::vulkan) {
-          rt_desc.load_op = reshade::api::render_pass_load_op::load;
-          rt_desc.store_op = reshade::api::render_pass_store_op::store;
-        }
-        this->render_target_slots.render_pass_descs[insert_index] = rt_desc;
-        ++insert_index;
+    this->render_target_slots.render_pass_descs.resize(render_target_views_size);
+    for (size_t i = 0; i < render_target_views_size; ++i) {
+      this->render_target_slots.render_pass_descs[i].view = this->render_target_slots.views[i];
+      if (is_vulkan) {
+        this->render_target_slots.render_pass_descs[i].load_op = this->render_target_load_op;
+        this->render_target_slots.render_pass_descs[i].store_op = this->render_target_store_op;
       }
     }
 
@@ -575,46 +675,75 @@ class RenderPass {
       }
     }
 
-    cmd_list->begin_render_pass(
-        static_cast<uint32_t>(this->render_target_slots.render_pass_descs.size()),
-        this->render_target_slots.render_pass_descs.data(),
-        nullptr);
+    if (is_vulkan && this->render_target_load_op == reshade::api::render_pass_load_op::discard) {
+      std::vector<reshade::api::resource> barrier_resources;
+      std::vector<reshade::api::resource_usage> barrier_old_states;
+      std::vector<reshade::api::resource_usage> barrier_new_states;
+      for (auto res : this->render_target_slots.resources) {
+        if (res.handle != 0) {
+          barrier_resources.push_back(res);
+          barrier_old_states.push_back(reshade::api::resource_usage::undefined);
+          barrier_new_states.push_back(reshade::api::resource_usage::render_target);
+        }
+      }
+      if (!barrier_resources.empty()) {
+        cmd_list->barrier(static_cast<uint32_t>(barrier_resources.size()), barrier_resources.data(), barrier_old_states.data(), barrier_new_states.data());
+      }
+    }
 
     bool is_compute = this->IsComputePass();
+    // Vulkan can't dispatch inside render pass
+    const bool allow_render_pass = !(is_vulkan && is_compute);
+    if (allow_render_pass) {
+      cmd_list->begin_render_pass(
+          static_cast<uint32_t>(this->render_target_slots.render_pass_descs.size()),
+          this->render_target_slots.render_pass_descs.data(),
+          nullptr);
+    }
+
     // TODO(clshortfuse): Allocate/bind descriptor tables instead
     auto descriptor_stage = is_compute
                                 ? reshade::api::shader_stage::all_compute
                                 : reshade::api::shader_stage::all_graphics;
-    auto current_layout_param_index = 0;
-    while (current_layout_param_index < descriptor_table_updates.size()) {
-#ifdef DEBUG_LEVEL_2
-      {
-        std::stringstream s;
-        const auto& u = descriptor_table_updates[current_layout_param_index];
-        s << "utils::render::RenderPass(push_descriptors index=" << current_layout_param_index
-          << " type=" << u.type
-          << " count=" << u.count << ")";
-        reshade::log::message(reshade::log::level::info, s.str().c_str());
-      }
-#endif
-      cmd_list->push_descriptors(
-          descriptor_stage,
-          this->layout,
-          current_layout_param_index,
-          descriptor_table_updates[current_layout_param_index]);
-      ++current_layout_param_index;
-    }
 
-    // Push constants
-    for (const auto& [slot_space, span] : push_constants) {
-      cmd_list->push_constants(
-          descriptor_stage,
-          this->layout,
-          current_layout_param_index,
-          0,
-          static_cast<uint32_t>(span.size()),
-          span.data());
-      ++current_layout_param_index;
+    {
+      const uint32_t descriptor_layout_param_count = is_vulkan
+                                                         ? (descriptor_table_updates.empty() ? 0u : 1u)
+                                                         : static_cast<uint32_t>(descriptor_table_updates.size());
+      auto current_layout_param_index = 0u;
+
+      for (uint32_t i = 0; i < descriptor_table_updates.size(); ++i) {
+        const uint32_t layout_param_index = is_vulkan ? 0u : i;
+#ifdef DEBUG_LEVEL_2
+        {
+          std::stringstream s;
+          const auto& u = descriptor_table_updates[i];
+          s << "utils::render::RenderPass(push_descriptors index=" << layout_param_index
+            << ", binding=" << u.binding
+            << " type=" << u.type
+            << " count=" << u.count << ")";
+          reshade::log::message(reshade::log::level::info, s.str().c_str());
+        }
+#endif
+        cmd_list->push_descriptors(
+            descriptor_stage,
+            this->layout,
+            layout_param_index,
+            descriptor_table_updates[i]);
+      }
+      current_layout_param_index = descriptor_layout_param_count;
+
+      // Push constants
+      for (const auto& [slot_space, span] : push_constants) {
+        cmd_list->push_constants(
+            descriptor_stage,
+            this->layout,
+            current_layout_param_index,
+            0,
+            static_cast<uint32_t>(span.size()),
+            span.data());
+        ++current_layout_param_index;
+      }
     }
 
     if (!is_compute) {
@@ -721,7 +850,9 @@ class RenderPass {
       }
     }
 
-    cmd_list->end_render_pass();
+    if (allow_render_pass) {
+      cmd_list->end_render_pass();
+    }
 
     if (this->flush_after_render) {
       assert(queue != nullptr);
@@ -784,6 +915,11 @@ class RenderPass {
     for (const auto& sampler : generated_samplers) {
       if (sampler.handle == 0) continue;
       device->destroy_sampler(sampler);
+      for (auto& active_sampler : samplers) {
+        if (active_sampler.handle == sampler.handle) {
+          active_sampler = {0};
+        }
+      }
     }
     generated_samplers.clear();
 
@@ -810,6 +946,11 @@ class RenderPass {
     for (const auto& sampler : generated_samplers) {
       if (sampler.handle == 0) continue;
       device->destroy_sampler(sampler);
+      for (auto& active_sampler : samplers) {
+        if (active_sampler.handle == sampler.handle) {
+          active_sampler = {0};
+        }
+      }
     }
     generated_samplers.clear();
 
