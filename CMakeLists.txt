@@ -89,7 +89,7 @@ enable_testing()
 # Use executable to convert resources to .h files for embedding
 add_executable(embed_file src/embed_file.cpp)
 # Helper executable that analyzes HLSL #include dependencies and outputs .d files
-add_executable(analyze_hlsl_deps src/analyze_hlsl_deps.cpp)
+add_executable(analyze_shader_deps src/analyze_shader_deps.cpp)
 add_executable(decomp ./src/decompiler/cli.cpp)
 add_executable(mcp_bridge src/apps/mcp_bridge/main.cpp)
 
@@ -220,6 +220,58 @@ function(build_shader_target ADDON ADDON_PATH)
   set(EMBED_FOLDER ${CMAKE_CURRENT_BINARY_DIR}/${ADDON}.include/embed)
   unset(SHADER_BINARIES)
   unset(SHADER_AUX_OUTPUTS)
+  macro(add_stage_spirv_shader OUTPUT_STEM)
+    list(FIND SHADER_BINARIES ${EMBED_FOLDER}/${OUTPUT_STEM}.spv SHADER_BINARY_INDEX)
+    if(SHADER_BINARY_INDEX EQUAL -1)
+      set(DEPFILE_SPV ${CMAKE_CURRENT_BINARY_DIR}/${ADDON}/${OUTPUT_STEM}.spv.d)
+      if(SPIRV_VAL_BIN)
+        add_custom_command(
+          OUTPUT ${EMBED_FOLDER}/${OUTPUT_STEM}.spv
+          COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${OUTPUT_STEM}.spv ${DEPFILE_SPV}
+          COMMAND ${SHADER_COMPILER} ${FILE} -stage ${SHADER_STAGE} ${SHADER_FLAGS} -target spirv -o ${EMBED_FOLDER}/${OUTPUT_STEM}.spv
+          COMMAND ${CMAKE_COMMAND} -DVALIDATOR="${SPIRV_VAL_BIN}" -DFILE="${EMBED_FOLDER}/${OUTPUT_STEM}.spv" -DFLAGS="${SPIRV_VAL_FLAGS_STR}" -P ${SPIRV_VAL_SCRIPT}
+          DEPENDS ${SHADER_DEPENDS} analyze_shader_deps
+          DEPFILE ${DEPFILE_SPV}
+        )
+      else()
+        add_custom_command(
+          OUTPUT ${EMBED_FOLDER}/${OUTPUT_STEM}.spv
+          COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${OUTPUT_STEM}.spv ${DEPFILE_SPV}
+          COMMAND ${SHADER_COMPILER} ${FILE} -stage ${SHADER_STAGE} ${SHADER_FLAGS} -target spirv -o ${EMBED_FOLDER}/${OUTPUT_STEM}.spv
+          DEPENDS ${SHADER_DEPENDS} analyze_shader_deps
+          DEPFILE ${DEPFILE_SPV}
+        )
+      endif()
+      list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${OUTPUT_STEM}.spv)
+      if(SPIRV_DIS_BIN)
+        add_custom_command(
+          OUTPUT ${EMBED_FOLDER}/${OUTPUT_STEM}.spvasm
+          COMMAND "${SPIRV_DIS_BIN}" "${EMBED_FOLDER}/${OUTPUT_STEM}.spv" -o "${EMBED_FOLDER}/${OUTPUT_STEM}.spvasm"
+          DEPENDS ${EMBED_FOLDER}/${OUTPUT_STEM}.spv
+        )
+        list(APPEND SHADER_AUX_OUTPUTS ${EMBED_FOLDER}/${OUTPUT_STEM}.spvasm)
+      endif()
+    endif()
+  endmacro()
+  macro(add_gl_vk_spirv_alias OUTPUT_STEM)
+    list(FIND SHADER_BINARIES ${EMBED_FOLDER}/${OUTPUT_STEM}_gl.spv SHADER_BINARY_INDEX)
+    if(SHADER_BINARY_INDEX EQUAL -1)
+      add_custom_command(
+        OUTPUT ${EMBED_FOLDER}/${OUTPUT_STEM}_gl.spv
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${EMBED_FOLDER}/${OUTPUT_STEM}_vk.spv ${EMBED_FOLDER}/${OUTPUT_STEM}_gl.spv
+        DEPENDS ${EMBED_FOLDER}/${OUTPUT_STEM}_vk.spv
+      )
+      list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${OUTPUT_STEM}_gl.spv)
+    endif()
+    if(SPIRV_DIS_BIN)
+      add_custom_command(
+        OUTPUT ${EMBED_FOLDER}/${OUTPUT_STEM}_gl.spvasm
+        COMMAND "${SPIRV_DIS_BIN}" "${EMBED_FOLDER}/${OUTPUT_STEM}_gl.spv" -o "${EMBED_FOLDER}/${OUTPUT_STEM}_gl.spvasm"
+        DEPENDS ${EMBED_FOLDER}/${OUTPUT_STEM}_gl.spv
+      )
+      list(APPEND SHADER_AUX_OUTPUTS ${EMBED_FOLDER}/${OUTPUT_STEM}_gl.spvasm)
+    endif()
+  endmacro()
 
   file(GLOB_RECURSE SHADER_HLSL_SOURCES CONFIGURE_DEPENDS ${ADDON_PATH}/*.hlsl)
   foreach(FILE ${SHADER_HLSL_SOURCES})
@@ -266,9 +318,9 @@ function(build_shader_target ADDON ADDON_PATH)
           set(DEPFILE_DX11 ${CMAKE_CURRENT_BINARY_DIR}/${ADDON}/${SHADER_HASH}_dx11.d)
           add_custom_command(
             OUTPUT ${EMBED_FOLDER}/${SHADER_HASH}_dx11.cso
-            COMMAND $<TARGET_FILE:analyze_hlsl_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_HASH}_dx11.cso ${DEPFILE_DX11}
+            COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_HASH}_dx11.cso ${DEPFILE_DX11}
             COMMAND ${SHADER_COMPILER} ${FILE} -T ${SHADER_TARGET_TYPE}_5_0 ${SHADER_FLAGS} /nologo /O3 /Qstrip_reflect -E main -Fo ${EMBED_FOLDER}/${SHADER_HASH}_dx11.cso
-            DEPENDS ${FILE} analyze_hlsl_deps
+            DEPENDS ${FILE} analyze_shader_deps
             DEPFILE ${DEPFILE_DX11}
           )
           list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_HASH}_dx11.cso)
@@ -276,9 +328,9 @@ function(build_shader_target ADDON ADDON_PATH)
           set(DEPFILE_DX11 ${CMAKE_CURRENT_BINARY_DIR}/${ADDON}/${SHADER_NAME}_dx11.d)
           add_custom_command(
             OUTPUT ${EMBED_FOLDER}/${SHADER_NAME}_dx11.cso
-            COMMAND $<TARGET_FILE:analyze_hlsl_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_NAME}_dx11.cso ${DEPFILE_DX11}
+            COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_NAME}_dx11.cso ${DEPFILE_DX11}
             COMMAND ${SHADER_COMPILER} ${FILE} -T ${SHADER_TARGET_TYPE}_5_0 ${SHADER_FLAGS} /nologo /O3 /Qstrip_reflect -E main -Fo ${EMBED_FOLDER}/${SHADER_NAME}_dx11.cso
-            DEPENDS ${FILE} analyze_hlsl_deps
+            DEPENDS ${FILE} analyze_shader_deps
             DEPFILE ${DEPFILE_DX11}
           )
           list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_NAME}_dx11.cso)
@@ -293,9 +345,9 @@ function(build_shader_target ADDON ADDON_PATH)
           set(DEPFILE_DX12 ${CMAKE_CURRENT_BINARY_DIR}/${ADDON}/${SHADER_HASH}_dx12.d)
           add_custom_command(
             OUTPUT ${EMBED_FOLDER}/${SHADER_HASH}_dx12.cso
-            COMMAND $<TARGET_FILE:analyze_hlsl_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_HASH}_dx12.cso ${DEPFILE_DX12}
+            COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_HASH}_dx12.cso ${DEPFILE_DX12}
             COMMAND ${SHADER_COMPILER} ${FILE} -T ${SHADER_TARGET_TYPE}_5_1 ${SHADER_FLAGS} /nologo /O3 /Qstrip_reflect -E main -Fo ${EMBED_FOLDER}/${SHADER_HASH}_dx12.cso
-            DEPENDS ${FILE} analyze_hlsl_deps
+            DEPENDS ${FILE} analyze_shader_deps
             DEPFILE ${DEPFILE_DX12}
           )
           list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_HASH}_dx12.cso)
@@ -303,9 +355,9 @@ function(build_shader_target ADDON ADDON_PATH)
           set(DEPFILE_DX12 ${CMAKE_CURRENT_BINARY_DIR}/${ADDON}/${SHADER_NAME}_dx12.d)
           add_custom_command(
             OUTPUT ${EMBED_FOLDER}/${SHADER_NAME}_dx12.cso
-            COMMAND $<TARGET_FILE:analyze_hlsl_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_NAME}_dx12.cso ${DEPFILE_DX12}
+            COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_NAME}_dx12.cso ${DEPFILE_DX12}
             COMMAND ${SHADER_COMPILER} ${FILE} -T ${SHADER_TARGET_TYPE}_5_1 ${SHADER_FLAGS} /nologo /O3 /Qstrip_reflect -E main -Fo ${EMBED_FOLDER}/${SHADER_NAME}_dx12.cso
-            DEPENDS ${FILE} analyze_hlsl_deps
+            DEPENDS ${FILE} analyze_shader_deps
             DEPFILE ${DEPFILE_DX12}
           )
           list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_NAME}_dx12.cso)
@@ -337,9 +389,9 @@ function(build_shader_target ADDON ADDON_PATH)
           set(DEPFILE ${CMAKE_CURRENT_BINARY_DIR}/${ADDON}/${SHADER_HASH}.d)
           add_custom_command(
             OUTPUT ${EMBED_FOLDER}/${SHADER_HASH}.cso
-            COMMAND $<TARGET_FILE:analyze_hlsl_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_HASH}.cso ${DEPFILE}
+            COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_HASH}.cso ${DEPFILE}
             COMMAND ${SHADER_COMPILER} ${FILE} -T ${SHADER_TARGET} ${SHADER_FLAGS} /nologo /O3 /Qstrip_reflect -E main -Fo ${EMBED_FOLDER}/${SHADER_HASH}.cso
-            DEPENDS ${FILE} analyze_hlsl_deps
+            DEPENDS ${FILE} analyze_shader_deps
             DEPFILE ${DEPFILE}
           )
           list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_HASH}.cso)
@@ -347,9 +399,9 @@ function(build_shader_target ADDON ADDON_PATH)
           set(DEPFILE ${CMAKE_CURRENT_BINARY_DIR}/${ADDON}/${SHADER_NAME}.d)
           add_custom_command(
             OUTPUT ${EMBED_FOLDER}/${SHADER_NAME}.cso
-            COMMAND $<TARGET_FILE:analyze_hlsl_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_NAME}.cso ${DEPFILE}
+            COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_NAME}.cso ${DEPFILE}
             COMMAND ${SHADER_COMPILER} ${FILE} -T ${SHADER_TARGET} ${SHADER_FLAGS} /nologo /O3 /Qstrip_reflect -E main -Fo ${EMBED_FOLDER}/${SHADER_NAME}.cso
-            DEPENDS ${FILE} analyze_hlsl_deps
+            DEPENDS ${FILE} analyze_shader_deps
             DEPFILE ${DEPFILE}
           )
           list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_NAME}.cso)
@@ -377,6 +429,7 @@ function(build_shader_target ADDON ADDON_PATH)
       set(SHADER_HASH ${CMAKE_MATCH_1})
     endif()
 
+    #SLANG
     set(SHADER_COMPILER ${SLANGC_BIN})
     unset(SHADER_FLAGS)
     set(SHADER_FLAGS ${SLANGC_FLAGS_LIST})
@@ -398,55 +451,12 @@ function(build_shader_target ADDON ADDON_PATH)
         elseif(SHADER_TARGET STREQUAL "comp")
           set(SHADER_STAGE "compute")
         endif()
+        set(SHADER_DEPENDS ${HLSL_DEPENDENCIES})
 
         if(SHADER_HASH)
-          if(SPIRV_VAL_BIN)
-            add_custom_command(
-              OUTPUT ${EMBED_FOLDER}/${SHADER_HASH}.spv
-              COMMAND ${SHADER_COMPILER} ${FILE} -stage ${SHADER_STAGE} ${SHADER_FLAGS} -target spirv -o ${EMBED_FOLDER}/${SHADER_HASH}.spv
-              COMMAND ${CMAKE_COMMAND} -DVALIDATOR="${SPIRV_VAL_BIN}" -DFILE="${EMBED_FOLDER}/${SHADER_HASH}.spv" -DFLAGS="${SPIRV_VAL_FLAGS_STR}" -P ${SPIRV_VAL_SCRIPT}
-              DEPENDS ${HLSL_DEPENDENCIES}
-            )
-          else()
-            add_custom_command(
-              OUTPUT ${EMBED_FOLDER}/${SHADER_HASH}.spv
-              COMMAND ${SHADER_COMPILER} ${FILE} -stage ${SHADER_STAGE} ${SHADER_FLAGS} -target spirv -o ${EMBED_FOLDER}/${SHADER_HASH}.spv
-              DEPENDS ${HLSL_DEPENDENCIES}
-            )
-          endif()
-          list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_HASH}.spv)
-          if(SPIRV_DIS_BIN)
-            add_custom_command(
-              OUTPUT ${EMBED_FOLDER}/${SHADER_HASH}.spvasm
-              COMMAND "${SPIRV_DIS_BIN}" "${EMBED_FOLDER}/${SHADER_HASH}.spv" -o "${EMBED_FOLDER}/${SHADER_HASH}.spvasm"
-              DEPENDS ${EMBED_FOLDER}/${SHADER_HASH}.spv
-            )
-            list(APPEND SHADER_AUX_OUTPUTS ${EMBED_FOLDER}/${SHADER_HASH}.spvasm)
-          endif()
+          add_stage_spirv_shader(${SHADER_HASH})
         else()
-          if(SPIRV_VAL_BIN)
-            add_custom_command(
-              OUTPUT ${EMBED_FOLDER}/${SHADER_NAME}.spv
-              COMMAND ${SHADER_COMPILER} ${FILE} -stage ${SHADER_STAGE} ${SHADER_FLAGS} -target spirv -o ${EMBED_FOLDER}/${SHADER_NAME}.spv
-              COMMAND ${CMAKE_COMMAND} -DVALIDATOR="${SPIRV_VAL_BIN}" -DFILE="${EMBED_FOLDER}/${SHADER_NAME}.spv" -DFLAGS="${SPIRV_VAL_FLAGS_STR}" -P ${SPIRV_VAL_SCRIPT}
-              DEPENDS ${HLSL_DEPENDENCIES}
-            )
-          else()
-            add_custom_command(
-              OUTPUT ${EMBED_FOLDER}/${SHADER_NAME}.spv
-              COMMAND ${SHADER_COMPILER} ${FILE} -stage ${SHADER_STAGE} ${SHADER_FLAGS} -target spirv -o ${EMBED_FOLDER}/${SHADER_NAME}.spv
-              DEPENDS ${HLSL_DEPENDENCIES}
-            )
-          endif()
-          list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_NAME}.spv)
-          if(SPIRV_DIS_BIN)
-            add_custom_command(
-              OUTPUT ${EMBED_FOLDER}/${SHADER_NAME}.spvasm
-              COMMAND "${SPIRV_DIS_BIN}" "${EMBED_FOLDER}/${SHADER_NAME}.spv" -o "${EMBED_FOLDER}/${SHADER_NAME}.spvasm"
-              DEPENDS ${EMBED_FOLDER}/${SHADER_NAME}.spv
-            )
-            list(APPEND SHADER_AUX_OUTPUTS ${EMBED_FOLDER}/${SHADER_NAME}.spvasm)
-          endif()
+          add_stage_spirv_shader(${SHADER_NAME})
         endif()
       else()
         string(SUBSTRING ${SHADER_TARGET} 3 1 SHADER_TARGET_MAJOR)
@@ -463,33 +473,45 @@ function(build_shader_target ADDON ADDON_PATH)
           list(APPEND HLSL_DEPENDENCIES ${HLSL_CHILD_DEPENDENCIES})
 
           if(SHADER_HASH)
+            set(DEPFILE ${CMAKE_CURRENT_BINARY_DIR}/${ADDON}/${SHADER_HASH}_dx11_slang.d)
             add_custom_command(
               OUTPUT ${EMBED_FOLDER}/${SHADER_HASH}_dx11.cso
+              COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_HASH}_dx11.cso ${DEPFILE}
               COMMAND ${SHADER_COMPILER} ${FILE} -profile ${SHADER_TARGET_TYPE}_5_0 ${SHADER_FLAGS} -target dxbc -o ${EMBED_FOLDER}/${SHADER_HASH}_dx11.cso
-              DEPENDS ${HLSL_DEPENDENCIES}
+              DEPENDS ${HLSL_DEPENDENCIES} analyze_shader_deps
+              DEPFILE ${DEPFILE}
             )
             list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_HASH}_dx11.cso)
           else()
+            set(DEPFILE ${CMAKE_CURRENT_BINARY_DIR}/${ADDON}/${SHADER_NAME}_dx11_slang.d)
             add_custom_command(
               OUTPUT ${EMBED_FOLDER}/${SHADER_NAME}_dx11.cso
+              COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_NAME}_dx11.cso ${DEPFILE}
               COMMAND ${SHADER_COMPILER} ${FILE} -profile ${SHADER_TARGET_TYPE}_5_0 ${SHADER_FLAGS} -target dxbc -o ${EMBED_FOLDER}/${SHADER_NAME}_dx11.cso
-              DEPENDS ${HLSL_DEPENDENCIES}
+              DEPENDS ${HLSL_DEPENDENCIES} analyze_shader_deps
+              DEPFILE ${DEPFILE}
             )
             list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_NAME}_dx11.cso)
           endif()
 
           if(SHADER_HASH)
+            set(DEPFILE ${CMAKE_CURRENT_BINARY_DIR}/${ADDON}/${SHADER_HASH}_dx12_slang.d)
             add_custom_command(
               OUTPUT ${EMBED_FOLDER}/${SHADER_HASH}_dx12.cso
+              COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_HASH}_dx12.cso ${DEPFILE}
               COMMAND ${SHADER_COMPILER} ${FILE} -profile ${SHADER_TARGET_TYPE}_5_1 ${SHADER_FLAGS} -target dxbc -o ${EMBED_FOLDER}/${SHADER_HASH}_dx12.cso
-              DEPENDS ${HLSL_DEPENDENCIES}
+              DEPENDS ${HLSL_DEPENDENCIES} analyze_shader_deps
+              DEPFILE ${DEPFILE}
             )
             list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_HASH}_dx12.cso)
           else()
+            set(DEPFILE ${CMAKE_CURRENT_BINARY_DIR}/${ADDON}/${SHADER_NAME}_dx12_slang.d)
             add_custom_command(
               OUTPUT ${EMBED_FOLDER}/${SHADER_NAME}_dx12.cso
+              COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_NAME}_dx12.cso ${DEPFILE}
               COMMAND ${SHADER_COMPILER} ${FILE} -profile ${SHADER_TARGET_TYPE}_5_1 ${SHADER_FLAGS} -target dxbc -o ${EMBED_FOLDER}/${SHADER_NAME}_dx12.cso
-              DEPENDS ${HLSL_DEPENDENCIES}
+              DEPENDS ${HLSL_DEPENDENCIES} analyze_shader_deps
+              DEPFILE ${DEPFILE}
             )
             list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_NAME}_dx12.cso)
           endif()
@@ -504,17 +526,23 @@ function(build_shader_target ADDON ADDON_PATH)
 
           if(SHADER_HASH)
             # message("Registering: " ${FILE} " => " ${EMBED_FOLDER}/${SHADER_HASH}.cso)
+            set(DEPFILE ${CMAKE_CURRENT_BINARY_DIR}/${ADDON}/${SHADER_HASH}_slang.d)
             add_custom_command(
               OUTPUT ${EMBED_FOLDER}/${SHADER_HASH}.cso
+              COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_HASH}.cso ${DEPFILE}
               COMMAND ${SHADER_COMPILER} ${FILE} -profile ${SHADER_TARGET} ${SHADER_FLAGS} -target dxil -o ${EMBED_FOLDER}/${SHADER_HASH}.cso
-              DEPENDS ${HLSL_DEPENDENCIES}
+              DEPENDS ${HLSL_DEPENDENCIES} analyze_shader_deps
+              DEPFILE ${DEPFILE}
             )
             list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_HASH}.cso)
           else()
+            set(DEPFILE ${CMAKE_CURRENT_BINARY_DIR}/${ADDON}/${SHADER_NAME}_slang.d)
             add_custom_command(
               OUTPUT ${EMBED_FOLDER}/${SHADER_NAME}.cso
+              COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_NAME}.cso ${DEPFILE}
               COMMAND ${SHADER_COMPILER} ${FILE} -profile ${SHADER_TARGET} ${SHADER_FLAGS} -target dxil -o ${EMBED_FOLDER}/${SHADER_NAME}.cso
-              DEPENDS ${HLSL_DEPENDENCIES}
+              DEPENDS ${HLSL_DEPENDENCIES} analyze_shader_deps
+              DEPFILE ${DEPFILE}
             )
             list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_NAME}.cso)
           endif()
@@ -619,20 +647,52 @@ function(build_shader_target ADDON ADDON_PATH)
       continue()
     endif()
 
-    string(REGEX MATCH "(.*)\\.(frag|vert|comp)\\.glsl$" _ ${FILENAME})
+    set(DUAL_SPV_GLSL OFF)
+    string(REGEX MATCH "(.*)\\.(frag|vert|comp)\\.spv\\.glsl$" _ ${FILENAME})
     set(SHADER_NAME ${CMAKE_MATCH_1})
     set(SHADER_TARGET ${CMAKE_MATCH_2})
+    if(SHADER_TARGET)
+      set(DUAL_SPV_GLSL ON)
+    else()
+      string(REGEX MATCH "(.*)\\.(frag|vert|comp)\\.glsl$" _ ${FILENAME})
+      set(SHADER_NAME ${CMAKE_MATCH_1})
+      set(SHADER_TARGET ${CMAKE_MATCH_2})
+    endif()
     if(SHADER_NAME)
       string(REGEX MATCH "(0x[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f])$" _ ${SHADER_NAME})
       set(SHADER_HASH ${CMAKE_MATCH_1})
     endif()
 
-    if(SHADER_TARGET AND SHADER_HASH)
-      configure_file(${FILE} ${EMBED_FOLDER}/${SHADER_HASH}.glsl COPYONLY)
-      list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_HASH}.glsl)
-    elseif(SHADER_TARGET AND SHADER_NAME)
-      configure_file(${FILE} ${EMBED_FOLDER}/${SHADER_NAME}.glsl COPYONLY)
-      list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_NAME}.glsl)
+    #GLSL
+    set(SHADER_COMPILER ${SLANGC_BIN})
+    unset(SHADER_FLAGS)
+    set(SHADER_FLAGS ${SLANGC_FLAGS_LIST})
+    unset(SHADER_STAGE)
+    if(SHADER_TARGET STREQUAL "frag")
+      set(SHADER_STAGE "fragment")
+    elseif(SHADER_TARGET STREQUAL "vert")
+      set(SHADER_STAGE "vertex")
+    elseif(SHADER_TARGET STREQUAL "comp")
+      set(SHADER_STAGE "compute")
+    endif()
+    set(SHADER_DEPENDS ${FILE})
+
+    if(SHADER_STAGE AND SHADER_HASH)
+      if(DUAL_SPV_GLSL)
+        set(SHADER_DEPENDS ${FILE})
+        add_stage_spirv_shader(${SHADER_HASH}_vk)
+        add_gl_vk_spirv_alias(${SHADER_HASH})
+      else()
+        add_stage_spirv_shader(${SHADER_HASH})
+      endif()
+    elseif(SHADER_STAGE AND SHADER_NAME)
+      if(DUAL_SPV_GLSL)
+        set(SHADER_DEPENDS ${FILE})
+        add_stage_spirv_shader(${SHADER_NAME}_vk)
+        add_gl_vk_spirv_alias(${SHADER_NAME})
+      else()
+        add_stage_spirv_shader(${SHADER_NAME})
+      endif()
     endif()
   endforeach()
 
@@ -646,6 +706,8 @@ function(build_shader_target ADDON ADDON_PATH)
     set(ANY_VERSION_SHADERS)
     set(DX11_SHADERS)
     set(DX12_SHADERS)
+    set(GL_SHADERS)
+    set(VK_SHADERS)
     set(SHADER_STEMS)
 
     foreach(FILE ${SHADER_BINARIES})
@@ -669,6 +731,10 @@ function(build_shader_target ADDON ADDON_PATH)
         list(APPEND DX11_SHADERS ${FILENAME})
       elseif(FILENAME MATCHES "^0x[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]_dx12$")
         list(APPEND DX12_SHADERS ${FILENAME})
+      elseif(FILENAME MATCHES "^0x[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]_gl$")
+        list(APPEND GL_SHADERS ${FILENAME})
+      elseif(FILENAME MATCHES "^0x[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]_vk$")
+        list(APPEND VK_SHADERS ${FILENAME})
       endif()
 
     endforeach()
@@ -710,15 +776,51 @@ function(build_shader_target ADDON ADDON_PATH)
       endforeach()
     endif()
 
-    if(ANY_VERSION_SHADERS_LENGTH GREATER 0 OR DX11_DX12_INTERSECT_LENGTH GREATER 0)
-      string(APPEND SHADERS_H_OUTPUT "#define __ALL_CUSTOM_SHADERS \\\n")
-      if(ANY_VERSION_SHADERS_LENGTH GREATER 0 AND DX11_DX12_INTERSECT_LENGTH GREATER 0)
-        string(APPEND SHADERS_H_OUTPUT "  __CUSTOM_SHADER_ENTRIES, \\\n  __CUSTOM_DIRECTX_SHADERS\n")
-      elseif(ANY_VERSION_SHADERS_LENGTH GREATER 0)
-        string(APPEND SHADERS_H_OUTPUT "  __CUSTOM_SHADER_ENTRIES\n")
-      elseif(DX11_DX12_INTERSECT_LENGTH GREATER 0)
-        string(APPEND SHADERS_H_OUTPUT "  __CUSTOM_DIRECTX_SHADERS\n")
+    set(GL_VK_INTERSECT)
+    foreach(FILENAME ${GL_SHADERS})
+      string(REGEX REPLACE "_gl$" "" BASE_NAME ${FILENAME})
+      list(FIND VK_SHADERS "${BASE_NAME}_vk" IDX)
+      if(NOT IDX EQUAL -1)
+        list(APPEND GL_VK_INTERSECT ${BASE_NAME})
       endif()
+    endforeach()
+
+    list(LENGTH GL_VK_INTERSECT GL_VK_INTERSECT_LENGTH)
+    if(GL_VK_INTERSECT_LENGTH GREATER 0)
+      string(APPEND SHADERS_H_OUTPUT "#define __CUSTOM_OPENGL_VULKAN_SHADERS \\\n")
+      math(EXPR LAST_INDEX "${GL_VK_INTERSECT_LENGTH} - 1")
+      foreach(INDEX RANGE 0 ${LAST_INDEX})
+        list(GET GL_VK_INTERSECT ${INDEX} BASE_NAME)
+        if(INDEX EQUAL LAST_INDEX)
+          string(APPEND SHADERS_H_OUTPUT "  CustomOpenGLVulkanShaders(${BASE_NAME})\n")
+        else()
+          string(APPEND SHADERS_H_OUTPUT "  CustomOpenGLVulkanShaders(${BASE_NAME}), \\\n")
+        endif()
+      endforeach()
+    endif()
+
+    if(ANY_VERSION_SHADERS_LENGTH GREATER 0 OR DX11_DX12_INTERSECT_LENGTH GREATER 0 OR GL_VK_INTERSECT_LENGTH GREATER 0)
+      string(APPEND SHADERS_H_OUTPUT "#define __ALL_CUSTOM_SHADERS \\\n")
+      set(ALL_CUSTOM_SHADER_GROUPS)
+      if(ANY_VERSION_SHADERS_LENGTH GREATER 0)
+        list(APPEND ALL_CUSTOM_SHADER_GROUPS "__CUSTOM_SHADER_ENTRIES")
+      endif()
+      if(DX11_DX12_INTERSECT_LENGTH GREATER 0)
+        list(APPEND ALL_CUSTOM_SHADER_GROUPS "__CUSTOM_DIRECTX_SHADERS")
+      endif()
+      if(GL_VK_INTERSECT_LENGTH GREATER 0)
+        list(APPEND ALL_CUSTOM_SHADER_GROUPS "__CUSTOM_OPENGL_VULKAN_SHADERS")
+      endif()
+      list(LENGTH ALL_CUSTOM_SHADER_GROUPS ALL_CUSTOM_SHADER_GROUPS_LENGTH)
+      math(EXPR ALL_CUSTOM_SHADER_GROUPS_LAST_INDEX "${ALL_CUSTOM_SHADER_GROUPS_LENGTH} - 1")
+      foreach(INDEX RANGE 0 ${ALL_CUSTOM_SHADER_GROUPS_LAST_INDEX})
+        list(GET ALL_CUSTOM_SHADER_GROUPS ${INDEX} GROUP_NAME)
+        if(INDEX EQUAL ALL_CUSTOM_SHADER_GROUPS_LAST_INDEX)
+          string(APPEND SHADERS_H_OUTPUT "  ${GROUP_NAME}\n")
+        else()
+          string(APPEND SHADERS_H_OUTPUT "  ${GROUP_NAME}, \\\n")
+        endif()
+      endforeach()
     endif()
 
   endif()
@@ -810,3 +912,4 @@ set(CPACK_PROJECT_NAME ${PROJECT_NAME})
 set(CPACK_PROJECT_VERSION ${PROJECT_VERSION})
 
 include(CPack)
+

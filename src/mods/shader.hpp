@@ -97,6 +97,16 @@ static std::function<bool(reshade::api::command_list*)> invoked_custom_swapchain
       },                                                                              \
     }                                                                                 \
   }
+#define CustomOpenGLVulkanShaders(__crc32__)                                          \
+  {                                                                                   \
+    __crc32__, {                                                                      \
+      .crc32 = __crc32__,                                                             \
+      .code_by_device = {                                                             \
+          {reshade::api::device_api::opengl, RENODX_JOIN_MACRO(__##__crc32__, _gl)},  \
+          {reshade::api::device_api::vulkan, RENODX_JOIN_MACRO(__##__crc32__, _vk)},  \
+      },                                                                              \
+    }                                                                                 \
+  }
 
 static thread_local std::vector<reshade::api::pipeline_layout_param*> created_params;
 static thread_local std::unordered_map<uint32_t, reshade::api::pipeline_layout_param*> rebuilt_params;
