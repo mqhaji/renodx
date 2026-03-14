@@ -5,6 +5,7 @@
 #include <exception>
 #include <filesystem>
 #include <include/reshade.hpp>
+#include <stdexcept>
 
 #include <Windows.h>
 
@@ -53,6 +54,15 @@ struct CustomShader {
 
   [[nodiscard]] std::string GetFileAlias() const {
     auto filename = file_path.filename().string();
+    auto AliasBeforeHash = [](const std::string& base) -> std::string {
+      if (auto hash_pos = base.rfind("_0x"); hash_pos != std::string::npos) {
+        return base.substr(0, hash_pos);
+      }
+      if (base.size() == 10 && base.rfind("0x", 0) == 0) {
+        return "";
+      }
+      return base;
+    };
     if (is_hlsl) {
       static const auto CHARACTERS_TO_REMOVE_FROM_END = std::string("0x12345678.xx_x_x.hlsl").length();
       filename.erase(filename.length() - (std::min)(CHARACTERS_TO_REMOVE_FROM_END, filename.length()));
@@ -68,10 +78,21 @@ struct CustomShader {
       if (auto target_pos = filename.rfind('.'); target_pos != std::string::npos) {
         filename.erase(target_pos);
       }
-      if (auto hash_pos = filename.rfind("_0x"); hash_pos != std::string::npos) {
-        filename.erase(hash_pos);
+      return AliasBeforeHash(filename);
+    }
+    if (is_glsl) {
+      if (auto suffix_pos = filename.rfind(".glsl"); suffix_pos != std::string::npos) {
+        filename.erase(suffix_pos);
       }
-      return filename;
+      if (filename.ends_with(".spv")) {
+        filename.erase(filename.size() - 4);
+      }
+      if (filename.ends_with(".frag") || filename.ends_with(".vert") || filename.ends_with(".comp")) {
+        if (auto target_pos = filename.rfind('.'); target_pos != std::string::npos) {
+          filename.erase(target_pos);
+        }
+      }
+      return AliasBeforeHash(filename);
     }
     return "";
   }
@@ -103,6 +124,7 @@ static std::aligned_storage_t<1U << 18, std::max<size_t>(alignof(FILE_NOTIFY_EXT
 
 static bool CompileCustomShaders() {
   const std::unique_lock compile_lock(compile_mutex);
+  const auto local_device_api = static_cast<reshade::api::device_api>(shared_device_api.load());
   struct WorkItem {
     std::filesystem::path entry_path;
     bool is_hlsl = false;
@@ -124,11 +146,24 @@ static bool CompileCustomShaders() {
   auto ResolveShaderTargetForApi = [&](const std::string& target) {
     if (target.size() < 4 || !target.ends_with("_x")) return target;
     if (target.find("_5_") == std::string::npos) return target;
-    const auto device_api = static_cast<reshade::api::device_api>(shared_device_api.load());
     std::string resolved = target;
     resolved[resolved.size() - 1] =
-        (device_api == reshade::api::device_api::d3d12) ? '1' : '0';
+        (local_device_api == reshade::api::device_api::d3d12) ? '1' : '0';
     return resolved;
+  };
+
+  auto ParseStageTargetAndHash = [&](const std::filesystem::path& entry_path, const char* suffix, std::string& out_target, std::string& out_hash) {
+    const auto& filename = entry_path.filename().string();
+    const auto suffix_pos = filename.rfind(suffix);
+    if (suffix_pos == std::string::npos || suffix_pos == 0) return false;
+    const auto before_suffix = filename.substr(0, suffix_pos);
+    const auto target_dot = before_suffix.rfind('.');
+    if (target_dot == std::string::npos || target_dot == 0) return false;
+    out_target = before_suffix.substr(target_dot + 1);
+    const auto shader_name = before_suffix.substr(0, target_dot);
+    if (shader_name.size() < 10 || shader_name.rfind("0x") != shader_name.size() - 10) return false;
+    out_hash = shader_name.substr(shader_name.size() - 8, 8);
+    return true;
   };
 
   std::vector<std::pair<std::string, std::string>> local_shader_defines;
@@ -177,8 +212,6 @@ static bool CompileCustomShaders() {
       auto basename = entry_path.stem().string();
       std::string hash_string;
       std::string shader_target;
-      std::string shader_stage;
-
       if (is_hlsl) {
         auto length = basename.length();
         if (length < strlen("0x12345678.xx_x_x")) continue;
@@ -189,17 +222,26 @@ static bool CompileCustomShaders() {
         // uint32_t versionMajor = shader_target[3] - '0';
         hash_string = basename.substr(length - strlen("12345678.xx_x_x"), 8);
       } else if (is_slang) {
-        const auto& filename = entry_path.filename().string();
-        const auto slang_suffix = filename.rfind(".slang");
-        if (slang_suffix == std::string::npos || slang_suffix == 0) continue;
-        const auto before_suffix = filename.substr(0, slang_suffix);
-        const auto target_dot = before_suffix.rfind('.');
-        if (target_dot == std::string::npos || target_dot == 0) continue;
-        shader_target = before_suffix.substr(target_dot + 1);
-        const auto shader_name = before_suffix.substr(0, target_dot);
-        if (shader_name.size() < 10 || shader_name.rfind("0x") != shader_name.size() - 10) continue;
-        hash_string = shader_name.substr(shader_name.size() - 8, 8);
-      } else if (is_cso || is_spv || is_glsl) {
+        if (!ParseStageTargetAndHash(entry_path, ".slang", shader_target, hash_string)) continue;
+      } else if (is_glsl) {
+        const bool has_stage_suffix =
+            ParseStageTargetAndHash(entry_path, ".spv.glsl", shader_target, hash_string)
+            || ParseStageTargetAndHash(entry_path, ".glsl", shader_target, hash_string);
+        if (!has_stage_suffix) {
+          // Legacy GLSL path: binaries files must start with 0x12345678. The rest is ignored.
+          if (basename.size() < 10) {
+            std::stringstream s;
+            s << "CompileCustomShaders(Invalid file format: ";
+            s << basename;
+            s << ")";
+            reshade::log::message(reshade::log::level::warning, s.str().c_str());
+            continue;
+          }
+          hash_string = basename.substr(2, 8);
+        } else if (shader_target != "frag" && shader_target != "vert" && shader_target != "comp") {
+          shader_target.clear();
+        }
+      } else if (is_cso || is_spv) {
         // Binaries files must start with 0x12345678. The rest of the basename is ignored.
         if (basename.size() < 10) {
           std::stringstream s;
@@ -314,6 +356,51 @@ static bool CompileCustomShaders() {
               .file_path = item.entry_path,
           },
       };
+      auto LogCompilationFailed = [&]() {
+        std::stringstream s;
+        s << "loadCustomShaders(Compilation failed: ";
+        s << item.entry_path.string();
+        s << ", " << result.custom_shader.GetCompilationException().what();
+        s << ")";
+        reshade::log::message(reshade::log::level::warning, s.str().c_str());
+      };
+      auto LoadBinary = [&]() {
+        try {
+          result.processed = RetryCompile(
+              [&]() {
+                return utils::path::ReadBinaryFile(item.entry_path);
+              },
+              item.entry_path,
+              result.custom_shader.compilation);
+          if (!result.processed) {
+            result.failed = true;
+          }
+        } catch (std::exception& e) {
+          result.custom_shader.compilation = e;
+          result.failed = true;
+        }
+      };
+      auto CompileWithSlang = [&]() {
+        try {
+          result.processed = RetryCompile(
+              [&]() {
+                return renodx::utils::shader::compiler::slang::CompileShaderFromFile(
+                    item.entry_path.c_str(),
+                    item.shader_target.c_str(),
+                    local_shader_defines);
+              },
+              item.entry_path,
+              result.custom_shader.compilation);
+          if (!result.processed) {
+            result.failed = true;
+            LogCompilationFailed();
+          }
+        } catch (std::exception& e) {
+          result.failed = true;
+          result.custom_shader.compilation = e;
+          LogCompilationFailed();
+        }
+      };
 
       if (item.is_hlsl) {
         try {
@@ -347,51 +434,24 @@ static bool CompileCustomShaders() {
         }
 
       } else if (item.is_slang) {
-        try {
-          result.processed = RetryCompile(
-              [&]() {
-                return renodx::utils::shader::compiler::slang::CompileShaderFromFile(
-                    item.entry_path.c_str(),
-                    item.shader_target.c_str(),
-                    local_shader_defines);
-              },
-              item.entry_path,
-              result.custom_shader.compilation);
-          if (!result.processed) {
+        CompileWithSlang();
+
+      } else if (item.is_glsl) {
+        if (local_device_api == reshade::api::device_api::vulkan) {
+          if (item.shader_target.empty()) {
+            result.custom_shader.compilation = std::runtime_error(
+                "Invalid GLSL shader stage. Expected filename suffix '.frag.glsl', '.vert.glsl', or '.comp.glsl'.");
             result.failed = true;
-            std::stringstream s;
-            s << "loadCustomShaders(Compilation failed: ";
-            s << item.entry_path.string();
-            s << ", " << result.custom_shader.GetCompilationException().what();
-            s << ")";
-            reshade::log::message(reshade::log::level::warning, s.str().c_str());
+            LogCompilationFailed();
+          } else {
+            CompileWithSlang();
           }
-        } catch (std::exception& e) {
-          result.failed = true;
-          result.custom_shader.compilation = e;
-          std::stringstream s;
-          s << "loadCustomShaders(Compilation failed: ";
-          s << item.entry_path.string();
-          s << ", " << result.custom_shader.GetCompilationException().what();
-          s << ")";
-          reshade::log::message(reshade::log::level::warning, s.str().c_str());
+        } else {
+          LoadBinary();
         }
 
-      } else if (item.is_cso || item.is_spv || item.is_glsl) {
-        try {
-          result.processed = RetryCompile(
-              [&]() {
-                return utils::path::ReadBinaryFile(item.entry_path);
-              },
-              item.entry_path,
-              result.custom_shader.compilation);
-          if (!result.processed) {
-            result.failed = true;
-          }
-        } catch (std::exception& e) {
-          result.custom_shader.compilation = e;
-          result.failed = true;
-        }
+      } else if (item.is_cso || item.is_spv) {
+        LoadBinary();
       }
 
       results[index] = std::move(result);

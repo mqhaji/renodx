@@ -13,20 +13,20 @@
 
 namespace fs = std::filesystem;
 
-// Parse a single HLSL file for #include directives
-// Returns normalized absolute paths to avoid duplicates like "foo.hlsl" vs "././foo.hlsl"
-std::set<fs::path> ParseIncludes(const fs::path& hlsl_file) {
+// Parse a single source file for #include directives.
+// Returns normalized absolute paths to avoid duplicates like "foo.hlsl" vs "././foo.hlsl".
+std::set<fs::path> ParseIncludes(const fs::path& source_file) {
   std::set<fs::path> includes;
-  std::ifstream file(hlsl_file);
+  std::ifstream file(source_file);
   if (!file.is_open()) {
-    std::cerr << "Warning: Could not open " << hlsl_file << '\n';
+    std::cerr << "Warning: Could not open " << source_file << '\n';
     return includes;
   }
 
   // Match: #include "path" or #include <path>
   std::regex include_regex(R"(^\s*#\s*include\s+[\"<]([^\">]+)[\">])");
   std::string line;
-  auto base_dir = hlsl_file.parent_path();
+  auto base_dir = source_file.parent_path();
 
   while (std::getline(file, line)) {
     std::smatch match;
@@ -49,17 +49,17 @@ std::set<fs::path> ParseIncludes(const fs::path& hlsl_file) {
 // Recursively collect all dependencies
 // NOLINTNEXTLINE
 void CollectDependencies(
-    const fs::path& hlsl_file,
+    const fs::path& source_file,
     std::set<fs::path>& visited,
     std::vector<fs::path>& dependencies) {
   // Avoid infinite loops
-  if (visited.contains(hlsl_file)) {
+  if (visited.contains(source_file)) {
     return;
   }
-  visited.insert(hlsl_file);
+  visited.insert(source_file);
 
   // Parse includes from this file (already normalized)
-  auto includes = ParseIncludes(hlsl_file);
+  auto includes = ParseIncludes(source_file);
 
   for (const auto& resolved : includes) {
 
@@ -119,8 +119,8 @@ void WriteDependencyFile(
 
 int main(int argc, char* argv[]) {
   if (argc != 4) {
-    std::cerr << "Usage: " << argv[0] << " <input.hlsl> <output.h> <depfile.d>" << '\n';
-    std::cerr << "  Analyzes HLSL #include dependencies and writes a Ninja-style .d file" << '\n';
+    std::cerr << "Usage: " << argv[0] << " <input.source> <output.binary> <depfile.d>" << '\n';
+    std::cerr << "  Analyzes source #include dependencies and writes a Ninja-style .d file" << '\n';
     return 1;
   }
 
