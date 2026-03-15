@@ -372,7 +372,8 @@ static bool OnCreatePipelineLayout(
     //   aligned_dword_count = ((aligned_dword_count + 3u) & ~3u);
     // }
     const uint32_t vk_new_pc_count = vk_aligned_pc_count + shader_injection_size;
-    const uint32_t vk_new_total_pc_count = aligned_dword_count + shader_injection_size;
+    const uint32_t vk_new_total_pc_count = aligned_dword_count + shader_injection_size;\
+    // TODO(Ritsu): Revise the limit
     constexpr uint32_t vk_max_pc_count = 64u;  // Vulkan PC ranges, but 64(256 bytes) is a common limit
 
     if (vk_new_total_pc_count > vk_max_pc_count) {
@@ -871,7 +872,7 @@ inline void OnBindDescriptorTables(
 #endif
     cmd_list->bind_descriptor_table(stages, cloned_layout, (first + i), tables[i]);
     if (!is_vulkan) {
-      // Pushing twice messes up Vulkan's descriptors, unlike DX12
+      // Avoid replacing in vulkan
       cmd_list->bind_descriptor_table(stages, layout, (first + i), tables[i]);
     }
   }
