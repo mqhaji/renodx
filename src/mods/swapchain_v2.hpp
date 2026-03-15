@@ -894,6 +894,10 @@ static void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
           reshade::log::message(reshade::log::level::info, "mods::swapchain::OnInitSwapchain(Overriding existing clone target.)");
         }
         info->clone_target = &data->swap_chain_clone_info;
+        // Dont upgrade swapchain view in vulkan
+        if(swapchain->get_device()->get_api() == reshade::api::device_api::vulkan){
+          info->clone_target->use_resource_view_cloning_and_upgrade = false;
+        }
       }
     }
   }

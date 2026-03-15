@@ -216,6 +216,12 @@ struct SwapchainProxyPass {
     }
 #endif
     pass.revert_state_after_render = revert_state;
+    if (is_vulkan) {
+      pass.render_target_load_op = reshade::api::render_pass_load_op::discard;
+    } else {
+      pass.render_target_load_op = reshade::api::render_pass_load_op::load;
+    }
+    pass.render_target_store_op = reshade::api::render_pass_store_op::store;
     pass.pipeline_subobjects.vertex_shader = vertex_shader;
     pass.pipeline_subobjects.pixel_shader = pixel_shader;
     pass.pipeline_subobjects.compute_shader = {};
@@ -258,8 +264,7 @@ struct SwapchainProxyPass {
     if (is_vulkan) {
       const reshade::api::resource final_resources[] = {current_back_buffer};
       const reshade::api::resource_usage final_old_states[] = {
-          reshade::api::resource_usage::render_target
-          | reshade::api::resource_usage::general};
+          reshade::api::resource_usage::render_target};
       const reshade::api::resource_usage final_new_states[] = {
           reshade::api::resource_usage::present};
       cmd_list->barrier(

@@ -853,6 +853,8 @@ static bool OnCreatePipeline(
             auto new_size = replacement.size();
 
             desc->code_size = new_size;
+            // unify entry points
+            desc->entry_point = "main";
 
             if (new_size == 0) {
               desc->code = nullptr;
