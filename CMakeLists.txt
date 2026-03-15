@@ -34,6 +34,16 @@ if(DEFINED ENV{VULKAN_SDK})
   set(VULKAN_SDK_PATH "$ENV{VULKAN_SDK}")
 endif()
 
+find_program(GLSLANGVALIDATOR_BIN glslangValidator.exe
+  HINTS
+  ${VULKAN_SDK_PATH}/Bin
+  ${CMAKE_CURRENT_SOURCE_DIR}/bin/
+  REQUIRED)
+message("GLSLANGVALIDATOR_BIN: " ${GLSLANGVALIDATOR_BIN})
+set(GLSLANGVALIDATOR_FLAGS_LIST -V --target-env vulkan1.3)
+list(JOIN GLSLANGVALIDATOR_FLAGS_LIST " " GLSLANGVALIDATOR_FLAGS_STR)
+file(TO_CMAKE_PATH "${GLSLANGVALIDATOR_BIN}" GLSLANGVALIDATOR_BIN_CMAKE_PATH)
+
 set(SPIRV_VAL_FLAGS_LIST --target-env vulkan1.3)
 list(JOIN SPIRV_VAL_FLAGS_LIST " " SPIRV_VAL_FLAGS_STR)
 
@@ -228,7 +238,7 @@ function(build_shader_target ADDON ADDON_PATH)
         add_custom_command(
           OUTPUT ${EMBED_FOLDER}/${OUTPUT_STEM}.spv
           COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${OUTPUT_STEM}.spv ${DEPFILE_SPV}
-          COMMAND ${SHADER_COMPILER} ${FILE} -stage ${SHADER_STAGE} ${SHADER_FLAGS} -target spirv -o ${EMBED_FOLDER}/${OUTPUT_STEM}.spv
+          COMMAND ${SPIRV_COMPILE_COMMAND}
           COMMAND ${CMAKE_COMMAND} -DVALIDATOR="${SPIRV_VAL_BIN}" -DFILE="${EMBED_FOLDER}/${OUTPUT_STEM}.spv" -DFLAGS="${SPIRV_VAL_FLAGS_STR}" -P ${SPIRV_VAL_SCRIPT}
           DEPENDS ${SHADER_DEPENDS} analyze_shader_deps
           DEPFILE ${DEPFILE_SPV}
@@ -237,7 +247,7 @@ function(build_shader_target ADDON ADDON_PATH)
         add_custom_command(
           OUTPUT ${EMBED_FOLDER}/${OUTPUT_STEM}.spv
           COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${OUTPUT_STEM}.spv ${DEPFILE_SPV}
-          COMMAND ${SHADER_COMPILER} ${FILE} -stage ${SHADER_STAGE} ${SHADER_FLAGS} -target spirv -o ${EMBED_FOLDER}/${OUTPUT_STEM}.spv
+          COMMAND ${SPIRV_COMPILE_COMMAND}
           DEPENDS ${SHADER_DEPENDS} analyze_shader_deps
           DEPFILE ${DEPFILE_SPV}
         )
@@ -452,101 +462,18 @@ function(build_shader_target ADDON ADDON_PATH)
           set(SHADER_STAGE "compute")
         endif()
         set(SHADER_DEPENDS ${HLSL_DEPENDENCIES})
+        set(SPIRV_COMPILE_COMMAND
+          ${SHADER_COMPILER} ${FILE} -stage ${SHADER_STAGE} ${SHADER_FLAGS} -target spirv -o ${EMBED_FOLDER}/${SHADER_HASH}.spv)
 
         if(SHADER_HASH)
           add_stage_spirv_shader(${SHADER_HASH})
         else()
+          set(SPIRV_COMPILE_COMMAND
+            ${SHADER_COMPILER} ${FILE} -stage ${SHADER_STAGE} ${SHADER_FLAGS} -target spirv -o ${EMBED_FOLDER}/${SHADER_NAME}.spv)
           add_stage_spirv_shader(${SHADER_NAME})
         endif()
       else()
-        string(SUBSTRING ${SHADER_TARGET} 3 1 SHADER_TARGET_MAJOR)
-        string(SUBSTRING ${SHADER_TARGET} 5 1 SHADER_TARGET_MINOR)
-        if(SHADER_TARGET_MAJOR STREQUAL "5" AND SHADER_TARGET_MINOR STREQUAL "x")
-
-          string(SUBSTRING ${SHADER_TARGET} 0 2 SHADER_TARGET_TYPE)
-
-          # Add dependencies
-          unset(HLSL_DEPENDENCIES)
-          unset(HLSL_CHILD_DEPENDENCIES)
-          list(APPEND HLSL_DEPENDENCIES ${FILE})
-          inspect_hlsl_imports(${FILE} HLSL_CHILD_DEPENDENCIES ".")
-          list(APPEND HLSL_DEPENDENCIES ${HLSL_CHILD_DEPENDENCIES})
-
-          if(SHADER_HASH)
-            set(DEPFILE ${CMAKE_CURRENT_BINARY_DIR}/${ADDON}/${SHADER_HASH}_dx11_slang.d)
-            add_custom_command(
-              OUTPUT ${EMBED_FOLDER}/${SHADER_HASH}_dx11.cso
-              COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_HASH}_dx11.cso ${DEPFILE}
-              COMMAND ${SHADER_COMPILER} ${FILE} -profile ${SHADER_TARGET_TYPE}_5_0 ${SHADER_FLAGS} -target dxbc -o ${EMBED_FOLDER}/${SHADER_HASH}_dx11.cso
-              DEPENDS ${HLSL_DEPENDENCIES} analyze_shader_deps
-              DEPFILE ${DEPFILE}
-            )
-            list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_HASH}_dx11.cso)
-          else()
-            set(DEPFILE ${CMAKE_CURRENT_BINARY_DIR}/${ADDON}/${SHADER_NAME}_dx11_slang.d)
-            add_custom_command(
-              OUTPUT ${EMBED_FOLDER}/${SHADER_NAME}_dx11.cso
-              COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_NAME}_dx11.cso ${DEPFILE}
-              COMMAND ${SHADER_COMPILER} ${FILE} -profile ${SHADER_TARGET_TYPE}_5_0 ${SHADER_FLAGS} -target dxbc -o ${EMBED_FOLDER}/${SHADER_NAME}_dx11.cso
-              DEPENDS ${HLSL_DEPENDENCIES} analyze_shader_deps
-              DEPFILE ${DEPFILE}
-            )
-            list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_NAME}_dx11.cso)
-          endif()
-
-          if(SHADER_HASH)
-            set(DEPFILE ${CMAKE_CURRENT_BINARY_DIR}/${ADDON}/${SHADER_HASH}_dx12_slang.d)
-            add_custom_command(
-              OUTPUT ${EMBED_FOLDER}/${SHADER_HASH}_dx12.cso
-              COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_HASH}_dx12.cso ${DEPFILE}
-              COMMAND ${SHADER_COMPILER} ${FILE} -profile ${SHADER_TARGET_TYPE}_5_1 ${SHADER_FLAGS} -target dxbc -o ${EMBED_FOLDER}/${SHADER_HASH}_dx12.cso
-              DEPENDS ${HLSL_DEPENDENCIES} analyze_shader_deps
-              DEPFILE ${DEPFILE}
-            )
-            list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_HASH}_dx12.cso)
-          else()
-            set(DEPFILE ${CMAKE_CURRENT_BINARY_DIR}/${ADDON}/${SHADER_NAME}_dx12_slang.d)
-            add_custom_command(
-              OUTPUT ${EMBED_FOLDER}/${SHADER_NAME}_dx12.cso
-              COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_NAME}_dx12.cso ${DEPFILE}
-              COMMAND ${SHADER_COMPILER} ${FILE} -profile ${SHADER_TARGET_TYPE}_5_1 ${SHADER_FLAGS} -target dxbc -o ${EMBED_FOLDER}/${SHADER_NAME}_dx12.cso
-              DEPENDS ${HLSL_DEPENDENCIES} analyze_shader_deps
-              DEPFILE ${DEPFILE}
-            )
-            list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_NAME}_dx12.cso)
-          endif()
-
-        else()
-          # Add dependencies
-          unset(HLSL_DEPENDENCIES)
-          unset(HLSL_CHILD_DEPENDENCIES)
-          list(APPEND HLSL_DEPENDENCIES ${FILE})
-          inspect_hlsl_imports(${FILE} HLSL_CHILD_DEPENDENCIES ".")
-          list(APPEND HLSL_DEPENDENCIES ${HLSL_CHILD_DEPENDENCIES})
-
-          if(SHADER_HASH)
-            # message("Registering: " ${FILE} " => " ${EMBED_FOLDER}/${SHADER_HASH}.cso)
-            set(DEPFILE ${CMAKE_CURRENT_BINARY_DIR}/${ADDON}/${SHADER_HASH}_slang.d)
-            add_custom_command(
-              OUTPUT ${EMBED_FOLDER}/${SHADER_HASH}.cso
-              COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_HASH}.cso ${DEPFILE}
-              COMMAND ${SHADER_COMPILER} ${FILE} -profile ${SHADER_TARGET} ${SHADER_FLAGS} -target dxil -o ${EMBED_FOLDER}/${SHADER_HASH}.cso
-              DEPENDS ${HLSL_DEPENDENCIES} analyze_shader_deps
-              DEPFILE ${DEPFILE}
-            )
-            list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_HASH}.cso)
-          else()
-            set(DEPFILE ${CMAKE_CURRENT_BINARY_DIR}/${ADDON}/${SHADER_NAME}_slang.d)
-            add_custom_command(
-              OUTPUT ${EMBED_FOLDER}/${SHADER_NAME}.cso
-              COMMAND $<TARGET_FILE:analyze_shader_deps> ${FILE} ${EMBED_FOLDER}/${SHADER_NAME}.cso ${DEPFILE}
-              COMMAND ${SHADER_COMPILER} ${FILE} -profile ${SHADER_TARGET} ${SHADER_FLAGS} -target dxil -o ${EMBED_FOLDER}/${SHADER_NAME}.cso
-              DEPENDS ${HLSL_DEPENDENCIES} analyze_shader_deps
-              DEPFILE ${DEPFILE}
-            )
-            list(APPEND SHADER_BINARIES ${EMBED_FOLDER}/${SHADER_NAME}.cso)
-          endif()
-        endif()
+        message(WARNING "Skipping slang file (only stage targets are supported: frag/vert/comp): ${FILE}")
       endif()
     else()
       #message(WARNING "Skipping shader file: " ${FILE} " - Invalid target or name.")
@@ -664,21 +591,25 @@ function(build_shader_target ADDON ADDON_PATH)
     endif()
 
     #GLSL
-    set(SHADER_COMPILER ${SLANGC_BIN})
+    set(SHADER_COMPILER ${GLSLANGVALIDATOR_BIN})
     unset(SHADER_FLAGS)
-    set(SHADER_FLAGS ${SLANGC_FLAGS_LIST})
+    set(SHADER_FLAGS ${GLSLANGVALIDATOR_FLAGS_LIST})
     unset(SHADER_STAGE)
     if(SHADER_TARGET STREQUAL "frag")
-      set(SHADER_STAGE "fragment")
+      set(SHADER_STAGE "frag")
     elseif(SHADER_TARGET STREQUAL "vert")
-      set(SHADER_STAGE "vertex")
+      set(SHADER_STAGE "vert")
     elseif(SHADER_TARGET STREQUAL "comp")
-      set(SHADER_STAGE "compute")
+      set(SHADER_STAGE "comp")
     endif()
     set(SHADER_DEPENDS ${FILE})
 
     if(SHADER_STAGE AND SHADER_HASH)
+      set(SPIRV_COMPILE_COMMAND
+        ${SHADER_COMPILER} ${SHADER_FLAGS} -S ${SHADER_STAGE} -o ${EMBED_FOLDER}/${SHADER_HASH}.spv ${FILE})
       if(DUAL_SPV_GLSL)
+        set(SPIRV_COMPILE_COMMAND
+          ${SHADER_COMPILER} ${SHADER_FLAGS} -S ${SHADER_STAGE} -o ${EMBED_FOLDER}/${SHADER_HASH}_vk.spv ${FILE})
         set(SHADER_DEPENDS ${FILE})
         add_stage_spirv_shader(${SHADER_HASH}_vk)
         add_gl_vk_spirv_alias(${SHADER_HASH})
@@ -686,7 +617,11 @@ function(build_shader_target ADDON ADDON_PATH)
         add_stage_spirv_shader(${SHADER_HASH})
       endif()
     elseif(SHADER_STAGE AND SHADER_NAME)
+      set(SPIRV_COMPILE_COMMAND
+        ${SHADER_COMPILER} ${SHADER_FLAGS} -S ${SHADER_STAGE} -o ${EMBED_FOLDER}/${SHADER_NAME}.spv ${FILE})
       if(DUAL_SPV_GLSL)
+        set(SPIRV_COMPILE_COMMAND
+          ${SHADER_COMPILER} ${SHADER_FLAGS} -S ${SHADER_STAGE} -o ${EMBED_FOLDER}/${SHADER_NAME}_vk.spv ${FILE})
         set(SHADER_DEPENDS ${FILE})
         add_stage_spirv_shader(${SHADER_NAME}_vk)
         add_gl_vk_spirv_alias(${SHADER_NAME})
@@ -889,7 +824,7 @@ foreach(FILE ${ADDON_FILES})
   generate_resource_rc(${ADDON})
   add_dependencies(${ADDON} ${ADDON}-shaders)
   add_dependencies(${ADDON} detours)
-  target_compile_definitions(${ADDON} PRIVATE RENODX_SLANGC_BIN_PATH="${SLANGC_BIN_CMAKE_PATH}" RENODX_SLANGC_FLAGS="${SLANGC_FLAGS_STR}" RENODX_SPIRV_CROSS_BIN_PATH="${SPIRV_CROSS_BIN_CMAKE_PATH}" RENODX_SPIRV_CROSS_FLAGS="${SPIRV_CROSS_FLAGS_STR}")
+  target_compile_definitions(${ADDON} PRIVATE RENODX_SLANGC_BIN_PATH="${SLANGC_BIN_CMAKE_PATH}" RENODX_SLANGC_FLAGS="${SLANGC_FLAGS_STR}" RENODX_GLSLANGVALIDATOR_BIN_PATH="${GLSLANGVALIDATOR_BIN_CMAKE_PATH}" RENODX_GLSLANGVALIDATOR_FLAGS="${GLSLANGVALIDATOR_FLAGS_STR}" RENODX_SPIRV_CROSS_BIN_PATH="${SPIRV_CROSS_BIN_CMAKE_PATH}" RENODX_SPIRV_CROSS_FLAGS="${SPIRV_CROSS_FLAGS_STR}")
   target_link_libraries(${ADDON} PRIVATE detours)
   target_link_libraries(${ADDON} PRIVATE Vulkan::Vulkan)
   target_include_directories(${ADDON} SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/external/Detours/include)

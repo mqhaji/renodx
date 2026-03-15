@@ -21,7 +21,7 @@
 #include "./format.hpp"
 #include "./path.hpp"
 #include "./shader_compiler_directx.hpp"
-#include "./shader_compiler_slang.hpp"
+#include "./shader_compiler_vulkan.hpp"
 
 namespace renodx::utils::shader::compiler::watcher {
 
@@ -384,7 +384,28 @@ static bool CompileCustomShaders() {
         try {
           result.processed = RetryCompile(
               [&]() {
-                return renodx::utils::shader::compiler::slang::CompileShaderFromFile(
+                return renodx::utils::shader::compiler::vulkan::CompileShaderFromFile(
+                    item.entry_path.c_str(),
+                    item.shader_target.c_str(),
+                    local_shader_defines);
+              },
+              item.entry_path,
+              result.custom_shader.compilation);
+          if (!result.processed) {
+            result.failed = true;
+            LogCompilationFailed();
+          }
+        } catch (std::exception& e) {
+          result.failed = true;
+          result.custom_shader.compilation = e;
+          LogCompilationFailed();
+        }
+      };
+      auto CompileWithGlslangValidator = [&]() {
+        try {
+          result.processed = RetryCompile(
+              [&]() {
+                return renodx::utils::shader::compiler::vulkan::CompileGlslFromFile(
                     item.entry_path.c_str(),
                     item.shader_target.c_str(),
                     local_shader_defines);
@@ -440,11 +461,11 @@ static bool CompileCustomShaders() {
         if (local_device_api == reshade::api::device_api::vulkan) {
           if (item.shader_target.empty()) {
             result.custom_shader.compilation = std::runtime_error(
-                "Invalid GLSL shader stage. Expected filename suffix '.frag.glsl', '.vert.glsl', or '.comp.glsl'.");
+                "Invalid GLSL shader stage. Expected filename suffix '.frag.glsl', '.vert.glsl', '.comp.glsl', '.frag.spv.glsl', '.vert.spv.glsl', or '.comp.spv.glsl'.");
             result.failed = true;
             LogCompilationFailed();
           } else {
-            CompileWithSlang();
+            CompileWithGlslangValidator();
           }
         } else {
           LoadBinary();
@@ -761,3 +782,4 @@ static void RequestCompile() {
 }
 
 }  // namespace renodx::utils::shader::compiler::watcher
+

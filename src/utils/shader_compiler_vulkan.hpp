@@ -25,12 +25,14 @@
 
 #include "./path.hpp"
 
-namespace renodx::utils::shader::compiler::slang {
+namespace renodx::utils::shader::compiler::vulkan {
 
 namespace internal {
 
 static std::shared_mutex mutex_slangc_path;
 static std::filesystem::path cached_slangc_path;
+static std::shared_mutex mutex_glslangvalidator_path;
+static std::filesystem::path cached_glslangvalidator_path;
 static std::atomic_uint32_t compile_counter = 0;
 static std::optional<std::filesystem::path> cached_spirv_dis;
 static std::optional<std::filesystem::path> cached_spirv_cross;
@@ -81,12 +83,12 @@ inline ProcessResult RunProcess(const std::wstring& command_line, const std::fil
   HANDLE read_pipe = nullptr;
   HANDLE write_pipe = nullptr;
   if (!CreatePipe(&read_pipe, &write_pipe, &security_attributes, 0)) {
-    throw std::exception("Failed to create slangc pipe.");
+    throw std::exception("Failed to create compiler pipe.");
   }
   if (!SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0)) {
     CloseHandle(read_pipe);
     CloseHandle(write_pipe);
-    throw std::exception("Failed to configure slangc pipe.");
+    throw std::exception("Failed to configure compiler pipe.");
   }
 
   STARTUPINFOW startup_info{};
@@ -114,7 +116,7 @@ inline ProcessResult RunProcess(const std::wstring& command_line, const std::fil
 
   if (!created) {
     CloseHandle(read_pipe);
-    throw std::exception("Failed to launch slangc.");
+    throw std::exception("Failed to launch compiler.");
   }
 
   std::string output;
@@ -194,6 +196,74 @@ inline std::filesystem::path FindSlangcPath() {
   throw std::exception("Could not locate slangc.exe. Set SLANGC_BIN or place it next to the addon or in a bin folder.");
 }
 
+inline std::filesystem::path FindGlslangValidatorPath() {
+  {
+    std::shared_lock lock(mutex_glslangvalidator_path);
+    if (!cached_glslangvalidator_path.empty()) return cached_glslangvalidator_path;
+  }
+
+  std::unique_lock lock(mutex_glslangvalidator_path);
+  if (!cached_glslangvalidator_path.empty()) return cached_glslangvalidator_path;
+
+#ifdef RENODX_GLSLANGVALIDATOR_BIN_PATH
+  if (!std::string(RENODX_GLSLANGVALIDATOR_BIN_PATH).empty()) {
+    auto cmake_path = std::filesystem::path(RENODX_GLSLANGVALIDATOR_BIN_PATH);
+    if (std::filesystem::exists(cmake_path)) {
+      cached_glslangvalidator_path = cmake_path;
+      return cached_glslangvalidator_path;
+    }
+  }
+#endif
+
+  auto try_candidate = [&](const std::filesystem::path& candidate) {
+    if (!candidate.empty() && std::filesystem::exists(candidate)) {
+      cached_glslangvalidator_path = candidate;
+      return true;
+    }
+    return false;
+  };
+
+  auto try_env = [&](const wchar_t* name) {
+    wchar_t* env_path = nullptr;
+    size_t env_len = 0;
+    if (_wdupenv_s(&env_path, &env_len, name) != 0 || env_path == nullptr) {
+      return false;
+    }
+    std::filesystem::path candidate = env_path;
+    free(env_path);
+    return try_candidate(candidate);
+  };
+
+  if (try_env(L"GLSLANGVALIDATOR_BIN")) return cached_glslangvalidator_path;
+  if (try_env(L"GLSLANGVALIDATOR")) return cached_glslangvalidator_path;
+
+  wchar_t* vulkan_sdk = nullptr;
+  size_t vulkan_sdk_len = 0;
+  if (_wdupenv_s(&vulkan_sdk, &vulkan_sdk_len, L"VULKAN_SDK") == 0 && vulkan_sdk != nullptr) {
+    std::filesystem::path sdk_path = vulkan_sdk;
+    free(vulkan_sdk);
+    if (try_candidate(sdk_path / "Bin" / "glslangValidator.exe")) return cached_glslangvalidator_path;
+  }
+
+  try {
+    if (try_candidate(std::filesystem::current_path() / "glslangValidator.exe")) return cached_glslangvalidator_path;
+  } catch (...) {
+  }
+
+  std::array<wchar_t, MAX_PATH> module_path{};
+  GetModuleFileNameW(nullptr, module_path.data(), static_cast<DWORD>(module_path.size()));
+  std::filesystem::path search_root = std::filesystem::path(module_path.data()).parent_path();
+  for (int i = 0; i < 4; ++i) {
+    if (try_candidate(search_root / "glslangValidator.exe")) return cached_glslangvalidator_path;
+    if (try_candidate(search_root / "bin" / "glslangValidator.exe")) return cached_glslangvalidator_path;
+    if (!search_root.has_parent_path()) break;
+    search_root = search_root.parent_path();
+  }
+
+  throw std::exception(
+      "Could not locate glslangValidator.exe. Set GLSLANGVALIDATOR_BIN or place it next to the addon or in a bin folder.");
+}
+
 inline std::filesystem::path GetTempOutputPath(const std::wstring& extension) {
   auto output_dir = renodx::utils::path::GetOutputPath();
   if (!std::filesystem::exists(output_dir)) {
@@ -237,6 +307,16 @@ inline void AppendDefaultFlags(std::vector<std::wstring>& args) {
   args.emplace_back(L"main");
   args.emplace_back(L"-Wno-30056");
   args.emplace_back(L"-Wno-15205");
+#endif
+}
+
+inline void AppendGlslangValidatorDefaultFlags(std::vector<std::wstring>& args) {
+#ifdef RENODX_GLSLANGVALIDATOR_FLAGS
+  AppendFlagsFromString(RENODX_GLSLANGVALIDATOR_FLAGS, args);
+#else
+  args.emplace_back(L"-V");
+  args.emplace_back(L"--target-env");
+  args.emplace_back(L"vulkan1.3");
 #endif
 }
 
@@ -467,7 +547,11 @@ inline std::vector<uint8_t> CompileShaderFromFile(
     stage = L"compute";
   }
 
-  std::wstring output_extension = is_stage_target ? L".spv" : L".cso";
+  if (!is_stage_target) {
+    throw std::exception("Only Slang stage targets are supported (frag/vert/comp).");
+  }
+
+  std::wstring output_extension = L".spv";
   auto output_path = internal::GetTempOutputPath(output_extension);
 
   std::vector<std::wstring> args;
@@ -481,21 +565,6 @@ inline std::vector<uint8_t> CompileShaderFromFile(
     args.emplace_back(stage);
     args.emplace_back(L"-target");
     args.emplace_back(L"spirv");
-  } else {
-    if (strlen(shader_target) < 5 || shader_target[2] != '_' || shader_target[4] != '_') {
-      throw std::exception("Invalid slang target profile.");
-    }
-    args.emplace_back(L"-profile");
-    args.emplace_back(std::wstring(shader_target, shader_target + strlen(shader_target)));
-
-    char major = shader_target[3];
-    if (major >= '6') {
-      args.emplace_back(L"-target");
-      args.emplace_back(L"dxil");
-    } else {
-      args.emplace_back(L"-target");
-      args.emplace_back(L"dxbc");
-    }
   }
 
   for (const auto& [key, value] : defines) {
@@ -531,4 +600,75 @@ inline std::vector<uint8_t> CompileShaderFromFile(
   return output_data;
 }
 
-}  // namespace renodx::utils::shader::compiler::slang
+inline std::vector<uint8_t> CompileGlslFromFile(
+    LPCWSTR file_path,
+    LPCSTR shader_target,
+    const std::vector<std::pair<std::string, std::string>>& defines = {}) {
+  if (file_path == nullptr || shader_target == nullptr) {
+    throw std::exception("Missing GLSL compile arguments.");
+  }
+
+  const std::filesystem::path source_path = file_path;
+  if (!std::filesystem::exists(source_path)) {
+    throw std::exception("GLSL source file not found.");
+  }
+
+  const std::string target = internal::ToLower(shader_target);
+  std::wstring stage;
+  if (target == "frag") {
+    stage = L"frag";
+  } else if (target == "vert") {
+    stage = L"vert";
+  } else if (target == "comp") {
+    stage = L"comp";
+  } else {
+    throw std::exception("Invalid GLSL stage target.");
+  }
+
+  auto output_path = internal::GetTempOutputPath(L".spv");
+
+  std::vector<std::wstring> args;
+  internal::AppendGlslangValidatorDefaultFlags(args);
+  args.emplace_back(L"-S");
+  args.emplace_back(stage);
+
+  std::wstring include_dir_flag = L"-I";
+  include_dir_flag.append(source_path.parent_path().wstring());
+  args.emplace_back(include_dir_flag);
+
+  for (const auto& [key, value] : defines) {
+    if (key.empty()) continue;
+    std::wstring definition = L"-D";
+    definition.append(std::wstring(key.begin(), key.end()));
+    if (!value.empty()) {
+      definition.push_back(L'=');
+      definition.append(std::wstring(value.begin(), value.end()));
+    }
+    args.emplace_back(definition);
+  }
+
+  args.emplace_back(L"-o");
+  args.emplace_back(output_path.wstring());
+  args.emplace_back(source_path.wstring());
+
+  const auto glslangvalidator_path = internal::FindGlslangValidatorPath();
+  const std::wstring command_line = internal::QuoteArg(glslangvalidator_path.wstring()) + L" " + internal::JoinArgs(args);
+  const auto result = internal::RunProcess(command_line, source_path.parent_path());
+
+  if (result.exit_code != 0) {
+    if (result.output.empty()) {
+      throw std::exception("glslangValidator failed.");
+    }
+    throw std::exception(result.output.c_str());
+  }
+
+  auto output_data = renodx::utils::path::ReadBinaryFile(output_path);
+  if (output_data.empty()) {
+    throw std::exception("glslangValidator did not produce output.");
+  }
+  std::filesystem::remove(output_path);
+  return output_data;
+}
+
+}  // namespace renodx::utils::shader::compiler::vulkan
+
