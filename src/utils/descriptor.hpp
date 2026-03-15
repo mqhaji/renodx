@@ -362,6 +362,11 @@ static bool OnCopyDescriptorTables(
 static reshade::api::descriptor_table_update* CloneDescriptorTableUpdates(
     const reshade::api::descriptor_table_update* updates,
     uint32_t count) {
+  constexpr auto k_vk_uniform_buffer_dynamic =
+      static_cast<reshade::api::descriptor_type>(8u);  // VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC
+  constexpr auto k_vk_storage_buffer_dynamic =
+      static_cast<reshade::api::descriptor_type>(9u);  // VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC
+
   const size_t size = sizeof(reshade::api::descriptor_table_update) * count;
   auto* clone = static_cast<reshade::api::descriptor_table_update*>(malloc(size));
   memcpy(clone, updates, size);
@@ -384,11 +389,16 @@ static reshade::api::descriptor_table_update* CloneDescriptorTableUpdates(
         break;
       case reshade::api::descriptor_type::constant_buffer:
       case reshade::api::descriptor_type::shader_storage_buffer:
+      case k_vk_uniform_buffer_dynamic:
+      case k_vk_storage_buffer_dynamic:
         descriptor_size = sizeof(reshade::api::buffer_range) * update.count;
         break;
       default:
         break;
     }
+    // Keep original descriptor pointer for unknown descriptor types.
+    if (descriptor_size == 0) continue;
+
     clone[i].descriptors = malloc(descriptor_size);
     memcpy(const_cast<void*>(clone[i].descriptors), update.descriptors, descriptor_size);
   }
