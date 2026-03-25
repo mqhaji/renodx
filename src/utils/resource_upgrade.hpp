@@ -1529,7 +1529,7 @@ inline bool OnCreateResourceView(
   if (use_resource_cloning) {
     if (resource_info->clone_target != nullptr) {
       auto* upgrade_info = resource_info->clone_target;
-      if (!upgrade_info->use_resource_view_cloning_and_upgrade && !(is_vulkan && is_back_buffer)) {  // Vulkan backbuffer views must be upgraded too
+      if (!upgrade_info->use_resource_view_cloning_and_upgrade) {
         return false;
       }
       // Upgrade on init instead (allows resource view handle reuse)
