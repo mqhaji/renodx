@@ -42,9 +42,26 @@ jobs:
           $installer = Join-Path $env:RUNNER_TEMP "vulkan-sdk-installer.exe"
           $installRoot = "C:\VulkanSDK"
           $installDir = Join-Path $installRoot $version
-          $url = "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe"
+          $urls = @(
+            "https://sdk.lunarg.com/sdk/download/$version/windows/vulkansdk-windows-X64-$version.exe",
+            "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe"
+          )
 
-          Invoke-WebRequest -Uri $url -OutFile $installer
+          $downloaded = $false
+          foreach ($url in $urls) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $installer
+              $downloaded = $true
+              break
+            } catch {
+              Write-Host "Failed to download Vulkan SDK from $url"
+            }
+          }
+
+          if (-not $downloaded) {
+            throw "Unable to download Vulkan SDK version $version from known installer URLs."
+          }
+
           Start-Process -FilePath $installer -ArgumentList '--root', $installRoot, '--accept-licenses', '--default-answer', '--confirm-command', 'install' -Wait -NoNewWindow
 
           if (!(Test-Path $installDir)) {
