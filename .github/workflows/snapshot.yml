@@ -173,7 +173,7 @@ jobs:
           path: "githubrelease"
 
   deploy:
-    if: github.ref == 'refs/heads/main'
+    if: needs.build.result == 'success' && (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main')
     needs: build
     permissions:
       pages: write # to deploy to Pages
