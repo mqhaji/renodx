@@ -64,12 +64,46 @@ jobs:
 
           Start-Process -FilePath $installer -ArgumentList '--root', $installRoot, '--accept-licenses', '--default-answer', '--confirm-command', 'install' -Wait -NoNewWindow
 
-          if (!(Test-Path $installDir)) {
-            throw "Vulkan SDK install directory not found: $installDir"
+          $sdkCandidates = @(
+            $installDir,
+            $installRoot,
+            (Join-Path $installRoot "SDK"),
+            (Join-Path $env:ProgramFiles "VulkanSDK\$version"),
+            (Join-Path $env:ProgramFiles "VulkanSDK"),
+            (Join-Path ${env:ProgramFiles(x86)} "VulkanSDK\$version"),
+            (Join-Path ${env:ProgramFiles(x86)} "VulkanSDK")
+          ) | Where-Object { $_ -and (Test-Path $_) }
+
+          $sdkDir = $sdkCandidates | Where-Object {
+            (Test-Path (Join-Path $_ 'Include\vulkan\vulkan.h')) -and
+            (Test-Path (Join-Path $_ 'Bin'))
+          } | Select-Object -First 1
+
+          if (-not $sdkDir) {
+            $searchRoots = @($installRoot, (Join-Path $env:ProgramFiles 'VulkanSDK'), (Join-Path ${env:ProgramFiles(x86)} 'VulkanSDK')) |
+              Where-Object { $_ -and (Test-Path $_) }
+
+            foreach ($root in $searchRoots) {
+              $sdkDir = Get-ChildItem -Path $root -Directory -Recurse -ErrorAction SilentlyContinue |
+                Where-Object {
+                  (Test-Path (Join-Path $_.FullName 'Include\vulkan\vulkan.h')) -and
+                  (Test-Path (Join-Path $_.FullName 'Bin'))
+                } |
+                Select-Object -ExpandProperty FullName -First 1
+
+              if ($sdkDir) {
+                break
+              }
+            }
           }
 
-          "VULKAN_SDK=$installDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "$installDir\Bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          if (-not $sdkDir) {
+            throw "Vulkan SDK install directory not found. Checked standard install roots after running the installer."
+          }
+
+          Write-Host "Using Vulkan SDK at $sdkDir"
+          "VULKAN_SDK=$sdkDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "$sdkDir\Bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Download Slang binaries
         run: |
