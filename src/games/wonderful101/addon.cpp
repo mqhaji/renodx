@@ -175,7 +175,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       renodx::mods::swapchain::use_resource_cloning = use_resource_view_cloning;
       renodx::mods::swapchain::target_format = target_format;
 
-      // renodx::mods::shader::expand_existing_constant_buffer = false;
       // We only care about pixel stage
       // renodx::mods::shader::minimum_constant_buffer_stages = reshade::api::shader_stage::pixel;
 

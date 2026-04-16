@@ -186,18 +186,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       renodx::mods::swapchain::target_format = target_format;
 
       /*
-        Aux constant buffer (Check shared.h) size is 120, but we force align it to 128.
-        This also helps if our shader_injection isn't aligned properly
-      */
-      // renodx::mods::shader::force_align_constant_buffers_to_16 = true;
-
-      /*
-        True means it'll attempt to expand current cbuffer definitions instead of adding a new push constant
-        entry. You'll have to experiment with this if cbuffer injection doesn't work
-      */
-      renodx::mods::shader::expand_existing_constant_buffer = true;
-
-      /*
         If expand_existing_constant_buffer is set to false renoDX will add new cbuffer range (instead of reusing the game's).
         This behaviour is overridden if renoDX finds a cbuffer that targets all shader_stages in minimum_constant_buffer_stages.
         e.g. If a game's cbuffer range targets all stages, renoDX will expand it regardless of expand_existing_constant_buffer value.

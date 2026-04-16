@@ -172,7 +172,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       renodx::mods::shader::allow_multiple_push_constants = true;
       renodx::mods::swapchain::use_resource_cloning = true;
       renodx::mods::swapchain::target_format = target_format;
-      renodx::mods::shader::expand_existing_constant_buffer = true;
       renodx::mods::shader::minimum_constant_buffer_stages = reshade::api::shader_stage::pixel;
       renodx::mods::swapchain::ignored_device_apis = {
           reshade::api::device_api::d3d11,

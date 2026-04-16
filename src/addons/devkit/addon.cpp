@@ -3077,6 +3077,14 @@ void OnPushDescriptors(
         dx_register_index = param.push_descriptors.dx_register_index;
         dx_register_space = param.push_descriptors.dx_register_space;
         break;
+      case reshade::api::pipeline_layout_param_type::push_descriptors_with_ranges:
+        if (param.descriptor_table.count <= update.binding) {
+          reshade::log::message(reshade::log::level::error, "Push descriptor binding out of range.");
+          return;
+        }
+        dx_register_index = param.descriptor_table.ranges[update.binding].dx_register_index;
+        dx_register_space = param.descriptor_table.ranges[update.binding].dx_register_space;
+        break;
       default:
         reshade::log::message(reshade::log::level::error, "Not descriptor table.");
         return;
