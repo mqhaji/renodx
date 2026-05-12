@@ -2,6 +2,7 @@
 
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:30 2026
 
+// clang-format off
 cbuffer cPSScene : register(b2) {
   struct
   {
@@ -18,9 +19,7 @@ cbuffer cPSScene : register(b2) {
     float4 m_fogColor;
     float4 m_cameraCenterOffset;
     float4 m_shadowMapResolutions;
-  }
-g_psScene:
-  packoffset(c0);
+  } g_psScene: packoffset(c0);
 }
 
 cbuffer cPSObject : register(b5) {
@@ -30,18 +29,14 @@ cbuffer cPSObject : register(b5) {
     float4x4 m_world;
     float4 m_useWeightCount;
     float4 m_localParam[4];
-  }
-g_psObject:
-  packoffset(c0);
+  } g_psObject: packoffset(c0);
 }
 
 cbuffer cPSMaterial : register(b4) {
   struct
   {
     float4 m_materials[8];
-  }
-g_psMaterial:
-  packoffset(c0);
+  } g_psMaterial: packoffset(c0);
 }
 
 cbuffer cPSSystem : register(b0) {
@@ -51,10 +46,9 @@ cbuffer cPSSystem : register(b0) {
     float4 m_renderInfo;
     float4 m_renderBuffer;
     float4 m_dominantLightDir;
-  }
-g_psSystem:
-  packoffset(c0);
+  } g_psSystem: packoffset(c0);
 }
+// clang-format on
 
 SamplerState inMoonSampler_s : register(s0);
 SamplerState g_samplerPoint_Wrap_s : register(s8);
@@ -285,6 +279,7 @@ void main(
 
   // NLightContribution: blend direct moon/sun color into sky inscatter.
   r2.xyzw = r2.xyzw;
+  // r2.rgb *= 10.f; // increase sun brightness
   r1.xyz = r1.xyz;
   r2.xyzw = r2.xyzw;
   r2.w = -r2.w;

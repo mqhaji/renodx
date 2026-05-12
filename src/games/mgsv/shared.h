@@ -1,5 +1,7 @@
-#ifndef SRC_DYING_LIGHT_SHARED_H_
-#define SRC_DYING_LIGHT_SHARED_H_
+#ifndef SRC_MGSV_SHARED_H_
+#define SRC_MGSV_SHARED_H_
+
+#define FIX_UNORM_SRGB 1
 
 // Must be 32bit aligned
 // Should be 4x32
@@ -21,6 +23,7 @@ struct ShaderInjectData {
   float scene_grade_strength;
 
   float custom_bloom;
+  float custom_taa;
 };
 
 #ifndef __cplusplus
@@ -46,8 +49,10 @@ cbuffer cb13 : register(b13) {
 
 #define CUSTOM_BLOOM shader_injection.custom_bloom
 
+#define CUSTOM_TAA shader_injection.custom_taa
+
 #include "../../shaders/renodx.hlsl"
 
 #endif
 
-#endif  // SRC_DYING_LIGHT_SHARED_H_
+#endif  // SRC_MGSV_SHARED_H_
