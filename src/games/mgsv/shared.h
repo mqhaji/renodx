@@ -25,6 +25,8 @@ struct ShaderInjectData {
   float scene_grade_strength;
 
   float custom_bloom;
+  float custom_boost_sun;
+
   float custom_taa;
 };
 
@@ -49,7 +51,8 @@ cbuffer cb13 : register(b13) {
 #define RENODX_TONE_MAP_FLARE                shader_injection.tone_map_flare
 #define RENODX_COLOR_GRADE_STRENGTH          shader_injection.scene_grade_strength
 
-#define CUSTOM_BLOOM shader_injection.custom_bloom
+#define CUSTOM_BLOOM     shader_injection.custom_bloom
+#define CUSTOM_BOOST_SUN shader_injection.custom_boost_sun
 
 #define CUSTOM_TAA shader_injection.custom_taa
 
