@@ -2,6 +2,7 @@
 
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:26 2026
 
+// clang-format off
 cbuffer cPSScene : register(b2) {
   struct
   {
@@ -18,18 +19,14 @@ cbuffer cPSScene : register(b2) {
     float4 m_fogColor;
     float4 m_cameraCenterOffset;
     float4 m_shadowMapResolutions;
-  }
-g_psScene:
-  packoffset(c0);
+  } g_psScene: packoffset(c0);
 }
 
 cbuffer cPSMaterial : register(b4) {
   struct
   {
     float4 m_materials[8];
-  }
-g_psMaterial:
-  packoffset(c0);
+  } g_psMaterial: packoffset(c0);
 }
 
 cbuffer cPSSystem : register(b0) {
@@ -39,10 +36,9 @@ cbuffer cPSSystem : register(b0) {
     float4 m_renderInfo;
     float4 m_renderBuffer;
     float4 m_dominantLightDir;
-  }
-g_psSystem:
-  packoffset(c0);
+  } g_psSystem: packoffset(c0);
 }
+// clang-format on
 
 SamplerState g_samplerPoint_Wrap_s : register(s8);
 SamplerState g_samplerPoint_Clamp_s : register(s9);
@@ -192,8 +188,8 @@ void main(
 
   if (RENODX_TONE_MAP_TYPE != 0.f) {
     r1.rgb = untonemapped;
+    r1.rgb = max(0, r1.rgb);
   }
-  r1 = max(0, r1);
 
   r0.xy = float2(0.125, 0.125) * r0.xy;
   r0.xy = frac(r0.xy);
@@ -204,5 +200,10 @@ void main(
   r2.xyz = r2.xyz;
   r2.w = r2.w;
   o0.xyzw = r2.xyzw;
+
+#if FIX_UNORM_SRGB
+  o0.rgb = renodx::color::srgb::Encode(max(0, o0.rgb));
+#endif
+
   return;
 }
