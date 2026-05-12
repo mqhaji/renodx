@@ -1,6 +1,8 @@
 #ifndef SRC_MGSV_SHARED_H_
 #define SRC_MGSV_SHARED_H_
 
+#define ENABLE_TAA_SLIDER 0
+
 #define FIX_UNORM_SRGB 1
 
 // Must be 32bit aligned
