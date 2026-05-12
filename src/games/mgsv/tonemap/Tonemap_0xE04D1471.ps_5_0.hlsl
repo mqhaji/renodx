@@ -56,8 +56,7 @@ void main(
   float maxch_scale = 1.f;
   if (RENODX_TONE_MAP_TYPE != 0.f) {
     r1.rgb = renodx::color::gamma::DecodeSafe(r1.rgb);
-    // maxch_scale = renodx::tonemap::neutwo::ComputeMaxChannelScale(r1.rgb);
-    maxch_scale = ComputeReinhardSmoothClampScale(r1.rgb, 0.5f);
+    maxch_scale = ComputeMaxChCompressionScale(r1.rgb, 0.5f);
     r1.rgb *= maxch_scale;
     r1.rgb = renodx::color::gamma::EncodeSafe(r1.rgb);
   }
@@ -75,31 +74,32 @@ void main(
 
   float3 input_color = (sqrt(max(0, r0.rgb))) / maxch_scale;
 
-  r0.xyz = max(float3(0, 0, 0), r0.xyz);
-  r0.xyz = min(float3(1, 1, 1), r0.xyz);
-  r1.xyz = max(float3(0.001953125, 0.001953125, 0.001953125), r0.xyz);
-  r1.xyz = rsqrt(r1.xyz);
-  r0.xyz = r1.xyz * r0.xyz;
-  r0.xyz = max(float3(0, 0, 0), r0.xyz);
-  r0.xyz = min(float3(1, 1, 1), r0.xyz);
-  r0.yzw = float3(0.9375, 0.9375, 0.9375) * r0.xyz;
-  r0.y = 0.0625 * r0.y;
-  r1.x = 16 * r0.w;
-  r1.x = floor(r1.x);
-  r1.x = 0.0625 * r1.x;
-  r1.y = -r1.x;
-  r0.w = r1.y + r0.w;
-  r0.w = 16 * r0.w;
-  r0.x = r1.x + r0.y;
-  r0.xy = float2(0.001953125, 0.03125) + r0.xz;
-  r1.xy = float2(0.0625, 0) + r0.xy;
-  r0.xyz = inColorLUT.Sample(g_samplerLinear_Clamp_s, r0.xy).xyz;
-  r1.z = -r0.w;
-  r1.z = 1 + r1.z;
-  r0.xyz = r1.zzz * r0.xyz;
-  r1.xyz = inColorLUT.Sample(g_samplerLinear_Clamp_s, r1.xy).xyz;
-  r1.xyz = r1.xyz * r0.www;
-  r0.xyz = r1.xyz + r0.xyz;
+  // r0.xyz = max(float3(0, 0, 0), r0.xyz);
+  // r0.xyz = min(float3(1, 1, 1), r0.xyz);
+  // r1.xyz = max(float3(0.001953125, 0.001953125, 0.001953125), r0.xyz);
+  // r1.xyz = rsqrt(r1.xyz);
+  // r0.xyz = r1.xyz * r0.xyz;
+  // r0.xyz = max(float3(0, 0, 0), r0.xyz);
+  // r0.xyz = min(float3(1, 1, 1), r0.xyz);
+  // r0.yzw = float3(0.9375, 0.9375, 0.9375) * r0.xyz;
+  // r0.y = 0.0625 * r0.y;
+  // r1.x = 16 * r0.w;
+  // r1.x = floor(r1.x);
+  // r1.x = 0.0625 * r1.x;
+  // r1.y = -r1.x;
+  // r0.w = r1.y + r0.w;
+  // r0.w = 16 * r0.w;
+  // r0.x = r1.x + r0.y;
+  // r0.xy = float2(0.001953125, 0.03125) + r0.xz;
+  // r1.xy = float2(0.0625, 0) + r0.xy;
+  // r0.xyz = inColorLUT.Sample(g_samplerLinear_Clamp_s, r0.xy).xyz;
+  // r1.z = -r0.w;
+  // r1.z = 1 + r1.z;
+  // r0.xyz = r1.zzz * r0.xyz;
+  // r1.xyz = inColorLUT.Sample(g_samplerLinear_Clamp_s, r1.xy).xyz;
+  // r1.xyz = r1.xyz * r0.www;
+  // r0.xyz = r1.xyz + r0.xyz;
+  r0.rgb = Sample2DLUT(r0.rgb, inColorLUT, g_samplerLinear_Clamp_s);
 
   // renodx::lut::Config lut_config = renodx::lut::config::Create(
   //     g_samplerLinear_Clamp_s,
