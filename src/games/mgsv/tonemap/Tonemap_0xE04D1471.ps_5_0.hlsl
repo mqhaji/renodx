@@ -71,7 +71,8 @@ void main(
   r0.xyz = min(float3(0.5, 0.5, 0.5), r0.xyz);
   r0.rgb = lerp(0, r0.rgb, CUSTOM_BLOOM);
   r0.xyz = lerp(r1.xyz, 1.f, r0.xyz);
-
+  // r0.rgb = max(0, renodx::color::correct::Luminance(r1.rgb, r0.rgb));
+  
   float3 input_color = (sqrt(max(0, r0.rgb))) / maxch_scale;
 
   // r0.xyz = max(float3(0, 0, 0), r0.xyz);
