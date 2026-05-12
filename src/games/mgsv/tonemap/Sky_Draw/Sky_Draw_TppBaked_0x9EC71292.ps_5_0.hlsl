@@ -114,6 +114,11 @@ void main(
   r1.w = r1.w;
   r3.xy = r3.xy;
   r4.xyzw = inMoonTexture.Sample(inMoonSampler_s, v2.zw).xyzw;
+
+  if (CUSTOM_BOOST_SUN != 0.f) {
+    r4.w /= 10.f;
+  }
+
   r2.xyzw = r4.xyzw * r2.xyzw;
   r3.zw = cmp(float2(1, 1) >= r3.xy);
   r3.zw = r3.zw ? float2(1, 1) : float2(0, 0);
@@ -279,7 +284,6 @@ void main(
 
   // NLightContribution: blend direct moon/sun color into sky inscatter.
   r2.xyzw = r2.xyzw;
-  // r2.rgb *= 10.f; // increase sun brightness
   r1.xyz = r1.xyz;
   r2.xyzw = r2.xyzw;
   r2.w = -r2.w;
