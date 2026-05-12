@@ -221,10 +221,14 @@ void main(
 
   if (RENODX_TONE_MAP_TYPE != 0.f) {
     r1.rgb = untonemapped;
+    r1.rgb = max(0, r1.rgb);
   }
-  r1 = max(0, r1);
 
   // Final output: tonemapped RGB plus luminance-derived alpha.
   o0.xyzw = r1.xyzw;
+#if FIX_UNORM_SRGB
+  o0.rgb = renodx::color::srgb::Encode(max(0, o0.rgb));
+#endif
+
   return;
 }
