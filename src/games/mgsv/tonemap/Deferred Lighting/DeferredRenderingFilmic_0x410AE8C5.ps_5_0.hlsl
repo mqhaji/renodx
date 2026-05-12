@@ -178,5 +178,9 @@ void main(
 
   r1.w = r1.w;
   o0.xyzw = r1.xyzw;
+
+#if FIX_UNORM_SRGB
+  o0.rgb = renodx::color::srgb::Encode(max(0, o0.rgb));
+#endif
   return;
 }
