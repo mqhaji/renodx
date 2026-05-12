@@ -25,6 +25,7 @@
 #include "../../utils/date.hpp"
 #include "../../utils/settings.hpp"
 #include "./shared.h"
+#include "./taa/taa.hpp"
 
 namespace {
 
@@ -740,6 +741,9 @@ void OnPresetOff() {
       {"ColorGradeScene", 100.f},
       {"FxBloom", 100.f},
   });
+#if ENABLE_TAA_SLIDER
+  taa::OnPresetOff();
+#endif
 }
 
 bool fired_on_init_swapchain = false;
@@ -787,6 +791,10 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     case DLL_PROCESS_ATTACH:
       if (!reshade::register_addon(h_module)) return FALSE;
 
+#if ENABLE_TAA_SLIDER
+      taa::AppendSettings(settings, &shader_injection);
+#endif
+
       if (!initialized) {
         renodx::mods::swapchain::force_borderless = true;
         renodx::mods::swapchain::prevent_full_screen = true;
@@ -826,7 +834,9 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       reshade::unregister_addon(h_module);
       break;
   }
-
+#if ENABLE_TAA_SLIDER
+  taa::Use(fdw_reason, &shader_injection);
+#endif
   renodx::utils::settings::Use(fdw_reason, &settings, &OnPresetOff);
 
   renodx::mods::swapchain::Use(fdw_reason, &shader_injection);
