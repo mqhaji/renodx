@@ -57,23 +57,39 @@ renodx::utils::resource::ResourceUpgradeInfo motion_blur_upgrade_info = {
     .name = "motion_blur_bgra8_typeless_hot_swap",
 };
 
-bool tonemap_copy_tracking_armed_this_frame = false;
-bool tonemap_copy_tracking_allowed = false;
+renodx::utils::resource::ResourceUpgradeInfo dof_final_copy_upgrade_info = {
+    .old_format = reshade::api::format::b8g8r8a8_typeless,
+    .new_format = reshade::api::format::r16g16b16a16_float,
+    .use_resource_view_cloning = true,
+    .use_resource_view_hot_swap = true,
+    .usage_set = static_cast<uint32_t>(
+        reshade::api::resource_usage::shader_resource
+        | reshade::api::resource_usage::render_target),
+    .dimensions = {.width = renodx::utils::resource::ResourceUpgradeInfo::BACK_BUFFER,
+                   .height = renodx::utils::resource::ResourceUpgradeInfo::BACK_BUFFER},
+    .usage_include = reshade::api::resource_usage::render_target,
+    .name = "dof_final_copy_bgra8_typeless_hot_swap",
+};
+
+bool dof_final_copy_upgrade_allowed = false;
+reshade::api::resource dof_final_copy_active_resource = {0u};
 bool tonemap_copy_resource_propagation_allowed = false;
 reshade::api::resource tonemap_copy_resource_source = {0u};
 
-void ArmTonemapCopyTrackingAfterDofNear(reshade::api::command_list* cmd_list) {
+void ArmDofFinalCopyRenderBufferWindow(reshade::api::command_list* cmd_list) {
   (void)cmd_list;
 
-  if (tonemap_copy_tracking_armed_this_frame) return;
+  dof_final_copy_upgrade_allowed = true;
+}
 
-  tonemap_copy_tracking_armed_this_frame = true;
-  tonemap_copy_tracking_allowed = true;
+void DisarmDofFinalCopyRenderBufferAfterDofFinal(reshade::api::command_list* cmd_list) {
+  (void)cmd_list;
+
+  dof_final_copy_upgrade_allowed = false;
 }
 
 void ResetTonemapCopyTracking() {
-  tonemap_copy_tracking_armed_this_frame = false;
-  tonemap_copy_tracking_allowed = false;
+  dof_final_copy_upgrade_allowed = false;
   tonemap_copy_resource_propagation_allowed = false;
   tonemap_copy_resource_source = {0u};
 }
@@ -106,6 +122,11 @@ bool ActivateCloneHotSwapIfTracked(
 
 bool MarkSceneTonemapCloneTarget(
     reshade::api::resource_view rtv,
+    reshade::api::device* device);
+
+bool MarkCloneTarget(
+    reshade::api::resource_view rtv,
+    renodx::utils::resource::ResourceUpgradeInfo* upgrade_info,
     reshade::api::device* device);
 
 void UpgradeDeferredTonemapOutputRTVs(
@@ -169,9 +190,28 @@ bool ResourceViewMatchesCloneTarget(
       [&matches, upgrade_info](const renodx::utils::resource::ResourceViewInfo& info) {
         if (info.destroyed) return;
 
-        matches = info.clone_target == upgrade_info
+        matches = (info.clone_target == upgrade_info && info.clone_enabled)
                   || (info.resource_info != nullptr
-                      && info.resource_info->clone_target == upgrade_info);
+                      && info.resource_info->clone_target == upgrade_info
+                      && info.resource_info->clone_enabled);
+
+        // D3D11 PSGetShaderResources can return the already-rewritten clone SRV instead of the
+        // original SRV. Clone views do not carry clone_enabled, so confirm against the original
+        // resource that owns the clone before rejecting the source gate.
+        if (!matches
+            && info.is_clone
+            && info.clone_target == upgrade_info
+            && info.original_resource.handle != 0u) {
+          renodx::utils::resource::GetResourceInfo(
+              info.original_resource,
+              [&matches, &info, upgrade_info](const renodx::utils::resource::ResourceInfo& resource_info) {
+                matches = !resource_info.destroyed
+                          && resource_info.clone_target == upgrade_info
+                          && resource_info.clone_enabled
+                          && (info.clone_resource.handle == 0u
+                              || resource_info.clone.handle == info.clone_resource.handle);
+              });
+        }
       });
   return matches;
 }
@@ -198,6 +238,93 @@ bool PixelShaderResourceMatchesCloneTarget(
       upgrade_info);
   shader_resource_view->Release();
   return matches;
+}
+
+reshade::api::resource GetOriginalResourceFromView(reshade::api::resource_view view) {
+  if (view.handle == 0u) return {0u};
+
+  reshade::api::resource resource = {0u};
+  bool destroyed = true;
+  const auto found_view = renodx::utils::resource::GetResourceViewInfo(
+      view,
+      [&resource, &destroyed](const renodx::utils::resource::ResourceViewInfo& info) {
+        destroyed = info.destroyed;
+        if (info.destroyed) return;
+        resource = info.original_resource;
+      });
+  if (!found_view || destroyed) return {0u};
+
+  return resource;
+}
+
+void UpgradeDofFinalCopyRenderBuffer(reshade::api::command_list* cmd_list) {
+  if (cmd_list == nullptr) return;
+  if (!dof_final_copy_upgrade_allowed) return;
+
+  auto rtvs = renodx::utils::swapchain::GetRenderTargets(cmd_list);
+  if (rtvs.empty() || rtvs[0].handle == 0u) return;
+
+  // The correct copy should still be copying from the HDR scene-color clone.
+  if (!PixelShaderResourceMatchesCloneTarget(cmd_list, &scene_tonemap_upgrade_info, 0u)) return;
+
+  auto* device = cmd_list->get_device();
+  if (device == nullptr) return;
+
+  // CopyRenderBuffer is generic, so this is intentionally frame-local:
+  // DOF_ScatterCompositeFar arms the next full-res BGRA CopyRenderBuffer that
+  // copies from the active scene clone. Do not rely on a previous-frame T1
+  // handle; MGSV can rotate/recreate this resource between frames/captures.
+  const auto rtv_resource = GetOriginalResourceFromView(rtvs[0]);
+  if (rtv_resource.handle == 0u) return;
+
+  if (!MarkCloneTarget(rtvs[0], &dof_final_copy_upgrade_info, device)) return;
+
+  if (!ActivateCloneHotSwapIfTracked(device, rtvs[0])) return;
+
+  dof_final_copy_active_resource = rtv_resource;
+  dof_final_copy_upgrade_allowed = false;
+
+  renodx::mods::swapchain::FlushDescriptors(cmd_list);
+  renodx::mods::swapchain::RewriteRenderTargets(cmd_list, rtvs.size(), rtvs.data(), {0});
+}
+
+void DeactivateDofFinalCopyRenderBufferTarget() {
+  if (dof_final_copy_active_resource.handle == 0u) return;
+
+  std::vector<uint64_t> view_handles;
+  bool found_destroyed = false;
+  bool should_deactivate = false;
+  const auto found_resource = renodx::utils::resource::UpdateResourceInfo(
+      dof_final_copy_active_resource,
+      [&view_handles, &found_destroyed, &should_deactivate](renodx::utils::resource::ResourceInfo* info) {
+        if (info->destroyed) {
+          found_destroyed = true;
+          return;
+        }
+        if (info->clone_target != &dof_final_copy_upgrade_info) return;
+
+        // Keep the clone target/clone allocation for reuse, but disable hot-swap between frames.
+        // MGSV reuses this full-res BGRA resource for rain/GBuffer material work near frame start;
+        // leaving the clone enabled makes those passes sample the stale HDR DoF snapshot.
+        info->clone_enabled = false;
+        info->clone_can_deactivate = false;
+        view_handles.assign(info->resource_view_handles.begin(), info->resource_view_handles.end());
+        should_deactivate = true;
+      });
+  if (!found_resource || found_destroyed) {
+    dof_final_copy_active_resource = {0u};
+    return;
+  }
+  if (!should_deactivate) {
+    dof_final_copy_active_resource = {0u};
+    return;
+  }
+
+  renodx::utils::resource::upgrade::UpdateResourceViewsCloneState(
+      view_handles,
+      false,
+      false);
+  dof_final_copy_active_resource = {0u};
 }
 
 bool MarkCloneTarget(
@@ -434,6 +561,19 @@ bool OnCopyTonemapOutputResource(
       },                                            \
   }
 
+#define UpgradeDofFinalCopyRenderBufferRTV(value)   \
+  {                                                 \
+      value,                                        \
+      {                                             \
+          .crc32 = value,                           \
+          .code = __##value,                        \
+          .on_inject = [](auto*) { return false; }, \
+          .on_draw = [](auto* cmd_list) {         \
+            UpgradeDofFinalCopyRenderBuffer(cmd_list); \
+            return true; },        \
+      },                                            \
+  }
+
 #define UpgradeMotionBlurRTV(value)                                                                   \
   {                                                                                                   \
       value,                                                                                          \
@@ -459,9 +599,10 @@ bool OnCopyTonemapOutputResource(
 
 renodx::mods::shader::CustomShaders custom_shaders = []() {
   renodx::mods::shader::CustomShaders shaders = {
-      UpgradeRTVReplaceShaderCallback(0xE2D609B1, ArmTonemapCopyTrackingAfterDofNear),  // DOF_ScatterCompositeNear
-      UpgradeRTVReplaceShader(0x7C017264),                                              // DOF_ScatterCompositeFar
-      UpgradeRTVReplaceShader(0xFC5542BB),                                              // DOF_ScatterCompositeFinal
+      UpgradeRTVReplaceShaderCallback(0xE2D609B1, ArmDofFinalCopyRenderBufferWindow),            // DOF_ScatterCompositeNear
+      UpgradeRTVReplaceShaderCallback(0x7C017264, ArmDofFinalCopyRenderBufferWindow),            // DOF_ScatterCompositeFar
+      UpgradeDofFinalCopyRenderBufferRTV(0x83272BCB),                                            // CopyRenderBuffer feeding DOF_ScatterCompositeFinal T1
+      UpgradeRTVReplaceShaderCallback(0xFC5542BB, DisarmDofFinalCopyRenderBufferAfterDofFinal),  // DOF_ScatterCompositeFinal
 
       // Motion blur ping-pongs through full-res scene-color intermediates.
       UpgradeMotionBlurRTV(0xBFC7D3C2),
@@ -648,6 +789,15 @@ renodx::utils::settings::Settings settings = {
         .parse = [](float value) { return value * 0.01f; },
     },
     new renodx::utils::settings::Setting{
+        .key = "FxBoostSun",
+        .binding = &shader_injection.custom_boost_sun,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 1.f,
+        .label = "Boost Sun Brightness",
+        .section = "Effects",
+        .tooltip = "Boosts the brightness of the sun.",
+    },
+    new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
         .label = "Reset All",
         .section = "Options",
@@ -740,6 +890,7 @@ void OnPresetOff() {
       {"ColorGradeFlare", 0.f},
       {"ColorGradeScene", 100.f},
       {"FxBloom", 100.f},
+      {"FxBoostSun", 0.f},
   });
 #if ENABLE_TAA_SLIDER
   taa::OnPresetOff();
@@ -776,6 +927,7 @@ void OnPresent(
   (void)dirty_rect_count;
   (void)dirty_rects;
 
+  DeactivateDofFinalCopyRenderBufferTarget();
   ResetTonemapCopyTracking();
 }
 
