@@ -2,9 +2,8 @@
 
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:24 2026
 
-cbuffer cPSScene : register(b2)
-{
-
+// clang-format off
+cbuffer cPSScene : register(b2) {
   struct
   {
     float4x4 m_projectionView;
@@ -20,45 +19,36 @@ cbuffer cPSScene : register(b2)
     float4 m_fogColor;
     float4 m_cameraCenterOffset;
     float4 m_shadowMapResolutions;
-  } g_psScene : packoffset(c0);
-
+  } g_psScene: packoffset(c0);
 }
 
-cbuffer cPSObject : register(b5)
-{
-
+cbuffer cPSObject : register(b5) {
   struct
   {
     float4x4 m_viewWorld;
     float4x4 m_world;
     float4 m_useWeightCount;
     float4 m_localParam[4];
-  } g_psObject : packoffset(c0);
-
+  } g_psObject: packoffset(c0);
 }
 
-cbuffer cPSMaterial : register(b4)
-{
-
+cbuffer cPSMaterial : register(b4) {
   struct
   {
     float4 m_materials[8];
-  } g_psMaterial : packoffset(c0);
-
+  } g_psMaterial: packoffset(c0);
 }
 
-cbuffer cPSSystem : register(b0)
-{
-
+cbuffer cPSSystem : register(b0) {
   struct
   {
     float4 m_param;
     float4 m_renderInfo;
     float4 m_renderBuffer;
     float4 m_dominantLightDir;
-  } g_psSystem : packoffset(c0);
-
+  } g_psSystem: packoffset(c0);
 }
+// clang-format on
 
 SamplerState g_samplerPoint_Clamp_s : register(s9);
 SamplerState g_samplerLinear_Wrap_s : register(s10);
@@ -72,28 +62,25 @@ Texture2D<float4> inFoamTexture2 : register(t5);
 Texture2D<float4> g_tex_fog : register(t12);
 Texture2D<float4> inDepthTexture : register(t13);
 
-
 // 3Dmigoto declarations
 #define cmp -
 
-
 void main(
-  float4 v0 : SV_Position0,
-  float4 v1 : TEXCOORD0,
-  float4 v2 : TEXCOORD1,
-  out float4 o0 : SV_Target0,
-  out float4 o1 : SV_Target1)
-{
-  float4 r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11,r12,r13,r14,r15,r16,r17,r18;
+    float4 v0: SV_Position0,
+    float4 v1: TEXCOORD0,
+    float4 v2: TEXCOORD1,
+    out float4 o0: SV_Target0,
+    out float4 o1: SV_Target1) {
+  float4 r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17, r18;
   uint4 bitmask, uiDest;
   float4 fDest;
 
-  r0.zw = float2(-0.5,-0.5) + v0.xy;
+  r0.zw = float2(-0.5, -0.5) + v0.xy;
   r0.xyzw = r0.zwzw;
   r1.xyzw = r0.xyzw;
   r1.xyzw = r1.xyzw / g_psSystem.m_renderInfo.xyxy;
-  r1.xyzw = float4(2,-2,2,-2) * r1.xyzw;
-  r1.xyzw = float4(-1,1,-1,1) + r1.xyzw;
+  r1.xyzw = float4(2, -2, 2, -2) * r1.xyzw;
+  r1.xyzw = float4(-1, 1, -1, 1) + r1.xyzw;
   r1.xyzw = r1.xyzw;
   r1.xyzw = r1.xyzw;
   r0.z = v1.z;
@@ -111,24 +98,24 @@ void main(
   r0.w = max(0, r0.w);
   r0.w = min(1, r0.w);
   r0.w = 127 * r0.w;
-  r1.xyzw = float4(0.0146484375,0.123046875,0.0146484375,0.123046875) * r1.xyzw;
-  r1.xyzw = float4(0.015625,0.125,0.015625,0.125) + r1.xyzw;
+  r1.xyzw = float4(0.0146484375, 0.123046875, 0.0146484375, 0.123046875) * r1.xyzw;
+  r1.xyzw = float4(0.015625, 0.125, 0.015625, 0.125) + r1.xyzw;
   r2.x = 1 + r0.w;
   r2.x = max(0, r2.x);
   r2.w = min(127, r2.x);
   r2.y = r0.w;
   r2.xy = floor(r2.yw);
-  r2.xy = r2.xy / float2(32,32);
+  r2.xy = r2.xy / float2(32, 32);
   r2.zw = frac(r2.xy);
-  r3.xz = float2(32,32) * r2.zw;
+  r3.xz = float2(32, 32) * r2.zw;
   r3.yw = floor(r2.xy);
-  r2.xyzw = float4(0.03125,0.25,0.03125,0.25) * r3.xyzw;
+  r2.xyzw = float4(0.03125, 0.25, 0.03125, 0.25) * r3.xyzw;
   r1.xyzw = r2.xyzw + r1.xyzw;
   r2.xyzw = frac(r0.wwww);
   r3.xyzw = g_tex_fog.Sample(g_samplerLinear_Clamp_s, r1.xy).xyzw;
   r1.xyzw = g_tex_fog.Sample(g_samplerLinear_Clamp_s, r1.zw).xyzw;
   r4.xyzw = -r2.xyzw;
-  r4.xyzw = float4(1,1,1,1) + r4.xyzw;
+  r4.xyzw = float4(1, 1, 1, 1) + r4.xyzw;
   r3.xyzw = r4.xyzw * r3.xyzw;
   r1.xyzw = r2.xyzw * r1.xyzw;
   r1.xyzw = r3.xyzw + r1.xyzw;
@@ -144,7 +131,7 @@ void main(
   r2.xyz = r2.xyz;
   r0.xy = r0.xy;
   r0.xy = r0.xy;
-  r0.xy = float2(0.49609375,0.49609375) + r0.xy;
+  r0.xy = float2(0.49609375, 0.49609375) + r0.xy;
   r0.xy = g_psSystem.m_renderBuffer.zw * r0.xy;
   r0.xy = r0.xy;
   r3.xy = v1.xy;
@@ -163,7 +150,7 @@ void main(
   r3.zw = g_psMaterial.m_materials[0].xy;
   r2.w = g_psMaterial.m_materials[0].w;
   r4.w = g_psMaterial.m_materials[1].z;
-  r6.xy = float2(0.620000005,0.889999986) * g_psMaterial.m_materials[2].yy;
+  r6.xy = float2(0.620000005, 0.889999986) * g_psMaterial.m_materials[2].yy;
   r7.xyz = g_psMaterial.m_materials[3].xyz;
   r8.xyz = g_psMaterial.m_materials[4].xyz;
   r6.z = g_psMaterial.m_materials[4].w;
@@ -201,8 +188,8 @@ void main(
   r11.zw = r11.zw;
   r6.xy = inGradientTexture.Sample(g_samplerLinear_Wrap_s, r6.xy).xy;
   r6.xy = r6.xy;
-  r11.zw = float2(0.649999976,0.649999976) * r11.zw;
-  r6.xy = float2(0.349999994,0.349999994) * r6.xy;
+  r11.zw = float2(0.649999976, 0.649999976) * r11.zw;
+  r6.xy = float2(0.349999994, 0.349999994) * r6.xy;
   r6.xy = r11.zw + r6.xy;
   r12.xyzw = inGradientTexture.Sample(g_samplerLinear_Wrap_s, v1.xy).wxyz;
   r11.zw = g_psMaterial.m_materials[2].zz * r6.xy;
@@ -210,7 +197,7 @@ void main(
   r13.xy = r13.xy + r12.yz;
   r13.xy = r13.xy * r0.ww;
   r13.xz = r13.xy + r11.zw;
-  r6.xy = float2(0.100000001,0.100000001) * r6.xy;
+  r6.xy = float2(0.100000001, 0.100000001) * r6.xy;
   r14.xy = r6.xy * r6.ww;
   r14.z = 0;
   r15.xyz = -r14.xyz;
@@ -225,11 +212,11 @@ void main(
   r0.w = rsqrt(r0.w);
   r13.xyz = r13.xyz * r0.www;
   r6.xy = r11.xy + r3.zw;
-  r6.xy = float2(0.400000006,0.400000006) * r6.xy;
+  r6.xy = float2(0.400000006, 0.400000006) * r6.xy;
   r6.xy = inNormalDetailTexture.Sample(g_samplerAnisotropic_Wrap_s, r6.xy).yw;
   r6.xy = r6.xy;
-  r6.xy = float2(2,2) * r6.xy;
-  r11.xz = float2(-1,-1) + r6.xy;
+  r6.xy = float2(2, 2) * r6.xy;
+  r11.xz = float2(-1, -1) + r6.xy;
   r0.w = r11.z * r11.z;
   r0.w = -r0.w;
   r0.w = 1 + r0.w;
@@ -262,7 +249,7 @@ void main(
   r6.x = -r6.x;
   r15.xyz = r11.xyz * r6.xxx;
   r15.xyz = r15.xyz + r4.xyz;
-  r6.xy = float2(0.200000003,0.200000003) * r3.xy;
+  r6.xy = float2(0.200000003, 0.200000003) * r3.xy;
   r6.xy = r6.xy + r3.zw;
   r16.xyz = inFoamTexture.Sample(g_samplerAnisotropic_Wrap_s, r6.xy).xyz;
   r16.xyz = r16.xyz;
@@ -278,7 +265,7 @@ void main(
   r5.w = 0.949999988 * r5.w;
   r5.w = 0.0500000007 + r5.w;
   r5.w = max(0, r5.w);
-  r17.xyz = min(float3(1,1,1), r5.www);
+  r17.xyz = min(float3(1, 1, 1), r5.www);
   r5.w = dot(r2.xzy, r15.xyz);
   r5.w = max(0, r5.w);
   r5.w = min(1, r5.w);
@@ -318,9 +305,9 @@ void main(
   r7.xzw = r7.xzw * r6.yyy;
   r6.y = 0.150000006 * r6.w;
   r6.y = 0.0250000004 + r6.y;
-  r9.xyz = float3(-0,-1,-0) + r11.xyz;
+  r9.xyz = float3(-0, -1, -0) + r11.xyz;
   r9.xyz = r9.xyz * r6.yyy;
-  r9.xyz = float3(0,1,0) + r9.xyz;
+  r9.xyz = float3(0, 1, 0) + r9.xyz;
   r6.y = dot(r9.xyz, r9.xyz);
   r6.y = rsqrt(r6.y);
   r9.xyz = r9.xyz * r6.yyy;
@@ -347,7 +334,7 @@ void main(
   r6.y = 0.25 * r6.y;
   r5.w = r6.y + r5.w;
   r7.xzw = r10.yzw * r5.www;
-  r5.w = dot(r7.xzw, float3(0.333000004,0.333000004,0.333000004));
+  r5.w = dot(r7.xzw, float3(0.333000004, 0.333000004, 0.333000004));
   r5.w = r5.w * r5.w;
   r5.w = max(0, r5.w);
   r5.w = min(1, r5.w);
@@ -355,7 +342,7 @@ void main(
   r11.xyz = r17.zzz;
   r7.xzw = r11.xyz * r7.xzw;
   r7.xzw = r7.xzw * r8.www;
-  r7.xzw = float3(1.04999995,1.04999995,1.04999995) * r7.xzw;
+  r7.xzw = float3(1.04999995, 1.04999995, 1.04999995) * r7.xzw;
   r5.w = -0.0399999991 + r7.y;
   r5.w = 14 * r5.w;
   r5.w = 1 + r5.w;
@@ -374,8 +361,8 @@ void main(
   r5.w = 0.5 * r16.x;
   r5.w = max(0, r5.w);
   r5.w = min(1, r5.w);
-  r11.xyz = float3(-0.075000003,-0.0900000036,-0.0599999987) * r5.www;
-  r11.xyz = float3(0.135000005,0.194999993,0.254999995) + r11.xyz;
+  r11.xyz = float3(-0.075000003, -0.0900000036, -0.0599999987) * r5.www;
+  r11.xyz = float3(0.135000005, 0.194999993, 0.254999995) + r11.xyz;
   r5.w = 9.99999975e-05 / g_psScene.m_exposure.z;
   r5.w = max(0, r5.w);
   r5.w = min(1, r5.w);
@@ -388,20 +375,20 @@ void main(
   r15.xyz = r15.xyz * r4.xxx;
   r4.x = dot(r15.xzy, r2.xyz);
   r4.x = max(0, r4.x);
-  r15.xyz = min(float3(1,1,1), r4.xxx);
+  r15.xyz = min(float3(1, 1, 1), r4.xxx);
   r4.x = dot(r10.yzw, r10.yzw);
   r4.x = rsqrt(r4.x);
   r18.xyz = r10.yzw * r4.xxx;
-  r18.xyz = float3(-0.349999994,-0.349999994,-0.349999994) + r18.xyz;
+  r18.xyz = float3(-0.349999994, -0.349999994, -0.349999994) + r18.xyz;
   r15.xyz = r18.xyz * r15.xyz;
-  r15.xyz = float3(0.349999994,0.349999994,0.349999994) + r15.xyz;
+  r15.xyz = float3(0.349999994, 0.349999994, 0.349999994) + r15.xyz;
   r11.xyz = r15.xyz * r11.xyz;
-  r11.xyz = float3(0.0960000008,0.200000003,0.379999995) * r11.xyz;
-  r18.xyz = float3(-0.075000003,0.0250000004,0.0250000004) * r13.www;
-  r18.xyz = float3(0.135000005,0.194999993,0.254999995) + r18.xyz;
-  r4.xz = r3.xy / float2(10,10);
+  r11.xyz = float3(0.0960000008, 0.200000003, 0.379999995) * r11.xyz;
+  r18.xyz = float3(-0.075000003, 0.0250000004, 0.0250000004) * r13.www;
+  r18.xyz = float3(0.135000005, 0.194999993, 0.254999995) + r18.xyz;
+  r4.xz = r3.xy / float2(10, 10);
   r6.yw = r12.yw * r0.zz;
-  r6.yw = r6.yw / float2(75,75);
+  r6.yw = r6.yw / float2(75, 75);
   r4.xz = r6.yw + r4.xz;
   r4.x = inWhitecapTexture1.Sample(g_samplerLinear_Wrap_s, r4.xz).z;
   r4.x = r4.x * r6.x;
@@ -409,12 +396,12 @@ void main(
   r4.x = 400 * r4.x;
   r4.x = max(0, r4.x);
   r4.x = min(1, r4.x);
-  r18.xyz = float3(-0.0599999987,-0.104999997,-0.194999993) + r18.xyz;
+  r18.xyz = float3(-0.0599999987, -0.104999997, -0.194999993) + r18.xyz;
   r18.xyz = r18.xyz * r4.xxx;
-  r18.xyz = float3(0.0599999987,0.104999997,0.194999993) + r18.xyz;
+  r18.xyz = float3(0.0599999987, 0.104999997, 0.194999993) + r18.xyz;
   r18.xyz = r18.xyz * r5.www;
   r15.xyz = r18.xyz * r15.xyz;
-  r4.x = dot(float3(0,1,0), r14.xyz);
+  r4.x = dot(float3(0, 1, 0), r14.xyz);
   r4.x = 5 * r4.x;
   r4.x = 3 + r4.x;
   r4.z = 2 * r0.z;
@@ -425,17 +412,17 @@ void main(
   r2.w = -r2.w;
   r2.w = 1 + r2.w;
   r2.w = 0.949999988 * r2.w;
-  r6.yw = float2(0.0500000007,0.0500000007) + r2.ww;
+  r6.yw = float2(0.0500000007, 0.0500000007) + r2.ww;
   r2.w = 0.0399999991 * r6.x;
   r2.w = -r2.w;
   r2.w = 0.0405000001 + r2.w;
   r5.xy = r5.xy * r2.ww;
-  r5.xy = float2(0,0.0399999991) + r5.xy;
+  r5.xy = float2(0, 0.0399999991) + r5.xy;
   r5.xy = r6.yw * r5.xy;
   r5.xy = -r5.xy;
   r0.xy = r5.xy + r0.xy;
-  r0.xy = max(float2(0,0), r0.xy);
-  r0.xy = min(float2(1,1), r0.xy);
+  r0.xy = max(float2(0, 0), r0.xy);
+  r0.xy = min(float2(1, 1), r0.xy);
   r0.xy = r0.xy;
   r5.xy = g_psScene.m_projectionParam.zw;
   r0.x = inDepthTexture.Sample(g_samplerPoint_Clamp_s, r0.xy).x;
@@ -478,7 +465,7 @@ void main(
   r0.y = 10 * r0.y;
   r0.y = 1 + r0.y;
   r3.zw = r4.ww * r3.zw;
-  r3.zw = float2(2,2) * r3.zw;
+  r3.zw = float2(2, 2) * r3.zw;
   r3.xy = r3.xy + r3.zw;
   r0.z = inFoamTexture2.Sample(g_samplerLinear_Wrap_s, r3.xy).y;
   r0.z = r0.z;
@@ -504,9 +491,9 @@ void main(
   r0.z = r0.z + r0.w;
   r0.y = r0.y * r0.z;
   r0.y = 0.5 * r0.y;
-  r3.yzw = float3(0.150000006,0.150000006,0.150000006) * r10.yzw;
+  r3.yzw = float3(0.150000006, 0.150000006, 0.150000006) * r10.yzw;
   r3.yzw = r3.yzw + r11.xyz;
-  r3.yzw = float3(0.0500000007,0.0500000007,0.0500000007) + r3.yzw;
+  r3.yzw = float3(0.0500000007, 0.0500000007, 0.0500000007) + r3.yzw;
   r0.z = dot(r12.ywz, r2.xyz);
   r0.w = -r0.z;
   r0.z = max(r0.z, r0.w);
@@ -518,14 +505,14 @@ void main(
   r0.w = 0.25 * r3.x;
   r0.z = r0.z * r0.w;
   r2.xyz = r0.zzz * r10.yzw;
-  r2.xyz = float3(0.00875000004,0.0315000005,0.0157500003) * r2.xyz;
+  r2.xyz = float3(0.00875000004, 0.0315000005, 0.0157500003) * r2.xyz;
   r0.z = 12 * r0.y;
   r0.z = -r0.z;
   r0.z = 1 + r0.z;
   r0.z = max(0, r0.z);
   r0.z = min(1, r0.z);
   r4.yzw = r7.xyz * r0.zzz;
-  r5.xyz = float3(1.85000002,1.85000002,1.85000002) * r11.xyz;
+  r5.xyz = float3(1.85000002, 1.85000002, 1.85000002) * r11.xyz;
   r6.xyz = r15.xyz * r4.xxx;
   r7.xyz = -r5.xyz;
   r6.xyz = r7.xyz + r6.xyz;
@@ -535,47 +522,55 @@ void main(
   r0.x = max(0, r0.x);
   r0.x = min(1, r0.x);
   r6.xyz = -r5.xyz;
-  r6.xyz = float3(0,0,0) + r6.xyz;
+  r6.xyz = float3(0, 0, 0) + r6.xyz;
   r0.xzw = r6.xyz * r0.xxx;
   r0.xzw = r5.xyz + r0.xzw;
   r0.xzw = r2.xyz + r0.xzw;
   r2.xyz = r3.yzw * r0.yyy;
   r0.xyz = r2.xyz + r0.xzw;
-  r0.xyz = float3(1,1,1) * r0.xyz;
+  r0.xyz = float3(1, 1, 1) * r0.xyz;
   r0.xyz = r4.yzw + r0.xyz;
   r0.xyz = r0.xyz * r1.www;
   r0.xyz = r0.xyz + r1.xyz;
   r8.xyz = r8.xyz;
   r0.xyz = r0.xyz;
+
+  // TppTonemap
+  float3 untonemapped = r0.rgb;
   r1.xyz = r8.yyy;
   r1.xzw = cmp(r1.xyz >= r0.xyz);
-  r1.xzw = r1.xzw ? float3(1,1,1) : float3(0,0,0);
+  r1.xzw = r1.xzw ? float3(1, 1, 1) : float3(0, 0, 0);
   r2.xyz = r1.xzw * r0.xyz;
   r1.xzw = -r1.xzw;
-  r1.xzw = float3(1,1,1) + r1.xzw;
+  r1.xzw = float3(1, 1, 1) + r1.xzw;
   r0.xyz = r0.xyz + r8.zzz;
   r3.xyz = -r1.yyy;
   r0.xyz = r3.xyz + r0.xyz;
   r0.xyz = r8.xxx * r0.xyz;
-  r0.xyz = float3(-1,-1,-1) / r0.xyz;
+  r0.xyz = float3(-1, -1, -1) / r0.xyz;
   r0.xyz = r0.xyz + r8.zzz;
   r0.xyz = r0.xyz + r1.yyy;
   r0.xyz = r1.xzw * r0.xyz;
   r0.xyz = r2.xyz + r0.xyz;
   r0.xyz = r0.xyz;
   r0.xyz = r0.xyz;
-  r1.xyz = cmp(float3(0.00313080009,0.00313080009,0.00313080009) >= r0.xyz);
-  r1.xyz = r1.xyz ? float3(1,1,1) : float3(0,0,0);
-  r2.xyz = float3(12.9200001,12.9200001,12.9200001) * r0.xyz;
+  if (RENODX_TONE_MAP_TYPE != 0.f) {
+    r0.rgb = untonemapped;
+    r0.rgb = max(0, r0.rgb);
+  }
+
+  r1.xyz = cmp(float3(0.00313080009, 0.00313080009, 0.00313080009) >= r0.xyz);
+  r1.xyz = r1.xyz ? float3(1, 1, 1) : float3(0, 0, 0);
+  r2.xyz = float3(12.9200001, 12.9200001, 12.9200001) * r0.xyz;
   r2.xyz = r2.xyz * r1.xyz;
   r1.xyz = -r1.xyz;
-  r1.xyz = float3(1,1,1) + r1.xyz;
-  r0.xyz = max(float3(9.99999975e-06,9.99999975e-06,9.99999975e-06), r0.xyz);
+  r1.xyz = float3(1, 1, 1) + r1.xyz;
+  r0.xyz = max(float3(9.99999975e-06, 9.99999975e-06, 9.99999975e-06), r0.xyz);
   r0.xyz = log2(r0.xyz);
-  r0.xyz = float3(0.416666657,0.416666657,0.416666657) * r0.xyz;
+  r0.xyz = float3(0.416666657, 0.416666657, 0.416666657) * r0.xyz;
   r0.xyz = exp2(r0.xyz);
-  r0.xyz = float3(1.05499995,1.05499995,1.05499995) * r0.xyz;
-  r0.xyz = float3(-0.0549999997,-0.0549999997,-0.0549999997) + r0.xyz;
+  r0.xyz = float3(1.05499995, 1.05499995, 1.05499995) * r0.xyz;
+  r0.xyz = float3(-0.0549999997, -0.0549999997, -0.0549999997) + r0.xyz;
   r0.xyz = r1.xyz * r0.xyz;
   r0.xyz = r2.xyz + r0.xyz;
   r0.xyz = r0.xyz;
