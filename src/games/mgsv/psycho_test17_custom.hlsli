@@ -1,5 +1,5 @@
-#include "./shared.h"
 #include "./macleod_boynton.hlsli"
+#include "./shared.h"
 
 #ifndef RENODX_MGSV_PSYCHO_TEST17_HLSLI_
 #define RENODX_MGSV_PSYCHO_TEST17_HLSLI_
@@ -1073,8 +1073,7 @@ float psycho17_ContrastAndFlare(
 namespace config17 {
 
 struct Config {
-  bool apply_lms_tonemap;
-  bool apply_maxch_tonemap;
+  bool apply_tonemap;
   float peak_value;
   float exposure;
   float gamma;
@@ -1098,8 +1097,7 @@ struct Config {
 };
 
 Config Create(
-    bool apply_lms_tonemap = true,
-    bool apply_maxch_tonemap = true,
+    bool apply_tonemap = true,
     float peak_value = 1000.f / 203.f,
     float exposure = 1.f,
     float gamma = 1.f,
@@ -1121,8 +1119,7 @@ Config Create(
     bool post_gamut_compress = true,
     float hue_emulation = 0.f) {
   const Config psycho17_config = {
-    apply_lms_tonemap,
-    apply_maxch_tonemap,
+    apply_tonemap,
     peak_value,
     exposure,
     gamma,
@@ -1181,9 +1178,8 @@ float3 ApplyTest17BT2020(float3 color_bt2020, float3 color_hue_shift_source_bt20
     color_lms = lms_signal_unit * max(availability, 0.f);
   }
 
-  if (psycho_config.apply_lms_tonemap) {
+  if (psycho_config.apply_tonemap) {
     float3 lms_peak_unit = renodx::color::lms::from::BT2020(psycho_config.peak_value.xxx);
-    // color_lms = psycho17_ReinhardPiecewise(color_lms, lms_peak_unit, midgray_lms);
     color_lms = renodx::tonemap::neutwo::PerChannel(color_lms, lms_peak_unit);
 
     color_lms *= renodx::math::DivideSafe(
@@ -1307,7 +1303,7 @@ float3 ApplyTest17BT2020(float3 color_bt2020, float3 color_hue_shift_source_bt20
 
   color_bt2020 = renodx::color::bt2020::from::LMS(color_lms);
 
-  if (psycho_config.apply_maxch_tonemap) {
+  if (psycho_config.apply_tonemap) {
     color_bt2020 = renodx::tonemap::neutwo::MaxChannel(
         max(color_bt2020, 0.f.xxx),
         psycho_config.peak_value,
@@ -1321,8 +1317,7 @@ float3 ApplyPreToneMapColorGradeBT2020(float3 color_bt2020, config17::Config psy
   // Keep only this subset from ApplyTest17BT2020:
   // exposure, gamma, highlights, shadows, contrast, flare, flare_lms,
   // contrast_highlights, contrast_shadows, adaptation_contrast, bleaching_intensity.
-  psycho_config.apply_lms_tonemap = false;
-  psycho_config.apply_maxch_tonemap = false;
+  psycho_config.apply_tonemap = false;
   psycho_config.pre_gamut_compress = false;
   psycho_config.post_gamut_compress = false;
   psycho_config.purity_scale = 1.f;
