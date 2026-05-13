@@ -67,46 +67,11 @@ void main(
   r0.xy = float2(0.5, 0.5) * r0.xy;
   r0.xy = r0.xy + r0.zw;
   r0.xyz = inBloom.Sample(g_samplerLinear_Clamp_s, r0.xy).xyz;
-  r0.xyz = r0.xyz;
   r0.xyz = min(float3(0.5, 0.5, 0.5), r0.xyz);
   r0.rgb = lerp(0, r0.rgb, CUSTOM_BLOOM);
   r0.xyz = lerp(r1.xyz, 1.f, r0.xyz);
-  // r0.rgb = max(0, renodx::color::correct::Luminance(r1.rgb, r0.rgb));
-  
-  float3 input_color = (sqrt(max(0, r0.rgb))) / maxch_scale;
 
-  // r0.xyz = max(float3(0, 0, 0), r0.xyz);
-  // r0.xyz = min(float3(1, 1, 1), r0.xyz);
-  // r1.xyz = max(float3(0.001953125, 0.001953125, 0.001953125), r0.xyz);
-  // r1.xyz = rsqrt(r1.xyz);
-  // r0.xyz = r1.xyz * r0.xyz;
-  // r0.xyz = max(float3(0, 0, 0), r0.xyz);
-  // r0.xyz = min(float3(1, 1, 1), r0.xyz);
-  // r0.yzw = float3(0.9375, 0.9375, 0.9375) * r0.xyz;
-  // r0.y = 0.0625 * r0.y;
-  // r1.x = 16 * r0.w;
-  // r1.x = floor(r1.x);
-  // r1.x = 0.0625 * r1.x;
-  // r1.y = -r1.x;
-  // r0.w = r1.y + r0.w;
-  // r0.w = 16 * r0.w;
-  // r0.x = r1.x + r0.y;
-  // r0.xy = float2(0.001953125, 0.03125) + r0.xz;
-  // r1.xy = float2(0.0625, 0) + r0.xy;
-  // r0.xyz = inColorLUT.Sample(g_samplerLinear_Clamp_s, r0.xy).xyz;
-  // r1.z = -r0.w;
-  // r1.z = 1 + r1.z;
-  // r0.xyz = r1.zzz * r0.xyz;
-  // r1.xyz = inColorLUT.Sample(g_samplerLinear_Clamp_s, r1.xy).xyz;
-  // r1.xyz = r1.xyz * r0.www;
-  // r0.xyz = r1.xyz + r0.xyz;
-  r0.rgb = Sample2DLUT(r0.rgb, inColorLUT, g_samplerLinear_Clamp_s);
-
-  // renodx::lut::Config lut_config = renodx::lut::config::Create(
-  //     g_samplerLinear_Clamp_s,
-  //     1.f,
-  //     1.f, renodx::lut::config::type::GAMMA_2_0, renodx::lut::config::type::GAMMA_2_0, 16);
-  // r0.rgb = sqrt(renodx::lut::Sample(inColorLUT, lut_config, r0.rgb));
+  r0.rgb = Sample2DLUTWithScaling(r0.rgb, inColorLUT, g_samplerLinear_Clamp_s);
 
   // invert tonemap after LUT
   r0.rgb = max(0, r0.rgb);
@@ -115,7 +80,6 @@ void main(
     r0.rgb /= maxch_scale;
     r0.rgb = renodx::color::gamma::EncodeSafe(r0.rgb);
   }
-  r0.rgb = lerp(input_color, r0.rgb, RENODX_COLOR_GRADE_STRENGTH);
 
   if (RENODX_GAMMA_CORRECTION == 1.f) {
     r0.rgb = renodx::color::gamma::DecodeSafe(r0.rgb);
@@ -147,17 +111,18 @@ void main(
     psycho17_config.highlights = RENODX_TONE_MAP_HIGHLIGHTS;
     psycho17_config.shadows = RENODX_TONE_MAP_SHADOWS;
     psycho17_config.contrast = RENODX_TONE_MAP_CONTRAST;
-    psycho17_config.flare = 0.10f * pow(RENODX_TONE_MAP_FLARE, 10.f);
+    psycho17_config.flare_lms = 0.10f * pow(RENODX_TONE_MAP_FLARE, 10.f);
     psycho17_config.contrast_highlights = 1.f;
     psycho17_config.contrast_shadows = 1.f;
     psycho17_config.purity_scale = RENODX_TONE_MAP_SATURATION;
     psycho17_config.purity_highlights = -1.f * (RENODX_TONE_MAP_HIGHLIGHT_SATURATION - 1.f);
     psycho17_config.dechroma = RENODX_TONE_MAP_DECHROMA;
-    psycho17_config.adaptation_contrast = 1.f;
+    psycho17_config.adaptation_contrast = RENODX_TONE_MAP_CONE_CONTRAST;
     psycho17_config.bleaching_intensity = 0.f;
     psycho17_config.hue_emulation = 0.f;
     psycho17_config.pre_gamut_compress = false;
     psycho17_config.post_gamut_compress = true;
+    psycho17_config.mid_gray = 0.1f;
     r0.rgb = renodx_custom::tonemap::psycho::ApplyTest17BT2020(r0.rgb, r0.rgb, psycho17_config);
 
     r0.rgb = renodx::color::bt709::from::BT2020(r0.rgb);
@@ -168,7 +133,7 @@ void main(
 
   r0.rgb *= RENODX_DIFFUSE_WHITE_NITS / RENODX_GRAPHICS_WHITE_NITS;
 
-  if (RENODX_GAMMA_CORRECTION) {
+  if (RENODX_GAMMA_CORRECTION != 0.f) {
     r0.rgb = renodx::color::gamma::EncodeSafe(r0.rgb);
   } else {
     r0.rgb = renodx::color::srgb::EncodeSafe(r0.rgb);
