@@ -53,11 +53,11 @@ void main(
 
   if (RENODX_TONE_MAP_TYPE != 0.f) {
     o0.w = saturate(r0.w);
-    o0.rgb = renodx::color::bt709::clamp::BT2020(r0.rgb);
 
     if (RENODX_GAMMA_CORRECTION) {
-      o0.rgb = renodx::color::correct::GammaSafe(o0.rgb);
+      r0.rgb = renodx::color::correct::GammaSafe(r0.rgb);
     }
+    o0.rgb = renodx::color::bt709::clamp::BT2020(r0.rgb);
     o0.rgb *= RENODX_GRAPHICS_WHITE_NITS / 80.f;
 
     return;
