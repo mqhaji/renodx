@@ -2,9 +2,8 @@
 
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:23 2026
 
-cbuffer cPSScene : register(b2)
-{
-
+// clang-format off
+cbuffer cPSScene : register(b2) {
   struct
   {
     float4x4 m_projectionView;
@@ -20,32 +19,26 @@ cbuffer cPSScene : register(b2)
     float4 m_fogColor;
     float4 m_cameraCenterOffset;
     float4 m_shadowMapResolutions;
-  } g_psScene : packoffset(c0);
-
+  } g_psScene: packoffset(c0);
 }
 
-cbuffer cPSMaterial : register(b4)
-{
-
+cbuffer cPSMaterial : register(b4) {
   struct
   {
     float4 m_materials[8];
-  } g_psMaterial : packoffset(c0);
-
+  } g_psMaterial: packoffset(c0);
 }
 
-cbuffer cPSSystem : register(b0)
-{
-
+cbuffer cPSSystem : register(b0) {
   struct
   {
     float4 m_param;
     float4 m_renderInfo;
     float4 m_renderBuffer;
     float4 m_dominantLightDir;
-  } g_psSystem : packoffset(c0);
-
+  } g_psSystem: packoffset(c0);
 }
+// clang-format on
 
 SamplerState g_samplerPoint_Wrap_s : register(s8);
 SamplerState g_samplerPoint_Clamp_s : register(s9);
@@ -58,25 +51,22 @@ Texture2D<float4> inDepth : register(t11);
 Texture2D<float4> g_tex_fog : register(t12);
 Texture2D<float4> inOcclusion : register(t13);
 
-
 // 3Dmigoto declarations
 #define cmp -
 
-
 void main(
-  float4 v0 : SV_Position0,
-  float2 v1 : TEXCOORD0,
-  out float4 o0 : SV_Target0)
-{
-  float4 r0,r1,r2,r3,r4,r5;
+    float4 v0: SV_Position0,
+    float2 v1: TEXCOORD0,
+    out float4 o0: SV_Target0) {
+  float4 r0, r1, r2, r3, r4, r5;
   uint4 bitmask, uiDest;
   float4 fDest;
 
   // inVPos -> NScreenToTextureCoordinate: convert pixel position to scene texture UV.
-  r0.xy = float2(-0.5,-0.5) + v0.xy;
+  r0.xy = float2(-0.5, -0.5) + v0.xy;
   r0.xy = r0.xy;
   r0.xy = r0.xy;
-  r0.xy = float2(0.49609375,0.49609375) + r0.xy;
+  r0.xy = float2(0.49609375, 0.49609375) + r0.xy;
   r0.xy = g_psSystem.m_renderBuffer.zw * r0.xy;
   r0.xy = r0.xy;
   r0.xy = r0.xy;
@@ -148,8 +138,8 @@ void main(
   r0.z = max(0, r0.z);
   r0.z = min(1, r0.z);
   r0.z = 127 * r0.z;
-  r1.xyzw = float4(0.0146484375,0.123046875,0.0146484375,0.123046875) * r1.xyzw;
-  r1.xyzw = float4(0.015625,0.125,0.015625,0.125) + r1.xyzw;
+  r1.xyzw = float4(0.0146484375, 0.123046875, 0.0146484375, 0.123046875) * r1.xyzw;
+  r1.xyzw = float4(0.015625, 0.125, 0.015625, 0.125) + r1.xyzw;
 
   // GetVolumetricFog2D: compute adjacent fog atlas layer UVs and blend weight.
   r2.x = 1 + r0.z;
@@ -157,17 +147,17 @@ void main(
   r2.w = min(127, r2.x);
   r2.y = r0.z;
   r2.xy = floor(r2.yw);
-  r2.xy = r2.xy / float2(32,32);
+  r2.xy = r2.xy / float2(32, 32);
   r2.zw = frac(r2.xy);
-  r3.xz = float2(32,32) * r2.zw;
+  r3.xz = float2(32, 32) * r2.zw;
   r3.yw = floor(r2.xy);
-  r2.xyzw = float4(0.03125,0.25,0.03125,0.25) * r3.xyzw;
+  r2.xyzw = float4(0.03125, 0.25, 0.03125, 0.25) * r3.xyzw;
   r1.xyzw = r2.xyzw + r1.xyzw;
   r2.xyzw = frac(r0.zzzz);
   r3.xyzw = g_tex_fog.Sample(g_samplerLinear_Clamp_s, r1.xy).xyzw;
   r1.xyzw = g_tex_fog.Sample(g_samplerLinear_Clamp_s, r1.zw).xyzw;
   r4.xyzw = -r2.xyzw;
-  r4.xyzw = float4(1,1,1,1) + r4.xyzw;
+  r4.xyzw = float4(1, 1, 1, 1) + r4.xyzw;
   r3.xyzw = r4.xyzw * r3.xyzw;
   r1.xyzw = r2.xyzw * r1.xyzw;
   r1.xyzw = r3.xyzw + r1.xyzw;
@@ -189,7 +179,7 @@ void main(
   r0.xyz = r0.xyz;
 
   // NCalcurateOutputColor2: compute luminance-derived alpha/output weight.
-  r0.w = dot(r0.xyz, float3(0.212500006,0.715399981,0.0720999986));
+  r0.w = dot(r0.xyz, float3(0.212500006, 0.715399981, 0.0720999986));
   r0.w = 0.03125 * r0.w;
   r1.x = max(0.001953125, r0.w);
   r1.x = rsqrt(r1.x);
@@ -198,31 +188,30 @@ void main(
   r0.xyz = r0.xyz;
 
   float3 untonemapped = r0.rgb;
-
-  // TppTonemap: apply the per-channel Fox Engine tonemap curve.
-  r3.xyz = r2.yyy;
-  r3.xzw = cmp(r3.xyz >= r0.xyz);
-  r3.xzw = r3.xzw ? float3(1,1,1) : float3(0,0,0);
-  r4.xyz = r3.xzw * r0.xyz;
-  r3.xzw = -r3.xzw;
-  r3.xzw = float3(1,1,1) + r3.xzw;
-  r0.xyz = r0.xyz + r2.zzz;
-  r5.xyz = -r3.yyy;
-  r0.xyz = r5.xyz + r0.xyz;
-  r0.xyz = r2.xxx * r0.xyz;
-  r0.xyz = float3(-1,-1,-1) / r0.xyz;
-  r0.xyz = r0.xyz + r2.zzz;
-  r0.xyz = r0.xyz + r3.yyy;
-  r0.xyz = r3.xzw * r0.xyz;
-  r1.xyz = r4.xyz + r0.xyz;
-  r1.xyz = r1.xyz;
-  r1.xyz = r1.xyz;
-  r1.w = r1.w;
-
   if (RENODX_TONE_MAP_TYPE != 0.f) {
     r1.rgb = untonemapped;
     r1.rgb = max(0, r1.rgb);
+  } else {
+    // TppTonemap: apply the per-channel Fox Engine tonemap curve.
+    r3.xyz = r2.yyy;
+    r3.xzw = cmp(r3.xyz >= r0.xyz);
+    r3.xzw = r3.xzw ? float3(1, 1, 1) : float3(0, 0, 0);
+    r4.xyz = r3.xzw * r0.xyz;
+    r3.xzw = -r3.xzw;
+    r3.xzw = float3(1, 1, 1) + r3.xzw;
+    r0.xyz = r0.xyz + r2.zzz;
+    r5.xyz = -r3.yyy;
+    r0.xyz = r5.xyz + r0.xyz;
+    r0.xyz = r2.xxx * r0.xyz;
+    r0.xyz = float3(-1, -1, -1) / r0.xyz;
+    r0.xyz = r0.xyz + r2.zzz;
+    r0.xyz = r0.xyz + r3.yyy;
+    r0.xyz = r3.xzw * r0.xyz;
+    r1.xyz = r4.xyz + r0.xyz;
+    r1.xyz = r1.xyz;
+    r1.xyz = r1.xyz;
   }
+  r1.w = r1.w;
 
   // Final output: tonemapped RGB plus luminance-derived alpha.
   o0.xyzw = r1.xyzw;
