@@ -297,26 +297,27 @@ void main(
 
   // TppTonemap<0:NaN:Inf,1:NaN:Inf,2:NaN:Inf>
   float3 untonemapped = r0.rgb;
-  r2.xyz = g_psMaterial.m_materials[0].xyz;
-  r0.xyz = r0.xyz;
-  r3.xyz = r2.yyy;
-  r3.xzw = cmp(r3.xyz >= r0.xyz);
-  r3.xzw = r3.xzw ? float3(1, 1, 1) : float3(0, 0, 0);
-  r4.xyz = r3.xzw * r0.xyz;
-  r3.xzw = -r3.xzw;
-  r3.xzw = float3(1, 1, 1) + r3.xzw;
-  r0.xyz = r0.xyz + r2.zzz;
-  r5.xyz = -r3.yyy;
-  r0.xyz = r5.xyz + r0.xyz;
-  r0.xyz = r2.xxx * r0.xyz;
-  r0.xyz = float3(-1, -1, -1) / r0.xyz;
-  r0.xyz = r0.xyz + r2.zzz;
-  r0.xyz = r0.xyz + r3.yyy;
-  r0.xyz = r3.xzw * r0.xyz;
-  r1.xyz = r4.xyz + r0.xyz;
   if (RENODX_TONE_MAP_TYPE != 0.f) {
     r1.rgb = untonemapped;
     r1.rgb = max(0, r1.rgb);
+  } else {
+    r2.xyz = g_psMaterial.m_materials[0].xyz;
+    r0.xyz = r0.xyz;
+    r3.xyz = r2.yyy;
+    r3.xzw = cmp(r3.xyz >= r0.xyz);
+    r3.xzw = r3.xzw ? float3(1, 1, 1) : float3(0, 0, 0);
+    r4.xyz = r3.xzw * r0.xyz;
+    r3.xzw = -r3.xzw;
+    r3.xzw = float3(1, 1, 1) + r3.xzw;
+    r0.xyz = r0.xyz + r2.zzz;
+    r5.xyz = -r3.yyy;
+    r0.xyz = r5.xyz + r0.xyz;
+    r0.xyz = r2.xxx * r0.xyz;
+    r0.xyz = float3(-1, -1, -1) / r0.xyz;
+    r0.xyz = r0.xyz + r2.zzz;
+    r0.xyz = r0.xyz + r3.yyy;
+    r0.xyz = r3.xzw * r0.xyz;
+    r1.xyz = r4.xyz + r0.xyz;
   }
 
   r1.xyz = r1.xyz;

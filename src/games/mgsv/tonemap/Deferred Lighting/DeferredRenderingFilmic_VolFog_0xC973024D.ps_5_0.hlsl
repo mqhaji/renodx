@@ -2,6 +2,7 @@
 
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:32 2026
 
+// clang-format off
 cbuffer cPSScene : register(b2) {
   struct
   {
@@ -18,9 +19,7 @@ cbuffer cPSScene : register(b2) {
     float4 m_fogColor;
     float4 m_cameraCenterOffset;
     float4 m_shadowMapResolutions;
-  }
-g_psScene:
-  packoffset(c0);
+  } g_psScene: packoffset(c0);
 }
 
 cbuffer cPSObject : register(b5) {
@@ -30,9 +29,7 @@ cbuffer cPSObject : register(b5) {
     float4x4 m_world;
     float4 m_useWeightCount;
     float4 m_localParam[4];
-  }
-g_psObject:
-  packoffset(c0);
+  } g_psObject: packoffset(c0);
 }
 
 cbuffer cPSSystem : register(b0) {
@@ -42,10 +39,9 @@ cbuffer cPSSystem : register(b0) {
     float4 m_renderInfo;
     float4 m_renderBuffer;
     float4 m_dominantLightDir;
-  }
-g_psSystem:
-  packoffset(c0);
+  } g_psSystem: packoffset(c0);
 }
+// clang-format on
 
 SamplerState g_samplerPoint_Wrap_s : register(s8);
 SamplerState g_samplerPoint_Clamp_s : register(s9);
@@ -172,51 +168,54 @@ void main(
   r1.w = r1.x * r0.w;
   r0.xyz = r0.xyz;
   r0.xyz = r0.xyz;
-  r2.xyz = g_psObject.m_localParam[2].zzz;
-  r0.w = g_psObject.m_localParam[1].x;
-  r2.w = g_psObject.m_localParam[1].y;
-  r3.x = g_psObject.m_localParam[1].z;
-  r3.y = g_psObject.m_localParam[1].w;
-  r3.z = g_psObject.m_localParam[2].x;
-  r3.w = g_psObject.m_localParam[2].y;
-  r2.xyz = r2.xyz;
-  r0.w = r0.w;
-  r2.w = r2.w;
-  r3.x = r3.x;
-  r3.y = r3.y;
-  r3.z = r3.z;
-  r3.w = r3.w;
-  r4.xyz = r0.www * r2.xyz;
-  r3.x = r3.x * r2.w;
-  r5.xyz = r4.xyz + r3.xxx;
-  r5.xyz = r5.xyz * r2.xyz;
-  r4.w = r3.y * r3.z;
-  r5.xyz = r5.xyz + r4.www;
-  r4.xyz = r4.xyz + r2.www;
-  r2.xyz = r4.xyz * r2.xyz;
-  r3.y = r3.y * r3.w;
-  r2.xyz = r3.yyy + r2.xyz;
-  r2.xyz = r5.xyz / r2.xyz;
-  r3.z = r3.z / r3.w;
-  r4.xyz = -r3.zzz;
-  r2.xyz = r4.xyz + r2.xyz;
-  r2.xyz = float3(1, 1, 1) / r2.xyz;
-  r0.xyz = r0.xyz;
-  r5.xyz = r0.www * r0.xyz;
-  r3.xzw = r5.xyz + r3.xxx;
-  r3.xzw = r3.xzw * r0.xyz;
-  r3.xzw = r3.xzw + r4.www;
-  r5.xyz = r5.xyz + r2.www;
-  r0.xyz = r5.xyz * r0.xyz;
-  r0.xyz = r0.xyz + r3.yyy;
-  r0.xyz = r3.xzw / r0.xyz;
-  r0.xyz = r0.xyz + r4.xyz;
-  r1.xyz = r0.xyz * r2.xyz;
+
+  float3 untonemapped = r0.rgb;
+  if (RENODX_TONE_MAP_TYPE != 0.f) {
+    float A = g_psObject.m_localParam[1].x, B = g_psObject.m_localParam[1].y, C = g_psObject.m_localParam[1].z, D = g_psObject.m_localParam[1].w;
+    float E = g_psObject.m_localParam[2].x, F = g_psObject.m_localParam[2].y, W = g_psObject.m_localParam[2].z;
+    float coeffs[6] = { A, B, C, D, E, F };
+    float white_precompute = 1.f / renodx::tonemap::ApplyCurve(W, A, B, C, D, E, F);
+    Uncharted2::Config::Uncharted2ExtendedConfig uc2_config = Uncharted2::Config::CreateUncharted2ExtendedConfig(coeffs, white_precompute);
+    r1.rgb = Uncharted2::ApplyExtended(untonemapped, uc2_config);
+  } else {
+    // getTonemapedColor_UnchartedFilmic<0:NaN:Inf,1:NaN:Inf,2:NaN:Inf>
+    r2.xyz = g_psObject.m_localParam[2].zzz;  // W
+    r0.w = g_psObject.m_localParam[1].x;      // A
+    r2.w = g_psObject.m_localParam[1].y;      // B
+    r3.x = g_psObject.m_localParam[1].z;      // C
+    r3.y = g_psObject.m_localParam[1].w;      // D
+    r3.z = g_psObject.m_localParam[2].x;      // E
+    r3.w = g_psObject.m_localParam[2].y;      // F
+
+    r4.xyz = r0.www * r2.xyz;
+    r3.x = r3.x * r2.w;
+    r5.xyz = r4.xyz + r3.xxx;
+    r5.xyz = r5.xyz * r2.xyz;
+    r4.w = r3.y * r3.z;
+    r5.xyz = r5.xyz + r4.www;
+    r4.xyz = r4.xyz + r2.www;
+    r2.xyz = r4.xyz * r2.xyz;
+    r3.y = r3.y * r3.w;
+    r2.xyz = r3.yyy + r2.xyz;
+    r2.xyz = r5.xyz / r2.xyz;
+    r3.z = r3.z / r3.w;
+    r4.xyz = -r3.zzz;
+    r2.xyz = r4.xyz + r2.xyz;
+    r2.xyz = float3(1, 1, 1) / r2.xyz;  // invTonemapedWhite<0:NaN:Inf,1:NaN:Inf,2:NaN:Inf>
+    r0.xyz = r0.xyz;
+    r5.xyz = r0.www * r0.xyz;
+    r3.xzw = r5.xyz + r3.xxx;
+    r3.xzw = r3.xzw * r0.xyz;
+    r3.xzw = r3.xzw + r4.www;
+    r5.xyz = r5.xyz + r2.www;
+    r0.xyz = r5.xyz * r0.xyz;
+    r0.xyz = r0.xyz + r3.yyy;
+    r0.xyz = r3.xzw / r0.xyz;
+    r0.xyz = r0.xyz + r4.xyz;
+    r1.xyz = r0.xyz * r2.xyz;
+  }
   r1 = max(0, r1);
 
-  r1.xyz = r1.xyz;
-  r1.xyz = r1.xyz;
-  r1.xyz = r1.xyz;
   r1.w = r1.w;
   o0.xyzw = r1.xyzw;
 
