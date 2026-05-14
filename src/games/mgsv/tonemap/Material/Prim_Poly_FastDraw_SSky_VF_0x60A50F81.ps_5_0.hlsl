@@ -204,6 +204,10 @@ void main(
   r0.w = r0.w;
   r0.xyz = r0.xyz;
   r0.xyz = r0.xyz;
+  
+#if 1
+  r1.rgb = ApplyTppTonemap(r0.rgb, g_psMaterial.m_materials[0].xyz);
+#else
   r1.xyz = g_psMaterial.m_materials[0].xyz;
   r0.xyz = r0.xyz;
   r2.xyz = r1.yyy;
@@ -221,6 +225,8 @@ void main(
   r1.xyz = r1.xyz + r2.yyy;
   r1.xyz = r2.xzw * r1.xyz;
   r1.xyz = r3.xyz + r1.xyz;
+#endif
+
   r1.xyz = r1.xyz;
   r1.xyz = r1.xyz;
   r1.xyz = r1.xyz;
