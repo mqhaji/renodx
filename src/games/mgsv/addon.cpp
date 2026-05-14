@@ -512,6 +512,28 @@ bool OnCopyTonemapOutputResource(
       },                                                                                              \
   }
 
+#define UpgradeRTVShader(value)                     \
+  {                                                 \
+      value,                                        \
+      {                                             \
+          .crc32 = value,                           \
+          .on_inject = [](auto*) { return false; }, \
+          .on_draw = [](auto* cmd_list) {                                                             \
+            auto rtvs = renodx::utils::swapchain::GetRenderTargets(cmd_list);                         \
+            auto* device = cmd_list->get_device();                                                    \
+            bool changed = false;                                                                     \
+            for (auto rtv : rtvs) {                                                                   \
+              changed = ActivateCloneHotSwapIfTracked(device, rtv) || changed;                        \
+              ArmTonemapCopyResourcePropagationForRTV(device, rtv);                                   \
+            }                                                                                         \
+            if (changed) {                                                                            \
+              renodx::mods::swapchain::FlushDescriptors(cmd_list);                                    \
+              renodx::mods::swapchain::RewriteRenderTargets(cmd_list, rtvs.size(), rtvs.data(), {0}); \
+            }                                                                                         \
+            return true; },        \
+      },                                            \
+  }
+
 #define UpgradeTonemapOutputRTV(value)                                                                \
   {                                                                                                   \
       value,                                                                                          \
@@ -617,9 +639,16 @@ renodx::mods::shader::CustomShaders custom_shaders = []() {
       UpgradeDeferredTonemapOutputRTV(0x2EA8F13F, "DR_VolFog_TppTonemap"),
       UpgradeDeferredTonemapOutputRTV(0x59B44963, "DR_VolFog_TppTonemap_MD"),
 
-      // LUT builders and FXAA write into typeless BGRA render targets that need the clone activated.
-      UpgradeRTVReplaceShader(0x637BB745),
-      UpgradeRTVReplaceShader(0xCA7F0E3D),
+      // LUT builders write into typeless BGRA render targets that need the clone activated.
+      UpgradeRTVShader(0x244877AB),
+      UpgradeRTVShader(0x3BCB1620),
+      UpgradeRTVShader(0x5A8584C0),
+      UpgradeRTVShader(0x5E320D1D),
+      UpgradeRTVShader(0x637BB745),
+      UpgradeRTVShader(0xCA7F0E3D),
+      UpgradeRTVShader(0xDAA0FD48),
+      UpgradeRTVShader(0xF50444CF),
+
       UpgradeRTVReplaceShader(0x900968FF),
 
       // The named Tonemap shader is the late LUT/color-grading pass in MGSV.
@@ -799,6 +828,15 @@ renodx::utils::settings::Settings settings = {
         .max = 100.f,
         .parse = [](float value) { return value * 0.01f; },
     },
+    // new renodx::utils::settings::Setting{
+    //     .key = "FxBloomType",
+    //     .binding = &shader_injection.custom_bloom_type,
+    //     .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+    //     .default_value = 1.f,
+    //     .label = "Bloom Type",
+    //     .section = "Effects",
+    //     .labels = {"Vanilla", "Enhanced"},
+    // },
     new renodx::utils::settings::Setting{
         .key = "FxBloom",
         .binding = &shader_injection.custom_bloom,
@@ -911,6 +949,7 @@ void OnPresetOff() {
       {"ColorGradeFlare", 0.f},
       {"ColorGradeScene", 100.f},
       {"ColorGradeSceneScaling", 0.f},
+      {"FxBloomType", 0.f},
       {"FxBloom", 100.f},
       {"FxBoostSun", 0.f},
   });
