@@ -1,6 +1,29 @@
 #include "../common.hlsli"
 #include "./uncharted2extended.hlsli"
 
+float3 ApplyUnchartedFilmicTonemap(float3 untonemapped, float A, float B, float C, float D, float E, float F, float W) {
+  if (RENODX_TONE_MAP_TYPE != 0.f) {
+    float coeffs[6] = { A, B, C, D, E, F };
+    float white_precompute = 1.f / renodx::tonemap::ApplyCurve(W, A, B, C, D, E, F);
+    Uncharted2::Config::Uncharted2ExtendedConfig uc2_config = Uncharted2::Config::CreateUncharted2ExtendedConfig(coeffs, white_precompute);
+    return Uncharted2::ApplyExtended(untonemapped, uc2_config);
+  }
+
+  return renodx::tonemap::ApplyCurve(untonemapped, A, B, C, D, E, F)
+         / renodx::tonemap::ApplyCurve(W, A, B, C, D, E, F);
+}
+
+float3 ApplyTppTonemap(float3 untonemapped, float3 params) {
+  if (RENODX_TONE_MAP_TYPE != 0.f) return untonemapped;
+
+  float shoulder_start = params.y, shoulder_offset = params.z, shoulder_scale = params.x;
+
+  float3 linear_weight = renodx::math::Select(untonemapped <= shoulder_start, 1.f, 0.f);
+  float3 shoulder_curve = shoulder_start + shoulder_offset - (1.f / (shoulder_scale * (untonemapped - shoulder_start + shoulder_offset)));
+
+  return untonemapped * linear_weight + shoulder_curve * (1.f - linear_weight);
+}
+
 float3 Sample2DLUT(float3 color, Texture2D<float4> inColorLUT, SamplerState g_samplerLinear_Clamp_s) {
   // if (RENODX_TONE_MAP_TYPE != 0.f) return renodx::lut::SampleTetrahedral(inColorLUT, renodx::math::SqrtSafe(color), 16u);
 
