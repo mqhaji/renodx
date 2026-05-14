@@ -832,6 +832,9 @@ void main(
   r9.xyz = r9.xyz;
   r0.xyz = r0.xyz;
 
+#if 1
+  r0.rgb = ApplyTppTonemap(r0.rgb, r9.xyz);
+#else
   float3 untonemapped = r0.rgb;
 
   r1.xyw = r9.yyy;
@@ -855,6 +858,7 @@ void main(
   if (RENODX_TONE_MAP_TYPE != 0.f) {
     r0.rgb = untonemapped;
   }
+#endif
 
   // GammaCorrection.
   r1.xyw = cmp(float3(0.00313080009,0.00313080009,0.00313080009) >= r0.xyz);
