@@ -536,6 +536,9 @@ void main(
   r0.xyz = r0.xyz;
 
   // TppTonemap
+#if 1
+  r0.rgb = ApplyTppTonemap(r0.rgb, r8.xyz);
+#else
   float3 untonemapped = r0.rgb;
   r1.xyz = r8.yyy;
   r1.xzw = cmp(r1.xyz >= r0.xyz);
@@ -558,6 +561,7 @@ void main(
     r0.rgb = untonemapped;
     r0.rgb = max(0, r0.rgb);
   }
+#endif
 
   r1.xyz = cmp(float3(0.00313080009, 0.00313080009, 0.00313080009) >= r0.xyz);
   r1.xyz = r1.xyz ? float3(1, 1, 1) : float3(0, 0, 0);
