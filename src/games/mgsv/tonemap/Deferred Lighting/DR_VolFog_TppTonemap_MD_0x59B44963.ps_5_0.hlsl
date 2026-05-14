@@ -164,32 +164,30 @@ void main(
   r0.w = max(0.001953125, r0.z);
   r0.w = rsqrt(r0.w);
   r2.w = r0.z * r0.w;
+
+#if 1
+  r1.rgb = ApplyTppTonemap(r1.rgb, g_psMaterial.m_materials[0].xyz);
+#else
+  // TppTonemap: apply the per-channel Fox Engine tonemap curve.
   r3.xyz = g_psMaterial.m_materials[0].xyz;
   r1.xyz = r1.xyz;
-
-  float3 untonemapped = r1.rgb;
-  if (RENODX_TONE_MAP_TYPE != 0.f) {
-    r1.rgb = untonemapped;
-    r1.rgb = max(0, r1.rgb);
-  } else {
-    // TppTonemap: apply the per-channel Fox Engine tonemap curve.
-    r4.xyz = r3.yyy;
-    r4.xzw = cmp(r4.xyz >= r1.xyz);
-    r4.xzw = r4.xzw ? float3(1, 1, 1) : float3(0, 0, 0);
-    r5.xyz = r4.xzw * r1.xyz;
-    r4.xzw = -r4.xzw;
-    r4.xzw = float3(1, 1, 1) + r4.xzw;
-    r1.xyz = r1.xyz + r3.zzz;
-    r6.xyz = -r4.yyy;
-    r1.xyz = r6.xyz + r1.xyz;
-    r1.xyz = r3.xxx * r1.xyz;
-    r1.xyz = float3(-1, -1, -1) / r1.xyz;
-    r1.xyz = r1.xyz + r3.zzz;
-    r1.xyz = r1.xyz + r4.yyy;
-    r1.xyz = r4.xzw * r1.xyz;
-    r1.xyz = r5.xyz + r1.xyz;
-    r1.xyz = r1.xyz;
-  }
+  r4.xyz = r3.yyy;
+  r4.xzw = cmp(r4.xyz >= r1.xyz);
+  r4.xzw = r4.xzw ? float3(1, 1, 1) : float3(0, 0, 0);
+  r5.xyz = r4.xzw * r1.xyz;
+  r4.xzw = -r4.xzw;
+  r4.xzw = float3(1, 1, 1) + r4.xzw;
+  r1.xyz = r1.xyz + r3.zzz;
+  r6.xyz = -r4.yyy;
+  r1.xyz = r6.xyz + r1.xyz;
+  r1.xyz = r3.xxx * r1.xyz;
+  r1.xyz = float3(-1, -1, -1) / r1.xyz;
+  r1.xyz = r1.xyz + r3.zzz;
+  r1.xyz = r1.xyz + r4.yyy;
+  r1.xyz = r4.xzw * r1.xyz;
+  r1.xyz = r5.xyz + r1.xyz;
+  r1.xyz = r1.xyz;
+#endif
 
   r0.xy = float2(0.125, 0.125) * r0.xy;
   r0.xy = frac(r0.xy);
