@@ -55,10 +55,10 @@ void main(
   // tonemap to sdr before bloom
   float maxch_scale = 1.f;
   if (RENODX_TONE_MAP_TYPE != 0.f) {
-    r1.rgb = renodx::color::gamma::DecodeSafe(r1.rgb);
+    r1.rgb = renodx::color::srgb::DecodeSafe(r1.rgb);
     maxch_scale = ComputeMaxChCompressionScale(r1.rgb, 0.5f);
     r1.rgb *= maxch_scale;
-    r1.rgb = renodx::color::gamma::EncodeSafe(r1.rgb);
+    r1.rgb = renodx::color::srgb::EncodeSafe(r1.rgb);
   }
 
   r1.xyz = r1.xyz;
@@ -76,68 +76,12 @@ void main(
   // invert tonemap after LUT
   r0.rgb = max(0, r0.rgb);
   if (RENODX_TONE_MAP_TYPE != 0.f) {
-    r0.rgb = renodx::color::gamma::DecodeSafe(r0.rgb);
+    r0.rgb = renodx::color::srgb::DecodeSafe(r0.rgb);
     r0.rgb /= maxch_scale;
-    r0.rgb = renodx::color::gamma::EncodeSafe(r0.rgb);
-  }
-
-  if (RENODX_GAMMA_CORRECTION == 1.f) {
-    r0.rgb = renodx::color::gamma::DecodeSafe(r0.rgb);
-  } else if (RENODX_GAMMA_CORRECTION == 2.f) {
-    r0.rgb = renodx::color::srgb::DecodeSafe(r0.rgb);
-    float3 perch = renodx::color::correct::GammaSafe(r0.rgb);
-
-    float y_in = max(0, renodx::color::yf::from::BT709(r0.rgb));
-    float y_out = renodx::color::correct::Gamma(y_in);
-
-    r0.rgb = renodx::color::correct::Luminance(r0.rgb, y_in, y_out);
-
-    r0.rgb = renodx::color::bt709::from::BT2020(renodx_custom::tonemap::psycho::psycho17_ApplyPurityFromBT2020(
-        renodx::color::bt2020::from::BT709(perch),
-        renodx::color::bt2020::from::BT709(r0.rgb), 1.f, 1.f, 1e-7f, false));
-  } else {
-    r0.rgb = renodx::color::srgb::DecodeSafe(r0.rgb);
-  }
-
-  if (RENODX_TONE_MAP_TYPE != 0.f) {
-    r0.rgb = renodx::color::bt2020::from::BT709(r0.rgb);
-
-    renodx_custom::tonemap::psycho::config17::Config psycho17_config =
-        renodx_custom::tonemap::psycho::config17::Create();
-    psycho17_config.peak_value = RENODX_PEAK_WHITE_NITS / RENODX_DIFFUSE_WHITE_NITS;
-    psycho17_config.clip_point = 100.f;
-    psycho17_config.exposure = RENODX_TONE_MAP_EXPOSURE;
-    psycho17_config.gamma = 1.f;
-    psycho17_config.highlights = RENODX_TONE_MAP_HIGHLIGHTS;
-    psycho17_config.shadows = RENODX_TONE_MAP_SHADOWS;
-    psycho17_config.contrast = RENODX_TONE_MAP_CONTRAST;
-    psycho17_config.flare_lms = 0.10f * pow(RENODX_TONE_MAP_FLARE, 10.f);
-    psycho17_config.contrast_highlights = 1.f;
-    psycho17_config.contrast_shadows = 1.f;
-    psycho17_config.purity_scale = RENODX_TONE_MAP_SATURATION;
-    psycho17_config.purity_highlights = -1.f * (RENODX_TONE_MAP_HIGHLIGHT_SATURATION - 1.f);
-    psycho17_config.dechroma = RENODX_TONE_MAP_DECHROMA;
-    psycho17_config.adaptation_contrast = RENODX_TONE_MAP_CONE_CONTRAST;
-    psycho17_config.bleaching_intensity = 0.f;
-    psycho17_config.hue_emulation = 0.f;
-    psycho17_config.pre_gamut_compress = false;
-    psycho17_config.post_gamut_compress = true;
-    psycho17_config.mid_gray = 0.1f;
-    r0.rgb = renodx_custom::tonemap::psycho::ApplyTest17BT2020(r0.rgb, r0.rgb, psycho17_config);
-
-    r0.rgb = renodx::color::bt709::from::BT2020(r0.rgb);
-
-  } else if (RENODX_TONE_MAP_TYPE == 0.f) {
-    r0.rgb = saturate(r0.rgb);
-  }
-
-  r0.rgb *= RENODX_DIFFUSE_WHITE_NITS / RENODX_GRAPHICS_WHITE_NITS;
-
-  if (RENODX_GAMMA_CORRECTION != 0.f) {
-    r0.rgb = renodx::color::gamma::EncodeSafe(r0.rgb);
-  } else {
     r0.rgb = renodx::color::srgb::EncodeSafe(r0.rgb);
   }
+
+  r0.rgb = ApplyFinalTonemap(r0.rgb);
 
   o0.w = dot(r0.xyz, float3(0.298999995, 0.587000012, 0.114));
   o0.xyz = r0.xyz;
