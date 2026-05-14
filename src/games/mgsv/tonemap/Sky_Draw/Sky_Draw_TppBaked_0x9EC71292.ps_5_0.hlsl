@@ -364,6 +364,9 @@ void main(
   r0.xyz = r0.xyz;
 
   // NCalcurateOutputColor: TppTonemap curve.
+#if 1
+  r0.rgb = ApplyTppTonemap(r0.rgb, g_psMaterial.m_materials[1].xyz);
+#else
   float3 untonemapped = r0.xyz;
   r1.xyz = g_psMaterial.m_materials[1].xyz;
   r1.xyz = r1.xyz;
@@ -386,10 +389,7 @@ void main(
   r0.xyz = r0.xyz;
   r0.xyz = max(float3(0, 0, 0), r0.xyz);
   r0.xyz = min(float3(1, 1, 1), r0.xyz);
-
-  if (RENODX_TONE_MAP_TYPE != 0.f) {
-    r0.rgb = untonemapped;
-  }
+#endif
 
   // GammaCorrection: linear RGB to sRGB output.
   r1.xyz = cmp(float3(0.00313080009, 0.00313080009, 0.00313080009) >= r0.xyz);
