@@ -169,52 +169,47 @@ void main(
   r0.xyz = r0.xyz;
   r0.xyz = r0.xyz;
 
-  float3 untonemapped = r0.rgb;
-  if (RENODX_TONE_MAP_TYPE != 0.f) {
-    float A = g_psObject.m_localParam[1].x, B = g_psObject.m_localParam[1].y, C = g_psObject.m_localParam[1].z, D = g_psObject.m_localParam[1].w;
-    float E = g_psObject.m_localParam[2].x, F = g_psObject.m_localParam[2].y, W = g_psObject.m_localParam[2].z;
-    float coeffs[6] = { A, B, C, D, E, F };
-    float white_precompute = 1.f / renodx::tonemap::ApplyCurve(W, A, B, C, D, E, F);
-    Uncharted2::Config::Uncharted2ExtendedConfig uc2_config = Uncharted2::Config::CreateUncharted2ExtendedConfig(coeffs, white_precompute);
-    r1.rgb = Uncharted2::ApplyExtended(untonemapped, uc2_config);
-  } else {
-    // getTonemapedColor_UnchartedFilmic<0:NaN:Inf,1:NaN:Inf,2:NaN:Inf>
-    r2.xyz = g_psObject.m_localParam[2].zzz;  // W
-    r0.w = g_psObject.m_localParam[1].x;      // A
-    r2.w = g_psObject.m_localParam[1].y;      // B
-    r3.x = g_psObject.m_localParam[1].z;      // C
-    r3.y = g_psObject.m_localParam[1].w;      // D
-    r3.z = g_psObject.m_localParam[2].x;      // E
-    r3.w = g_psObject.m_localParam[2].y;      // F
+#if 1
+  float A = g_psObject.m_localParam[1].x, B = g_psObject.m_localParam[1].y, C = g_psObject.m_localParam[1].z, D = g_psObject.m_localParam[1].w;
+  float E = g_psObject.m_localParam[2].x, F = g_psObject.m_localParam[2].y, W = g_psObject.m_localParam[2].z;
+  r1.rgb = ApplyUnchartedFilmicTonemap(r0.rgb, A, B, C, D, E, F, W);
+#else
+  // getTonemapedColor_UnchartedFilmic<0:NaN:Inf,1:NaN:Inf,2:NaN:Inf>
+  r2.xyz = g_psObject.m_localParam[2].zzz;  // W
+  r0.w = g_psObject.m_localParam[1].x;      // A
+  r2.w = g_psObject.m_localParam[1].y;      // B
+  r3.x = g_psObject.m_localParam[1].z;      // C
+  r3.y = g_psObject.m_localParam[1].w;      // D
+  r3.z = g_psObject.m_localParam[2].x;      // E
+  r3.w = g_psObject.m_localParam[2].y;      // F
 
-    r4.xyz = r0.www * r2.xyz;
-    r3.x = r3.x * r2.w;
-    r5.xyz = r4.xyz + r3.xxx;
-    r5.xyz = r5.xyz * r2.xyz;
-    r4.w = r3.y * r3.z;
-    r5.xyz = r5.xyz + r4.www;
-    r4.xyz = r4.xyz + r2.www;
-    r2.xyz = r4.xyz * r2.xyz;
-    r3.y = r3.y * r3.w;
-    r2.xyz = r3.yyy + r2.xyz;
-    r2.xyz = r5.xyz / r2.xyz;
-    r3.z = r3.z / r3.w;
-    r4.xyz = -r3.zzz;
-    r2.xyz = r4.xyz + r2.xyz;
-    r2.xyz = float3(1, 1, 1) / r2.xyz;  // invTonemapedWhite<0:NaN:Inf,1:NaN:Inf,2:NaN:Inf>
-    r0.xyz = r0.xyz;
-    r5.xyz = r0.www * r0.xyz;
-    r3.xzw = r5.xyz + r3.xxx;
-    r3.xzw = r3.xzw * r0.xyz;
-    r3.xzw = r3.xzw + r4.www;
-    r5.xyz = r5.xyz + r2.www;
-    r0.xyz = r5.xyz * r0.xyz;
-    r0.xyz = r0.xyz + r3.yyy;
-    r0.xyz = r3.xzw / r0.xyz;
-    r0.xyz = r0.xyz + r4.xyz;
-    r1.xyz = r0.xyz * r2.xyz;
-  }
-  r1 = max(0, r1);
+  r4.xyz = r0.www * r2.xyz;
+  r3.x = r3.x * r2.w;
+  r5.xyz = r4.xyz + r3.xxx;
+  r5.xyz = r5.xyz * r2.xyz;
+  r4.w = r3.y * r3.z;
+  r5.xyz = r5.xyz + r4.www;
+  r4.xyz = r4.xyz + r2.www;
+  r2.xyz = r4.xyz * r2.xyz;
+  r3.y = r3.y * r3.w;
+  r2.xyz = r3.yyy + r2.xyz;
+  r2.xyz = r5.xyz / r2.xyz;
+  r3.z = r3.z / r3.w;
+  r4.xyz = -r3.zzz;
+  r2.xyz = r4.xyz + r2.xyz;
+  r2.xyz = float3(1, 1, 1) / r2.xyz;  // invTonemapedWhite<0:NaN:Inf,1:NaN:Inf,2:NaN:Inf>
+  r0.xyz = r0.xyz;
+  r5.xyz = r0.www * r0.xyz;
+  r3.xzw = r5.xyz + r3.xxx;
+  r3.xzw = r3.xzw * r0.xyz;
+  r3.xzw = r3.xzw + r4.www;
+  r5.xyz = r5.xyz + r2.www;
+  r0.xyz = r5.xyz * r0.xyz;
+  r0.xyz = r0.xyz + r3.yyy;
+  r0.xyz = r3.xzw / r0.xyz;
+  r0.xyz = r0.xyz + r4.xyz;
+  r1.xyz = r0.xyz * r2.xyz;
+#endif
 
   r1.w = r1.w;
   o0.xyzw = r1.xyzw;
