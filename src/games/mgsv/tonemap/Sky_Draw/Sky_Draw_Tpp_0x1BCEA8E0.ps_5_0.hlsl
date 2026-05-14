@@ -372,6 +372,9 @@ void main(
   r0.xyz = r0.xyz;
   r0.xyz = r0.xyz;
   r0.xyz = r0.xyz;
+#if 1
+  r0.rgb = ApplyTppTonemap(r0.rgb, g_psMaterial.m_materials[1].xyz);
+#else
   r1.xyz = g_psMaterial.m_materials[1].xyz;
   r1.xyz = r1.xyz;
   r0.xyz = r0.xyz;
@@ -393,6 +396,7 @@ void main(
   r0.xyz = r0.xyz;
   r0.xyz = max(float3(0,0,0), r0.xyz);
   r0.xyz = min(float3(1,1,1), r0.xyz);
+#endif
   r0.xyz = r0.xyz;
   r1.xyz = cmp(float3(0.00313080009,0.00313080009,0.00313080009) >= r0.xyz);
   r1.xyz = r1.xyz ? float3(1,1,1) : float3(0,0,0);

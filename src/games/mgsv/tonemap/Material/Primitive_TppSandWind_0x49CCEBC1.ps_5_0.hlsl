@@ -402,6 +402,9 @@ void main(
   r0.w = r0.x * r0.y;
   r5.xyz = r5.xyz;
   r1.xyz = r1.xyz;
+#if 1
+  r1.rgb = ApplyTppTonemap(r1.rgb, r5.xyz);
+#else
   r2.xyz = r5.yyy;
   r2.xzw = cmp(r2.xyz >= r1.xyz);
   r2.xzw = r2.xzw ? float3(1,1,1) : float3(0,0,0);
@@ -419,6 +422,7 @@ void main(
   r1.xyz = r3.xyz + r1.xyz;
   r1.xyz = r1.xyz;
   r1.xyz = r1.xyz;
+#endif
   r2.xyz = cmp(float3(0.00313080009,0.00313080009,0.00313080009) >= r1.xyz);
   r2.xyz = r2.xyz ? float3(1,1,1) : float3(0,0,0);
   r3.xyz = float3(12.9200001,12.9200001,12.9200001) * r1.xyz;
