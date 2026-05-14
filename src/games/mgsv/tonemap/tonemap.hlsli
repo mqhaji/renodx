@@ -24,6 +24,72 @@ float3 ApplyTppTonemap(float3 untonemapped, float3 params) {
   return untonemapped * linear_weight + shoulder_curve * (1.f - linear_weight);
 }
 
+float3 ApplyFinalTonemap(float3 untonemapped) {
+  float3 r0 = untonemapped;
+
+  if (RENODX_GAMMA_CORRECTION == 1.f) {
+    r0.rgb = renodx::color::gamma::DecodeSafe(r0.rgb);
+  } else if (RENODX_GAMMA_CORRECTION == 2.f) {
+    r0.rgb = renodx::color::srgb::DecodeSafe(r0.rgb);
+    float3 perch = renodx::color::correct::GammaSafe(r0.rgb);
+
+    float y_in = max(0, renodx::color::yf::from::BT709(r0.rgb));
+    float y_out = renodx::color::correct::Gamma(y_in);
+
+    r0.rgb = renodx::color::correct::Luminance(r0.rgb, y_in, y_out);
+
+    r0.rgb = renodx::color::bt709::from::BT2020(renodx_custom::tonemap::psycho::psycho17_ApplyPurityFromBT2020(
+        renodx::color::bt2020::from::BT709(perch),
+        renodx::color::bt2020::from::BT709(r0.rgb), 1.f, 1.f, 1e-7f, false));
+  } else {
+    r0.rgb = renodx::color::srgb::DecodeSafe(r0.rgb);
+  }
+
+  if (RENODX_TONE_MAP_TYPE != 0.f) {
+    r0.rgb = renodx::color::bt2020::from::BT709(r0.rgb);
+
+    renodx_custom::tonemap::psycho::config17::Config psycho17_config =
+        renodx_custom::tonemap::psycho::config17::Create();
+    psycho17_config.peak_value = RENODX_PEAK_WHITE_NITS / RENODX_DIFFUSE_WHITE_NITS;
+    psycho17_config.clip_point = 100.f;
+    psycho17_config.exposure = RENODX_TONE_MAP_EXPOSURE;
+    psycho17_config.gamma = 1.f;
+    psycho17_config.highlights = RENODX_TONE_MAP_HIGHLIGHTS;
+    psycho17_config.shadows = RENODX_TONE_MAP_SHADOWS;
+    psycho17_config.contrast = RENODX_TONE_MAP_CONTRAST;
+    psycho17_config.flare_lms = 0.10f * pow(RENODX_TONE_MAP_FLARE, 10.f);
+    psycho17_config.contrast_highlights = 1.f;
+    psycho17_config.contrast_shadows = 1.f;
+    psycho17_config.purity_scale = RENODX_TONE_MAP_SATURATION;
+    psycho17_config.purity_highlights = -1.f * (RENODX_TONE_MAP_HIGHLIGHT_SATURATION - 1.f);
+    psycho17_config.dechroma = RENODX_TONE_MAP_DECHROMA;
+    psycho17_config.adaptation_contrast = RENODX_TONE_MAP_CONE_CONTRAST;
+    psycho17_config.bleaching_intensity = 0.f;
+    psycho17_config.hue_emulation = 0.f;
+    psycho17_config.pre_gamut_compress = false;
+    psycho17_config.post_gamut_compress = true;
+    psycho17_config.mid_gray = 0.1f;
+    psycho17_config.lms_tonemap_strength = 0.5f;
+    psycho17_config.apply_maxch_tonemap = true;
+    r0.rgb = renodx_custom::tonemap::psycho::ApplyTest17BT2020(r0.rgb, r0.rgb, psycho17_config);
+
+    r0.rgb = renodx::color::bt709::from::BT2020(r0.rgb);
+
+  } else if (RENODX_TONE_MAP_TYPE == 0.f) {
+    r0.rgb = saturate(r0.rgb);
+  }
+
+  r0.rgb *= RENODX_DIFFUSE_WHITE_NITS / RENODX_GRAPHICS_WHITE_NITS;
+
+  if (RENODX_GAMMA_CORRECTION != 0.f) {
+    r0.rgb = renodx::color::gamma::EncodeSafe(r0.rgb);
+  } else {
+    r0.rgb = renodx::color::srgb::EncodeSafe(r0.rgb);
+  }
+
+  return r0.rgb;
+}
+
 float3 Sample2DLUT(float3 color, Texture2D<float4> inColorLUT, SamplerState g_samplerLinear_Clamp_s) {
   // if (RENODX_TONE_MAP_TYPE != 0.f) return renodx::lut::SampleTetrahedral(inColorLUT, renodx::math::SqrtSafe(color), 16u);
 
@@ -82,10 +148,10 @@ float3 Sample2DLUTWithScaling(float3 color, Texture2D<float4> inColorLUT, Sample
   float3 input_gamma = renodx::math::SqrtSafe(color);
 
   if (RENODX_COLOR_GRADE_SCALING != 0.f) {
-    float3 input_linear = renodx::color::gamma::DecodeSafe(input_gamma);
+    float3 input_linear = renodx::color::srgb::DecodeSafe(input_gamma);
 
     float3 lut_black_gamma = Sample2DLUT(0, inColorLUT, g_samplerLinear_Clamp_s);
-    float3 lut_black_linear = renodx::color::gamma::DecodeSafe(lut_black_gamma);
+    float3 lut_black_linear = renodx::color::srgb::DecodeSafe(lut_black_gamma);
     float lut_black_y = max(0, renodx::color::y::from::BT709(lut_black_linear));
 
     if (lut_black_y > 0.f) {
@@ -96,14 +162,14 @@ float3 Sample2DLUTWithScaling(float3 color, Texture2D<float4> inColorLUT, Sample
           lut_black_gamma,
           lut_mid_gamma,
           input_gamma);
-      float3 unclamped_linear = renodx::color::gamma::DecodeSafe(unclamped_gamma);
+      float3 unclamped_linear = renodx::color::srgb::DecodeSafe(unclamped_gamma);
 
-      float3 output_linear = renodx::color::gamma::DecodeSafe(output_gamma);
+      float3 output_linear = renodx::color::srgb::DecodeSafe(output_gamma);
 
       float3 recolored = output_linear * lerp(1.f, renodx::math::DivideSafe(renodx::color::yf::from::BT709(unclamped_linear), renodx::color::yf::from::BT709(output_linear), 1.f), RENODX_COLOR_GRADE_SCALING * 0.99735);
 
       recolored = max(0, recolored);
-      output_gamma = renodx::color::gamma::EncodeSafe(recolored);
+      output_gamma = renodx::color::srgb::EncodeSafe(recolored);
     }
   }
 
