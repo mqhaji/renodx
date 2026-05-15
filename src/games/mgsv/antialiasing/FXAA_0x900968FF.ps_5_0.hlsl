@@ -36,6 +36,16 @@ void main(
   r0.zw = r0.zw;
   r0.x = r0.x;
   r0.y = r0.y;
+
+#if ENABLE_TAA_SLIDER
+  if (CUSTOM_TAA > 0.f) {
+    o0.xyz = renodx_game::antialiasing::ApplySceneScale(
+        renodx_game::antialiasing::SampleLevelScene(g_Image, g_samplerLinear_Clamp_s, r0.xy, 0).xyz);
+    o0.w = 0;
+    return;
+  }
+#endif
+
   r1.xyz = renodx_game::antialiasing::SampleLevelScene(g_Image, g_samplerLinear_Clamp_s, r0.xy, 0).xyz;
   r2.xyz = renodx_game::antialiasing::GatherScene(g_Image, g_samplerLinear_Clamp_s, r0.xy).xyz;
   r2.xyz = r2.xyz;

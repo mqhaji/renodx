@@ -41,7 +41,7 @@ example trace will scale with the player's settings.
 |---|---|---|---|---|
 | 0–1 | Frame setup | | | |
 | 2 | `MotionBlurCameraVelocity` | `0xA13321B6` | full | Writes camera-aware velocity to RTV0 `0xB9BB9E60`. Runs every frame regardless of motion-blur setting. |
-| 9–21 | `GBufferVelocity` / `GBufferMaskedVelocity` | `0x9815404F`, `0x58C10658` | full | Per-object velocity (44 + 4 draws of VS `0x1D2531B7`). |
+| 9–21 | `GBufferVelocity` / `GBufferMaskedVelocity` | PS `0x9815404F` / `0x58C10658`, VS `0x1D2531B7` / `0x7B809E72` | full | Per-object velocity (44 + 4 draws). |
 | 310  | `DR_VolFog_TppTonemap` | `0x2EA8F13F` | full target | Finalizes deferred lighting + volumetric fog into the main scene clone. Image is "largely formed" after this. Documented fallback candidate. |
 | 311–727 | Particles / decals / materials | various | full | Composite onto the main scene. |
 | 728  | `DOF_ScatterBakeFirst` | `0xFE1DC3F8` | half MRT | **Primary TAA insertion point.** Reads full-res HDR scene at SRV t0; writes to 3 half-res RTVs (DoF pyramid base, DoF intermediate, MB scene input). One hook covers both DoF and MB. |
@@ -276,15 +276,7 @@ dp4 r3.x, r0.xyzw, cb2[12].xyzw   // m_shadowProjection (prev pos)
 dp4 r0.x, r3.xyzw, cb2[16].xyzw   // m_shadowProjection2 (prev pos)
 ```
 
-Per-object velocity uses `m_projection` for current and `m_shadowProjection × m_shadowProjection2` for previous. If we patch `m_projection`/`m_projectionView` with
-current-frame jitter and leave the prev matrices alone, the resulting per-object
-velocity equals `pure_motion + current_jitter` (because curr is jittered but prev
-is not).
-
-The compute shader compensates: **`taa_velocity = decoded_velocity - prev_jitter`**.
-This yields the correct sub-pixel reprojection delta `curr_jitter - prev_jitter +
-pure_motion`. Both current and previous jitter offsets are passed to the compute
-shader via push constants each frame.
+Per-object velocity uses `m_projection` for current and `m_shadowProjection × m_shadowProjection2` for previous. To match Alien Isolation, jitter ownership stays on the CPU side: the TAA compute shader samples MGSV's velocity unchanged and receives no jitter cbuffer or push constants.
 
 ## Velocity Encoding
 
@@ -453,7 +445,7 @@ Recommended off when TAA is on:
 | Concern | Alien Isolation port | MGSV port |
 |---|---|---|
 | Jitter cbuffers | 3 separate structs (XSC, VSC, PSC) | Single struct `cVSScene`/`cPSScene` at b2 |
-| Jitter cancellation | Patches prev-frame matrices CPU-side; keeps no-jitter shadows | Patches only current; compensates in compute shader via `taa_velocity -= prev_jitter` |
+| Jitter cancellation | Patches prev-frame matrices CPU-side; keeps no-jitter shadows | CPU-owned jitter path; compute shader receives no jitter cbuffer |
 | Velocity decode | Signed UV deltas in `.xy` | `0.5 + 0.5 * scaled` in `.ba` of BGRA8 |
 | Input capture | Captures from `CAMERA_MOTION_PS` and `DOF_ENCODE_PS` draws | Reads straight off the insertion draw's descriptor state |
 | History format gate | Multiple HDR formats supported | MGSV color is already RGBA16F via existing upgrade |
@@ -468,8 +460,8 @@ Recommended off when TAA is on:
 4. [runtime/jitter.hpp](runtime/jitter.hpp) — cbuffer patching
 5. [shaders/mgsv_taa.cs_5_0.hlsl](shaders/mgsv_taa.cs_5_0.hlsl) — compute resolve
 
-All four gates call the same `MaybeRun(cmd_list, command_data)`. The
-difference is the *gating predicate*; the resource bound at pixel SRV t0
-is the right TAA target in every case. All sources are clone-upgraded
-RGBA16F at the same resolution, so the same history textures work for any
-path.
+All SRV-based fallback gates call `MaybeRun(cmd_list, command_data, name)` so
+logs identify the insertion path. The LocalReflection path calls
+`MaybeRunOnRenderTarget(cmd_list, rtv, name)` because its scene color is still an
+RTV at the hook point. All accepted sources are clone-upgraded RGBA16F at the
+same resolution, so the same history textures work for any path.

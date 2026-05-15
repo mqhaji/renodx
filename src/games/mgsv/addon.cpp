@@ -21,11 +21,24 @@
 #include <include/reshade.hpp>
 
 #include "../../mods/shader.hpp"
-#include "../../mods/swapchain.hpp"
+#include "../../mods/swapchain_v2.hpp"
 #include "../../utils/date.hpp"
 #include "../../utils/settings.hpp"
 #include "./shared.h"
 #include "./taa/taa.hpp"
+
+namespace renodx::mods::swapchain {
+using v2::expected_constant_buffer_index;
+using v2::FlushDescriptors;
+using v2::force_borderless;
+using v2::IsUpgraded;
+using v2::prevent_full_screen;
+using v2::resource_upgrade_infos;
+using v2::RewriteRenderTargets;
+using v2::SwapChainUpgradeTarget;
+using v2::Use;
+using v2::use_resource_cloning;
+}  // namespace renodx::mods::swapchain
 
 namespace {
 
@@ -1013,6 +1026,9 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
         renodx::mods::swapchain::prevent_full_screen = true;
 
         // renodx::mods::shader::force_pipeline_cloning = true;
+
+        renodx::mods::shader::expected_constant_buffer_index = 13;
+        renodx::mods::swapchain::expected_constant_buffer_index = 13;
 
         renodx::mods::swapchain::use_resource_cloning = true;
 

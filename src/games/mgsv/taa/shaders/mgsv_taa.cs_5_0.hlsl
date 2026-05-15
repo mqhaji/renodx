@@ -3,22 +3,16 @@
 // MGSV temporal resolve.
 //
 // Inputs (read live off the bindings of the insertion pixel-shader draw):
-//   t0 - current HDR color (RGBA16F clone of the typeless BGRA scene color)
-//   t1 - previous history (RGBA16F)
+//   t0 - current scene color (RGBA16F clone, already sRGB-encoded by MGSV)
+//   t1 - previous history (RGBA16F, stored sRGB-encoded like the scene color)
 //   t2 - camera velocity (BGRA8 unorm, encoded as 0.5 + 0.5 * scaled in .ba)
 //   t3 - depth (R32_FLOAT view over R32_G8_TYPELESS)
 //   s0 - linear sampler (history reconstruction)
 //   s1 - point sampler (current color, velocity, depth)
 //
 // Output:
-//   u0 - current history (RGBA16F), copied back into scene color after dispatch
-//
-// Constants (b13 ShaderInjectData, via shared.h):
-//   - jitter offsets in UV space are TBD-wired into ShaderInjectData; for now
-//     they default to zero. Once the float2 fields exist they are subtracted
-//     from per-object velocity (MGSV's prev matrices aren't jittered, so the
-//     decoded delta otherwise carries current_jitter only and would shift
-//     the reprojection).
+//   u0 - current history (RGBA16F, sRGB-encoded), copied back into scene color
+//        after dispatch
 
 Texture2D<float4> current_color_texture : register(t0);
 Texture2D<float4> previous_history_texture : register(t1);
@@ -29,11 +23,6 @@ SamplerState linear_sampler : register(s0);
 SamplerState point_sampler : register(s1);
 
 RWTexture2D<float4> current_history_output : register(u0);
-
-// Placeholder until the jitter offsets are added to ShaderInjectData.
-#ifndef MGSV_TAA_PREVIOUS_JITTER
-#define MGSV_TAA_PREVIOUS_JITTER float2(0.f, 0.f)
-#endif
 
 struct Neighborhood {
   float3 filtered_color;
@@ -46,6 +35,14 @@ struct CurrentTap {
   float weight;
   bool tight_bounds;
 };
+
+float3 DecodeSceneColor(float3 color) {
+  return renodx::color::srgb::Decode(max(0.f.xxx, color));
+}
+
+float3 EncodeSceneColor(float3 color) {
+  return renodx::color::srgb::Encode(max(0.f.xxx, color));
+}
 
 // Filters the current frame with a 3x3 + cross kernel and builds broad/tight
 // color bounds for history clipping. Ported from the Alien Isolation port.
@@ -84,7 +81,7 @@ Neighborhood BuildCurrentNeighborhood(float2 uv, float2 inv_screen_size) {
   for (uint i = 0u; i < 9u; ++i) {
     const CurrentTap tap = CURRENT_TAPS[i];
     const float3 sample_color =
-        current_color_texture.SampleLevel(point_sampler, uv + tap.offset * inv_screen_size, 0).xyz;
+        DecodeSceneColor(current_color_texture.SampleLevel(point_sampler, uv + tap.offset * inv_screen_size, 0).xyz);
 
     filtered_sum += sample_color * tap.weight;
     broad_min = min(sample_color, broad_min);
@@ -104,8 +101,8 @@ Neighborhood BuildCurrentNeighborhood(float2 uv, float2 inv_screen_size) {
 }
 
 // Decodes MGSV's camera-velocity buffer (BGRA8, .ba = encoded velocity) into
-// a UV-space delta, and compensates per-object velocity for the missing
-// previous-frame jitter contribution.
+// a UV-space delta. Jitter ownership stays on the CPU side, matching Alien
+// Isolation, so the compute resolve does not receive or apply jitter constants.
 //
 // MGSV's MotionBlurCameraVelocity_ps writes:
 //   o0.b = 0.5 + 0.5 * (vNDC.x * m_renderInfo.x / 128)
@@ -115,14 +112,11 @@ Neighborhood BuildCurrentNeighborhood(float2 uv, float2 inv_screen_size) {
 // factor, giving (encoded * 2 - 1) * 64 / screen_size. The shader's Y sign
 // flip is cancelled by UV.y being inverted vs NDC.y, so no extra negate.
 //
-// MGSV's prev-frame matrices (m_shadowProjection*) are not jittered, so the
-// decoded delta contains current_jitter but not previous_jitter. For TAA we
-// want (current_jitter - previous_jitter + pure_motion), so subtract previous.
 float2 DecodeVelocity(float2 uv, float2 screen_size) {
   const float4 raw = velocity_texture.SampleLevel(point_sampler, uv, 0);
   const float2 encoded = raw.ba;
   const float2 uv_velocity = (encoded * 2.f - 1.f) * 64.f / screen_size;
-  return uv_velocity - MGSV_TAA_PREVIOUS_JITTER;
+  return uv_velocity;
 }
 
 // Chooses the velocity from center + 4 diagonal taps using nearest-depth
@@ -187,7 +181,7 @@ float3 SampleHistoryCatmullRom(float2 uv, float2 screen_size, float2 inv_screen_
     [unroll]
     for (int x = 0; x < 3; ++x) {
       history_color +=
-          previous_history_texture.SampleLevel(linear_sampler, float2(sample_u[x], sample_v[y]), 0).xyz
+          DecodeSceneColor(previous_history_texture.SampleLevel(linear_sampler, float2(sample_u[x], sample_v[y]), 0).xyz)
           * weight_u[x] * weight_v[y];
     }
   }
@@ -253,6 +247,6 @@ void main(uint3 dispatch_thread_id : SV_DispatchThreadID) {
       velocity,
       screen_size);
 
-  const float3 resolved = max(0.f.xxx, lerp(clipped_history, neighborhood.filtered_color, blend));
-  current_history_output[dispatch_thread_id.xy] = float4(resolved, 1.f);
+  const float3 resolved = lerp(clipped_history, neighborhood.filtered_color, blend);
+  current_history_output[dispatch_thread_id.xy] = float4(EncodeSceneColor(resolved), 1.f);
 }

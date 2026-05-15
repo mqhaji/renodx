@@ -8,10 +8,9 @@
  *  - Per-frame counters used to gate dispatch and advance the jitter sample.
  *  - The Hammersley-permuted 16-sample jitter sequence, in UV space.
  *
- * The compute shader receives jitter offsets via ShaderInjectData push
- * constants (mgsv/shared.h). This module is the authoritative source for
- * both the cbuffer-patching code (taa::jitter) and the compute dispatch
- * (taa::resolve).
+ * Jitter stays CPU-side, matching Alien Isolation. This module is the
+ * authoritative source for the cbuffer-patching code (taa::jitter) and for
+ * frame/history bookkeeping used by the resolve dispatcher.
  */
 
 #include <array>
@@ -24,9 +23,10 @@ struct FrameState {
   uint64_t frame_index = 0u;
   bool taa_ran_this_frame = false;
 
-  // Both offsets are in UV space. previous_jitter holds the offset that was used
-  // to render the current "previous history" texture; the compute shader needs
-  // it to compensate per-object velocity (which only includes current jitter).
+  // Both offsets are in UV space. current_jitter is the last successfully
+  // resolved frame's offset, i.e. the jitter of the history texture that will
+  // be read next frame. previous_jitter keeps the one before that for logging
+  // and diagnostics.
   std::array<float, 2> current_jitter = {0.f, 0.f};
   std::array<float, 2> previous_jitter = {0.f, 0.f};
 
@@ -42,6 +42,7 @@ struct FrameState {
 
 inline float enabled = 0.f;
 inline float* enabled_binding = &enabled;
+inline float jitter_scale = 1.f;
 inline FrameState frame_state = {};
 
 inline bool IsEnabled() {
@@ -70,9 +71,18 @@ inline std::array<float, 2> CurrentFrameJitter(uint32_t width, uint32_t height) 
       (static_cast<float>(sample) + 0.5f) / 16.f,
       HammersleySample(sample, 238308531u),
   };
-  result[0] = (result[0] - 0.5f) * 2.f / static_cast<float>(width);
-  result[1] = (result[1] - 0.5f) * 2.f / static_cast<float>(height);
+  // Keep the shared value in UV/pixel space. Matrix patching converts this to
+  // projection/NDC space by multiplying by two.
+  result[0] = (result[0] - 0.5f) / static_cast<float>(width);
+  result[1] = (result[1] - 0.5f) / static_cast<float>(height);
+  result[0] *= jitter_scale;
+  result[1] *= jitter_scale;
   return result;
+}
+
+inline void ResetJitterHistory() {
+  frame_state.current_jitter = {0.f, 0.f};
+  frame_state.previous_jitter = {0.f, 0.f};
 }
 
 inline void BeginFrame() {
@@ -83,8 +93,7 @@ inline void BeginFrame() {
 }
 
 // Called only after a successful compute dispatch + copy-back. Promotes the
-// jitter that was actually applied this frame to "previous_jitter" so the next
-// frame's compute shader can subtract it from the velocity sample.
+// jitter that was actually applied this frame for history/debug bookkeeping.
 inline void MarkTaaDispatched(std::array<float, 2> applied_jitter) {
   frame_state.taa_ran_this_frame = true;
   frame_state.previous_jitter = frame_state.current_jitter;
