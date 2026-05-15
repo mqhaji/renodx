@@ -3,19 +3,17 @@
 /*
  * Per-command-list descriptor tracker for the MGSV TAA runtime.
  *
- * MGSV uses many cbuffer resource instances for the same `cVSScene` /
- * `cPSScene` struct (one per pass / per descriptor table). The jitter
- * system needs to know which resources are camera cbuffers so map/unmap
- * can patch them.
+ * The draw router identifies camera cbuffers from verified shader/register
+ * pairs. This module only records the current per-command-list descriptor
+ * state so draw-time code can capture color/depth resources safely.
  *
- * The insertion-point shader (DOF_ScatterBakeFirst or a CRB fallback) has
- * pixel `t0` (HDR color), `t2` (camera velocity), and `t3` (depth) bound
- * at draw time. This tracker captures those slots from push_descriptors
- * so HandleDraw can read them when it dispatches TAA.
+ * Current snapshot facts:
+ *   - Insertion draws bind HDR scene color at pixel t0.
+ *   - MotionBlurCameraVelocity writes velocity to RTV0 and reads depth at
+ *     pixel t2.
  */
 
 #include <cstdint>
-#include <unordered_set>
 #include <utility>
 
 #include <include/reshade.hpp>
@@ -29,14 +27,21 @@ namespace taa::descriptor_tracker {
 using RegisterSlot = std::pair<uint32_t, uint32_t>;
 
 struct __declspec(uuid("9F1A3A38-9D2A-4E5B-B5A3-3F2D0F38CD33")) CommandListData {
-  // Insertion-time inputs read off the active draw's bindings.
-  reshade::api::resource_view pixel_srv_t0 = {0};  // HDR color
-  reshade::api::resource_view pixel_srv_t2 = {0};  // Camera velocity
-  reshade::api::resource_view pixel_srv_t3 = {0};  // Depth
+  // Draw-time pixel SRVs used by the TAA router.
+  reshade::api::resource_view pixel_srv_t0 = {0};  // HDR color at insertion draws
+  reshade::api::resource_view pixel_srv_t1 = {0};  // Depth at DOF_ScatterBakeFirst
+  reshade::api::resource_view pixel_srv_t2 = {0};  // Depth at MotionBlurCameraVelocity
+  reshade::api::resource_view pixel_srv_t3 = {0};
 
   // Camera cbuffer at vertex b2 / pixel b2 — jitter patches on unmap.
   reshade::api::buffer_range vertex_cb_b2 = {};
   reshade::api::buffer_range pixel_cb_b2 = {};
+
+  // Deferred same-frame insertion marker. LocalReflectionAddBuffer draw
+  // callbacks run before the game draw, so taa.hpp records RTV0 here and
+  // resolves it from the next draw callback on the same command list.
+  reshade::api::resource_view pending_local_reflection_rtv = {0};
+  uint64_t pending_local_reflection_frame = UINT64_MAX;
 };
 
 inline CommandListData* Get(reshade::api::command_list* cmd_list) {
@@ -44,10 +49,6 @@ inline CommandListData* Get(reshade::api::command_list* cmd_list) {
   auto* data = cmd_list->get_private_data<CommandListData>();
   return data != nullptr ? data : cmd_list->create_private_data<CommandListData>();
 }
-
-// Discovered camera cbuffer resources across all command lists. Jitter consults
-// this set on every unmap to decide whether to patch.
-inline std::unordered_set<uint64_t> tracked_camera_cbuffers;
 
 inline bool ResolveRegister(
     reshade::api::pipeline_layout layout,
@@ -96,6 +97,9 @@ inline void StoreViewByStage(
     case 0:
       data->pixel_srv_t0 = view;
       break;
+    case 1:
+      data->pixel_srv_t1 = view;
+      break;
     case 2:
       data->pixel_srv_t2 = view;
       break;
@@ -119,17 +123,6 @@ inline void StoreConstantBufferByStage(
 
   if (tracks_vertex) data->vertex_cb_b2 = range;
   if (tracks_pixel) data->pixel_cb_b2 = range;
-
-  // Optimistically register this resource as a camera-cbuffer candidate. The
-  // jitter module re-verifies on map/unmap by checking the buffer size matches
-  // sizeof(CbScene) == 480 before applying any patch.
-  if ((tracks_vertex || tracks_pixel) && range.buffer.handle != 0u) {
-    tracked_camera_cbuffers.insert(range.buffer.handle);
-  }
-}
-
-inline bool IsTrackedCameraCbuffer(reshade::api::resource resource) {
-  return resource.handle != 0u && tracked_camera_cbuffers.contains(resource.handle);
 }
 
 inline void OnInitCommandList(reshade::api::command_list* cmd_list) {
