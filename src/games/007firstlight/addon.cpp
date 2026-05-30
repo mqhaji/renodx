@@ -1,5 +1,6 @@
 /*
- * Copyright (C) 2024 Musa Haji
+ * Copyright (C) 2026 Musa Haji
+ * Copyright (C) 2026 Lazorr
  * SPDX-License-Identifier: MIT
  */
 
@@ -15,6 +16,7 @@
 #include "../../mods/shader.hpp"
 #include "../../utils/date.hpp"
 #include "../../utils/settings.hpp"
+#include "isfast_noise.hpp"
 #include "shared.h"
 
 namespace {
@@ -230,6 +232,16 @@ renodx::utils::settings::Settings settings = {
         .parse = [](float value) { return value * 0.02f; },
     },
     new renodx::utils::settings::Setting{
+        .key = "FxISFASTShadows",
+        .binding = &shader_injection.custom_isfast_shadows,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 1.f,
+        .label = "IS-FAST Shadow Noise",
+        .section = "Shadows",
+        .tooltip = "Uses IS-FAST noise for deferred shadow sample rotation to reduce vertical jitter artifacts.",
+        .labels = {"Off", "On"},
+    },
+    new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
         .label = "Reset All",
         .section = "Options",
@@ -340,6 +352,7 @@ void OnPresetOff() {
       {"FxBloom", 100.f},
       {"FxFilmGrainType", 0.f},
       {"FxGrainStrength", 50.f},
+      {"FxISFASTShadows", 0.f},
   });
 }
 
@@ -372,13 +385,19 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
         renodx::mods::shader::allow_multiple_push_constants = true;
         renodx::mods::shader::expected_constant_buffer_space = 50;
 
+        firstlight::isfast::AddShaders(custom_shaders);
+
         initialized = true;
       }
       reshade::register_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);  // detect peak nits
+      reshade::register_event<reshade::addon_event::init_device>(firstlight::isfast::OnInitDevice);
+      reshade::register_event<reshade::addon_event::destroy_device>(firstlight::isfast::OnDestroyDevice);
 
       break;
     case DLL_PROCESS_DETACH:
       reshade::unregister_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);  // detect peak nits
+      reshade::unregister_event<reshade::addon_event::init_device>(firstlight::isfast::OnInitDevice);
+      reshade::unregister_event<reshade::addon_event::destroy_device>(firstlight::isfast::OnDestroyDevice);
 
       reshade::unregister_addon(h_module);
       break;
