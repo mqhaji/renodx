@@ -16,6 +16,7 @@
 #include "../../mods/shader.hpp"
 #include "../../utils/date.hpp"
 #include "../../utils/settings.hpp"
+#include "dlss.hpp"
 #include "isfast_noise.hpp"
 #include "shared.h"
 
@@ -252,6 +253,16 @@ renodx::utils::settings::Settings settings = {
         .labels = {"Off", "Sharp", "Filtered"},
     },
     new renodx::utils::settings::Setting{
+        .key = "DLSSGHUDGhostingFix",
+        .binding = &firstlight::dlss::dlssg_hud_ghosting_fix,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 1.f,
+        .label = "DLSS FG HUD Ghosting Fix",
+        .section = "DLSS Frame Generation",
+        .tooltip = "Hides the game's HDR UI alpha and HUD-less color inputs from DLSS Frame Generation to reduce HUD ghosting and disocclusion artifacts.",
+        .labels = {"Off", "On"},
+    },
+    new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
         .label = "Reset All",
         .section = "Options",
@@ -364,6 +375,7 @@ void OnPresetOff() {
       {"FxGrainStrength", 50.f},
       {"FxISFASTShadows", 0.f},
       {"FxSSRReflectionFix", 0.f},
+      {"DLSSGHUDGhostingFix", 1.f},
   });
 }
 
@@ -403,12 +415,14 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       reshade::register_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);  // detect peak nits
       reshade::register_event<reshade::addon_event::init_device>(firstlight::isfast::OnInitDevice);
       reshade::register_event<reshade::addon_event::destroy_device>(firstlight::isfast::OnDestroyDevice);
+      firstlight::dlss::Use(fdw_reason);
 
       break;
     case DLL_PROCESS_DETACH:
       reshade::unregister_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);  // detect peak nits
       reshade::unregister_event<reshade::addon_event::init_device>(firstlight::isfast::OnInitDevice);
       reshade::unregister_event<reshade::addon_event::destroy_device>(firstlight::isfast::OnDestroyDevice);
+      firstlight::dlss::Use(fdw_reason);
 
       reshade::unregister_addon(h_module);
       break;
