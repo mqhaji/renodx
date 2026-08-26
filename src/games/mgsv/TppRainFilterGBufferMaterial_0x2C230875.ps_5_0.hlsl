@@ -129,7 +129,10 @@ void main(
   r1.xyz = r0.www * r0.zzz;
   r1.xyz = r1.xyz;
   r2.xyzw = inAlbedoMap.Sample(g_samplerLinear_Wrap_s, r0.xy).xyzw;
-  // r2.rgb = renodx::color::srgb::Decode(max(0, r2.rgb));
+
+  // #if FIX_UNORM_SRGB
+  //   r2.xyz = renodx::color::srgb::Decode(max(0, r2.xyz));
+  // #endif
 
   r0.xyzw = inMaterialMap.Sample(g_samplerPoint_Wrap_s, r0.xy).xyzw;
   r2.xyzw = r2.xyzw;
