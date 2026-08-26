@@ -86,8 +86,13 @@ renodx::utils::resource::ResourceUpgradeInfo dof_final_copy_upgrade_info = {
 
 bool dof_final_copy_upgrade_allowed = false;
 reshade::api::resource dof_final_copy_active_resource = {0u};
+std::vector<reshade::api::resource> motion_blur_active_resources;
+bool motion_blur_copy_upgrade_allowed = false;
+bool motion_blur_copy_back_pending = false;
 bool tonemap_copy_resource_propagation_allowed = false;
 reshade::api::resource tonemap_copy_resource_source = {0u};
+
+void DeactivateMotionBlurTargets();
 
 void ArmDofFinalCopyRenderBufferWindow(reshade::api::command_list* cmd_list) {
   (void)cmd_list;
@@ -101,8 +106,19 @@ void DisarmDofFinalCopyRenderBufferAfterDofFinal(reshade::api::command_list* cmd
   dof_final_copy_upgrade_allowed = false;
 }
 
+void ArmMotionBlurCopyRenderBufferWindow(reshade::api::command_list* cmd_list) {
+  (void)cmd_list;
+
+  // Tile preparation does not consume scene color. Clear any missed previous-frame state here,
+  // immediately before the CopyRenderBuffer draw that populates the motion-blur scene input.
+  DeactivateMotionBlurTargets();
+  motion_blur_copy_upgrade_allowed = true;
+}
+
 void ResetTonemapCopyTracking() {
   dof_final_copy_upgrade_allowed = false;
+  motion_blur_copy_upgrade_allowed = false;
+  motion_blur_copy_back_pending = false;
   tonemap_copy_resource_propagation_allowed = false;
   tonemap_copy_resource_source = {0u};
 }
@@ -270,74 +286,108 @@ reshade::api::resource GetOriginalResourceFromView(reshade::api::resource_view v
   return resource;
 }
 
-void UpgradeDofFinalCopyRenderBuffer(reshade::api::command_list* cmd_list) {
+void TrackActiveMotionBlurResource(reshade::api::resource_view view) {
+  if (!ResourceViewMatchesCloneTarget(view, &motion_blur_upgrade_info)) return;
+
+  const auto resource = GetOriginalResourceFromView(view);
+  if (resource.handle == 0u) return;
+
+  for (const auto active_resource : motion_blur_active_resources) {
+    if (active_resource.handle == resource.handle) return;
+  }
+  motion_blur_active_resources.push_back(resource);
+}
+
+void UpgradeCopyRenderBufferTarget(reshade::api::command_list* cmd_list) {
   if (cmd_list == nullptr) return;
-  if (!dof_final_copy_upgrade_allowed) return;
+  if (!dof_final_copy_upgrade_allowed && !motion_blur_copy_upgrade_allowed) return;
+
+  const bool is_motion_blur_copy = motion_blur_copy_upgrade_allowed;
 
   auto rtvs = renodx::utils::swapchain::GetRenderTargets(cmd_list);
   if (rtvs.empty() || rtvs[0].handle == 0u) return;
 
-  // The correct copy should still be copying from the HDR scene-color clone.
-  if (!PixelShaderResourceMatchesCloneTarget(cmd_list, &scene_tonemap_upgrade_info, 0u)) return;
+  // DoF still needs source proof because its markers open a wider window. The two motion-blur
+  // tile-prep shaders identify their immediately following scene-input copy unambiguously, and
+  // that full-resolution source can rotate between scene/DoF clone roles.
+  if (!is_motion_blur_copy
+      && !PixelShaderResourceMatchesCloneTarget(cmd_list, &scene_tonemap_upgrade_info, 0u)) {
+    return;
+  }
 
   auto* device = cmd_list->get_device();
   if (device == nullptr) return;
 
-  // CopyRenderBuffer is generic, so this is intentionally frame-local:
-  // DOF_ScatterCompositeFar arms the next full-res BGRA CopyRenderBuffer that
-  // copies from the active scene clone. Do not rely on a previous-frame T1
-  // handle; MGSV can rotate/recreate this resource between frames/captures.
+  // CopyRenderBuffer is generic, so DoF and motion-blur markers arm only their next
+  // scene-color copy. Do not rely on previous-frame handles; MGSV rotates these resources.
   const auto rtv_resource = GetOriginalResourceFromView(rtvs[0]);
   if (rtv_resource.handle == 0u) return;
 
-  if (!MarkCloneTarget(rtvs[0], &dof_final_copy_upgrade_info, device)) return;
+  auto* upgrade_info = is_motion_blur_copy
+                           ? &motion_blur_upgrade_info
+                           : &dof_final_copy_upgrade_info;
+  if (!MarkCloneTarget(rtvs[0], upgrade_info, device)) return;
 
-  if (!ActivateCloneHotSwapIfTracked(device, rtvs[0])) return;
+  const bool activated = ActivateCloneHotSwapIfTracked(device, rtvs[0]);
+  if (!activated && !ResourceViewMatchesCloneTarget(rtvs[0], upgrade_info)) return;
 
-  dof_final_copy_active_resource = rtv_resource;
-  dof_final_copy_upgrade_allowed = false;
+  if (upgrade_info == &motion_blur_upgrade_info) {
+    TrackActiveMotionBlurResource(rtvs[0]);
+    motion_blur_copy_upgrade_allowed = false;
+  } else {
+    dof_final_copy_active_resource = rtv_resource;
+    dof_final_copy_upgrade_allowed = false;
+  }
 
-  renodx::mods::swapchain::FlushDescriptors(cmd_list);
-  renodx::mods::swapchain::RewriteRenderTargets(cmd_list, rtvs.size(), rtvs.data(), {0});
+  if (activated) {
+    renodx::mods::swapchain::FlushDescriptors(cmd_list);
+    renodx::mods::swapchain::RewriteRenderTargets(cmd_list, rtvs.size(), rtvs.data(), {0});
+  }
 }
 
-void DeactivateDofFinalCopyRenderBufferTarget() {
-  if (dof_final_copy_active_resource.handle == 0u) return;
+void DeactivateCloneHotSwapTarget(
+    reshade::api::resource resource,
+    renodx::utils::resource::ResourceUpgradeInfo* upgrade_info) {
+  if (resource.handle == 0u || upgrade_info == nullptr) return;
 
   std::vector<uint64_t> view_handles;
-  bool found_destroyed = false;
   bool should_deactivate = false;
   const auto found_resource = renodx::utils::resource::UpdateResourceInfo(
-      dof_final_copy_active_resource,
-      [&view_handles, &found_destroyed, &should_deactivate](renodx::utils::resource::ResourceInfo* info) {
-        if (info->destroyed) {
-          found_destroyed = true;
-          return;
-        }
-        if (info->clone_target != &dof_final_copy_upgrade_info) return;
+      resource,
+      [&view_handles, &should_deactivate, upgrade_info](renodx::utils::resource::ResourceInfo* info) {
+        if (info->destroyed || info->clone_target != upgrade_info) return;
 
-        // Keep the clone target/clone allocation for reuse, but disable hot-swap between frames.
-        // MGSV reuses this full-res BGRA resource for rain/GBuffer material work near frame start;
-        // leaving the clone enabled makes those passes sample the stale HDR DoF snapshot.
+        // Keep the clone target/allocation for reuse, but disable hot-swap after this role ends.
         info->clone_enabled = false;
         info->clone_can_deactivate = false;
         view_handles.assign(info->resource_view_handles.begin(), info->resource_view_handles.end());
         should_deactivate = true;
       });
-  if (!found_resource || found_destroyed) {
-    dof_final_copy_active_resource = {0u};
-    return;
-  }
-  if (!should_deactivate) {
-    dof_final_copy_active_resource = {0u};
-    return;
-  }
+  if (!found_resource || !should_deactivate) return;
 
   renodx::utils::resource::upgrade::UpdateResourceViewsCloneState(
       view_handles,
       false,
       false);
+}
+
+void DeactivateDofFinalCopyRenderBufferTarget() {
+  if (dof_final_copy_active_resource.handle == 0u) return;
+
+  // MGSV reuses this full-res BGRA resource for rain/GBuffer material work near frame start;
+  // leaving the clone enabled makes those passes sample the stale HDR DoF snapshot.
+  DeactivateCloneHotSwapTarget(
+      dof_final_copy_active_resource,
+      &dof_final_copy_upgrade_info);
   dof_final_copy_active_resource = {0u};
+}
+
+void DeactivateMotionBlurTargets() {
+  // Motion-blur intermediates can be reused for unrelated half-resolution work in the next frame.
+  for (const auto resource : motion_blur_active_resources) {
+    DeactivateCloneHotSwapTarget(resource, &motion_blur_upgrade_info);
+  }
+  motion_blur_active_resources.clear();
 }
 
 bool MarkCloneTarget(
@@ -596,16 +646,35 @@ bool OnCopyTonemapOutputResource(
       },                                            \
   }
 
-#define UpgradeDofFinalCopyRenderBufferRTV(value)   \
+#define TrackMotionBlurTilePrep(value)              \
+  {                                                 \
+      value,                                        \
+      {                                             \
+          .crc32 = value,                           \
+          .on_inject = [](auto*) { return false; }, \
+          .on_draw = [](auto* cmd_list) {                  \
+            ArmMotionBlurCopyRenderBufferWindow(cmd_list); \
+            return true; },        \
+      },                                            \
+  }
+
+#define UpgradeCopyRenderBufferRTV(value)           \
   {                                                 \
       value,                                        \
       {                                             \
           .crc32 = value,                           \
           .code = __##value,                        \
           .on_inject = [](auto*) { return false; }, \
-          .on_draw = [](auto* cmd_list) {         \
-            UpgradeDofFinalCopyRenderBuffer(cmd_list); \
+          .on_draw = [](auto* cmd_list) {                    \
+            UpgradeCopyRenderBufferTarget(cmd_list);         \
+            motion_blur_copy_back_pending =                  \
+                PixelShaderResourceMatchesCloneTarget(       \
+                    cmd_list, &motion_blur_upgrade_info, 0u); \
             return true; },        \
+          .on_drawn = [](auto*) {                            \
+            if (!motion_blur_copy_back_pending) return;      \
+            motion_blur_copy_back_pending = false;           \
+            DeactivateMotionBlurTargets(); },                \
       },                                            \
   }
 
@@ -622,6 +691,7 @@ bool OnCopyTonemapOutputResource(
             for (auto rtv : rtvs) {                                                                   \
               MarkMotionBlurCloneTarget(rtv, device);                                                 \
               changed = ActivateCloneHotSwapIfTracked(device, rtv) || changed;                        \
+              TrackActiveMotionBlurResource(rtv);                                                     \
             }                                                                                         \
             if (changed) {                                                                            \
               renodx::mods::swapchain::FlushDescriptors(cmd_list);                                    \
@@ -636,10 +706,13 @@ renodx::mods::shader::CustomShaders custom_shaders = []() {
   renodx::mods::shader::CustomShaders shaders = {
       UpgradeRTVReplaceShaderCallback(0xE2D609B1, ArmDofFinalCopyRenderBufferWindow),            // DOF_ScatterCompositeNear
       UpgradeRTVReplaceShaderCallback(0x7C017264, ArmDofFinalCopyRenderBufferWindow),            // DOF_ScatterCompositeFar
-      UpgradeDofFinalCopyRenderBufferRTV(0x83272BCB),                                            // CopyRenderBuffer feeding DOF_ScatterCompositeFinal T1
       UpgradeRTVReplaceShaderCallback(0xFC5542BB, DisarmDofFinalCopyRenderBufferAfterDofFinal),  // DOF_ScatterCompositeFinal
 
-      // Motion blur ping-pongs through full-res scene-color intermediates.
+      TrackMotionBlurTilePrep(0xF05DCBFD),
+      TrackMotionBlurTilePrep(0x512E2B48),
+      UpgradeCopyRenderBufferRTV(0x83272BCB),
+
+      // Motion blur ping-pongs through half-resolution scene-color intermediates.
       UpgradeMotionBlurRTV(0xBFC7D3C2),
 
       // Deferred rendering paths perform the actual filmic tonemap before the
@@ -648,7 +721,7 @@ renodx::mods::shader::CustomShaders custom_shaders = []() {
       UpgradeDeferredTonemapOutputRTV(0x410AE8C5, "DeferredRenderingFilmic"),
       UpgradeDeferredTonemapOutputRTV(0xC973024D, "DeferredRenderingFilmic_VolFog"),
       UpgradeDeferredTonemapOutputRTV(0xBDE1F4CD, "DR_TonemapRainFilter"),
-      TrackDeferredTonemapOutputRTV(0x6E29F0AB, "DR_TonemapRainFilter_NoIR"),
+      UpgradeDeferredTonemapOutputRTV(0x6E29F0AB, "DR_TonemapRainFilter_NoIR"),
       UpgradeDeferredTonemapOutputRTV(0x2EA8F13F, "DR_VolFog_TppTonemap"),
       UpgradeDeferredTonemapOutputRTV(0x59B44963, "DR_VolFog_TppTonemap_MD"),
 
