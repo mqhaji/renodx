@@ -7,7 +7,7 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 - **Filmic tone mapping** from deferred rendering paths
 - **LUT-based color grading** with extended color precision
 - **Motion blur** with HDR-aware rendering
-- **Depth-of-field effects** (currently SDR-clamped)
+- **Depth-of-field effects** with an HDR pre-final scene copy
 - **User-configurable settings** via the ReShade overlay UI
 
 ---
@@ -20,18 +20,18 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 - Uses ReShade's `resource_view_cloning` and `resource_view_hot_swap` features
 - Creates HDR (RGBA16F) clones of original SDR (BGRA8) resources
 - Activates clones conditionally on specific shader draws
-- Allows multiple upgrade infos to share the same physical resource
+- Rejects conflicting clone roles for resources reused by unrelated passes
 
 **2. Shader-Based Control Flow**
-- Custom shader replacements intercept draws via `on_draw` callbacks
+- Custom shader registrations intercept draws via `on_draw` callbacks
 - Callbacks mark render targets as clone candidates
 - Separately activate clones only when rendering tone mapping / color grading
 - Ensures HDR precision for critical rendering, SDR for everything else
 
 **3. Event Hooks**
-- `init_swapchain`: Initialize upgrade infos and mark resource candidates
-- `present`: Reset frame-local tracking state
-- ~~`copy_resource`: (removed) Was used to propagate clones but caused corruption~~
+- `init_swapchain`: Detect peak brightness and swapchain upgrade state
+- `present`: Deactivate the frame-local DoF-copy target and reset copy gates
+- `copy_resource`: Propagate an armed scene-color clone to the matching copy destination
 
 ---
 
@@ -51,8 +51,21 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 
 **Activated by these shaders:**
 - `0xE04D1471` (Tonemap) — Late LUT/color-grading pass
-- `0x410AE8C5`, `0xC973024D`, `0xBDE1F4CD`, `0x2EA8F13F`, `0x59B44963` — Deferred rendering tone mapping
-- DOF passes (fire-and-forget, then clamp to SDR)
+- `0x410AE8C5`, `0xC973024D`, `0xBDE1F4CD`, `0x6E29F0AB`, `0x2EA8F13F`, `0x59B44963` — Deferred rendering tone mapping
+
+### dof_final_copy_upgrade_info
+
+**Purpose**: Preserves the full-resolution pre-final DoF scene copy in RGBA16F without globally upgrading the generic copy shader.
+
+```cpp
+// Old format: 8-bit BGRA typeless
+// New format: 16-bit RGBA float
+// Size: Full backbuffer
+// Features: Clone + hot-swap enabled
+// Lifetime: Successful pre-final DoF copy through presentation
+```
+
+`DOF_ScatterCompositeNear` and `DOF_ScatterCompositeFar` arm the copy window. The destination is upgraded only when `CopyRenderBuffer` SRV0 is the active scene-tonemap clone. `DOF_ScatterCompositeFinal` closes the window, and `OnPresent()` disables hot-swap for the activated destination while retaining its clone allocation.
 
 ### motion_blur_upgrade_info
 
@@ -67,7 +80,10 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 ```
 
 **Activated by:**
-- `0xBFC7D3C2` (MotionBlur) — Full-res motion blur accumulation
+- `0xF05DCBFD` / `0x512E2B48` — Arm the next motion-blur input copy
+- `0x83272BCB` — Activate the armed half-resolution motion-blur input target
+- `0xBFC7D3C2` — Render the two half-resolution motion-blur ping-pong passes
+- The post-motion-blur `0x83272BCB` draw — Copy the result back, then deactivate the motion-blur clones
 
 ### LUT Builder (Inline Upgrade)
 
@@ -88,13 +104,16 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 | Hash | Name | Purpose | RT0 | Clone? | Notes |
 |------|------|---------|-----|--------|-------|
 | 0xE2D609B1 | DOF_ScatterCompositeNear | Depth-of-field near pass | ✓ | Yes | Arms post-DOF tracking flag |
-| 0x7C017264 | DOF_ScatterCompositeFar | Depth-of-field far pass | ✓ | Yes | HDR clone, but DOF output remains SDR |
-| 0xFC5542BB | DOF_ScatterCompositeFinal | DOF final composite | ✓ | Yes | SDR-clamped output |
-| 0xBFC7D3C2 | MotionBlur | Motion blur full-res | ✓ | Yes | Marked + activated for HDR |
+| 0x7C017264 | DOF_ScatterCompositeFar | Depth-of-field far pass | ✓ | Yes | Refreshes the DoF-copy window |
+| 0xFC5542BB | DOF_ScatterCompositeFinal | DoF final composite | ✓ | Yes | Closes the DoF-copy window |
+| 0xF05DCBFD | Motion-blur tile max | Velocity tile preparation | — | No | Arms the next motion-blur input copy |
+| 0x512E2B48 | Motion-blur tile refine | Velocity tile refinement | — | No | Refreshes the motion-blur input-copy gate |
+| 0x83272BCB | CopyRenderBuffer | Generic scene/intermediate copy | Conditional | Conditional | Upgraded only inside a proven DoF or motion-blur window |
+| 0xBFC7D3C2 | MotionBlurMcGuire | Motion-blur ping-pong | ✓ | Yes | Half-resolution HDR intermediates |
 | 0x410AE8C5 | DeferredRenderingFilmic | Deferred tone mapping | ✓ | Yes | Primary deferred path |
 | 0xC973024D | DeferredRenderingFilmic_VolFog | Deferred + volumetric fog | ✓ | Yes | Deferred with volumetric lighting |
 | 0xBDE1F4CD | DR_TonemapRainFilter | Deferred + rain | ✓ | Yes | Only RTV0 upgraded (not material maps) |
-| 0x6E29F0AB | DR_TonemapRainFilter_NoIR | Deferred rain (no IR) | ✓ | Track | Marked but not activated (material target) |
+| 0x6E29F0AB | DR_TonemapRainFilter_NoIR | Deferred rain (no IR) | ✓ | Yes | RTV0 upgraded; replacement supplies explicit output encoding |
 | 0x2EA8F13F | DR_VolFog_TppTonemap | Volumetric fog tone mapping | ✓ | Yes | Vol fog tone mapping pass |
 | 0x59B44963 | DR_VolFog_TppTonemap_MD | VolFog + multi-distance | ✓ | Yes | Multi-distance variant |
 | 0x637BB745 | LUT Builder (Pass 1) | Color grading LUT construction | ✓ | Yes | Generic LUT builder |
@@ -105,7 +124,7 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 **Legend:**
 - **Hash**: CRC32 of compiled DXBC bytecode
 - **Clone?**: Whether clone/hot-swap is activated
-- **Track**: Marked as candidate but not activated on this draw
+- **Conditional**: Activated only when a same-frame shader sequence proves the resource role
 - **RTV0 only**: Only first render target upgraded (others are material/GBuffer targets)
 
 ---
@@ -117,7 +136,7 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 When a shader in the `custom_shaders` array is intercepted:
 
 1. **Get RTVs**: Retrieve bound render targets via `GetRenderTargets(cmd_list)`
-2. **Mark Target**: For each RTV, call `MarkSceneTonemapCloneTarget()` or `MarkMotionBlurCloneTarget()`
+2. **Mark Target**: Call `MarkSceneTonemapCloneTarget()`, `MarkMotionBlurCloneTarget()`, or `MarkCloneTarget()` for a sequence-proven copy destination
    - Checks if the underlying resource matches upgrade criteria (format, size, usage)
    - Records upgrade info pointer in resource metadata
 3. **Activate Clone**: Call `ActivateCloneHotSwapIfTracked(device, rtv)`
@@ -128,31 +147,17 @@ When a shader in the `custom_shaders` array is intercepted:
 ### Reset Phase (Per-Present)
 
 `ResetTonemapCopyTracking()` clears frame-local state:
-- `tonemap_copy_tracking_armed_this_frame` → `false`
-- `tonemap_copy_tracking_allowed` → `false`
+- `dof_final_copy_upgrade_allowed` → `false`
+- `motion_blur_copy_upgrade_allowed` → `false`
+- `motion_blur_copy_back_pending` → `false`
+- `tonemap_copy_resource_propagation_allowed` → `false`
+- `tonemap_copy_resource_source` → null
 
-This ensures one-shot arming gates (like DOF) only fire once per frame.
-
----
-
-## Current Limitations
-
-### DOF is SDR-Clamped (Unorm)
-
-**Why**: Removed `CopyRenderBuffer` (0x83272BCB) tracking to fix white texture corruption.
-
-**Effect**:
-- DOF renders into SDR (8-bit BGRA) targets
-- Depth-of-field effects do not benefit from HDR precision
-- Output is tone-mapped (clamped) to SDR range [0, 1]
-
-**Workaround**: None currently; DOF remains SDR for now.
-
-**Future**: Dedicated HDR-aware DOF shader replacement or explicit marking without copy propagation.
+`OnPresent()` also disables hot-swap for the successfully activated DoF final-copy resource. Its clone target and allocation remain available for reuse.
 
 ---
 
-## Why CopyRenderBuffer Tracking Was Removed
+## Scoped `CopyRenderBuffer` and Clone Lifetimes
 
 ### The Problem
 
@@ -161,19 +166,23 @@ This ensures one-shot arming gates (like DOF) only fire once per frame.
 - Motion blur passes copy scene temps
 - Tone mapping operations copy intermediate results
 
-**Issue**: When tracked for one operation (e.g., DOF → motion blur), the global `copy_resource` event hook would indiscriminately copy SDR data back over HDR clone targets for *all* CopyRenderBuffer uses, causing:
-- **White texture corruption** (unorm [0,1] range written to float [0,16] range)
-- **Flickering/intermittent corruption** (race conditions between copies and draws)
-- **Cascading failures** even with one-shot gating
+Globally upgrading this shader, or leaving clone hot-swap active after a resource changes roles, can expose stale or domain-incompatible data as rain materials, sonar textures, SSAO, menu post-processing, or later scene color.
 
 ### The Solution
 
-**Accepted Trade-off**: Allow DOF to remain SDR. Instead of tracking generic copies, explicitly mark specific render targets in shader callbacks:
-- Deferred tone mapping shaders mark their own outputs
-- Motion blur shader marks its own intermediates
-- LUT builders mark their own targets
+The addon upgrades `CopyRenderBuffer` only inside sequence-proven windows:
 
-**Result**: No white corruption, but DOF is SDR-clamped until a proper HDR DOF solution is implemented.
+1. `DOF_ScatterCompositeNear` and `DOF_ScatterCompositeFar` arm the DoF window.
+2. A candidate DoF copy must still read SRV0 from the active scene-tonemap clone.
+3. The successful full-resolution DoF-copy target remains active through the final composite, then is disabled at presentation.
+4. Motion-blur tile preparation arms only its immediately following input copy.
+5. That copy activates the half-resolution motion-blur target without depending on a specific full-resolution clone role, because MGSV rotates the scene source between compatible roles.
+6. `MotionBlurMcGuire` tracks both active ping-pong targets.
+7. The copy-back draw consumes an active motion-blur SRV0, then its post-draw callback disables all motion-blur hot-swaps.
+
+Clone allocations and targets are retained; only active redirection is disabled. This preserves HDR through DoF and motion blur while preventing those resources from remaining redirected when MGSV reuses them for unrelated work.
+
+The native `copy_resource` callback is separately armed from a proven scene-tonemap output. It marks the matching destination as a scene clone and copies clone-to-clone. Shared resource-upgrade handling continues to redirect copies whose endpoints are already active.
 
 ---
 
@@ -182,8 +191,13 @@ This ensures one-shot arming gates (like DOF) only fire once per frame.
 ### State Variables
 
 ```cpp
-bool tonemap_copy_tracking_armed_this_frame;  // One-shot flag per frame
-bool tonemap_copy_tracking_allowed;            // Gating flag for DOF post-processing
+bool dof_final_copy_upgrade_allowed;
+reshade::api::resource dof_final_copy_active_resource;
+std::vector<reshade::api::resource> motion_blur_active_resources;
+bool motion_blur_copy_upgrade_allowed;
+bool motion_blur_copy_back_pending;
+bool tonemap_copy_resource_propagation_allowed;
+reshade::api::resource tonemap_copy_resource_source;
 ```
 
 ### Key Functions
@@ -196,9 +210,13 @@ bool tonemap_copy_tracking_allowed;            // Gating flag for DOF post-proce
 **Activation Functions:**
 - `ActivateCloneHotSwapIfTracked(device, rtv)` — Activate clone if marked
 - `PixelShaderResourceMatchesCloneTarget(cmd_list, upgrade_info)` — Check PS slot 0
+- `UpgradeCopyRenderBufferTarget(cmd_list)` — Upgrade an armed DoF or motion-blur copy target
 
-**Arming/Reset:**
-- `ArmTonemapCopyTrackingAfterDofNear(cmd_list)` — Called after DOF_ScatterCompositeNear draw
+**Arming/Cleanup:**
+- `ArmDofFinalCopyRenderBufferWindow(cmd_list)` — Arm the next qualifying DoF copy
+- `ArmMotionBlurCopyRenderBufferWindow(cmd_list)` — Arm the next motion-blur input copy
+- `DeactivateDofFinalCopyRenderBufferTarget()` — Disable the frame-local DoF-copy target
+- `DeactivateMotionBlurTargets()` — Disable motion targets after copy-back
 - `ResetTonemapCopyTracking()` — Called on present
 
 ### Macros
@@ -216,8 +234,11 @@ bool tonemap_copy_tracking_allowed;            // Gating flag for DOF post-proce
 // Mark + activate for deferred tonemap (RTV0 only)
 #define UpgradeDeferredTonemapOutputRTV(value, name) { ... }
 
-// Track but do not activate (used for material maps that shouldn't clone)
-#define TrackDeferredTonemapOutputRTV(value, name) { ... }
+// Arm the next motion-blur input copy from a tile-preparation marker
+#define TrackMotionBlurTilePrep(value) { ... }
+
+// Route only sequence-proven DoF/motion-blur copies through HDR targets
+#define UpgradeCopyRenderBufferRTV(value) { ... }
 
 // Motion blur variant
 #define UpgradeMotionBlurRTV(value) { ... }
@@ -226,7 +247,7 @@ bool tonemap_copy_tracking_allowed;            // Gating flag for DOF post-proce
 ### Custom Shaders Array
 
 The `custom_shaders` array defines the shader interception pipeline. **Order matters**:
-1. DOF & motion blur upgrades (marking + activation)
+1. DoF windows, motion-blur sequence markers, and scoped `CopyRenderBuffer` handling
 2. Deferred tone mapping upgrades
 3. LUT builder and FXAA upgrades
 4. Final LUT/color-grading upgrade
@@ -235,18 +256,6 @@ The `custom_shaders` array defines the shader interception pipeline. **Order mat
 ---
 
 ## Next Steps / Future Work
-
-### Proper DOF HDR Support
-
-Option A: **Dedicated DOF shader replacement**
-- Create custom DOF shader that renders directly to RGBA16F
-- Replace all three DOF passes (Near, Far, Final)
-- Requires algorithm port from existing shader
-
-Option B: **HDR-aware CopyRenderBuffer**
-- Create custom copy shader that intelligently routes SDR vs. HDR copies
-- Register only when needed, not globally
-- Safer than generic event hook
 
 ### Extended Color Grading
 
