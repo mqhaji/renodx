@@ -1,6 +1,6 @@
 #include "./common.hlsli"
 
-// ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:23 2026
+// ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:32 2026
 
 // clang-format off
 cbuffer cPSScene : register(b2) {
@@ -19,14 +19,16 @@ cbuffer cPSScene : register(b2) {
     float4 m_fogColor;
     float4 m_cameraCenterOffset;
     float4 m_shadowMapResolutions;
-  } g_psScene: packoffset(c0);
+  } g_psScene:
+  packoffset(c0);
 }
 
 cbuffer cPSMaterial : register(b4) {
   struct
   {
     float4 m_materials[8];
-  } g_psMaterial: packoffset(c0);
+  } g_psMaterial:
+  packoffset(c0);
 }
 
 cbuffer cPSSystem : register(b0) {
@@ -36,15 +38,14 @@ cbuffer cPSSystem : register(b0) {
     float4 m_renderInfo;
     float4 m_renderBuffer;
     float4 m_dominantLightDir;
-  } g_psSystem: packoffset(c0);
+  } g_psSystem:
+  packoffset(c0);
 }
 // clang-format on
 
 SamplerState g_samplerPoint_Wrap_s : register(s8);
 SamplerState g_samplerPoint_Clamp_s : register(s9);
 SamplerState g_samplerLinear_Wrap_s : register(s10);
-SamplerState g_samplerLinear_Clamp_s : register(s11);
-Texture2D<float4> inViewportCaptureMap : register(t0);
 Texture2D<float4> inAlbedoMap : register(t8);
 Texture2D<float4> inMaterialMap : register(t11);
 Texture2D<float4> inDepthMap : register(t12);
@@ -68,65 +69,25 @@ void main(
   r0.xy = g_psSystem.m_renderBuffer.zw * r0.xy;
   r0.xy = r0.xy;
   r0.xy = r0.xy;
-  r0.zw = v0.xy;
   r0.xy = r0.xy;
-  r0.zw = r0.zw;
   r0.xy = r0.xy;
-  r1.xy = -g_psScene.m_cameraCenterOffset.xy;
-  r0.zw = r1.xy + r0.zw;
-  r1.xyzw = g_psScene.m_projectionParam.xyzw;
-  r2.x = inDepthMap.SampleLevel(g_samplerPoint_Clamp_s, r0.xy, 0).x;
-  r2.x = r2.x;
+  r0.zw = g_psScene.m_projectionParam.zw;
+  r1.x = inDepthMap.SampleLevel(g_samplerPoint_Clamp_s, r0.xy, 0).x;
+  r1.x = r1.x;
+  r1.x = r1.x;
   r0.zw = r0.zw;
-  r2.x = r2.x;
-  r1.xyzw = r1.xyzw;
-  r1.w = -r1.w;
-  r1.w = r2.x + r1.w;
-  r2.z = r1.z / r1.w;
-  r1.z = r2.z;
-  r0.zw = r1.xy * r0.zw;
-  r2.xy = r0.zw * r1.zz;
-  r1.z = r1.z;
-  r1.z = r1.z;
-  r1.z = r1.z;
-  r0.z = -g_psMaterial.m_materials[2].x;
-  r0.z = r1.z + r0.z;
+  r0.w = -r0.w;
+  r0.w = r1.x + r0.w;
+  r0.z = r0.z / r0.w;
+  r0.z = r0.z;
+  r0.z = r0.z;
+  r0.z = r0.z;
+  r0.w = -g_psMaterial.m_materials[2].x;
+  r0.z = r0.z + r0.w;
   r0.z = g_psMaterial.m_materials[3].x * r0.z;
   r0.z = max(0, r0.z);
-  r0.z = min(1, r0.z);
-  r2.w = 1;
-  r1.x = dot(r2.xyzw, g_psScene.m_view._m00_m10_m20_m30);
-  r1.y = dot(r2.xyzw, g_psScene.m_view._m01_m11_m21_m31);
-  r1.z = dot(r2.xyzw, g_psScene.m_view._m03_m13_m23_m33);
+  r1.xyz = min(float3(1, 1, 1), r0.zzz);
   r1.xyz = r1.xyz;
-  r1.xy = float2(0.0299999993, 0.0299999993) * r1.xy;
-  r1.xy = float2(0.5, -0.5) * r1.xy;
-  r1.xy = float2(0.5, 0.5) + r1.xy;
-  r0.w = g_psMaterial.m_materials[0].w * r1.z;
-  r0.w = max(0, r0.w);
-  r0.w = min(1, r0.w);
-  r0.w = -r0.w;
-  r0.w = 1 + r0.w;
-  r1.xy = r1.xy;
-  r0.w = r0.w;
-  r1.zw = float2(-0.5, -0.5) * g_psSystem.m_renderBuffer.zw;
-  r1.xy = r1.xy + r1.zw;
-  r1.xyzw = inViewportCaptureMap.Sample(g_samplerLinear_Clamp_s, r1.xy).xzyw;
-  r1.xy = r1.xy;
-  r1.zw = r1.zw;
-  r1.xy = float2(0.0399999991, 0.0399999991) + r1.xy;
-  r2.xy = -r0.ww;
-  r1.xy = r2.xy + r1.xy;
-  r1.xy = r1.xy / float2(0.0399999991, 0.0399999991);
-  r1.xy = max(float2(0, 0), r1.xy);
-  r1.xy = min(float2(1, 1), r1.xy);
-  r1.zw = r1.xy * r1.zw;
-  r1.xy = -r1.xy;
-  r1.xy = float2(1, 1) + r1.xy;
-  r1.xy = r1.zw + r1.xy;
-  r0.w = r1.x * r1.y;
-  r0.w = r0.w;
-  r1.xyz = r0.www * r0.zzz;
   r1.xyz = r1.xyz;
   r2.xyzw = inAlbedoMap.Sample(g_samplerLinear_Wrap_s, r0.xy).xyzw;
 

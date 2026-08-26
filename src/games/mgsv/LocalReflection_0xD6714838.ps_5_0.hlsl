@@ -2,6 +2,7 @@
 
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:33 2026
 
+// clang-format off
 cbuffer cPSScene : register(b2) {
   struct
   {
@@ -18,8 +19,7 @@ cbuffer cPSScene : register(b2) {
     float4 m_fogColor;
     float4 m_cameraCenterOffset;
     float4 m_shadowMapResolutions;
-  }
-g_psScene:
+  } g_psScene:
   packoffset(c0);
 }
 
@@ -30,8 +30,7 @@ cbuffer cPSObject : register(b5) {
     float4x4 m_world;
     float4 m_useWeightCount;
     float4 m_localParam[4];
-  }
-g_psObject:
+  } g_psObject:
   packoffset(c0);
 }
 
@@ -42,10 +41,10 @@ cbuffer cPSSystem : register(b0) {
     float4 m_renderInfo;
     float4 m_renderBuffer;
     float4 m_dominantLightDir;
-  }
-g_psSystem:
+  } g_psSystem:
   packoffset(c0);
 }
+// clang-format on
 
 SamplerState g_samplerPoint_Clamp_s : register(s9);
 SamplerState g_samplerLinear_Wrap_s : register(s10);
