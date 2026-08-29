@@ -1,0 +1,121 @@
+# MGSV Temporal Reconstruction Roadmap
+
+Future work for improving the current analytical TAA and preparing reusable native-resolution DLAA inputs. This document
+is intentionally prospective; [README.md](README.md) describes only the current implementation.
+
+## Scope
+
+- Keep all temporal features default-Off until their input and restoration contracts are validated.
+- Preserve native render/output resolution. Game resolution scaling and dynamic resolution are out of scope.
+- Target DLAA specifically, not DLSS Super Resolution.
+- Keep MGSV's bone-aware object motion rather than replacing it with depth-only camera motion.
+- Do not restore broad mapped-constant-buffer mutation.
+- Treat an FSR-style architecture as a source of proven analytical techniques, not as a drop-in D3D11 integration.
+
+## Priority 1: signal correctness
+
+1. **Linear history reconstruction**
+   - First test decoded manual bilinear history sampling to isolate encoded-interpolation loss.
+   - If confirmed, store temporal history in linear RGBA16F and encode only when copying the final result back into MGSV's
+     scene domain.
+   - Keep the current filter, clipping, and blend unchanged during this test.
+2. **Reverse-Z velocity dilation**
+   - Compare center-only, minimum-depth, and maximum-depth selection as isolated changes.
+   - Move to a full 3x3 nearest-surface selection only after confirming MGSV's raw reverse-Z convention at this pass.
+   - Carry depth, motion, and object classification from the same selected sample.
+3. **Camera-cut reset**
+   - Detect large view/projection/FOV discontinuities and invalidate history before accumulation.
+   - Cover aiming, binocular transitions, cutscenes, teleportation, pause/resume, and display-mode changes.
+
+## Priority 2: modern history validation
+
+1. Store or reconstruct previous-frame depth.
+2. Compare reprojected expected depth against observed previous depth.
+3. Produce a disocclusion confidence value rather than relying exclusively on color bounds.
+4. Reject history at true surface changes while preserving it on depth-consistent geometry.
+5. Move rectification from raw RGB toward a luminance/chroma representation once linear history is established.
+
+Do not globally weaken the current AABB. Without depth validation, relaxed clipping is expected to reintroduce character
+ghosting.
+
+## Priority 3: thin-feature stability
+
+The current wire failure matches the problem addressed by temporal lock systems: current coverage is present, but
+intermittent jitter coverage allows ordinary rectification to erase accumulated detail.
+
+An FSR2-inspired native-resolution lock should track:
+
+- Thin-feature detection from a local luminance neighborhood.
+- Reprojected lock lifetime.
+- Luminance recorded when the lock is created.
+- Trust based on current shading stability.
+- Immediate or accelerated unlock on disocclusion, camera reset, or material instability.
+
+Locks should selectively protect depth-consistent thin detail. They should not become a global increase in history weight.
+
+## Priority 4: canonical temporal inputs
+
+Create a consumer-independent input layer shared by custom TAA and DLAA:
+
+| Input | Target contract |
+|---|---|
+| Color | Full-resolution linear HDR, HUDless, before final output encoding |
+| Depth | Full-resolution reverse-Z with explicit metadata |
+| Motion | Signed RG16F current-to-previous motion, camera motion included, jitter excluded |
+| Matrices | Current/previous no-jitter view, projection, VP, inverse VP, and clip transforms |
+| Jitter | Exact applied offset in pixel and UV units |
+| Frame state | Token, dimensions, previous-frame validity, camera-cut/reset state |
+
+### Motion plan
+
+- Derive background camera motion exactly from depth and no-jitter matrices.
+- Preserve native current/previous bones and object transforms for object motion.
+- Investigate the velocity-specific `MakeVelocityBuffer` orchestration boundary with a bounded read-only observer before
+  any native correction.
+- Remove the native packed-motion bias and approximately 64-pixel clamp only on an owned temporal path.
+- Keep native motion blur as a separate compatibility consumer until expanded vectors are proven safe.
+
+### Deferred masks
+
+Reactive and transparency/composition masks are useful for particles, alpha blending, reflections, and animated textures,
+but they should not block the required color/depth/motion/reset contract. Material-derived masks are preferable to
+final-image heuristics when they become necessary.
+
+## Priority 5: native-resolution DLAA
+
+After the canonical inputs are stable:
+
+1. Integrate Streamline/DLAA with identical render and output extents.
+2. Supply row-major no-jitter camera matrices and jitter separately in the SDK's documented units.
+3. Validate motion direction, Y convention, scale, reverse-Z, reset, and frame-token lifetime with SDK diagnostics.
+4. Establish a valid HUDless input and reintegration point before evaluating image quality.
+5. Use auto exposure initially unless a proven MGSV exposure resource is available.
+6. Compare custom TAA and DLAA against the same canonical inputs.
+
+No internal resolution changes, DLSS Super Resolution modes, or game viewport/culling modifications are planned.
+
+## Optional finishing work
+
+- Add reactive/transparency handling for proven material classes.
+- Add luminance stability history for shading changes and exposure transitions.
+- Add optional RCAS only after wire stability, disocclusion, and camera reset are working.
+- Re-evaluate a native-resolution analytical FSR path only after custom TAA and DLAA are stable. Public FSR2 backends are
+  primarily DX12/Vulkan, so MGSV's D3D11 integration would require deliberate backend or shader adaptation.
+
+## Validation matrix
+
+Every temporal-input revision should cover:
+
+- Static camera and geometry.
+- Slow and fast camera pans.
+- Slow character motion, idle animation, hair, clothing, and equipment.
+- Rigid moving objects, foliage, fences, and thin wires.
+- Aiming, first-person aim, binoculars, and abrupt FOV transitions.
+- Pause/resume, cutscenes, camera cuts, and teleportation.
+- DoF and motion blur enabled and disabled.
+- Rain, particles, transparency, NoIR, and sonar.
+- Resolution/display-mode changes.
+- First frame after enable, resize, reset, camera cut, and failed input capture.
+
+Required diagnostics should eventually include camera-only and object-only signed motion, motion validity, selected depth,
+reverse-Z visualization, disocclusion confidence, lock state, current jitter, and reset state.

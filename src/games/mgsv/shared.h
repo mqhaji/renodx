@@ -1,8 +1,6 @@
 #ifndef SRC_MGSV_SHARED_H_
 #define SRC_MGSV_SHARED_H_
 
-#define ENABLE_TAA_SLIDER 0
-
 #define FIX_UNORM_SRGB 1
 
 // Must be 32bit aligned
@@ -31,6 +29,10 @@ struct ShaderInjectData {
   float custom_boost_sun;
 
   float custom_taa;
+  float taa_jitter_uv_x;
+  float taa_jitter_uv_y;
+  float taa_jitter_padding;
+  float taa_jitter_padding_2;
 };
 
 #ifndef __cplusplus
@@ -60,7 +62,8 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_BLOOM      shader_injection.custom_bloom
 #define CUSTOM_BOOST_SUN  shader_injection.custom_boost_sun
 
-#define CUSTOM_TAA shader_injection.custom_taa
+#define CUSTOM_TAA    shader_injection.custom_taa
+#define TAA_JITTER_UV float2(shader_injection.taa_jitter_uv_x, shader_injection.taa_jitter_uv_y)
 
 #include "../../shaders/renodx.hlsl"
 
