@@ -8,6 +8,7 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 - **LUT-based color grading** with extended color precision
 - **Motion blur** with HDR-aware rendering
 - **Depth-of-field effects** with an HDR pre-final scene copy
+- **Optional temporal anti-aliasing** with native projection jitter and high-precision velocity
 - **User-configurable settings** via the ReShade overlay UI
 
 ---
@@ -32,6 +33,12 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 - `init_swapchain`: Detect peak brightness and swapchain upgrade state
 - `present`: Deactivate the frame-local DoF-copy target and reset copy gates
 - `copy_resource`: Propagate an armed scene-color clone to the matching copy destination
+
+**4. Temporal Anti-Aliasing**
+- Installs a narrowly validated native projection hook during device initialization
+- Captures the final camera/object velocity target and resolves into RGBA16F ping-pong history
+- Requires exact frame, sample, and render-dimension agreement between the native jitter and resolve
+- Leaves TAA disabled by default and preserves the original FXAA path while disabled
 
 ---
 
@@ -85,6 +92,25 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 - `0xBFC7D3C2` — Render the two half-resolution motion-blur ping-pong passes
 - The post-motion-blur `0x83272BCB` draw — Copy the result back, then deactivate the motion-blur clones
 
+### taa_velocity_upgrade_info
+
+**Purpose**: Preserves both the full-resolution deformation-aware object-velocity target and the final camera/object
+velocity composite at RGBA16F precision for temporal reprojection.
+
+```cpp
+// Old resource format: 8-bit BGRA typeless
+// New format: 16-bit RGBA float
+// Size: Full backbuffer
+// Features: Clone + hot-swap enabled
+// Velocity channels: .ba
+```
+
+The clone descriptor deliberately matches the underlying `b8g8r8a8_typeless` resources rather than their typed
+render-target views. The addon activates the clone before the first `GBufferVelocity` or `GBufferMaskedVelocity` draw and
+keeps it active through `MotionBlurCameraVelocity`, which composites camera and object motion into a separate RGBA16F
+clone for TAA. This avoids losing object motion to BGRA8's approximately 0.502-pixel code spacing before the final float
+write. Runtime validation of the new object-input clone remains pending.
+
 ### LUT Builder (Inline Upgrade)
 
 **Purpose**: Marks 256×16 LUT builder target as RGBA16F for internal precision.
@@ -106,6 +132,9 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 | 0xE2D609B1 | DOF_ScatterCompositeNear | Depth-of-field near pass | ✓ | Yes | Arms post-DOF tracking flag |
 | 0x7C017264 | DOF_ScatterCompositeFar | Depth-of-field far pass | ✓ | Yes | Refreshes the DoF-copy window |
 | 0xFC5542BB | DOF_ScatterCompositeFinal | DoF final composite | ✓ | Yes | Closes the DoF-copy window |
+| 0x9815404F | GBufferVelocity | Deformation-aware object velocity | ✓ | TAA | Shared RGBA16F object-velocity clone |
+| 0x58C10658 | GBufferMaskedVelocity | Alpha-tested object velocity | ✓ | TAA | Writes the same RGBA16F object-velocity clone |
+| 0xA13321B6 | MotionBlurCameraVelocity | Final full-resolution velocity | ✓ | TAA | RGBA16F clone; velocity encoded in `.ba` |
 | 0xF05DCBFD | Motion-blur tile max | Velocity tile preparation | — | No | Arms the next motion-blur input copy |
 | 0x512E2B48 | Motion-blur tile refine | Velocity tile refinement | — | No | Refreshes the motion-blur input-copy gate |
 | 0x83272BCB | CopyRenderBuffer | Generic scene/intermediate copy | Conditional | Conditional | Upgraded only inside a proven DoF or motion-blur window |
@@ -183,6 +212,40 @@ The addon upgrades `CopyRenderBuffer` only inside sequence-proven windows:
 Clone allocations and targets are retained; only active redirection is disabled. This preserves HDR through DoF and motion blur while preventing those resources from remaining redirected when MGSV reuses them for unrelated work.
 
 The native `copy_resource` callback is separately armed from a proven scene-tonemap output. It marks the matching destination as a scene clone and copies clone-to-clone. Shared resource-upgrade handling continues to redirect copies whose endpoints are already active.
+
+---
+
+## Temporal Anti-Aliasing (Default Off)
+
+The addon includes an optional TAA baseline under **Effects > Temporal Anti-Aliasing**. It defaults to **Off**. While
+disabled, MGSV keeps its original FXAA path and the native projection remains unmodified.
+
+When enabled, the TAA path:
+
+1. Applies an eight-sample base-(2,3) Halton sequence only to the proven gameplay projection copy at
+   `ShaderManager+0x680`.
+2. Publishes the exact applied jitter together with its frame token, sample index, and render dimensions.
+3. Captures vanilla no-jitter projection/view matrices at the same native boundary, computes the current inverse and
+   previous VP relation in double precision, and promotes current VP only after a successful temporal dispatch.
+4. Captures the final `MotionBlurCameraVelocity` target through the targeted RGBA16F velocity clone.
+5. Reprojects RGBA16F history on a fixed output grid using exact depth-derived camera motion for background pixels and
+   MGSV's deformation-aware velocity for object-mask pixels, with Alias Isolation's nearest-absolute-depth selection.
+6. Resolves immediately before `DOF_ScatterBakeFirst`, so the game creates its DoF and motion-blur inputs from resolved
+   scene color.
+7. Bypasses the original FXAA filter only while TAA is active.
+
+**TAA Jitter Pattern** exposes only the production eight-phase Halton sequence and an **Off** diagnostic that leaves the
+resolve active with zero projection jitter. **TAA Diagnostic View** isolates the temporal result, raw current frame,
+3x3-filtered current frame, and raw center-pixel velocity direction or magnitude. **TAA Velocity View Range** controls
+the scale of the velocity visualizations. Pattern and diagnostic changes invalidate and reseed history.
+
+The resolve fails closed: a missing or stale native jitter publication, stale velocity, or dimension mismatch skips temporal
+accumulation and invalidates history instead of blending misaligned frames. Enable/disable transitions also reset temporal
+state, and disabling verifies exact restoration of the vanilla projection copy. A scoped replacement for VS `0x200DBED9`
+applies the same published jitter to a light path that otherwise receives an unjittered projection.
+
+See [`taa/README.md`](taa/README.md) for the current implementation and validation contract. Future temporal quality and
+native-resolution DLAA work is tracked in [`taa/ROADMAP.md`](taa/ROADMAP.md).
 
 ---
 
@@ -281,15 +344,11 @@ The `custom_shaders` array defines the shader interception pipeline. **Order mat
 
 ### Build
 
-```bash
-cd c:\Dev\renodx
-build.cmd
-```
+Use CMake Tools in VS Code, select the desired configuration, and build the `mgsv` target. Inspect these outputs:
 
-Or use CMake Tools in VS Code:
-```
-Build (mgsv target)
-```
+- `build/Release/renodx-mgsv.addon64` (or the matching configuration directory)
+- `build/mgsv.include/embed/mgsv_taa.cso`
+- `build/mgsv.include/embed/mgsv_taa.h`
 
 ### Deploy
 
@@ -306,6 +365,15 @@ copy build\Release\renodx-mgsv.addon64 "C:\Program Files (x86)\Steam\steamapps\c
 4. Enable **RenoDX** checkbox
 5. Configure tone mapping / color grading settings
 
+### Manual TAA Verification
+
+1. Start with **Temporal Anti-Aliasing** disabled and confirm the original FXAA presentation is stable.
+2. Enable TAA with jitter **Off**, then switch to **Halton** and confirm that each pattern change resets history.
+3. Inspect static edges, foliage, slow and fast camera pans, aiming, binoculars, menus, DoF, and motion blur.
+4. Exercise all five diagnostic views and confirm the log has no recurring publication, capture, setup, or dispatch warnings.
+5. Disable TAA and verify that the scene returns without a persistent subpixel shift or stale-history frame.
+6. Repeat an enable/disable cycle after a resolution or display-mode change to verify history is recreated at the new size.
+
 ---
 
 ## References
@@ -313,7 +381,3 @@ copy build\Release\renodx-mgsv.addon64 "C:\Program Files (x86)\Steam\steamapps\c
 - **ReShade API**: https://github.com/crosire/reshade
 - **RenoDX Project**: https://github.com/clshortfuse/renodx
 - **MGSV Mod Community**: Discord / GitHub wikis
-
----
-
-*Documentation generated for RenoDX MGSV addon. For questions or contributions, see the RenoDX GitHub repository.*

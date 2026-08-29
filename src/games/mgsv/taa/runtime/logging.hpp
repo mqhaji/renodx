@@ -3,9 +3,8 @@
 /*
  * Lightweight logging helpers for the MGSV TAA runtime.
  *
- * Mirrors the structure used by the Alien Isolation port. Default-enabled while
- * the implementation is in development so that map/unmap and dispatch decisions
- * are visible in ReShade.log without a rebuild.
+ * Native-hook handshakes, input rejection, and dispatch decisions remain
+ * visible in ReShade.log without a rebuild.
  */
 
 #include <cstdint>
@@ -26,9 +25,6 @@ inline constexpr const char* TAG = "MgsvTaa: ";
 struct Hex {
   uint64_t value;
 };
-struct Crc32 {
-  uint32_t value;
-};
 struct Bool {
   bool value;
 };
@@ -38,10 +34,6 @@ inline std::ostream& operator<<(std::ostream& os, Hex hex) {
   os << "0x" << std::hex << std::uppercase << hex.value;
   os.flags(flags);
   return os;
-}
-
-inline std::ostream& operator<<(std::ostream& os, Crc32 crc) {
-  return os << Hex{crc.value};
 }
 
 inline std::ostream& operator<<(std::ostream& os, Bool b) {

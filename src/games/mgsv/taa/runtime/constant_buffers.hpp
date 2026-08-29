@@ -6,14 +6,17 @@
  * Owns:
  *  - The master enable binding (driven by a settings checkbox).
  *  - Per-frame counters used to gate dispatch and advance the jitter sample.
- *  - The Hammersley-permuted 16-sample jitter sequence, in UV space.
+ *  - Diagnostic Off and eight-sample base-(2,3) Halton jitter patterns,
+ *    in UV space.
  *
- * Jitter stays CPU-side, matching Alien Isolation. This module is the
- * authoritative source for the cbuffer-patching code (taa::jitter) and for
- * frame/history bookkeeping used by the resolve dispatcher.
+ * The native projection hook and ReShade callbacks can execute on different
+ * threads. Atomic frame/sample mirrors let the hook choose the same sample
+ * that the resolve expects without reading mutable render-callback state.
  */
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 
 namespace taa::constant_buffers {
@@ -22,13 +25,6 @@ struct FrameState {
   uint32_t taa_sample_index = 0u;
   uint64_t frame_index = 0u;
   bool taa_ran_this_frame = false;
-
-  // Both offsets are in UV space. current_jitter is the last successfully
-  // resolved frame's offset, i.e. the jitter of the history texture that will
-  // be read next frame. previous_jitter keeps the one before that for logging
-  // and diagnostics.
-  std::array<float, 2> current_jitter = {0.f, 0.f};
-  std::array<float, 2> previous_jitter = {0.f, 0.f};
 
   // Pipeline markers used to identify which CopyRenderBuffer invocation
   // is the right TAA insertion point. DoF runs at all times in observed
@@ -42,47 +38,132 @@ struct FrameState {
 
 inline float enabled = 0.f;
 inline float* enabled_binding = &enabled;
-inline float jitter_scale = 1.f;
+inline float jitter_pattern = 1.f;
+inline float diagnostic_view = 0.f;
+inline float velocity_visualization_range = 8.f;
+inline std::atomic<bool> runtime_enabled = false;
+inline std::atomic<uint32_t> runtime_jitter_pattern = 1u;
+inline std::atomic<float> runtime_diagnostic_view = 0.f;
+inline std::atomic<float> runtime_velocity_visualization_range = 8.f;
+inline std::atomic<uint64_t> runtime_settings_generation = 0u;
+inline std::atomic<uint64_t> current_frame_token = 0u;
+inline std::atomic<uint32_t> current_sample_index = 0u;
 inline FrameState frame_state = {};
+inline constexpr uint32_t HALTON_SEQUENCE_LENGTH = 8u;
+
+inline void SetEnabled(bool value) {
+  if (runtime_enabled.exchange(value, std::memory_order_acq_rel) != value) {
+    runtime_settings_generation.fetch_add(1u, std::memory_order_release);
+  }
+}
+
+inline void SyncEnabled() {
+  SetEnabled(enabled_binding != nullptr && *enabled_binding > 0.f);
+}
 
 inline bool IsEnabled() {
-  return enabled_binding != nullptr && *enabled_binding > 0.f;
+  return runtime_enabled.load(std::memory_order_acquire);
 }
 
-// Radical-inverse Hammersley term. Same constant as Alien Isolation.
-inline float HammersleySample(uint32_t bits, uint32_t seed) {
-  bits = (bits << 16u) | (bits >> 16u);
-  bits = ((bits & 0x00ff00ffu) << 8u) | ((bits & 0xff00ff00u) >> 8u);
-  bits = ((bits & 0x0f0f0f0fu) << 4u) | ((bits & 0xf0f0f0f0u) >> 4u);
-  bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xccccccccu) >> 2u);
-  bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xaaaaaaaau) >> 1u);
-  bits ^= seed;
-  return static_cast<float>(bits) * 2.3283064365386963e-10f;
+inline void SetJitterPattern(float value) {
+  const uint32_t pattern = static_cast<uint32_t>(std::clamp(value, 0.f, 1.f));
+  if (runtime_jitter_pattern.exchange(pattern, std::memory_order_acq_rel) != pattern) {
+    runtime_settings_generation.fetch_add(1u, std::memory_order_release);
+  }
 }
 
-// Computes the per-frame jitter offset in UV space for the current sample index.
-// Returns (0, 0) when TAA already dispatched this frame so accidental re-reads
-// produce no further offset.
-inline std::array<float, 2> CurrentFrameJitter(uint32_t width, uint32_t height) {
-  if (frame_state.taa_ran_this_frame || width == 0u || height == 0u) return {0.f, 0.f};
+inline void SyncJitterPattern() {
+  jitter_pattern = static_cast<float>(static_cast<uint32_t>(std::clamp(jitter_pattern, 0.f, 1.f)));
+  SetJitterPattern(jitter_pattern);
+}
 
-  const uint32_t sample = (frame_state.taa_sample_index * 7u) % 16u;
-  std::array<float, 2> result = {
-      (static_cast<float>(sample) + 0.5f) / 16.f,
-      HammersleySample(sample, 238308531u),
-  };
-  // Keep the shared value in UV/pixel space. Matrix patching converts this to
-  // projection/NDC space by multiplying by two.
-  result[0] = (result[0] - 0.5f) / static_cast<float>(width);
-  result[1] = (result[1] - 0.5f) / static_cast<float>(height);
-  result[0] *= jitter_scale;
-  result[1] *= jitter_scale;
+inline uint32_t GetJitterPattern() {
+  return runtime_jitter_pattern.load(std::memory_order_acquire);
+}
+
+inline void SetDiagnosticView(float value) {
+  value = static_cast<float>(static_cast<uint32_t>(std::clamp(value, 0.f, 4.f)));
+  diagnostic_view = value;
+  if (runtime_diagnostic_view.exchange(value, std::memory_order_acq_rel) != value) {
+    runtime_settings_generation.fetch_add(1u, std::memory_order_release);
+  }
+}
+
+inline void SyncDiagnosticView() {
+  SetDiagnosticView(diagnostic_view);
+}
+
+inline float GetDiagnosticView() {
+  return runtime_diagnostic_view.load(std::memory_order_acquire);
+}
+
+inline void SetVelocityVisualizationRange(float value) {
+  runtime_velocity_visualization_range.store(value > 0.01f ? value : 0.01f, std::memory_order_release);
+}
+
+inline void SyncVelocityVisualizationRange() {
+  SetVelocityVisualizationRange(velocity_visualization_range);
+}
+
+inline float GetVelocityVisualizationRange() {
+  return runtime_velocity_visualization_range.load(std::memory_order_acquire);
+}
+
+inline uint64_t RuntimeSettingsGeneration() {
+  return runtime_settings_generation.load(std::memory_order_acquire);
+}
+
+inline uint64_t CurrentFrameToken() {
+  return current_frame_token.load(std::memory_order_acquire);
+}
+
+inline uint32_t CurrentSampleIndex() {
+  return current_sample_index.load(std::memory_order_acquire);
+}
+
+inline float HaltonSample(uint32_t index, uint32_t base) {
+  const float inverse_base = 1.f / static_cast<float>(base);
+  float fraction = inverse_base;
+  float result = 0.f;
+  while (index != 0u) {
+    result += static_cast<float>(index % base) * fraction;
+    index /= base;
+    fraction *= inverse_base;
+  }
   return result;
 }
 
-inline void ResetJitterHistory() {
-  frame_state.current_jitter = {0.f, 0.f};
-  frame_state.previous_jitter = {0.f, 0.f};
+inline std::array<float, 2> JitterPixelsForSample(uint32_t sample_index) {
+  switch (GetJitterPattern()) {
+    case 0u:
+      return {0.f, 0.f};
+    default: {
+      // Native-resolution TAA uses ceil(8 * 1^2) = 8 phases. Skip Halton index
+      // zero because it is the unit-square origin rather than a distributed tap.
+      const uint32_t halton_index = (sample_index % HALTON_SEQUENCE_LENGTH) + 1u;
+      return {
+          HaltonSample(halton_index, 2u) - 0.5f,
+          HaltonSample(halton_index, 3u) - 0.5f,
+      };
+    }
+  }
+}
+
+inline std::array<float, 2> JitterForSample(uint32_t sample_index, uint32_t width, uint32_t height) {
+  if (width == 0u || height == 0u) return {0.f, 0.f};
+
+  auto result = JitterPixelsForSample(sample_index);
+  // Keep the shared value in UV/pixel space. Matrix patching converts this to
+  // projection/NDC space by multiplying by two.
+  result[0] /= static_cast<float>(width);
+  result[1] /= static_cast<float>(height);
+  return result;
+}
+
+inline void ResetTemporalState() {
+  frame_state.taa_sample_index = 0u;
+  frame_state.taa_ran_this_frame = false;
+  current_sample_index.store(0u, std::memory_order_release);
 }
 
 inline void BeginFrame() {
@@ -90,15 +171,14 @@ inline void BeginFrame() {
   frame_state.taa_ran_this_frame = false;
   frame_state.dof_fired = false;
   frame_state.mb_tile_prep_fired = false;
+  current_frame_token.store(frame_state.frame_index, std::memory_order_release);
 }
 
-// Called only after a successful compute dispatch + copy-back. Promotes the
-// jitter that was actually applied this frame for history/debug bookkeeping.
-inline void MarkTaaDispatched(std::array<float, 2> applied_jitter) {
+// Called only after a successful compute dispatch and copy-back.
+inline void MarkTaaDispatched() {
   frame_state.taa_ran_this_frame = true;
-  frame_state.previous_jitter = frame_state.current_jitter;
-  frame_state.current_jitter = applied_jitter;
   ++frame_state.taa_sample_index;
+  current_sample_index.store(frame_state.taa_sample_index, std::memory_order_release);
 }
 
 }  // namespace taa::constant_buffers
