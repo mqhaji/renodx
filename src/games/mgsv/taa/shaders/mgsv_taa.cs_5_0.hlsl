@@ -1,5 +1,7 @@
 #include "../../shared.h"
 
+#define CLIP_TIGHTNESS 0.5f
+
 // MGSV temporal resolve.
 //
 // Inputs (read live off the bindings of the insertion pixel-shader draw):
@@ -8,8 +10,7 @@
 //   t2 - camera velocity (RGBA16F preferred, BGRA8 fallback; encoded in .ba)
 //   t3 - depth (selects silhouette velocity from center + diagonal taps)
 //   t4 - object velocity (RGBA16F clone; .r marks pixels with object motion)
-//   s0 - linear sampler (history reconstruction)
-//   s1 - point sampler (current color, velocity, depth, object mask)
+//   s0 - point sampler (current color, velocity, depth, object mask)
 //   b0 - resolve diagnostic controls
 //
 // Output:
@@ -22,8 +23,7 @@ Texture2D<float4> velocity_texture : register(t2);
 Texture2D<float4> depth_texture : register(t3);
 Texture2D<float4> object_velocity_texture : register(t4);
 
-SamplerState linear_sampler : register(s0);
-SamplerState point_sampler : register(s1);
+SamplerState point_sampler : register(s0);
 
 RWTexture2D<float4> current_history_output : register(u0);
 
@@ -33,7 +33,7 @@ cbuffer TaaResolveConstants : register(b0) {
   float camera_reprojection_valid;
   float padding_0;
   float2 current_jitter_uv;
-  float2 padding;
+  float2 padding_1;
   float4 current_to_previous_clip_row_0;
   float4 current_to_previous_clip_row_1;
   float4 current_to_previous_clip_row_2;
@@ -68,7 +68,7 @@ float3 EncodeSceneColor(float3 color) {
 }
 
 // Filters the current frame and builds broad/tight color bounds for history clipping.
-Neighborhood BuildCurrentNeighborhood(float2 uv, float2 inv_screen_size) {
+Neighborhood BuildCurrentNeighborhood(float2 uv, float2 inv_screen_size, float3 center_color) {
   static const float CURRENT_FILTER_EXPONENT = 2.29f;
   static const float CURRENT_DIAGONAL_WEIGHT = exp(-CURRENT_FILTER_EXPONENT * 2.f);
   static const float CURRENT_CARDINAL_WEIGHT = exp(-CURRENT_FILTER_EXPONENT);
@@ -108,7 +108,9 @@ Neighborhood BuildCurrentNeighborhood(float2 uv, float2 inv_screen_size) {
   for (uint i = 0u; i < 9u; ++i) {
     const CurrentTap tap = CURRENT_TAPS[i];
     const float3 sample_color =
-        DecodeSceneColor(current_color_texture.SampleLevel(point_sampler, uv + tap.offset * inv_screen_size, 0).xyz);
+        i == 4u
+            ? center_color
+            : DecodeSceneColor(current_color_texture.SampleLevel(point_sampler, uv + tap.offset * inv_screen_size, 0).xyz);
 
     filtered_sum += sample_color * tap.weight;
     broad_min = min(sample_color, broad_min);
@@ -122,8 +124,8 @@ Neighborhood BuildCurrentNeighborhood(float2 uv, float2 inv_screen_size) {
 
   Neighborhood neighborhood;
   neighborhood.filtered_color = filtered_sum * CURRENT_NORMALIZATION;
-  neighborhood.clip_min = broad_min + 0.5f * (tight_min - broad_min);
-  neighborhood.clip_max = broad_max + 0.5f * (tight_max - broad_max);
+  neighborhood.clip_min = lerp(broad_min, tight_min, CLIP_TIGHTNESS);
+  neighborhood.clip_max = lerp(broad_max, tight_max, CLIP_TIGHTNESS);
   return neighborhood;
 }
 
@@ -146,13 +148,14 @@ float2 DecodeVelocity(float2 uv, float2 screen_size) {
   return (encoded * 2.f - 1.f) * 64.f / screen_size;
 }
 
-// Chooses the velocity and corresponding object mask from the current pixel or
-// diagonal neighbors using nearest-depth selection.
-VelocitySelection SelectNearestVelocity(float2 uv, float2 inv_screen_size, float2 screen_size) {
-  // Velocity search uses center plus diagonal neighbors.
-  //  a   b
-  //    e
-  //  c   d
+// MGSV uses positive reverse-Z here, so the largest raw depth identifies the
+// nearest visible surface. This selection preserves thin foreground geometry
+// that was lost when the farther, smallest-absolute-depth sample supplied motion.
+VelocitySelection SelectNearestVelocity(
+    float2 uv,
+    float2 inv_screen_size,
+    float2 screen_size,
+    float2 center_velocity) {
   static const float2 VELOCITY_OFFSETS[5] = {
     float2(0.f, 0.f),
     float2(1.f, 1.f),
@@ -162,27 +165,62 @@ VelocitySelection SelectNearestVelocity(float2 uv, float2 inv_screen_size, float
   };
 
   VelocitySelection selection;
-  selection.velocity = DecodeVelocity(uv, screen_size);
+  selection.velocity = center_velocity;
   selection.object_mask = object_velocity_texture.SampleLevel(point_sampler, uv, 0).r;
   selection.uv = uv;
   selection.depth = depth_texture.SampleLevel(point_sampler, uv, 0).x;
-  float nearest_abs_depth = abs(selection.depth);
 
   [unroll]
   for (uint i = 1u; i < 5u; ++i) {
     const float2 candidate_uv = uv + VELOCITY_OFFSETS[i] * inv_screen_size;
-    const float candidate_abs_depth = abs(depth_texture.SampleLevel(point_sampler, candidate_uv, 0).x);
+    const float candidate_depth = depth_texture.SampleLevel(point_sampler, candidate_uv, 0).x;
 
-    if (candidate_abs_depth <= nearest_abs_depth) {
+    if (candidate_depth >= selection.depth) {
       selection.velocity = DecodeVelocity(candidate_uv, screen_size);
       selection.object_mask = object_velocity_texture.SampleLevel(point_sampler, candidate_uv, 0).r;
       selection.uv = candidate_uv;
-      selection.depth = depth_texture.SampleLevel(point_sampler, candidate_uv, 0).x;
-      nearest_abs_depth = candidate_abs_depth;
+      selection.depth = candidate_depth;
     }
   }
 
   return selection;
+}
+
+float4 CatmullRomWeights(float fraction) {
+  const float fraction_squared = fraction * fraction;
+  const float fraction_cubed = fraction_squared * fraction;
+  return float4(
+      fraction_squared - 0.5f * (fraction_cubed + fraction),
+      1.f + 1.5f * fraction_cubed - 2.5f * fraction_squared,
+      0.5f * fraction + 2.f * fraction_squared - 1.5f * fraction_cubed,
+      0.5f * (fraction_cubed - fraction_squared));
+}
+
+// History is stored in MGSV's encoded scene domain. Decode every texel before
+// Catmull-Rom interpolation so reconstruction happens in linear light; decoding
+// after hardware interpolation visibly damaged thin-detail stability.
+float3 SampleHistoryDecodedCatmullRom(float2 uv, float2 screen_size) {
+  const float2 texel_position = uv * screen_size - 0.5f.xx;
+  const int2 base_pixel = int2(floor(texel_position));
+  const float2 fraction = frac(texel_position);
+  const int2 maximum_pixel = int2(screen_size) - 1;
+  const int4 sample_x = clamp(base_pixel.x + int4(-1, 0, 1, 2), 0, maximum_pixel.x);
+  const int4 sample_y = clamp(base_pixel.y + int4(-1, 0, 1, 2), 0, maximum_pixel.y);
+  const float4 weight_x = CatmullRomWeights(fraction.x);
+  const float4 weight_y = CatmullRomWeights(fraction.y);
+  float3 history_color = 0.f.xxx;
+  float weight_sum = 0.f;
+  [unroll]
+  for (int y = 0; y < 4; ++y) {
+    [unroll]
+    for (int x = 0; x < 4; ++x) {
+      const float weight = weight_x[x] * weight_y[y];
+      const int2 pixel = int2(sample_x[x], sample_y[y]);
+      history_color += DecodeSceneColor(previous_history_texture.Load(int3(pixel, 0)).xyz) * weight;
+      weight_sum += weight;
+    }
+  }
+  return renodx::math::DivideSafe(history_color, weight_sum, 0.f.xxx);
 }
 
 // Rebuilds camera motion from MGSV's native no-jitter projection/view state.
@@ -213,43 +251,6 @@ bool ComputeMatrixCameraVelocity(float2 uv, float depth, out float2 velocity) {
 // Rejects reprojected history samples that land outside normalized screen UVs.
 bool IsInsideScreen(float2 uv) {
   return all(abs(uv - 0.5f.xx) < 0.5f.xx);
-}
-
-// Samples previous history with a nine-tap optimized Catmull-Rom reconstruction.
-float3 SampleHistoryCatmullRom(float2 uv, float2 screen_size, float2 inv_screen_size) {
-  const float2 base_pixel = floor(uv * screen_size - 0.5f.xx);
-  const float4 near_pixel = base_pixel.xyxy + float4(0.5f, 0.5f, -0.5f, -0.5f);
-  const float2 offset = uv * screen_size - near_pixel.xy;
-  const float2 offset_squared = offset * offset;
-  const float2 offset_cubed = offset_squared * offset;
-
-  const float2 negative_weight = offset_squared - 0.5f.xx * (offset_cubed + offset);
-  const float2 center_weight = 1.f.xx + 1.5f.xx * offset_cubed - 2.5f.xx * offset_squared;
-  const float2 positive_weight = 0.5f.xx * (offset_cubed - offset_squared);
-  const float2 middle_offset_weight = 1.f.xx - negative_weight - center_weight - positive_weight;
-  const float2 middle_weight = center_weight + middle_offset_weight;
-
-  const float2 negative_uv = near_pixel.zw * inv_screen_size;
-  const float2 middle_offset = renodx::math::DivideSafe(middle_offset_weight, middle_weight, 0.f.xx);
-  const float2 middle_uv = (near_pixel.xy + middle_offset) * inv_screen_size;
-  const float2 positive_uv = (base_pixel + 2.5f.xx) * inv_screen_size;
-
-  const float3 sample_u = float3(negative_uv.x, middle_uv.x, positive_uv.x);
-  const float3 sample_v = float3(negative_uv.y, middle_uv.y, positive_uv.y);
-  const float3 weight_u = float3(negative_weight.x, middle_weight.x, positive_weight.x);
-  const float3 weight_v = float3(negative_weight.y, middle_weight.y, positive_weight.y);
-
-  float3 history_color = 0.f.xxx;
-  [unroll]
-  for (int y = 0; y < 3; ++y) {
-    [unroll]
-    for (int x = 0; x < 3; ++x) {
-      history_color +=
-          DecodeSceneColor(previous_history_texture.SampleLevel(linear_sampler, float2(sample_u[x], sample_v[y]), 0).xyz)
-          * weight_u[x] * weight_v[y];
-    }
-  }
-  return history_color;
 }
 
 // Clips reprojected history toward the filtered current color inside the neighborhood color box.
@@ -290,10 +291,12 @@ void main(uint3 dispatch_thread_id: SV_DispatchThreadID) {
   const float2 inv_screen_size = 1.f.xx / screen_size;
   const float2 uv = (float2(dispatch_thread_id.xy) + 0.5f.xx) * inv_screen_size;
   const float4 raw_current = current_color_texture.SampleLevel(point_sampler, uv, 0);
+  const float3 current_center = DecodeSceneColor(raw_current.xyz);
 
-  const Neighborhood neighborhood = BuildCurrentNeighborhood(uv, inv_screen_size);
   const float2 raw_velocity = DecodeVelocity(uv, screen_size);
-  const VelocitySelection velocity_selection = SelectNearestVelocity(uv, inv_screen_size, screen_size);
+  const Neighborhood neighborhood = BuildCurrentNeighborhood(uv, inv_screen_size, current_center);
+  const VelocitySelection velocity_selection =
+      SelectNearestVelocity(uv, inv_screen_size, screen_size, raw_velocity);
   float2 velocity = velocity_selection.velocity;
   if (camera_reprojection_valid > 0.f && velocity_selection.object_mask <= 0.5f) {
     float2 matrix_camera_velocity = 0.f.xx;
@@ -307,7 +310,7 @@ void main(uint3 dispatch_thread_id: SV_DispatchThreadID) {
   const float2 history_uv = uv - velocity;
 
   const float3 history_color = IsInsideScreen(history_uv)
-                                   ? SampleHistoryCatmullRom(history_uv, screen_size, inv_screen_size)
+                                   ? SampleHistoryDecodedCatmullRom(history_uv, screen_size)
                                    : neighborhood.filtered_color;
   const float3 clipped_history = ClipHistory(
       history_color,
