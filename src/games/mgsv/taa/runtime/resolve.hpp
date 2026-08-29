@@ -17,12 +17,15 @@
  * clone-upgrades the typeless BGRA8 underlying resource, so the clone SRV
  * is what we sample and the clone resource is what we copy back into.
  *
- * MGSV differs from Alien Isolation only in the resource slots/formats:
- * MotionBlurCameraVelocity writes BGRA8 velocity to RTV0 and reads depth at
- * pixel t2. The compute shader decodes that BGRA8 velocity directly.
+ * MGSV differs from Alien Isolation in the resource slots/formats:
+ * MotionBlurCameraVelocity writes encoded velocity to RTV0 and reads depth at
+ * pixel t2. While TAA is active, the addon upgrades the earlier object-velocity
+ * target and this final composite target to RGBA16F.
  */
 
+#include <intrin.h>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <limits>
 #include <utility>
@@ -31,12 +34,13 @@
 #include <embed/shaders.h>
 #include <include/reshade.hpp>
 
-#include "../../../../utils/resource_upgrade.hpp"
 #include "../../../../utils/resource.hpp"
+#include "../../../../utils/resource_upgrade.hpp"
 #include "../../../../utils/state.hpp"
 #include "./constant_buffers.hpp"
 #include "./descriptor_tracker.hpp"
 #include "./logging.hpp"
+#include "./projection_jitter.hpp"
 
 namespace taa::resolve {
 
@@ -54,24 +58,19 @@ struct Resources {
   reshade::api::format view_format = reshade::api::format::unknown;
   uint32_t accum_index = 0u;
   bool initialized = false;
+  uint64_t settings_generation = std::numeric_limits<uint64_t>::max();
 
   // Stable cache from the last successful insertion so steady state does
   // not have to re-query resource descs every frame.
   reshade::api::resource_view color_srv = {0};
   reshade::api::resource color_resource = {0};
 
-  // SRV created over the active scene-color RTV clone for the deferred
-  // LocalReflectionAddBuffer insertion point. The game has only bound this
-  // resource as an RTV at that point, so there may not be a game SRV to reuse.
-  reshade::api::resource_view rtv_color_srv = {0};
-  reshade::api::resource rtv_color_resource = {0};
-  reshade::api::format rtv_color_view_format = reshade::api::format::unknown;
-
   reshade::api::resource velocity_resource = {0};
   reshade::api::resource_view velocity_rtv = {0};
   reshade::api::resource_view velocity_srv = {0};
   reshade::api::format velocity_view_format = reshade::api::format::unknown;
   reshade::api::resource_view depth_srv = {0};
+  reshade::api::resource_view object_velocity_srv = {0};
   uint64_t capture_frame = std::numeric_limits<uint64_t>::max();
 
   reshade::api::pipeline_layout compute_layout = {0};
@@ -79,21 +78,113 @@ struct Resources {
   std::array<reshade::api::sampler, 2> samplers = {};
 };
 
+struct alignas(16) ResolveConstants {
+  float diagnostic_view = 0.f;
+  float velocity_visualization_range = 8.f;
+  float camera_reprojection_valid = 0.f;
+  float padding_0 = 0.f;
+  std::array<float, 2> current_jitter_uv = {0.f, 0.f};
+  std::array<float, 2> padding = {0.f, 0.f};
+  std::array<float, 16> current_to_previous_clip = {};
+};
+
+static_assert(sizeof(ResolveConstants) == 96u, "TAA resolve constants must occupy six 16-byte registers");
+
 inline Resources resources;
-inline uint64_t last_dispatch_log = std::numeric_limits<uint64_t>::max();
+inline std::atomic_flag execution_lock = ATOMIC_FLAG_INIT;
+inline thread_local bool execution_locked_on_thread = false;
+inline constexpr size_t DESTROYED_VIEW_MAILBOX_SIZE = 64u;
+inline std::array<std::atomic<uint64_t>, DESTROYED_VIEW_MAILBOX_SIZE> destroyed_view_mailbox = {};
+inline std::atomic<bool> destroyed_view_mailbox_overflow = false;
 inline uint64_t last_missing_inputs_log = std::numeric_limits<uint64_t>::max();
-inline uint64_t last_capture_log = std::numeric_limits<uint64_t>::max();
 inline uint64_t last_capture_missing_log = std::numeric_limits<uint64_t>::max();
 inline uint64_t last_stale_capture_log = std::numeric_limits<uint64_t>::max();
 inline uint64_t last_compute_fail_log = std::numeric_limits<uint64_t>::max();
 inline uint64_t last_history_format_log = std::numeric_limits<uint64_t>::max();
 inline uint64_t last_history_create_fail_log = std::numeric_limits<uint64_t>::max();
-inline uint64_t last_rtv_srv_create_fail_log = std::numeric_limits<uint64_t>::max();
 inline uint64_t last_color_size_reject_log = std::numeric_limits<uint64_t>::max();
-inline uint64_t last_dispatch_setup_log = std::numeric_limits<uint64_t>::max();
+inline uint64_t last_missing_native_jitter_log = std::numeric_limits<uint64_t>::max();
+inline uint64_t last_history_invalidate_log = std::numeric_limits<uint64_t>::max();
 
 inline bool LogEvery(uint64_t& last_frame, uint64_t interval = 120u) {
   return logging::ShouldLogFrame(constant_buffers::frame_state.frame_index, last_frame, interval);
+}
+
+inline void LockExecution() {
+  while (execution_lock.test_and_set(std::memory_order_acquire)) {
+    _mm_pause();
+  }
+  execution_locked_on_thread = true;
+}
+
+inline void UnlockExecution() {
+  execution_locked_on_thread = false;
+  execution_lock.clear(std::memory_order_release);
+}
+
+inline bool IsExecutionLockedOnThisThread() {
+  return execution_locked_on_thread;
+}
+
+struct ExecutionGuard {
+  ExecutionGuard() { LockExecution(); }
+  ~ExecutionGuard() { UnlockExecution(); }
+};
+
+struct OptionalExecutionGuard {
+  bool acquired = false;
+
+  OptionalExecutionGuard() : acquired(!IsExecutionLockedOnThisThread()) {
+    if (acquired) LockExecution();
+  }
+
+  ~OptionalExecutionGuard() {
+    if (acquired) UnlockExecution();
+  }
+};
+
+inline void ApplyDestroyedResourceViewLocked(uint64_t handle) {
+  if (handle == resources.color_srv.handle) {
+    resources.color_srv = {0};
+    resources.color_resource = {0};
+  }
+  if (handle == resources.velocity_rtv.handle) resources.velocity_rtv = {0};
+  if (handle == resources.velocity_srv.handle) resources.velocity_srv = {0};
+  if (handle == resources.depth_srv.handle) resources.depth_srv = {0};
+  if (handle == resources.object_velocity_srv.handle) resources.object_velocity_srv = {0};
+}
+
+inline void ProcessDestroyedResourceViewsLocked() {
+  if (destroyed_view_mailbox_overflow.exchange(false, std::memory_order_acq_rel)) {
+    resources.color_srv = {0};
+    resources.color_resource = {0};
+    resources.velocity_resource = {0};
+    resources.velocity_rtv = {0};
+    resources.velocity_srv = {0};
+    resources.velocity_view_format = reshade::api::format::unknown;
+    resources.depth_srv = {0};
+    resources.object_velocity_srv = {0};
+    resources.capture_frame = std::numeric_limits<uint64_t>::max();
+  }
+  for (auto& slot : destroyed_view_mailbox) {
+    const uint64_t handle = slot.exchange(0u, std::memory_order_acq_rel);
+    if (handle != 0u) ApplyDestroyedResourceViewLocked(handle);
+  }
+}
+
+inline void QueueDestroyedResourceView(uint64_t handle) {
+  if (handle == 0u) return;
+  for (auto& slot : destroyed_view_mailbox) {
+    uint64_t empty = 0u;
+    if (slot.compare_exchange_strong(
+            empty,
+            handle,
+            std::memory_order_release,
+            std::memory_order_relaxed)) {
+      return;
+    }
+  }
+  destroyed_view_mailbox_overflow.store(true, std::memory_order_release);
 }
 
 struct PreviousComputeState {
@@ -168,14 +259,18 @@ inline void DestroyHistory(reshade::api::device* device) {
   resources.color_resource = {0};
   resources.accum_index = 0u;
   resources.initialized = false;
+  resources.settings_generation = std::numeric_limits<uint64_t>::max();
 }
 
-inline void DestroyRenderTargetColorSrv(reshade::api::device* device) {
-  if (device == nullptr) return;
-  if (resources.rtv_color_srv.handle != 0u) device->destroy_resource_view(resources.rtv_color_srv);
-  resources.rtv_color_srv = {0};
-  resources.rtv_color_resource = {0};
-  resources.rtv_color_view_format = reshade::api::format::unknown;
+inline void InvalidateHistory(const char* reason = "unspecified") {
+  const bool was_initialized = resources.initialized;
+  resources.initialized = false;
+  resources.accum_index = 0u;
+  projection_jitter::ResetMatrixHistory();
+  if (was_initialized && LogEvery(last_history_invalidate_log, 1u)) {
+    logging::Info("invalidated TAA history reason=", reason,
+                  " frame=", constant_buffers::CurrentFrameToken());
+  }
 }
 
 inline void DestroyVelocitySrv(reshade::api::device* device) {
@@ -185,21 +280,19 @@ inline void DestroyVelocitySrv(reshade::api::device* device) {
   resources.velocity_rtv = {0};
   resources.velocity_srv = {0};
   resources.velocity_view_format = reshade::api::format::unknown;
+  resources.object_velocity_srv = {0};
   resources.capture_frame = std::numeric_limits<uint64_t>::max();
 }
 
 inline void Destroy(reshade::api::device* device) {
   DestroyCompute(device);
   DestroyHistory(device);
-  DestroyRenderTargetColorSrv(device);
   DestroyVelocitySrv(device);
   resources = {};
 }
 
 // Layout mirrors the compute shader registers:
-//   s0-s1 samplers, t0-t3 SRVs, u0 UAV.
-// Jitter state is CPU-owned, matching Alien Isolation, so the compute shader
-// receives no jitter constants.
+//   s0-s1 samplers, t0-t4 SRVs, u0 UAV, b0 resolve constants.
 inline bool EnsureComputePipeline(reshade::api::command_list* cmd_list) {
   auto* device = cmd_list != nullptr ? cmd_list->get_device() : nullptr;
   if (device == nullptr) return false;
@@ -211,7 +304,7 @@ inline bool EnsureComputePipeline(reshade::api::command_list* cmd_list) {
 
   DestroyCompute(device);
 
-  std::array<reshade::api::pipeline_layout_param, 3> params = {};
+  std::array<reshade::api::pipeline_layout_param, 4> params = {};
   params[0].type = reshade::api::pipeline_layout_param_type::push_descriptors;
   params[0].push_descriptors.count = 2;
   params[0].push_descriptors.type = reshade::api::descriptor_type::sampler;
@@ -219,7 +312,7 @@ inline bool EnsureComputePipeline(reshade::api::command_list* cmd_list) {
   params[0].push_descriptors.dx_register_space = 0;
 
   params[1].type = reshade::api::pipeline_layout_param_type::push_descriptors;
-  params[1].push_descriptors.count = 4;
+  params[1].push_descriptors.count = 5;
   params[1].push_descriptors.type = reshade::api::descriptor_type::texture_shader_resource_view;
   params[1].push_descriptors.dx_register_index = 0;
   params[1].push_descriptors.dx_register_space = 0;
@@ -229,6 +322,12 @@ inline bool EnsureComputePipeline(reshade::api::command_list* cmd_list) {
   params[2].push_descriptors.type = reshade::api::descriptor_type::texture_unordered_access_view;
   params[2].push_descriptors.dx_register_index = 0;
   params[2].push_descriptors.dx_register_space = 0;
+
+  params[3].type = reshade::api::pipeline_layout_param_type::push_constants;
+  params[3].push_constants.count = sizeof(ResolveConstants) / sizeof(uint32_t);
+  params[3].push_constants.dx_register_index = 0;
+  params[3].push_constants.dx_register_space = 0;
+  params[3].push_constants.visibility = reshade::api::shader_stage::compute;
 
   if (!device->create_pipeline_layout(static_cast<uint32_t>(params.size()), params.data(), &resources.compute_layout)) {
     if (LogEvery(last_compute_fail_log)) logging::Warn("failed to create TAA compute pipeline layout");
@@ -300,27 +399,62 @@ inline bool GetSupportedHistoryFormat(
 inline reshade::api::resource_view NormalizeColorSrv(reshade::api::resource_view color_srv) {
   if (color_srv.handle == 0u) return {0u};
 
-  const auto clone = renodx::utils::resource::upgrade::GetResourceViewClone(color_srv, {
-      .require_enabled = true,
-      .allow_create = true,
-      .activate = false,
-  });
+  const auto clone = renodx::utils::resource::upgrade::GetResourceViewClone(
+      color_srv,
+      {
+          .require_enabled = true,
+          .allow_create = true,
+          .activate = false,
+      });
   return clone.handle != 0u ? clone : color_srv;
+}
+
+inline bool SeedHistory(
+    reshade::api::command_list* cmd_list,
+    reshade::api::resource color_resource,
+    reshade::api::resource_usage color_current_usage) {
+  if (cmd_list == nullptr || color_resource.handle == 0u) return false;
+  for (const auto& item : resources.history) {
+    if (item.resource.handle == 0u) return false;
+  }
+
+  cmd_list->barrier(color_resource, color_current_usage, reshade::api::resource_usage::copy_source);
+  for (auto& item : resources.history) {
+    cmd_list->barrier(
+        item.resource,
+        reshade::api::resource_usage::shader_resource,
+        reshade::api::resource_usage::copy_dest);
+    cmd_list->copy_resource(color_resource, item.resource);
+    cmd_list->barrier(
+        item.resource,
+        reshade::api::resource_usage::copy_dest,
+        reshade::api::resource_usage::shader_resource);
+  }
+  cmd_list->barrier(color_resource, reshade::api::resource_usage::copy_source, color_current_usage);
+  resources.accum_index = 0u;
+  resources.initialized = true;
+  return true;
 }
 
 inline bool EnsureHistory(
     reshade::api::command_list* cmd_list,
     reshade::api::resource_view color_srv,
-  reshade::api::resource& color_resource,
-  reshade::api::resource_usage color_current_usage = reshade::api::resource_usage::shader_resource) {
+    reshade::api::resource& color_resource,
+    bool& history_seeded,
+    reshade::api::resource_usage color_current_usage = reshade::api::resource_usage::shader_resource) {
   auto* device = cmd_list != nullptr ? cmd_list->get_device() : nullptr;
   if (device == nullptr || color_srv.handle == 0u) return false;
+  history_seeded = false;
 
   // Steady-state fast path: same color SRV as last successful dispatch.
   if (resources.history[0].resource.handle != 0u
       && resources.color_srv.handle == color_srv.handle
       && resources.color_resource.handle != 0u) {
     color_resource = resources.color_resource;
+    if (!resources.initialized) {
+      history_seeded = SeedHistory(cmd_list, color_resource, color_current_usage);
+      return history_seeded;
+    }
     return true;
   }
 
@@ -350,6 +484,10 @@ inline bool EnsureHistory(
   if (matches) {
     resources.color_srv = color_srv;
     resources.color_resource = color_resource;
+    if (!resources.initialized) {
+      history_seeded = SeedHistory(cmd_list, color_resource, color_current_usage);
+      return history_seeded;
+    }
     return true;
   }
 
@@ -402,81 +540,16 @@ inline bool EnsureHistory(
   resources.color_srv = color_srv;
   resources.color_resource = color_resource;
   resources.accum_index = 0u;
-  resources.initialized = true;
-
-  // Seed both history textures from current color so the first resolve does
-  // not blend with uninitialized memory.
-  cmd_list->barrier(color_resource, color_current_usage, reshade::api::resource_usage::copy_source);
-  for (auto& item : resources.history) {
-    cmd_list->barrier(item.resource, reshade::api::resource_usage::shader_resource, reshade::api::resource_usage::copy_dest);
-    cmd_list->copy_resource(color_resource, item.resource);
-    cmd_list->barrier(item.resource, reshade::api::resource_usage::copy_dest, reshade::api::resource_usage::shader_resource);
+  resources.initialized = false;
+  history_seeded = SeedHistory(cmd_list, color_resource, color_current_usage);
+  if (!history_seeded) {
+    DestroyHistory(device);
+    return false;
   }
-  cmd_list->barrier(color_resource, reshade::api::resource_usage::copy_source, color_current_usage);
 
   logging::Info("created TAA history ", resources.width, "x", resources.height,
                 " resource_format=", static_cast<uint32_t>(resources.resource_format),
                 " view_format=", static_cast<uint32_t>(resources.view_format));
-  return true;
-}
-
-inline bool EnsureColorSrvFromRenderTarget(
-    reshade::api::command_list* cmd_list,
-    reshade::api::resource_view color_rtv,
-    reshade::api::resource_view& color_srv) {
-  auto* device = cmd_list != nullptr ? cmd_list->get_device() : nullptr;
-  color_srv = {0};
-  if (device == nullptr || color_rtv.handle == 0u) return false;
-
-  const auto color_rtv_clone = renodx::utils::resource::upgrade::GetResourceViewClone(color_rtv, {
-      .require_enabled = true,
-      .allow_create = true,
-      .activate = false,
-  });
-  const auto color_rtv_for_srv = color_rtv_clone.handle != 0u ? color_rtv_clone : color_rtv;
-
-  const auto color_resource = device->get_resource_from_view(color_rtv_for_srv);
-  if (color_resource.handle == 0u) return false;
-
-  const auto color_desc = device->get_resource_desc(color_resource);
-  const auto color_view_desc = device->get_resource_view_desc(color_rtv_for_srv);
-  reshade::api::format resource_format = reshade::api::format::unknown;
-  reshade::api::format color_view_format = reshade::api::format::unknown;
-  if (!GetSupportedHistoryFormat(color_desc, color_view_desc, resource_format, color_view_format)) return false;
-  (void)resource_format;
-
-  if (resources.rtv_color_srv.handle != 0u
-      && resources.rtv_color_resource.handle == color_resource.handle
-      && resources.rtv_color_view_format == color_view_format) {
-    color_srv = resources.rtv_color_srv;
-    return true;
-  }
-
-  DestroyRenderTargetColorSrv(device);
-
-  const auto srv_desc = reshade::api::resource_view_desc(
-      reshade::api::resource_view_type::texture_2d,
-      color_view_format,
-      0,
-      1,
-      0,
-      1);
-  if (!device->create_resource_view(color_resource, reshade::api::resource_usage::shader_resource, srv_desc, &resources.rtv_color_srv)) {
-    if (LogEvery(last_rtv_srv_create_fail_log)) {
-      logging::Warn("failed to create TAA SRV for scene RTV clone resource=", logging::Hex{color_resource.handle},
-                    " view_format=", static_cast<uint32_t>(color_view_format));
-    }
-    resources.rtv_color_resource = {0};
-    resources.rtv_color_view_format = reshade::api::format::unknown;
-    return false;
-  }
-
-  resources.rtv_color_resource = color_resource;
-  resources.rtv_color_view_format = color_view_format;
-  color_srv = resources.rtv_color_srv;
-  logging::Info("created TAA scene RTV SRV resource=", logging::Hex{color_resource.handle},
-                " srv=", logging::Hex{color_srv.handle},
-                " view_format=", static_cast<uint32_t>(color_view_format));
   return true;
 }
 
@@ -540,6 +613,8 @@ inline void CaptureCameraMotion(
     reshade::api::command_list* cmd_list,
     const descriptor_tracker::CommandListData& command_data,
     reshade::api::resource_view velocity_rtv) {
+  OptionalExecutionGuard execution_guard;
+  ProcessDestroyedResourceViewsLocked();
   if (velocity_rtv.handle == 0u) {
     if (LogEvery(last_capture_missing_log)) logging::Warn("camera velocity pass has no RTV0");
     return;
@@ -554,43 +629,21 @@ inline void CaptureCameraMotion(
     }
     return;
   }
+  auto object_velocity_srv = command_data.pixel_srv_t3;
+  if (object_velocity_srv.handle == 0u) {
+    if (LogEvery(last_capture_missing_log)) {
+      logging::Warn("camera velocity capture missing object_velocity_srv_t3 velocity_rtv=",
+                    logging::Hex{velocity_rtv.handle});
+    }
+    return;
+  }
+  const auto object_velocity_clone = renodx::utils::resource::upgrade::GetResourceViewClone(object_velocity_srv);
+  if (object_velocity_clone.handle != 0u) object_velocity_srv = object_velocity_clone;
   if (!EnsureVelocitySrv(cmd_list, velocity_rtv)) return;
 
   resources.depth_srv = depth_srv;
+  resources.object_velocity_srv = object_velocity_srv;
   resources.capture_frame = constant_buffers::frame_state.frame_index;
-
-  if (LogEvery(last_capture_log, 30u)) {
-    auto* device = cmd_list != nullptr ? cmd_list->get_device() : nullptr;
-    uint32_t velocity_width = 0u;
-    uint32_t velocity_height = 0u;
-    uint32_t depth_width = 0u;
-    uint32_t depth_height = 0u;
-    uint32_t depth_format = 0u;
-    if (device != nullptr) {
-      if (resources.velocity_resource.handle != 0u) {
-        const auto velocity_desc = device->get_resource_desc(resources.velocity_resource);
-        velocity_width = velocity_desc.texture.width;
-        velocity_height = velocity_desc.texture.height;
-      }
-      const auto depth_resource = device->get_resource_from_view(resources.depth_srv);
-      if (depth_resource.handle != 0u) {
-        const auto depth_desc = device->get_resource_desc(depth_resource);
-        const auto depth_view_desc = device->get_resource_view_desc(resources.depth_srv);
-        depth_width = depth_desc.texture.width;
-        depth_height = depth_desc.texture.height;
-        depth_format = static_cast<uint32_t>(depth_view_desc.format);
-      }
-    }
-    logging::Info("captured camera velocity inputs frame=", resources.capture_frame,
-                  " velocity_rtv=", logging::Hex{velocity_rtv.handle},
-                  " velocity_srv=", logging::Hex{resources.velocity_srv.handle},
-                  " velocity_resource=", logging::Hex{resources.velocity_resource.handle},
-                  " velocity_size=", velocity_width, "x", velocity_height,
-                  " velocity_format=", static_cast<uint32_t>(resources.velocity_view_format),
-                  " depth_srv=", logging::Hex{resources.depth_srv.handle},
-                  " depth_size=", depth_width, "x", depth_height,
-                  " depth_view_format=", depth_format);
-  }
 }
 
 inline bool DispatchCompute(
@@ -600,14 +653,16 @@ inline bool DispatchCompute(
     reshade::api::resource_usage color_initial_usage,
     reshade::api::resource_usage color_final_usage,
     uint32_t current,
-  uint32_t previous) {
+    uint32_t previous,
+    const ResolveConstants& resolve_constants) {
   const PreviousComputeState previous_compute_state = CaptureComputeState(cmd_list);
 
-  const std::array<reshade::api::resource_view, 4> srvs = {
+  const std::array<reshade::api::resource_view, 5> srvs = {
       color_srv,
       resources.history[previous].srv,
       resources.velocity_srv,
       resources.depth_srv,
+      resources.object_velocity_srv,
   };
   const std::array<reshade::api::resource_view, 1> uavs = {
       resources.history[current].uav,
@@ -649,6 +704,13 @@ inline bool DispatchCompute(
   cmd_list->push_descriptors(reshade::api::shader_stage::all_compute, resources.compute_layout, 0, updates[0]);
   cmd_list->push_descriptors(reshade::api::shader_stage::all_compute, resources.compute_layout, 1, updates[1]);
   cmd_list->push_descriptors(reshade::api::shader_stage::all_compute, resources.compute_layout, 2, updates[2]);
+  cmd_list->push_constants(
+      reshade::api::shader_stage::all_compute,
+      resources.compute_layout,
+      3,
+      0,
+      sizeof(ResolveConstants) / sizeof(uint32_t),
+      &resolve_constants);
   cmd_list->bind_pipeline(reshade::api::pipeline_stage::all_compute, resources.compute_pipeline);
   cmd_list->dispatch((resources.width + 7u) / 8u, (resources.height + 7u) / 8u, 1u);
 
@@ -663,44 +725,64 @@ inline bool DispatchCompute(
   return true;
 }
 
-inline bool ColorMatchesCapturedDepth(
+inline bool ColorMatchesCapturedInputs(
     reshade::api::command_list* cmd_list,
     reshade::api::resource_view color_srv) {
   auto* device = cmd_list != nullptr ? cmd_list->get_device() : nullptr;
-  if (device == nullptr || color_srv.handle == 0u || resources.depth_srv.handle == 0u) return false;
+  if (device == nullptr
+      || color_srv.handle == 0u
+      || resources.depth_srv.handle == 0u
+      || resources.object_velocity_srv.handle == 0u) {
+    return false;
+  }
 
   const auto color_resource = device->get_resource_from_view(color_srv);
   const auto depth_resource = device->get_resource_from_view(resources.depth_srv);
-  if (color_resource.handle == 0u || depth_resource.handle == 0u) return false;
+  const auto object_velocity_resource = device->get_resource_from_view(resources.object_velocity_srv);
+  if (color_resource.handle == 0u
+      || depth_resource.handle == 0u
+      || object_velocity_resource.handle == 0u) {
+    return false;
+  }
 
   const auto color_desc = device->get_resource_desc(color_resource);
   const auto depth_desc = device->get_resource_desc(depth_resource);
+  const auto object_velocity_desc = device->get_resource_desc(object_velocity_resource);
   const bool matches = color_desc.texture.width == depth_desc.texture.width
-                       && color_desc.texture.height == depth_desc.texture.height;
+                       && color_desc.texture.height == depth_desc.texture.height
+                       && color_desc.texture.width == object_velocity_desc.texture.width
+                       && color_desc.texture.height == object_velocity_desc.texture.height;
   if (!matches && LogEvery(last_color_size_reject_log, 30u)) {
-    logging::Warn("rejecting non-full-res TAA color size=", color_desc.texture.width, "x", color_desc.texture.height,
-                  " expected=", depth_desc.texture.width, "x", depth_desc.texture.height,
+    logging::Warn("TAA input dimensions mismatch color=", color_desc.texture.width, "x", color_desc.texture.height,
+                  " depth=", depth_desc.texture.width, "x", depth_desc.texture.height,
+                  " object_velocity=", object_velocity_desc.texture.width, "x", object_velocity_desc.texture.height,
                   " color_srv=", logging::Hex{color_srv.handle},
-                  " depth_srv=", logging::Hex{resources.depth_srv.handle});
+                  " depth_srv=", logging::Hex{resources.depth_srv.handle},
+                  " object_velocity_srv=", logging::Hex{resources.object_velocity_srv.handle});
   }
   return matches;
 }
 
-inline bool MaybeRunFromColorSrv(
+inline bool MaybeRunFromColorSrvLocked(
     reshade::api::command_list* cmd_list,
     reshade::api::resource_view color_srv,
     reshade::api::resource_usage color_initial_usage = reshade::api::resource_usage::shader_resource,
     reshade::api::resource_usage color_final_usage = reshade::api::resource_usage::shader_resource,
     const char* insertion_name = "unknown") {
+  ProcessDestroyedResourceViewsLocked();
   if (!constant_buffers::IsEnabled()) return false;
   if (constant_buffers::frame_state.taa_ran_this_frame) return false;
 
-  if (color_srv.handle == 0u || resources.velocity_srv.handle == 0u || resources.depth_srv.handle == 0u) {
+  if (color_srv.handle == 0u
+      || resources.velocity_srv.handle == 0u
+      || resources.depth_srv.handle == 0u
+      || resources.object_velocity_srv.handle == 0u) {
     if (LogEvery(last_missing_inputs_log)) {
       logging::Warn("insertion missing inputs insertion=", insertion_name,
                     " color=", logging::Hex{color_srv.handle},
                     " velocity=", logging::Hex{resources.velocity_srv.handle},
-                    " depth=", logging::Hex{resources.depth_srv.handle});
+                    " depth=", logging::Hex{resources.depth_srv.handle},
+                    " object_velocity=", logging::Hex{resources.object_velocity_srv.handle});
     }
     return false;
   }
@@ -712,61 +794,117 @@ inline bool MaybeRunFromColorSrv(
     }
     return false;
   }
-  if (!ColorMatchesCapturedDepth(cmd_list, color_srv)) return false;
+  if (!ColorMatchesCapturedInputs(cmd_list, color_srv)) {
+    return false;
+  }
 
-  if (!EnsureComputePipeline(cmd_list)) return false;
+  const uint64_t frame_token = constant_buffers::CurrentFrameToken();
+  const uint32_t expected_sample_index = constant_buffers::CurrentSampleIndex();
+  const auto native_jitter = projection_jitter::GetAppliedJitter();
+  if (!native_jitter.valid
+      || native_jitter.frame_token != frame_token
+      || native_jitter.sample_index != expected_sample_index) {
+    InvalidateHistory("missing or stale native jitter");
+    if (LogEvery(last_missing_native_jitter_log, 30u)) {
+      logging::Warn("rejecting TAA dispatch without matching native jitter insertion=", insertion_name,
+                    " frame=", frame_token,
+                    " sample=", expected_sample_index,
+                    " published_valid=", logging::Bool{native_jitter.valid},
+                    " published_frame=", native_jitter.frame_token,
+                    " published_sample=", native_jitter.sample_index);
+    }
+    return false;
+  }
+  if (!native_jitter.camera_matrix_valid) {
+    InvalidateHistory("native camera matrix unavailable");
+    if (LogEvery(last_missing_native_jitter_log, 30u)) {
+      logging::Warn("rejecting TAA dispatch without a valid native camera matrix insertion=", insertion_name,
+                    " frame=", frame_token,
+                    " sample=", expected_sample_index);
+    }
+    return false;
+  }
+  if (resources.initialized && !native_jitter.camera_reprojection_valid) {
+    InvalidateHistory("native camera matrix history unavailable");
+  }
+
+  const uint64_t settings_generation = constant_buffers::RuntimeSettingsGeneration();
+  if (resources.settings_generation != settings_generation) {
+    InvalidateHistory("TAA runtime settings changed");
+  }
+
+  if (!EnsureComputePipeline(cmd_list)) {
+    return false;
+  }
 
   reshade::api::resource color_resource = {0};
-  if (!EnsureHistory(cmd_list, color_srv, color_resource, color_initial_usage)) return false;
+  bool history_seeded = false;
+  if (!EnsureHistory(cmd_list, color_srv, color_resource, history_seeded, color_initial_usage)) {
+    return false;
+  }
+
+  if (native_jitter.width != resources.width || native_jitter.height != resources.height) {
+    InvalidateHistory("native jitter dimensions do not match scene color");
+    if (LogEvery(last_missing_native_jitter_log, 30u)) {
+      logging::Warn("rejecting TAA dispatch with mismatched native jitter dimensions insertion=", insertion_name,
+                    " jitter_size=", native_jitter.width, "x", native_jitter.height,
+                    " color_size=", resources.width, "x", resources.height,
+                    " frame=", frame_token);
+    }
+    return false;
+  }
 
   const uint32_t current = resources.accum_index;
   const uint32_t previous = 1u - current;
-  const auto applied_jitter = constant_buffers::CurrentFrameJitter(resources.width, resources.height);
-  const auto previous_history_jitter = constant_buffers::frame_state.current_jitter;
-  if (LogEvery(last_dispatch_setup_log, 30u)) {
-    auto* device = cmd_list != nullptr ? cmd_list->get_device() : nullptr;
-    uint32_t color_width = 0u;
-    uint32_t color_height = 0u;
-    uint32_t color_format = 0u;
-    uint64_t color_handle = color_resource.handle;
-    if (device != nullptr && color_resource.handle != 0u) {
-      const auto color_desc = device->get_resource_desc(color_resource);
-      color_width = color_desc.texture.width;
-      color_height = color_desc.texture.height;
-      color_format = static_cast<uint32_t>(color_desc.texture.format);
-    }
-    logging::Info("TAA dispatch setup insertion=", insertion_name,
-                  " frame=", constant_buffers::frame_state.frame_index,
-                  " color_srv=", logging::Hex{color_srv.handle},
-                  " color_resource=", logging::Hex{color_handle},
-                  " color_size=", color_width, "x", color_height,
-                  " color_format=", color_format,
-                  " velocity_srv=", logging::Hex{resources.velocity_srv.handle},
-                  " depth_srv=", logging::Hex{resources.depth_srv.handle},
-                  " history_current=", current,
-                  " history_previous=", previous,
-                  " jitter_uv=", applied_jitter[0], ",", applied_jitter[1],
-                  " previous_jitter_uv=", previous_history_jitter[0], ",", previous_history_jitter[1]);
-  }
-  if (!DispatchCompute(cmd_list, color_srv, color_resource, color_initial_usage, color_final_usage, current, previous)) {
+  const std::array<float, 2> applied_jitter = {
+      native_jitter.jitter_uv_x,
+      native_jitter.jitter_uv_y,
+  };
+  const ResolveConstants resolve_constants = {
+      .diagnostic_view = constant_buffers::GetDiagnosticView(),
+      .velocity_visualization_range = constant_buffers::GetVelocityVisualizationRange(),
+      .camera_reprojection_valid = !history_seeded && native_jitter.camera_reprojection_valid ? 1.f : 0.f,
+      .current_jitter_uv = applied_jitter,
+      .current_to_previous_clip = native_jitter.current_to_previous_clip,
+  };
+  if (!DispatchCompute(
+          cmd_list,
+          color_srv,
+          color_resource,
+          color_initial_usage,
+          color_final_usage,
+          current,
+          previous,
+          resolve_constants)) {
     return false;
   }
 
   resources.accum_index = previous;
-  // The jitter offset applied this frame is what the geometry passes saw via
-  // jitter::ApplyMappedBuffer. Record it for history/debug bookkeeping only;
-  // the compute shader receives no jitter constants.
-  constant_buffers::MarkTaaDispatched(applied_jitter);
-
-  if (LogEvery(last_dispatch_log)) {
-    logging::Info("dispatched TAA insertion=", insertion_name,
-                  " frame=", constant_buffers::frame_state.frame_index,
-                  " size=", resources.width, "x", resources.height,
-                  " current=", current, " previous=", previous,
-                  " jitter=", applied_jitter[0], ",", applied_jitter[1],
-                  " previous_jitter=", previous_history_jitter[0], ",", previous_history_jitter[1]);
+  resources.settings_generation = settings_generation;
+  const bool camera_matrix_committed = projection_jitter::CommitCameraMatrix(
+      frame_token,
+      expected_sample_index);
+  if (!camera_matrix_committed) {
+    InvalidateHistory("native camera matrix commit failed");
   }
+  constant_buffers::MarkTaaDispatched();
   return true;
+}
+
+inline bool MaybeRunFromColorSrv(
+    reshade::api::command_list* cmd_list,
+    reshade::api::resource_view color_srv,
+    reshade::api::resource_usage color_initial_usage = reshade::api::resource_usage::shader_resource,
+    reshade::api::resource_usage color_final_usage = reshade::api::resource_usage::shader_resource,
+    const char* insertion_name = "unknown") {
+  if (!constant_buffers::IsEnabled()) return false;
+  OptionalExecutionGuard execution_guard;
+  return MaybeRunFromColorSrvLocked(
+      cmd_list,
+      color_srv,
+      color_initial_usage,
+      color_final_usage,
+      insertion_name);
 }
 
 inline bool MaybeRun(
@@ -780,41 +918,9 @@ inline bool MaybeRun(
                               insertion_name);
 }
 
-inline bool MaybeRunOnRenderTarget(
-    reshade::api::command_list* cmd_list,
-    reshade::api::resource_view color_rtv,
-    const char* insertion_name = "RTV") {
-  reshade::api::resource_view color_srv = {0};
-  if (!EnsureColorSrvFromRenderTarget(cmd_list, color_rtv, color_srv)) {
-    if (LogEvery(last_missing_inputs_log)) {
-      logging::Warn("insertion missing scene RTV clone insertion=", insertion_name,
-                    " color_rtv=", logging::Hex{color_rtv.handle});
-    }
-    return false;
-  }
-  return MaybeRunFromColorSrv(
-      cmd_list,
-      color_srv,
-      reshade::api::resource_usage::render_target,
-      reshade::api::resource_usage::render_target,
-      insertion_name);
-}
-
 inline void OnDestroyResourceView(renodx::utils::resource::ResourceViewInfo* info) {
   if (info == nullptr) return;
-  const uint64_t h = info->view.handle;
-  if (h == resources.color_srv.handle) {
-    resources.color_srv = {0};
-    resources.color_resource = {0};
-  }
-  if (h == resources.rtv_color_srv.handle) {
-    resources.rtv_color_srv = {0};
-    resources.rtv_color_resource = {0};
-    resources.rtv_color_view_format = reshade::api::format::unknown;
-  }
-  if (h == resources.velocity_rtv.handle) resources.velocity_rtv = {0};
-  if (h == resources.velocity_srv.handle) resources.velocity_srv = {0};
-  if (h == resources.depth_srv.handle) resources.depth_srv = {0};
+  QueueDestroyedResourceView(info->view.handle);
 }
 
 }  // namespace taa::resolve
