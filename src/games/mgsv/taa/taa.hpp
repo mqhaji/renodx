@@ -5,24 +5,23 @@
  *
  * addon.cpp includes this header only; the rest of the runtime lives under
  * mgsv/taa/runtime. This file wires the RenoDX setting, registers ReShade
- * callbacks, and routes draw-time events into the jitter and resolve modules.
+ * callbacks, and routes draw-time events into the native jitter and resolve modules.
  *
  * Modules:
- *   - constant_buffers: master enable, frame state, jitter sequence.
- *   - descriptor_tracker: per-command-list pixel SRVs and b2 state.
- *   - jitter: patches CbScene matrices on unmap for projection jitter.
+ *   - constant_buffers: master enable, frame/sample state, jitter sequence.
+ *   - descriptor_tracker: per-command-list pixel SRV state.
+ *   - projection_jitter: native projection injection and applied-jitter publication.
  *   - resolve: compute resolve dispatch + ping-pong history.
  *
- * Insertion is gated by shader-hash and frame-sequence markers; see
- * TAA_IMPLEMENTATION.md "Insertion-Point Strategy". Primary hook is deferred
- * one draw after LocalReflectionAddBuffer: the draw writes the largely formed
- * full-res scene RTV, then TAA resolves that RTV clone before subsequent draws.
- * DOF_ScatterBakeFirst remains a later fallback. Velocity/depth are captured
- * from MotionBlurCameraVelocity earlier in the same frame.
+ * Insertion is gated by shader-hash and frame-sequence markers; see README.md.
+ * The primary hook is DOF_ScatterBakeFirst, immediately before the game creates
+ * its DoF and motion-blur inputs. Velocity/depth are captured from
+ * MotionBlurCameraVelocity earlier in the same frame.
  */
 
 #include <windows.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 
 #include <include/reshade.hpp>
@@ -35,8 +34,8 @@
 #include "../shared.h"
 #include "./runtime/constant_buffers.hpp"
 #include "./runtime/descriptor_tracker.hpp"
-#include "./runtime/jitter.hpp"
 #include "./runtime/logging.hpp"
+#include "./runtime/projection_jitter.hpp"
 #include "./runtime/resolve.hpp"
 
 namespace taa {
@@ -51,19 +50,110 @@ inline bool logged_mb_gate = false;
 inline bool logged_camera_velocity = false;
 inline bool logged_gbuffer_velocity = false;
 inline bool logged_gbuffer_masked_velocity = false;
-inline bool logged_local_reflection_gate = false;
-inline uint64_t last_local_reflection_queue_log = UINT64_MAX;
-inline uint64_t last_local_reflection_consume_log = UINT64_MAX;
+
+using PrepareVelocityTarget = reshade::api::resource_view (*)(
+    reshade::api::command_list*,
+    reshade::api::resource_view);
+inline PrepareVelocityTarget prepare_velocity_target = nullptr;
+
+inline std::atomic_flag runtime_transition_lock = ATOMIC_FLAG_INIT;
+
+inline void SetRuntimeEnabled(bool enabled) {
+  projection_jitter::LockPublicationWriter();
+  if (constant_buffers::enabled_binding != nullptr) {
+    *constant_buffers::enabled_binding = enabled ? 1.f : 0.f;
+  }
+  constant_buffers::SetEnabled(enabled);
+  projection_jitter::InvalidateAppliedJitterLocked();
+  projection_jitter::UnlockPublicationWriter();
+}
+
+inline void TransitionRuntimeEnabled(
+    bool enabled,
+    const char* reason,
+    bool force_reset = false,
+    bool verify_restoration = true) {
+  while (runtime_transition_lock.test_and_set(std::memory_order_acquire)) {
+    _mm_pause();
+  }
+
+  const bool was_enabled = constant_buffers::IsEnabled();
+  if (was_enabled == enabled && !force_reset) {
+    runtime_transition_lock.clear(std::memory_order_release);
+    return;
+  }
+
+  // Disable projection writes before waiting for an in-flight resolve. Enable
+  // only after history/sample state is reset, so the native hook cannot publish
+  // a sample from the previous temporal sequence.
+  if (!enabled && was_enabled) {
+    SetRuntimeEnabled(false);
+    if (verify_restoration && projection_jitter::IsInstalled()) {
+      projection_jitter::BeginProductionRestorationCheck();
+    }
+  }
+  if (!verify_restoration) {
+    projection_jitter::CancelProductionRestorationCheck();
+  }
+
+  resolve::LockExecution();
+  projection_jitter::InvalidateAppliedJitter();
+  resolve::InvalidateHistory(reason);
+  constant_buffers::ResetTemporalState();
+  if (enabled) {
+    projection_jitter::CancelProductionRestorationCheck();
+    SetRuntimeEnabled(true);
+  }
+  resolve::UnlockExecution();
+
+  logging::Info("persistent TAA ", enabled ? "enabled" : "disabled", " reason=", reason);
+  runtime_transition_lock.clear(std::memory_order_release);
+}
+
+inline void SyncRuntimeEnabledFromBinding() {
+  const bool desired = constant_buffers::enabled_binding != nullptr
+                       && *constant_buffers::enabled_binding > 0.f;
+  if (desired != constant_buffers::IsEnabled()) {
+    TransitionRuntimeEnabled(desired, "setting synchronized");
+  }
+}
+
+inline void TransitionJitterPattern(float value) {
+  const uint32_t pattern = static_cast<uint32_t>(std::clamp(value, 0.f, 1.f));
+  constant_buffers::jitter_pattern = static_cast<float>(pattern);
+  if (pattern == constant_buffers::GetJitterPattern()) return;
+
+  while (runtime_transition_lock.test_and_set(std::memory_order_acquire)) {
+    _mm_pause();
+  }
+
+  // Resolve already uses execution -> publication ordering when committing
+  // matrix history. Preserve that order so the hook cannot publish a sample
+  // from the previous pattern while history/sample state is being reset.
+  resolve::LockExecution();
+  projection_jitter::LockPublicationWriter();
+  constant_buffers::SetJitterPattern(static_cast<float>(pattern));
+  projection_jitter::InvalidateAppliedJitterLocked();
+  projection_jitter::UnlockPublicationWriter();
+  resolve::InvalidateHistory("jitter pattern changed");
+  constant_buffers::ResetTemporalState();
+  resolve::UnlockExecution();
+
+  logging::Info("TAA jitter pattern changed pattern=", pattern);
+  runtime_transition_lock.clear(std::memory_order_release);
+}
+
+inline void SyncJitterPatternFromBinding() {
+  const uint32_t desired = static_cast<uint32_t>(std::clamp(constant_buffers::jitter_pattern, 0.f, 1.f));
+  constant_buffers::jitter_pattern = static_cast<float>(desired);
+  if (desired != constant_buffers::GetJitterPattern()) {
+    TransitionJitterPattern(static_cast<float>(desired));
+  }
+}
 
 namespace shader_hashes {
 
-// PRIMARY insertion marker: this draw writes the largely formed full-res scene
-// color RTV after local reflections have been added. Draw callbacks run before
-// the game draw, so HandleDraw records RTV0 here and resolves it at the next
-// draw callback, after LocalReflectionAddBuffer has actually executed.
-inline constexpr uint32_t LOCAL_REFLECTION_ADD_BUFFER_PS = 0xDC3A84C3u;
-
-// Later fallback insertion point: DOF_ScatterBakeFirst is an MRT pass that
+// Primary insertion point: DOF_ScatterBakeFirst is an MRT pass that
 // reads the full-res HDR scene at SRV t0 and writes BOTH the DoF half-res
 // pyramid base AND the motion-blur half-res scene input in a single draw.
 inline constexpr uint32_t DOF_SCATTER_BAKE_FIRST_PS = 0xFE1DC3F8u;
@@ -80,18 +170,12 @@ inline constexpr uint32_t COPY_RENDER_BUFFER_PS = 0x83272BCBu;
 inline constexpr uint32_t TONEMAP_PS = 0xE04D1471u;
 inline constexpr uint32_t TONEMAP_1DLUT_PS = 0xC0C26E46u;
 
-// DR_VolFog_TppTonemap finalizes deferred lighting + volumetric fog into
-// the main scene. Observed but not currently used as an insertion point;
-// LocalReflectionAddBuffer is a later full-res scene-color marker.
-inline constexpr uint32_t DR_VOL_FOG_TPP_TONEMAP_PS = 0x2EA8F13Fu;
-
 // Other post-effects observed but not used as insertion points. They
 // operate on half-res downsamples that are already produced by the time
 // they run; inserting at them would be too late.
 inline constexpr uint32_t DOF_NEAR_PS = 0xE2D609B1u;
 inline constexpr uint32_t DOF_FAR_PS = 0x7C017264u;
 inline constexpr uint32_t DOF_FINAL_PS = 0xFC5542BBu;
-inline constexpr uint32_t MOTION_BLUR_MCGUIRE_PS = 0xBFC7D3C2u;
 
 // Velocity pipeline. These never become insertion points. MotionBlurCameraVelocity
 // exposes the camera cbuffer at pixel b2 and writes the TAA velocity input to RTV0.
@@ -102,9 +186,6 @@ inline constexpr uint32_t GBUFFER_MASKED_VELOCITY_VS = 0x7B809E72u;
 inline constexpr uint32_t GBUFFER_MASKED_VELOCITY_PS = 0x58C10658u;
 inline constexpr uint32_t MB_TILE_MAX_PS = 0xF05DCBFDu;
 inline constexpr uint32_t MB_TILE_REFINE_PS = 0x512E2B48u;
-
-// Replaced or disabled when TAA is active.
-inline constexpr uint32_t FXAA_PS = 0x900968FFu;
 
 }  // namespace shader_hashes
 
@@ -120,99 +201,117 @@ inline reshade::api::resource_view CurrentRenderTarget0(reshade::api::command_li
   return state->render_targets[0];
 }
 
+inline void UpdateShaderInjectionJitter(ShaderInjectData* shader_injection) {
+  if (shader_injection == nullptr) return;
+
+  float jitter_uv_x = 0.f;
+  float jitter_uv_y = 0.f;
+  const uint64_t frame_token = constant_buffers::CurrentFrameToken();
+  const auto jitter = projection_jitter::GetAppliedJitter();
+  if (constant_buffers::IsEnabled()) {
+    // The temporal resolve advances CurrentSampleIndex after dispatch. Draws
+    // recorded later in the same frame must still use the publication for the
+    // current frame (sample n), not the already-promoted next sample (n + 1).
+    if (jitter.valid
+        && jitter.frame_token == frame_token) {
+      jitter_uv_x = jitter.jitter_uv_x;
+      jitter_uv_y = jitter.jitter_uv_y;
+    }
+  }
+
+  shader_injection->taa_jitter_uv_x = jitter_uv_x;
+  shader_injection->taa_jitter_uv_y = jitter_uv_y;
+  shader_injection->taa_jitter_padding = 0.f;
+  shader_injection->taa_jitter_padding_2 = 0.f;
+}
+
 inline void AppendSettings(renodx::utils::settings::Settings& settings, ShaderInjectData* shader_injection) {
   if (settings_appended || shader_injection == nullptr) return;
   settings_appended = true;
 
   std::vector<renodx::utils::settings::Setting*> taa_settings = {
-    new renodx::utils::settings::Setting{
-      .key = "FxTaa",
-      .binding = &shader_injection->custom_taa,
-      .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
-      .default_value = 1.f,
-      .label = "Temporal Anti-Aliasing",
-      .section = "Effects",
-    },
-    new renodx::utils::settings::Setting{
-      .key = "FxTaaJitterScale",
-      .binding = &constant_buffers::jitter_scale,
-      .value_type = renodx::utils::settings::SettingValueType::FLOAT,
-      .default_value = 1.f,
-      .label = "TAA Jitter Scale",
-      .section = "Effects",
-      .tooltip = "Debug isolation. Set to 0 to disable projection jitter and matching jitter compensation; if warbling stops, the issue is jitter/velocity alignment.",
-      .min = 0.f,
-      .max = 1.f,
-      .format = "%.2f",
-      .on_change = [] { constant_buffers::ResetJitterHistory(); },
-      .is_visible = [] { return constant_buffers::IsEnabled(); },
-    },
-    new renodx::utils::settings::Setting{
-      .key = "FxTaaDebugReadout",
-      .value_type = renodx::utils::settings::SettingValueType::CUSTOM,
-      .can_reset = false,
-      .label = "TAA Debug Readout",
-      .section = "Effects",
-      .on_draw = [] {
-      const auto jitter_debug = jitter::GetDebugState();
-      const auto frame = constant_buffers::frame_state;
-      const auto next_jitter = constant_buffers::CurrentFrameJitter(
-        jitter_debug.last_rt_width,
-        jitter_debug.last_rt_height);
-
-      ImGui::Text("TAA frame: %llu  ran: %s  sample: %u  jitter scale: %.2f",
-            static_cast<unsigned long long>(frame.frame_index),
-            frame.taa_ran_this_frame ? "yes" : "no",
-            frame.taa_sample_index,
-            constant_buffers::jitter_scale);
-      ImGui::Text("History jitter UV: current %.9f, %.9f  previous %.9f, %.9f",
-            frame.current_jitter[0], frame.current_jitter[1],
-            frame.previous_jitter[0], frame.previous_jitter[1]);
-      ImGui::Text("Next jitter UV: %.9f, %.9f  px: %.4f, %.4f",
-            next_jitter[0], next_jitter[1],
-            next_jitter[0] * static_cast<float>(jitter_debug.last_rt_width),
-            next_jitter[1] * static_cast<float>(jitter_debug.last_rt_height));
-      ImGui::Text("CbScene jitter: applied %u  skipped %u  last fullscreen: %s",
-            jitter_debug.applied_count,
-            jitter_debug.skipped_count,
-            jitter_debug.last_fullscreen ? "yes" : "no");
-      ImGui::Text("CbScene tracking: tracked %u  mapped %u  heuristic maps %u  last map size %llu",
-        jitter_debug.tracked_count,
-        jitter_debug.mapped_count,
-        jitter_debug.heuristic_mapped_count,
-        static_cast<unsigned long long>(jitter_debug.last_mapped_size));
-      ImGui::Text("CbScene last source: tracked %s  camera-like %s",
-            jitter_debug.last_tracked ? "yes" : "no",
-            jitter_debug.last_camera_like ? "yes" : "no");
-      ImGui::Text("Last applied px: %.4f, %.4f  projection: %.9f, %.9f",
-            jitter_debug.last_jitter_pixels_x, jitter_debug.last_jitter_pixels_y,
-            jitter_debug.last_projection_jitter_x, jitter_debug.last_projection_jitter_y);
-      ImGui::Text("Last RT/view: %ux%u / %.1fx%.1f  CbScene: 0x%llX",
-            jitter_debug.last_rt_width, jitter_debug.last_rt_height,
-            jitter_debug.last_viewport_width, jitter_debug.last_viewport_height,
-            static_cast<unsigned long long>(jitter_debug.last_resource_handle));
-      return false;
+      new renodx::utils::settings::Setting{
+          .key = "FxTaa",
+          .binding = &shader_injection->custom_taa,
+          .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+          .default_value = 0.f,
+          .label = "Temporal Anti-Aliasing",
+          .section = "Effects",
+          .on_change_value = [](float previous, float current) {
+            (void)previous;
+            TransitionRuntimeEnabled(current > 0.f, "setting changed");
+          },
       },
-      .is_visible = [] { return constant_buffers::IsEnabled(); },
-    },
+      new renodx::utils::settings::Setting{
+          .key = "FxTaaDiagnosticView",
+          .binding = &constant_buffers::diagnostic_view,
+          .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+          .default_value = 0.f,
+          .label = "TAA Diagnostic View",
+          .section = "Effects",
+          .tooltip = "Temporal Resolve is normal output. Raw Current bypasses temporal history and the current filter; Filtered Current isolates the 3x3 current-frame filter. Raw Velocity views inspect the center pixel of MGSV's captured velocity texture. Changing modes resets temporal history.",
+          .labels = {"Temporal Resolve", "Raw Current", "Filtered Current", "Raw Velocity Direction", "Raw Velocity Magnitude"},
+          .on_change_value = [](float previous, float current) {
+            (void)previous;
+            constant_buffers::SetDiagnosticView(current);
+            resolve::LockExecution();
+            resolve::InvalidateHistory("diagnostic view changed");
+            resolve::UnlockExecution(); },
+          .is_visible = [] { return constant_buffers::IsEnabled(); },
+      },
+      new renodx::utils::settings::Setting{
+          .key = "FxTaaJitterPattern",
+          .binding = &constant_buffers::jitter_pattern,
+          .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+          .default_value = 1.f,
+          .label = "TAA Jitter Pattern",
+          .section = "Effects",
+          .tooltip = "Diagnostic projection sampling pattern. Off keeps temporal resolve active with zero projection jitter. Halton is the eight-phase production sequence. Changing modes resets temporal history and the sample sequence.",
+          .labels = {"Off", "Halton (2,3) — 8 Phase"},
+          .on_change_value = [](float previous, float current) {
+            if (static_cast<uint32_t>(previous) == static_cast<uint32_t>(current)) return;
+            TransitionJitterPattern(current); },
+          .is_visible = [] { return constant_buffers::IsEnabled(); },
+      },
+      new renodx::utils::settings::Setting{
+          .key = "FxTaaVelocityVisualizationRange",
+          .binding = &constant_buffers::velocity_visualization_range,
+          .value_type = renodx::utils::settings::SettingValueType::FLOAT,
+          .default_value = 8.f,
+          .label = "TAA Velocity View Range",
+          .section = "Effects",
+          .tooltip = "Pixel velocity represented by full intensity in the direction and magnitude diagnostic views.",
+          .min = 0.25f,
+          .max = 64.f,
+          .format = "%.2f px",
+          .on_change_value = [](float previous, float current) {
+            (void)previous;
+            constant_buffers::SetVelocityVisualizationRange(current); },
+          .is_visible = [] {
+            const float view = constant_buffers::GetDiagnosticView();
+            return constant_buffers::IsEnabled() && view >= 3.f && view < 5.f; },
+          .is_logarithmic = true,
+      },
   };
 
   settings.insert(
       std::find_if(settings.begin(), settings.end(), [](const renodx::utils::settings::Setting* setting) {
         return setting != nullptr && setting->section == "Options";
       }),
-    taa_settings.begin(),
-    taa_settings.end());
+      taa_settings.begin(), taa_settings.end());
 }
 
 inline void OnPresetOff() {
   renodx::utils::settings::UpdateSetting("FxTaa", 0.f);
+  TransitionRuntimeEnabled(false, "preset off", true);
 }
 
 inline bool HandleDraw(reshade::api::command_list* cmd_list) {
   auto* data = descriptor_tracker::Get(cmd_list);
   if (data == nullptr) return false;
 
+  if (!constant_buffers::IsEnabled()) return false;
+  resolve::ExecutionGuard execution_guard;
   if (!constant_buffers::IsEnabled()) return false;
 
   auto* shader_state = renodx::utils::shader::GetCurrentState(cmd_list);
@@ -226,27 +325,31 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list) {
   const bool is_gbuffer_masked_velocity = vertex_hash == shader_hashes::GBUFFER_MASKED_VELOCITY_VS
                                           && pixel_hash == shader_hashes::GBUFFER_MASKED_VELOCITY_PS;
 
+  if (is_gbuffer_velocity || is_gbuffer_masked_velocity) {
+    if (prepare_velocity_target != nullptr) {
+      prepare_velocity_target(cmd_list, CurrentRenderTarget0(cmd_list));
+    }
+    if (is_gbuffer_velocity) {
+      LogObservedShader("vertex", "GBufferVelocity", vertex_hash, logged_gbuffer_velocity);
+    } else {
+      LogObservedShader("vertex", "GBufferMaskedVelocity", vertex_hash, logged_gbuffer_masked_velocity);
+    }
+  }
+
   if (is_camera_velocity) {
     LogObservedShader("pixel", "MotionBlurCameraVelocity", pixel_hash, logged_camera_velocity);
-    resolve::CaptureCameraMotion(cmd_list, *data, CurrentRenderTarget0(cmd_list));
+    auto velocity_rtv = CurrentRenderTarget0(cmd_list);
+    if (prepare_velocity_target != nullptr) {
+      velocity_rtv = prepare_velocity_target(cmd_list, velocity_rtv);
+    }
+    resolve::CaptureCameraMotion(cmd_list, *data, velocity_rtv);
   }
 
-  if (is_gbuffer_velocity) {
-    LogObservedShader("vertex", "GBufferVelocity", vertex_hash, logged_gbuffer_velocity);
-  }
-
-  if (is_gbuffer_masked_velocity) {
-    LogObservedShader("vertex", "GBufferMaskedVelocity", vertex_hash, logged_gbuffer_masked_velocity);
-  }
-
-  if (is_camera_velocity || is_gbuffer_velocity || is_gbuffer_masked_velocity) {
-    jitter::CaptureConstantBuffers(*data, is_camera_velocity, is_gbuffer_velocity || is_gbuffer_masked_velocity);
-  }
-
-  // Sequence markers: setting these enables the CRB gate later in the
-  // frame. DoF passes run in observed captures at draws 1188 / 1283 / 1285
-  // (Near / Far / Final). MB tile prep at 1292 / 1293 — unique to MB.
-  // BeginFrame clears both flags.
+  // Sequence markers arm the later CopyRenderBuffer fallbacks. The DoF
+  // composite passes follow the primary ScatterBakeFirst insertion point;
+  // motion-blur tile preparation follows the DoF sequence. The next eligible
+  // copy after either marker becomes that path's fallback. BeginFrame clears
+  // both flags.
   if (pixel_hash == shader_hashes::DOF_NEAR_PS
       || pixel_hash == shader_hashes::DOF_FAR_PS
       || pixel_hash == shader_hashes::DOF_FINAL_PS) {
@@ -257,41 +360,9 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list) {
     constant_buffers::frame_state.mb_tile_prep_fired = true;
   }
 
-  if (data->pending_local_reflection_rtv.handle != 0u
-      && data->pending_local_reflection_frame != constant_buffers::frame_state.frame_index) {
-    data->pending_local_reflection_rtv = {0};
-    data->pending_local_reflection_frame = UINT64_MAX;
-  }
-
-  if (data->pending_local_reflection_rtv.handle != 0u && !constant_buffers::frame_state.taa_ran_this_frame) {
-    const auto rtv = data->pending_local_reflection_rtv;
-    data->pending_local_reflection_rtv = {0};
-    data->pending_local_reflection_frame = UINT64_MAX;
-    if (logging::ShouldLogFrame(constant_buffers::frame_state.frame_index, last_local_reflection_consume_log, 30u)) {
-      logging::Info("consuming deferred LocalReflectionAddBuffer insertion frame=", constant_buffers::frame_state.frame_index,
-                    " rtv=", logging::Hex{rtv.handle});
-    }
-    resolve::MaybeRunOnRenderTarget(cmd_list, rtv, "LocalReflectionAddBuffer");
-  }
-
   if (constant_buffers::frame_state.taa_ran_this_frame) return false;
 
-  // Priority 1: LocalReflectionAddBuffer RTV. The draw callback is invoked
-  // before the original game draw, so this branch only records RTV0. The next
-  // draw callback resolves the saved RTV, which means LocalReflection's output
-  // exists and the scene is no longer bound as the active output target.
-  if (pixel_hash == shader_hashes::LOCAL_REFLECTION_ADD_BUFFER_PS) {
-    LogObservedShader("pixel", "LocalReflectionAddBuffer", pixel_hash, logged_local_reflection_gate);
-    data->pending_local_reflection_rtv = CurrentRenderTarget0(cmd_list);
-    data->pending_local_reflection_frame = constant_buffers::frame_state.frame_index;
-    if (logging::ShouldLogFrame(constant_buffers::frame_state.frame_index, last_local_reflection_queue_log, 30u)) {
-      logging::Info("queued deferred LocalReflectionAddBuffer insertion frame=", constant_buffers::frame_state.frame_index,
-                    " rtv=", logging::Hex{data->pending_local_reflection_rtv.handle});
-    }
-    return false;
-  }
-
-  // Priority 2: DOF_ScatterBakeFirst fallback. This MRT pass reads the full-res
+  // Priority 1: DOF_ScatterBakeFirst. This MRT pass reads the full-res
   // HDR scene and writes BOTH the DoF half-res pyramid base AND the motion-blur
   // half-res scene input. The shader hash itself is the gate — no sequence
   // flags needed. SRV t0 is the full-res HDR scene, which MaybeRun reads.
@@ -380,9 +451,11 @@ inline bool OnDrawOrDispatchIndirect(
 }
 
 inline void OnDestroyDevice(reshade::api::device* device) {
+  TransitionRuntimeEnabled(false, "device destroyed", true, false);
+  resolve::LockExecution();
   logging::Info("destroy device");
   resolve::Destroy(device);
-  jitter::Reset();
+  resolve::UnlockExecution();
 }
 
 inline void OnPresent(
@@ -398,13 +471,26 @@ inline void OnPresent(
   (void)dest_rect;
   (void)dirty_rect_count;
   (void)dirty_rects;
-  jitter::FinishFrame();
+  SyncRuntimeEnabledFromBinding();
+  SyncJitterPatternFromBinding();
+  constant_buffers::SyncDiagnosticView();
+  constant_buffers::SyncVelocityVisualizationRange();
+  resolve::LockExecution();
+  const bool taa_ran_this_frame = constant_buffers::frame_state.taa_ran_this_frame;
+  if (constant_buffers::IsEnabled() && !taa_ran_this_frame) {
+    resolve::InvalidateHistory("enabled frame ended without TAA resolve");
+  }
   constant_buffers::BeginFrame();
+  resolve::UnlockExecution();
 }
 
 inline void Use(DWORD fdw_reason, ShaderInjectData* shader_injection) {
   constant_buffers::enabled_binding =
       shader_injection != nullptr ? &shader_injection->custom_taa : &constant_buffers::enabled;
+  constant_buffers::SyncEnabled();
+  constant_buffers::SyncJitterPattern();
+  constant_buffers::SyncDiagnosticView();
+  constant_buffers::SyncVelocityVisualizationRange();
 
   renodx::utils::resource::Use(fdw_reason);
   renodx::utils::pipeline_layout::Use(fdw_reason);
@@ -416,17 +502,12 @@ inline void Use(DWORD fdw_reason, ShaderInjectData* shader_injection) {
       if (attached) return;
       attached = true;
       logging::Info("attach");
+      projection_jitter::Use(fdw_reason);
 
-      reshade::register_event<reshade::addon_event::init_swapchain>(jitter::OnInitSwapchain);
-      reshade::register_event<reshade::addon_event::destroy_swapchain>(jitter::OnDestroySwapchain);
       reshade::register_event<reshade::addon_event::init_command_list>(descriptor_tracker::OnInitCommandList);
       reshade::register_event<reshade::addon_event::destroy_command_list>(descriptor_tracker::OnDestroyCommandList);
       reshade::register_event<reshade::addon_event::reset_command_list>(descriptor_tracker::OnResetCommandList);
-      reshade::register_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(jitter::OnBindRenderTargetsAndDepthStencil);
-      reshade::register_event<reshade::addon_event::bind_viewports>(jitter::OnBindViewports);
       reshade::register_event<reshade::addon_event::push_descriptors>(descriptor_tracker::OnPushDescriptors);
-      reshade::register_event<reshade::addon_event::map_buffer_region>(jitter::OnMapBufferRegion);
-      reshade::register_event<reshade::addon_event::unmap_buffer_region>(jitter::OnUnmapBufferRegion);
       reshade::register_event<reshade::addon_event::draw>(OnDraw);
       reshade::register_event<reshade::addon_event::draw_indexed>(OnDrawIndexed);
       reshade::register_event<reshade::addon_event::draw_or_dispatch_indirect>(OnDrawOrDispatchIndirect);
@@ -439,17 +520,14 @@ inline void Use(DWORD fdw_reason, ShaderInjectData* shader_injection) {
       if (!attached) return;
       attached = false;
       logging::Info("detach");
+      // DllMain holds the loader lock. Runtime transitions and resource
+      // quiescence happen in destroy_device; process detach only unregisters.
+      projection_jitter::Use(fdw_reason);
 
-      reshade::unregister_event<reshade::addon_event::init_swapchain>(jitter::OnInitSwapchain);
-      reshade::unregister_event<reshade::addon_event::destroy_swapchain>(jitter::OnDestroySwapchain);
       reshade::unregister_event<reshade::addon_event::init_command_list>(descriptor_tracker::OnInitCommandList);
       reshade::unregister_event<reshade::addon_event::destroy_command_list>(descriptor_tracker::OnDestroyCommandList);
       reshade::unregister_event<reshade::addon_event::reset_command_list>(descriptor_tracker::OnResetCommandList);
-      reshade::unregister_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(jitter::OnBindRenderTargetsAndDepthStencil);
-      reshade::unregister_event<reshade::addon_event::bind_viewports>(jitter::OnBindViewports);
       reshade::unregister_event<reshade::addon_event::push_descriptors>(descriptor_tracker::OnPushDescriptors);
-      reshade::unregister_event<reshade::addon_event::map_buffer_region>(jitter::OnMapBufferRegion);
-      reshade::unregister_event<reshade::addon_event::unmap_buffer_region>(jitter::OnUnmapBufferRegion);
       reshade::unregister_event<reshade::addon_event::draw>(OnDraw);
       reshade::unregister_event<reshade::addon_event::draw_indexed>(OnDrawIndexed);
       reshade::unregister_event<reshade::addon_event::draw_or_dispatch_indirect>(OnDrawOrDispatchIndirect);
