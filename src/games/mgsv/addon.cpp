@@ -70,6 +70,20 @@ renodx::utils::resource::ResourceUpgradeInfo motion_blur_upgrade_info = {
     .name = "motion_blur_bgra8_typeless_hot_swap",
 };
 
+renodx::utils::resource::ResourceUpgradeInfo taa_velocity_upgrade_info = {
+    .old_format = reshade::api::format::b8g8r8a8_typeless,
+    .new_format = reshade::api::format::r16g16b16a16_float,
+    .use_resource_view_cloning = true,
+    .use_resource_view_hot_swap = true,
+    .usage_set = static_cast<uint32_t>(
+        reshade::api::resource_usage::shader_resource
+        | reshade::api::resource_usage::render_target),
+    .dimensions = {.width = renodx::utils::resource::ResourceUpgradeInfo::BACK_BUFFER,
+                   .height = renodx::utils::resource::ResourceUpgradeInfo::BACK_BUFFER},
+    .usage_include = reshade::api::resource_usage::render_target,
+    .name = "taa_velocity_bgra8_typeless_hot_swap",
+};
+
 renodx::utils::resource::ResourceUpgradeInfo dof_final_copy_upgrade_info = {
     .old_format = reshade::api::format::b8g8r8a8_typeless,
     .new_format = reshade::api::format::r16g16b16a16_float,
@@ -461,6 +475,33 @@ bool MarkMotionBlurCloneTarget(reshade::api::resource_view rtv, reshade::api::de
   return MarkCloneTarget(rtv, &motion_blur_upgrade_info, device);
 }
 
+reshade::api::resource_view PrepareTaaVelocityTarget(
+    reshade::api::command_list* cmd_list,
+    reshade::api::resource_view velocity_rtv) {
+  if (cmd_list == nullptr || velocity_rtv.handle == 0u) return velocity_rtv;
+
+  auto* device = cmd_list->get_device();
+  if (device == nullptr || !MarkCloneTarget(velocity_rtv, &taa_velocity_upgrade_info, device)) {
+    return velocity_rtv;
+  }
+
+  const bool activated = ActivateCloneHotSwapIfTracked(device, velocity_rtv);
+  if (!activated && !ResourceViewMatchesCloneTarget(velocity_rtv, &taa_velocity_upgrade_info)) {
+    return velocity_rtv;
+  }
+
+  if (activated) {
+    auto rtvs = renodx::utils::swapchain::GetRenderTargets(cmd_list);
+    if (!rtvs.empty()) {
+      renodx::mods::swapchain::FlushDescriptors(cmd_list);
+      renodx::mods::swapchain::RewriteRenderTargets(cmd_list, rtvs.size(), rtvs.data(), {0});
+    }
+  }
+
+  const auto clone_rtv = renodx::utils::resource::upgrade::GetResourceViewClone(velocity_rtv);
+  return clone_rtv.handle != 0u ? clone_rtv : velocity_rtv;
+}
+
 bool OnCopyTonemapOutputResource(
     reshade::api::command_list* cmd_list,
     reshade::api::resource source,
@@ -702,8 +743,22 @@ bool OnCopyTonemapOutputResource(
       },                                                                                              \
   }
 
+ShaderInjectData shader_injection;
+static_assert(sizeof(ShaderInjectData) % 16u == 0u, "ShaderInjectData must remain 16-byte aligned");
+
 renodx::mods::shader::CustomShaders custom_shaders = []() {
   renodx::mods::shader::CustomShaders shaders = {
+      {
+          0x200DBED9,
+          {
+              .crc32 = 0x200DBED9,
+              .code = __0x200DBED9,
+              .on_draw = [](auto*) {
+                taa::UpdateShaderInjectionJitter(&shader_injection);
+                return true;
+              },
+          },
+      },
       UpgradeRTVReplaceShaderCallback(0xE2D609B1, ArmDofFinalCopyRenderBufferWindow),            // DOF_ScatterCompositeNear
       UpgradeRTVReplaceShaderCallback(0x7C017264, ArmDofFinalCopyRenderBufferWindow),            // DOF_ScatterCompositeFar
       UpgradeRTVReplaceShaderCallback(0xFC5542BB, DisarmDofFinalCopyRenderBufferAfterDofFinal),  // DOF_ScatterCompositeFinal
@@ -745,8 +800,6 @@ renodx::mods::shader::CustomShaders custom_shaders = []() {
 
   return shaders;
 }();
-
-ShaderInjectData shader_injection;
 
 renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
@@ -1039,9 +1092,7 @@ void OnPresetOff() {
       {"FxBloom", 100.f},
       {"FxBoostSun", 0.f},
   });
-#if ENABLE_TAA_SLIDER
   taa::OnPresetOff();
-#endif
 }
 
 bool fired_on_init_swapchain = false;
@@ -1090,9 +1141,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     case DLL_PROCESS_ATTACH:
       if (!reshade::register_addon(h_module)) return FALSE;
 
-#if ENABLE_TAA_SLIDER
       taa::AppendSettings(settings, &shader_injection);
-#endif
 
       if (!initialized) {
         renodx::mods::swapchain::force_borderless = true;
@@ -1101,6 +1150,10 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
         // renodx::mods::shader::force_pipeline_cloning = true;
 
         renodx::mods::shader::expected_constant_buffer_index = 13;
+        renodx::mods::shader::minimum_constant_buffer_stages =
+            reshade::api::shader_stage::vertex
+            | reshade::api::shader_stage::pixel
+            | reshade::api::shader_stage::compute;
         renodx::mods::swapchain::expected_constant_buffer_index = 13;
 
         renodx::mods::swapchain::use_resource_cloning = true;
@@ -1136,9 +1189,10 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       reshade::unregister_addon(h_module);
       break;
   }
-#if ENABLE_TAA_SLIDER
+  // The persistent experimental toggle registers the native-jitter/resolve
+  // path and remains default-off.
+  taa::prepare_velocity_target = PrepareTaaVelocityTarget;
   taa::Use(fdw_reason, &shader_injection);
-#endif
   renodx::utils::settings::Use(fdw_reason, &settings, &OnPresetOff);
 
   renodx::mods::swapchain::Use(fdw_reason, &shader_injection);
