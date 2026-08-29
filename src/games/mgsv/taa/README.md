@@ -82,11 +82,12 @@ The compute shader consumes:
 
 The current frame is decoded before its 3x3 filter. Background pixels use depth-derived camera reprojection from the
 native no-jitter matrix relation. Object-mask pixels retain MGSV's bone-aware velocity. Velocity selection currently uses
-the center and four diagonal taps with the Alias Isolation nearest-absolute-depth rule.
+the center and four diagonal taps and chooses the largest raw depth, matching MGSV's positive reverse-Z nearest surface.
 
-The resolve reconstructs history with a nine-tap optimized Catmull-Rom filter, clips it to blended broad/tight current
-RGB bounds, and computes an adaptive blend from luminance position and subpixel velocity. Scene alpha is copied exactly
-from the current frame because downstream MGSV passes use it for highlight/emissive behavior.
+The resolve point-loads and decodes the complete 4x4 history footprint before 16-tap Catmull-Rom reconstruction in linear
+light. It clips history to equally blended broad/tight current RGB bounds and computes an adaptive blend from luminance
+position and subpixel velocity. Scene alpha is copied exactly from the current frame because downstream MGSV passes use
+it for highlight/emissive behavior.
 
 ## History and failure policy
 
@@ -124,17 +125,17 @@ No temporal output is produced from mismatched frame data.
   camera-wide wobble.
 - Native jitter and the compute resolve agree on frame, sample, dimensions, and current camera state before dispatch.
 - The `0x200DBED9` correction stabilizes the affected lights without changing their zero-jitter position.
-- Raw Current and Filtered Current retain the thin wire currently lost by Temporal Resolve, locating that remaining issue
-  in history reconstruction/rectification rather than current raster coverage.
+- Decoding history texels before Catmull-Rom reconstruction improved temporal quality over encoded interpolation.
+- Selecting the largest raw reverse-Z depth preserves thin foreground lines that disappeared with the previous
+  smallest-absolute-depth rule.
 
 ## Known limitations
 
-- Previous history is stored encoded, so linear sampler interpolation occurs before scene-color decoding. Correct
-  linear-light history reconstruction is the next signal-correctness task.
+- Previous history remains stored in MGSV's encoded scene domain, requiring sixteen point loads and per-texel decoding
+  for correct linear-light Catmull-Rom reconstruction. Separate linear history could recover the optimized sampling path.
 - There is no previous-depth history or explicit disocclusion mask.
 - Thin features have no temporal lock/confidence mechanism and can be removed by current-frame RGB clipping.
 - Large camera/FOV discontinuities do not yet trigger a dedicated camera-cut reset.
-- The current five-tap nearest-depth rule still requires a controlled reverse-Z validation.
 - Native object-velocity coverage and the approximately 64-pixel packed-motion clamp remain consumer limitations.
 - No sharpening is applied; sharpening is deferred until temporal stability is improved.
 

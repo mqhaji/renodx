@@ -15,15 +15,10 @@ is intentionally prospective; [README.md](README.md) describes only the current 
 ## Priority 1: signal correctness
 
 1. **Linear history reconstruction**
-   - First test decoded manual bilinear history sampling to isolate encoded-interpolation loss.
-   - If confirmed, store temporal history in linear RGBA16F and encode only when copying the final result back into MGSV's
-     scene domain.
-   - Keep the current filter, clipping, and blend unchanged during this test.
-2. **Reverse-Z velocity dilation**
-   - Compare center-only, minimum-depth, and maximum-depth selection as isolated changes.
-   - Move to a full 3x3 nearest-surface selection only after confirming MGSV's raw reverse-Z convention at this pass.
-   - Carry depth, motion, and object classification from the same selected sample.
-3. **Camera-cut reset**
+   - Per-texel decode before 16-tap Catmull-Rom is validated and now preserves correct linear-light reconstruction.
+   - Store temporal history in linear RGBA16F to recover optimized Catmull-Rom sampling, then encode only the copy written
+     back into MGSV's scene domain.
+2. **Camera-cut reset**
    - Detect large view/projection/FOV discontinuities and invalidate history before accumulation.
    - Cover aiming, binocular transitions, cutscenes, teleportation, pause/resume, and display-mode changes.
 
@@ -38,10 +33,10 @@ is intentionally prospective; [README.md](README.md) describes only the current 
 Do not globally weaken the current AABB. Without depth validation, relaxed clipping is expected to reintroduce character
 ghosting.
 
-## Priority 3: thin-feature stability
+## Priority 3: optional thin-feature stability
 
-The current wire failure matches the problem addressed by temporal lock systems: current coverage is present, but
-intermittent jitter coverage allows ordinary rectification to erase accumulated detail.
+Selecting the largest raw reverse-Z depth fixed the observed disappearing-wire failure by keeping nearest-surface motion
+at thin foreground geometry. Add temporal locks only if other thin features still fail under intermittent jitter coverage.
 
 An FSR2-inspired native-resolution lock should track:
 

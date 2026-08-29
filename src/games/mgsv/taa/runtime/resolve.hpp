@@ -75,7 +75,7 @@ struct Resources {
 
   reshade::api::pipeline_layout compute_layout = {0};
   reshade::api::pipeline compute_pipeline = {0};
-  std::array<reshade::api::sampler, 2> samplers = {};
+  std::array<reshade::api::sampler, 1> samplers = {};
 };
 
 struct alignas(16) ResolveConstants {
@@ -84,7 +84,7 @@ struct alignas(16) ResolveConstants {
   float camera_reprojection_valid = 0.f;
   float padding_0 = 0.f;
   std::array<float, 2> current_jitter_uv = {0.f, 0.f};
-  std::array<float, 2> padding = {0.f, 0.f};
+  std::array<float, 2> padding_1 = {0.f, 0.f};
   std::array<float, 16> current_to_previous_clip = {};
 };
 
@@ -292,7 +292,7 @@ inline void Destroy(reshade::api::device* device) {
 }
 
 // Layout mirrors the compute shader registers:
-//   s0-s1 samplers, t0-t4 SRVs, u0 UAV, b0 resolve constants.
+//   s0 sampler, t0-t4 SRVs, u0 UAV, b0 resolve constants.
 inline bool EnsureComputePipeline(reshade::api::command_list* cmd_list) {
   auto* device = cmd_list != nullptr ? cmd_list->get_device() : nullptr;
   if (device == nullptr) return false;
@@ -335,8 +335,7 @@ inline bool EnsureComputePipeline(reshade::api::command_list* cmd_list) {
     return false;
   }
 
-  const std::array<reshade::api::sampler_desc, 2> sampler_descs = {
-      reshade::api::sampler_desc{.filter = reshade::api::filter_mode::min_mag_mip_linear},
+  const std::array<reshade::api::sampler_desc, 1> sampler_descs = {
       reshade::api::sampler_desc{.filter = reshade::api::filter_mode::min_mag_mip_point},
   };
 
