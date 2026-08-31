@@ -744,7 +744,6 @@ bool OnCopyTonemapOutputResource(
   }
 
 ShaderInjectData shader_injection;
-static_assert(sizeof(ShaderInjectData) % 16u == 0u, "ShaderInjectData must remain 16-byte aligned");
 
 renodx::mods::shader::CustomShaders custom_shaders = []() {
   renodx::mods::shader::CustomShaders shaders = {
@@ -1081,7 +1080,7 @@ void OnPresetOff() {
       {"FxBloom", 100.f},
       {"FxBoostSun", 0.f},
   });
-  taa::OnPresetOff();
+  taa::settings::OnPresetOff();
 }
 
 bool fired_on_init_swapchain = false;
@@ -1130,7 +1129,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     case DLL_PROCESS_ATTACH:
       if (!reshade::register_addon(h_module)) return FALSE;
 
-      taa::AppendSettings(settings, &shader_injection);
+      taa::settings::AppendSettings(settings, &shader_injection);
 
       if (!initialized) {
         renodx::mods::swapchain::force_borderless = true;

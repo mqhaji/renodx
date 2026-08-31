@@ -109,6 +109,7 @@ Every temporal-input revision should cover:
 - Aiming, first-person aim, binoculars, and abrupt FOV transitions.
 - Pause/resume, cutscenes, camera cuts, and teleportation.
 - DoF and motion blur enabled and disabled.
+- Presents without a new full-resolution scene and render callbacks that straddle `Present`.
 - Rain, particles, transparency, NoIR, and sonar.
 - Resolution/display-mode changes.
 - First frame after enable, resize, reset, camera cut, and failed input capture.
