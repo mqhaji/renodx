@@ -219,7 +219,7 @@ The native `copy_resource` callback is separately armed from a proven scene-tone
 
 ## Temporal Anti-Aliasing (Default Off)
 
-The addon includes an optional TAA baseline under **Effects > Temporal Anti-Aliasing**. It defaults to **Off**. While
+The addon includes an optional TAA baseline under **Temporal Anti-Aliasing**. It defaults to **Off**. While
 disabled, MGSV keeps its original FXAA path and the native projection remains unmodified.
 
 When enabled, the TAA path:
@@ -234,23 +234,31 @@ When enabled, the TAA path:
 5. Captures the final `MotionBlurCameraVelocity` target through the targeted RGBA16F velocity clone.
 6. Reprojects RGBA16F history on a fixed output grid using exact depth-derived camera motion for background pixels and
    MGSV's deformation-aware velocity for object-mask pixels, selecting the largest raw depth for positive reverse-Z.
-7. Resolves immediately before `DOF_ScatterBakeFirst`, so the game creates its DoF and motion-blur inputs from resolved
-   scene color.
+7. Resolves at the first `DOF_ScatterBakeFirst` invocation whose scene color matches the full-resolution depth and motion
+   inputs. Lower-resolution DoF invocations are skipped so the fallback cascade can continue.
 8. Bypasses the original FXAA filter only while TAA is active.
 
-**TAA Jitter Pattern** is under **TAA Diagnostics** and exposes the production eight-phase Halton sequence plus an **Off**
+**TAA Jitter Pattern** is under **Temporal Anti-Aliasing** and exposes the production eight-phase Halton sequence plus an **Off**
 diagnostic that leaves the resolve active with zero projection jitter. The default build hides the extended diagnostic
 view, velocity range, object-motion selector, and per-path jitter controls behind
 `ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS=0`; their runtime values are pinned to production defaults. Resolve-tuning controls
 remain available, along with the default-Off **Unclamp Motion Vectors** experiment. Relevant changes invalidate and reseed
 history.
 
-The resolve fails closed: a missing or stale native jitter publication, stale velocity, or dimension mismatch skips temporal
-accumulation and invalidates history instead of blending misaligned frames. Enable/disable transitions also reset temporal
-state, and disabling verifies exact restoration of the vanilla projection copy. A former scoped replacement for VS `0x200DBED9`
-previously proved the missing light jitter and has been removed. Brief runtime testing indicates that the native
+The resolve fails closed: a missing native publication, stale velocity, or dimension mismatch skips that insertion
+candidate instead of blending misaligned inputs. MGSV may commit projection and capture camera motion before `Present`
+while recording the matching insertion callback afterward. Both inputs may therefore trail the callback epoch by one only
+when their Halton sample still matches. Presents without a new full-resolution insertion candidate preserve history;
+history resets only after a matching candidate is seen but cannot resolve. Enable/disable transitions also reset temporal
+state, and disabling verifies exact restoration of the vanilla projection copy. A former scoped
+replacement for VS `0x200DBED9` previously proved the missing light jitter and has been removed. Brief runtime testing indicates that the native
 alpha-model correction controls the affected lights; the separate guarded local-light callback remains an additional
 known-path correction pending isolated runtime classification.
+
+Default builds log explicit TAA enable/disable transitions and one **TAA accumulation started** line after each history
+seed. Repeated accumulation-start lines while settings and resolution are unchanged indicate that history is still being
+reset. Persisted startup state and waiting for the first native publication are logged once. The expected lower-resolution
+DoF candidate is also logged only once per device lifetime.
 
 See [`taa/README.md`](taa/README.md) for the current implementation and validation contract. Future temporal quality and
 native-resolution DLAA work is tracked in [`taa/ROADMAP.md`](taa/ROADMAP.md).
@@ -377,13 +385,16 @@ copy build\Release\renodx-mgsv.addon64 "C:\Program Files (x86)\Steam\steamapps\c
 ### Manual TAA Verification
 
 1. Start with **Temporal Anti-Aliasing** disabled and confirm the original FXAA presentation is stable.
-2. Enable TAA with jitter **Off**, then switch to **Halton** and confirm that each pattern change resets history.
+2. Enable TAA with jitter **Off** and confirm one **TAA runtime enabled** line followed by one **TAA accumulation started**
+   line. Standing still should not produce recurring accumulation-start lines. Switch to **Halton** and confirm the
+   intentional pattern change starts accumulation once more.
 3. Inspect static edges, foliage, slow and fast camera pans, aiming, binoculars, menus, DoF, and motion blur.
 4. Compare **Unclamp Motion Vectors** Off/On during motion above approximately 64 pixels; verify object motion and native
    motion blur, then return it to its default **Off** state.
 5. With `ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS=1`, exercise all diagnostic views and per-path controls; otherwise verify
    the production defaults and confirm the log has no recurring publication, capture, setup, or dispatch warnings.
-6. Disable TAA and verify that the scene returns without a persistent subpixel shift, stale-history frame, or freeze.
+6. Disable TAA and confirm a **TAA runtime disabled** line, then verify that the scene returns without a persistent
+   subpixel shift, stale-history frame, or freeze.
 7. Repeat an enable/disable cycle after a resolution or display-mode change to verify history is recreated at the new size.
 
 ---
