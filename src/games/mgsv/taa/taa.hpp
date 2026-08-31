@@ -201,28 +201,18 @@ inline reshade::api::resource_view CurrentRenderTarget0(reshade::api::command_li
   return state->render_targets[0];
 }
 
-inline void UpdateShaderInjectionJitter(ShaderInjectData* shader_injection) {
-  if (shader_injection == nullptr) return;
+inline void InvalidateHistoryForDiagnostic(const char* reason) {
+  resolve::LockExecution();
+  resolve::InvalidateHistory(reason);
+  resolve::UnlockExecution();
+}
 
-  float jitter_uv_x = 0.f;
-  float jitter_uv_y = 0.f;
-  const uint64_t frame_token = constant_buffers::CurrentFrameToken();
-  const auto jitter = projection_jitter::GetAppliedJitter();
-  if (constant_buffers::IsEnabled()) {
-    // The temporal resolve advances CurrentSampleIndex after dispatch. Draws
-    // recorded later in the same frame must still use the publication for the
-    // current frame (sample n), not the already-promoted next sample (n + 1).
-    if (jitter.valid
-        && jitter.frame_token == frame_token) {
-      jitter_uv_x = jitter.jitter_uv_x;
-      jitter_uv_y = jitter.jitter_uv_y;
-    }
-  }
-
-  shader_injection->taa_jitter_uv_x = jitter_uv_x;
-  shader_injection->taa_jitter_uv_y = jitter_uv_y;
-  shader_injection->taa_jitter_padding = 0.f;
-  shader_injection->taa_jitter_padding_2 = 0.f;
+inline void SetProjectionJitterScale(
+    constant_buffers::ProjectionJitterPath path,
+    float value,
+    const char* reason) {
+  constant_buffers::SetProjectionJitterScale(path, value);
+  InvalidateHistoryForDiagnostic(reason);
 }
 
 inline void AppendSettings(renodx::utils::settings::Settings& settings, ShaderInjectData* shader_injection) {
@@ -242,6 +232,7 @@ inline void AppendSettings(renodx::utils::settings::Settings& settings, ShaderIn
             TransitionRuntimeEnabled(current > 0.f, "setting changed");
           },
       },
+#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
       new renodx::utils::settings::Setting{
           .key = "FxTaaDiagnosticView",
           .binding = &constant_buffers::diagnostic_view,
@@ -249,8 +240,20 @@ inline void AppendSettings(renodx::utils::settings::Settings& settings, ShaderIn
           .default_value = 0.f,
           .label = "TAA Diagnostic View",
           .section = "Effects",
-          .tooltip = "Temporal Resolve is normal output. Raw Current bypasses temporal history and the current filter; Filtered Current isolates the 3x3 current-frame filter. Raw Velocity views inspect the center pixel of MGSV's captured velocity texture. Changing modes resets temporal history.",
-          .labels = {"Temporal Resolve", "Raw Current", "Filtered Current", "Raw Velocity Direction", "Raw Velocity Magnitude"},
+          .tooltip = "Compares current color, raw/final motion, object-mask coverage, selected motion, and native-object motion relative to matrix camera motion. Changing modes resets temporal history.",
+          .labels = {
+              "Temporal Resolve",
+              "Raw Current",
+              "Filtered Current",
+              "Raw Velocity Direction",
+              "Raw Velocity Magnitude",
+              "Raw Object Mask",
+              "Selected Object Mask",
+              "Selected Velocity Direction",
+              "Selected Velocity Magnitude",
+              "Object-Camera Residual Direction",
+              "Object-Camera Residual Magnitude",
+          },
           .on_change_value = [](float previous, float current) {
             (void)previous;
             constant_buffers::SetDiagnosticView(current);
@@ -259,20 +262,35 @@ inline void AppendSettings(renodx::utils::settings::Settings& settings, ShaderIn
             resolve::UnlockExecution(); },
           .is_visible = [] { return constant_buffers::IsEnabled(); },
       },
+#endif
       new renodx::utils::settings::Setting{
           .key = "FxTaaJitterPattern",
           .binding = &constant_buffers::jitter_pattern,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
           .default_value = 1.f,
           .label = "TAA Jitter Pattern",
-          .section = "Effects",
+          .section = "TAA Diagnostics",
           .tooltip = "Diagnostic projection sampling pattern. Off keeps temporal resolve active with zero projection jitter. Halton is the eight-phase production sequence. Changing modes resets temporal history and the sample sequence.",
-          .labels = {"Off", "Halton (2,3) — 8 Phase"},
+          .labels = {"Off", "Halton (2,3) - 8 Phase"},
           .on_change_value = [](float previous, float current) {
             if (static_cast<uint32_t>(previous) == static_cast<uint32_t>(current)) return;
             TransitionJitterPattern(current); },
           .is_visible = [] { return constant_buffers::IsEnabled(); },
       },
+      new renodx::utils::settings::Setting{
+          .key = "FxTaaUnclampMotionVectors",
+          .binding = &shader_injection->unclamp_motion_vectors,
+          .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+          .default_value = 0.f,
+          .label = "Unclamp Motion Vectors",
+          .section = "TAA Diagnostics",
+          .tooltip = "Removes only MGSV's unit-length saturate from object and camera velocity encoding while retaining the original 64-pixel scale. This can improve motion above 64 pixels but also changes native motion blur.",
+          .on_change_value = [](float previous, float current) {
+              if ((previous > 0.f) == (current > 0.f)) return;
+              InvalidateHistoryForDiagnostic("motion-vector clamp changed"); },
+          .is_visible = [] { return constant_buffers::IsEnabled(); },
+      },
+#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
       new renodx::utils::settings::Setting{
           .key = "FxTaaVelocityVisualizationRange",
           .binding = &constant_buffers::velocity_visualization_range,
@@ -289,9 +307,200 @@ inline void AppendSettings(renodx::utils::settings::Settings& settings, ShaderIn
             constant_buffers::SetVelocityVisualizationRange(current); },
           .is_visible = [] {
             const float view = constant_buffers::GetDiagnosticView();
-            return constant_buffers::IsEnabled() && view >= 3.f && view < 5.f; },
+            return constant_buffers::IsEnabled()
+                   && ((view >= 3.f && view < 5.f) || view >= 7.f); },
           .is_logarithmic = true,
       },
+      new renodx::utils::settings::Setting{
+          .key = "FxTaaObjectMotionMode",
+          .binding = &constant_buffers::object_motion_mode,
+          .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+          .default_value = 0.f,
+          .label = "TAA Object Motion Source",
+          .section = "TAA Diagnostics",
+          .tooltip = "Tests whether native skinned motion contains projection jitter. Matrix Camera Everywhere intentionally removes animation motion. Add modes are sign checks. Changing modes resets history.",
+          .labels = {
+              "Auto-Corrected Native Object Velocity",
+              "Matrix Camera Everywhere",
+              "Native - Current Jitter",
+              "Native + Current Jitter",
+              "Native - Jitter Delta",
+              "Native + Jitter Delta",
+          },
+          .on_change_value = [](float previous, float current) {
+            (void)previous;
+            constant_buffers::SetObjectMotionMode(current);
+            InvalidateHistoryForDiagnostic("object motion mode changed"); },
+          .is_visible = [] { return constant_buffers::IsEnabled(); },
+      },
+#endif
+      new renodx::utils::settings::Setting{
+          .key = "FxTaaClipTightness",
+          .binding = &constant_buffers::clip_tightness,
+          .value_type = renodx::utils::settings::SettingValueType::FLOAT,
+          .default_value = 0.5f,
+          .label = "TAA Clip Tightness",
+          .section = "TAA Diagnostics",
+          .tooltip = "Blends broad 3x3 history bounds toward the tighter cross-shaped bounds. 0 uses broad bounds; 1 uses tight bounds. Lower values may preserve unstable thin detail but increase ghosting.",
+          .min = 0.f,
+          .max = 1.f,
+          .format = "%.2f",
+          .on_change_value = [](float previous, float current) {
+            (void)previous;
+            constant_buffers::SetClipTightness(current);
+            InvalidateHistoryForDiagnostic("clip tightness changed"); },
+          .is_visible = [] { return constant_buffers::IsEnabled(); },
+      },
+      new renodx::utils::settings::Setting{
+          .key = "FxTaaHistoryClipStrength",
+          .binding = &constant_buffers::history_clip_strength,
+          .value_type = renodx::utils::settings::SettingValueType::FLOAT,
+          .default_value = 1.f,
+          .label = "TAA History Clip Strength",
+          .section = "TAA Diagnostics",
+          .tooltip = "Controls how strongly reprojected history is clipped to current-frame color bounds. 0 disables clipping; 1 is the current full clip. Lower values may stabilize fine patterns but can cause ghosting.",
+          .min = 0.f,
+          .max = 1.f,
+          .format = "%.2f",
+          .on_change_value = [](float previous, float current) {
+            (void)previous;
+            constant_buffers::SetHistoryClipStrength(current);
+            InvalidateHistoryForDiagnostic("history clip strength changed"); },
+          .is_visible = [] { return constant_buffers::IsEnabled(); },
+      },
+      new renodx::utils::settings::Setting{
+          .key = "FxTaaCurrentFrameBlend",
+          .binding = &constant_buffers::current_frame_blend,
+          .value_type = renodx::utils::settings::SettingValueType::FLOAT,
+          .default_value = 0.15f,
+          .label = "TAA Current Frame Blend",
+          .section = "TAA Diagnostics",
+          .tooltip = "Maximum adaptive contribution from filtered current color after history clipping. 0 retains clipped history completely; higher values respond faster but can expose jitter-phase flicker.",
+          .min = 0.f,
+          .max = 1.f,
+          .format = "%.2f",
+          .on_change_value = [](float previous, float current) {
+            (void)previous;
+            constant_buffers::SetCurrentFrameBlend(current);
+            InvalidateHistoryForDiagnostic("current frame blend changed"); },
+          .is_visible = [] { return constant_buffers::IsEnabled(); },
+      },
+#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
+      new renodx::utils::settings::Setting{
+          .key = "FxTaaVelocityProjectionJitterScale",
+          .binding = &constant_buffers::projection_jitter_scales[static_cast<size_t>(constant_buffers::ProjectionJitterPath::VELOCITY)],
+          .value_type = renodx::utils::settings::SettingValueType::FLOAT,
+          .default_value = 1.f,
+          .label = "Velocity Projection Jitter",
+          .section = "TAA Diagnostics",
+          .tooltip = "Scales same-frame jitter applied after MakeVelocityBuffer resets the active projection. Default native object motion automatically removes this current-jitter term.",
+          .min = -2.f,
+          .max = 2.f,
+          .format = "%.2fx",
+          .on_change_value = [](float previous, float current) {
+            (void)previous;
+            SetProjectionJitterScale(
+              constant_buffers::ProjectionJitterPath::VELOCITY,
+              current,
+              "velocity projection jitter changed"); },
+          .is_visible = [] { return constant_buffers::IsEnabled(); },
+      },
+      new renodx::utils::settings::Setting{
+          .key = "FxTaaForwardProjectionJitterScale",
+          .binding = &constant_buffers::projection_jitter_scales[static_cast<size_t>(constant_buffers::ProjectionJitterPath::FORWARD)],
+          .value_type = renodx::utils::settings::SettingValueType::FLOAT,
+          .default_value = 1.f,
+          .label = "Forward Projection Jitter",
+          .section = "TAA Diagnostics",
+          .tooltip = "Scales same-frame jitter applied by the GrPluginForwardRendering setup callback.",
+          .min = -2.f,
+          .max = 2.f,
+          .format = "%.2fx",
+          .on_change_value = [](float previous, float current) {
+            (void)previous;
+            SetProjectionJitterScale(
+              constant_buffers::ProjectionJitterPath::FORWARD,
+              current,
+              "forward projection jitter changed"); },
+          .is_visible = [] { return constant_buffers::IsEnabled(); },
+      },
+      new renodx::utils::settings::Setting{
+          .key = "FxTaaModelProjectionJitterScale",
+          .binding = &constant_buffers::projection_jitter_scales[static_cast<size_t>(constant_buffers::ProjectionJitterPath::MODEL)],
+          .value_type = renodx::utils::settings::SettingValueType::FLOAT,
+          .default_value = 1.f,
+          .label = "Model Projection Jitter",
+          .section = "TAA Diagnostics",
+          .tooltip = "Scales same-frame jitter applied after GrPluginModel installs viewport projection state.",
+          .min = -2.f,
+          .max = 2.f,
+          .format = "%.2fx",
+          .on_change_value = [](float previous, float current) {
+            (void)previous;
+            SetProjectionJitterScale(
+              constant_buffers::ProjectionJitterPath::MODEL,
+              current,
+              "model projection jitter changed"); },
+          .is_visible = [] { return constant_buffers::IsEnabled(); },
+      },
+      new renodx::utils::settings::Setting{
+          .key = "FxTaaAlphaProjectionJitterScale",
+          .binding = &constant_buffers::projection_jitter_scales[static_cast<size_t>(constant_buffers::ProjectionJitterPath::ALPHA_MODEL)],
+          .value_type = renodx::utils::settings::SettingValueType::FLOAT,
+          .default_value = 1.f,
+          .label = "Alpha Model Projection Jitter",
+          .section = "TAA Diagnostics",
+          .tooltip = "Scales same-frame jitter applied after GrPluginAlphaModel installs viewport projection state.",
+          .min = -2.f,
+          .max = 2.f,
+          .format = "%.2fx",
+          .on_change_value = [](float previous, float current) {
+            (void)previous;
+            SetProjectionJitterScale(
+              constant_buffers::ProjectionJitterPath::ALPHA_MODEL,
+              current,
+              "alpha-model projection jitter changed"); },
+          .is_visible = [] { return constant_buffers::IsEnabled(); },
+      },
+      new renodx::utils::settings::Setting{
+          .key = "FxTaaOverlayProjectionJitterScale",
+          .binding = &constant_buffers::projection_jitter_scales[static_cast<size_t>(constant_buffers::ProjectionJitterPath::OVERLAY_MODEL)],
+          .value_type = renodx::utils::settings::SettingValueType::FLOAT,
+          .default_value = 1.f,
+          .label = "Overlay Model Projection Jitter",
+          .section = "TAA Diagnostics",
+          .tooltip = "Scales same-frame jitter applied after GrPluginOverlayModel installs viewport projection state.",
+          .min = -2.f,
+          .max = 2.f,
+          .format = "%.2fx",
+          .on_change_value = [](float previous, float current) {
+            (void)previous;
+            SetProjectionJitterScale(
+              constant_buffers::ProjectionJitterPath::OVERLAY_MODEL,
+              current,
+              "overlay-model projection jitter changed"); },
+          .is_visible = [] { return constant_buffers::IsEnabled(); },
+      },
+      new renodx::utils::settings::Setting{
+          .key = "FxTaaLocalLightProjectionJitterScale",
+          .binding = &constant_buffers::projection_jitter_scales[static_cast<size_t>(constant_buffers::ProjectionJitterPath::LOCAL_LIGHT)],
+          .value_type = renodx::utils::settings::SettingValueType::FLOAT,
+          .default_value = 1.f,
+          .label = "Local Light Projection Jitter",
+          .section = "TAA Diagnostics",
+          .tooltip = "Temporarily scales jitter on GrViewport projection while GrPluginLocalLight builds its private scene packet, then restores the exact original matrix.",
+          .min = -2.f,
+          .max = 2.f,
+          .format = "%.2fx",
+          .on_change_value = [](float previous, float current) {
+            (void)previous;
+            SetProjectionJitterScale(
+              constant_buffers::ProjectionJitterPath::LOCAL_LIGHT,
+              current,
+              "local-light projection jitter changed"); },
+          .is_visible = [] { return constant_buffers::IsEnabled(); },
+      },
+#endif
   };
 
   settings.insert(
@@ -475,6 +684,9 @@ inline void OnPresent(
   SyncJitterPatternFromBinding();
   constant_buffers::SyncDiagnosticView();
   constant_buffers::SyncVelocityVisualizationRange();
+  constant_buffers::SyncObjectMotionMode();
+  constant_buffers::SyncResolveTuning();
+  constant_buffers::SyncProjectionJitterScales();
   resolve::LockExecution();
   const bool taa_ran_this_frame = constant_buffers::frame_state.taa_ran_this_frame;
   if (constant_buffers::IsEnabled() && !taa_ran_this_frame) {
@@ -491,6 +703,9 @@ inline void Use(DWORD fdw_reason, ShaderInjectData* shader_injection) {
   constant_buffers::SyncJitterPattern();
   constant_buffers::SyncDiagnosticView();
   constant_buffers::SyncVelocityVisualizationRange();
+  constant_buffers::SyncObjectMotionMode();
+  constant_buffers::SyncResolveTuning();
+  constant_buffers::SyncProjectionJitterScales();
 
   renodx::utils::resource::Use(fdw_reason);
   renodx::utils::pipeline_layout::Use(fdw_reason);
