@@ -82,13 +82,17 @@ struct alignas(16) ResolveConstants {
   float diagnostic_view = 0.f;
   float velocity_visualization_range = 8.f;
   float camera_reprojection_valid = 0.f;
-  float padding_0 = 0.f;
+  float object_motion_mode = 0.f;
   std::array<float, 2> current_jitter_uv = {0.f, 0.f};
-  std::array<float, 2> padding_1 = {0.f, 0.f};
+  std::array<float, 2> previous_jitter_uv = {0.f, 0.f};
+  float velocity_projection_jitter_scale = 0.f;
+  float clip_tightness = 0.5f;
+  float history_clip_strength = 1.f;
+  float current_frame_blend = 0.15f;
   std::array<float, 16> current_to_previous_clip = {};
 };
 
-static_assert(sizeof(ResolveConstants) == 96u, "TAA resolve constants must occupy six 16-byte registers");
+static_assert(sizeof(ResolveConstants) == 112u, "TAA resolve constants must occupy seven 16-byte registers");
 
 inline Resources resources;
 inline std::atomic_flag execution_lock = ATOMIC_FLAG_INIT;
@@ -298,7 +302,7 @@ inline bool EnsureComputePipeline(reshade::api::command_list* cmd_list) {
   if (device == nullptr) return false;
 
   if (resources.compute_layout.handle != 0u && resources.compute_pipeline.handle != 0u
-      && resources.samplers[0].handle != 0u && resources.samplers[1].handle != 0u) {
+      && resources.samplers[0].handle != 0u) {
     return true;
   }
 
@@ -863,7 +867,16 @@ inline bool MaybeRunFromColorSrvLocked(
       .diagnostic_view = constant_buffers::GetDiagnosticView(),
       .velocity_visualization_range = constant_buffers::GetVelocityVisualizationRange(),
       .camera_reprojection_valid = !history_seeded && native_jitter.camera_reprojection_valid ? 1.f : 0.f,
+      .object_motion_mode = static_cast<float>(constant_buffers::GetObjectMotionMode()),
       .current_jitter_uv = applied_jitter,
+      .previous_jitter_uv = {
+          native_jitter.previous_jitter_uv_x,
+          native_jitter.previous_jitter_uv_y,
+      },
+      .velocity_projection_jitter_scale = constant_buffers::GetProjectionJitterScale(constant_buffers::ProjectionJitterPath::VELOCITY),
+      .clip_tightness = constant_buffers::GetClipTightness(),
+      .history_clip_strength = constant_buffers::GetHistoryClipStrength(),
+      .current_frame_blend = constant_buffers::GetCurrentFrameBlend(),
       .current_to_previous_clip = native_jitter.current_to_previous_clip,
   };
   if (!DispatchCompute(

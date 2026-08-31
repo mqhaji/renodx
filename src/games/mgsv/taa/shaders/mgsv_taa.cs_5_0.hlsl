@@ -1,7 +1,5 @@
 #include "../../shared.h"
 
-#define CLIP_TIGHTNESS 0.5f
-
 // MGSV temporal resolve.
 //
 // Inputs (read live off the bindings of the insertion pixel-shader draw):
@@ -11,7 +9,7 @@
 //   t3 - depth (selects silhouette velocity from center + diagonal taps)
 //   t4 - object velocity (RGBA16F clone; .r marks pixels with object motion)
 //   s0 - point sampler (current color, velocity, depth, object mask)
-//   b0 - resolve diagnostic controls
+//   b0 - resolve diagnostic and tuning controls
 //
 // Output:
 //   u0 - current history (RGBA16F, sRGB-encoded RGB plus current scene alpha), copied back into scene color
@@ -31,9 +29,13 @@ cbuffer TaaResolveConstants : register(b0) {
   float diagnostic_view;
   float velocity_visualization_range;
   float camera_reprojection_valid;
-  float padding_0;
+  float object_motion_mode;
   float2 current_jitter_uv;
-  float2 padding_1;
+  float2 previous_jitter_uv;
+  float velocity_projection_jitter_scale;
+  float clip_tightness;
+  float history_clip_strength;
+  float current_frame_blend;
   float4 current_to_previous_clip_row_0;
   float4 current_to_previous_clip_row_1;
   float4 current_to_previous_clip_row_2;
@@ -124,8 +126,8 @@ Neighborhood BuildCurrentNeighborhood(float2 uv, float2 inv_screen_size, float3 
 
   Neighborhood neighborhood;
   neighborhood.filtered_color = filtered_sum * CURRENT_NORMALIZATION;
-  neighborhood.clip_min = lerp(broad_min, tight_min, CLIP_TIGHTNESS);
-  neighborhood.clip_max = lerp(broad_max, tight_max, CLIP_TIGHTNESS);
+  neighborhood.clip_min = lerp(broad_min, tight_min, clip_tightness);
+  neighborhood.clip_max = lerp(broad_max, tight_max, clip_tightness);
   return neighborhood;
 }
 
@@ -278,7 +280,7 @@ float ComputeHistoryBlend(float3 history_color, float3 clip_min, float3 clip_max
   float2 subpixel_weight = frac(abs(velocity) * screen_size);
   subpixel_weight = 0.5f.xx - abs(subpixel_weight - 0.5f.xx);
 
-  return saturate(0.15f * luma_edge_factor * (1.f + subpixel_weight.x + subpixel_weight.y));
+  return saturate(current_frame_blend * luma_edge_factor * (1.f + subpixel_weight.x + subpixel_weight.y));
 }
 
 [numthreads(8, 8, 1)]
@@ -294,15 +296,32 @@ void main(uint3 dispatch_thread_id: SV_DispatchThreadID) {
   const float3 current_center = DecodeSceneColor(raw_current.xyz);
 
   const float2 raw_velocity = DecodeVelocity(uv, screen_size);
+  const float raw_object_mask = object_velocity_texture.SampleLevel(point_sampler, uv, 0).r;
   const Neighborhood neighborhood = BuildCurrentNeighborhood(uv, inv_screen_size, current_center);
   const VelocitySelection velocity_selection =
       SelectNearestVelocity(uv, inv_screen_size, screen_size, raw_velocity);
-  float2 velocity = velocity_selection.velocity;
-  if (camera_reprojection_valid > 0.f && velocity_selection.object_mask <= 0.5f) {
-    float2 matrix_camera_velocity = 0.f.xx;
-    if (ComputeMatrixCameraVelocity(velocity_selection.uv, velocity_selection.depth, matrix_camera_velocity)) {
-      velocity = matrix_camera_velocity;
-    }
+  const float2 native_velocity = velocity_selection.velocity;
+  float2 matrix_camera_velocity = native_velocity;
+  if (camera_reprojection_valid > 0.f) {
+    ComputeMatrixCameraVelocity(velocity_selection.uv, velocity_selection.depth, matrix_camera_velocity);
+  }
+
+  float2 object_velocity = native_velocity;
+  if (object_motion_mode < 0.5f) {
+    object_velocity -= current_jitter_uv * velocity_projection_jitter_scale;
+  } else if (object_motion_mode >= 1.5f && object_motion_mode < 2.5f) {
+    object_velocity -= current_jitter_uv;
+  } else if (object_motion_mode >= 2.5f && object_motion_mode < 3.5f) {
+    object_velocity += current_jitter_uv;
+  } else if (object_motion_mode >= 3.5f && object_motion_mode < 4.5f) {
+    object_velocity -= current_jitter_uv - previous_jitter_uv;
+  } else if (object_motion_mode >= 4.5f) {
+    object_velocity += current_jitter_uv - previous_jitter_uv;
+  }
+
+  float2 velocity = velocity_selection.object_mask > 0.5f ? object_velocity : matrix_camera_velocity;
+  if (object_motion_mode >= 0.5f && object_motion_mode < 1.5f) {
+    velocity = matrix_camera_velocity;
   }
   // Do not add previous-current jitter here. That follows the current jittered
   // scene sample instead of accumulating the selected jitter phases at a fixed output
@@ -312,10 +331,14 @@ void main(uint3 dispatch_thread_id: SV_DispatchThreadID) {
   const float3 history_color = IsInsideScreen(history_uv)
                                    ? SampleHistoryDecodedCatmullRom(history_uv, screen_size)
                                    : neighborhood.filtered_color;
-  const float3 clipped_history = ClipHistory(
+  const float3 clipped_history = lerp(
       history_color,
-      neighborhood.filtered_color,
-      neighborhood.clip_min, neighborhood.clip_max);
+      ClipHistory(
+          history_color,
+          neighborhood.filtered_color,
+          neighborhood.clip_min,
+          neighborhood.clip_max),
+      history_clip_strength);
   const float blend = ComputeHistoryBlend(
       history_color,
       neighborhood.clip_min, neighborhood.clip_max,
@@ -335,6 +358,26 @@ void main(uint3 dispatch_thread_id: SV_DispatchThreadID) {
   } else if (diagnostic_view >= 3.5f && diagnostic_view < 4.5f) {
     const float velocity_magnitude = length(raw_velocity * screen_size);
     output_color = saturate(velocity_magnitude / max(velocity_visualization_range, 0.01f)).xxx;
+  } else if (diagnostic_view >= 4.5f && diagnostic_view < 5.5f) {
+    output_color = raw_object_mask.xxx;
+  } else if (diagnostic_view >= 5.5f && diagnostic_view < 6.5f) {
+    output_color = velocity_selection.object_mask.xxx;
+  } else if (diagnostic_view >= 6.5f && diagnostic_view < 7.5f) {
+    const float2 normalized_velocity = velocity * screen_size / max(velocity_visualization_range, 0.01f);
+    output_color = saturate(float3(normalized_velocity * 0.5f + 0.5f.xx, 0.5f));
+  } else if (diagnostic_view >= 7.5f && diagnostic_view < 8.5f) {
+    output_color = saturate(length(velocity * screen_size) / max(velocity_visualization_range, 0.01f)).xxx;
+  } else if (diagnostic_view >= 8.5f && diagnostic_view < 9.5f) {
+    const float2 residual = native_velocity - matrix_camera_velocity;
+    const float2 normalized_residual = residual * screen_size / max(velocity_visualization_range, 0.01f);
+    output_color = velocity_selection.object_mask > 0.5f
+                       ? saturate(float3(normalized_residual * 0.5f + 0.5f.xx, 0.5f))
+                       : 0.5f.xxx;
+  } else if (diagnostic_view >= 9.5f) {
+    const float residual_magnitude = length((native_velocity - matrix_camera_velocity) * screen_size);
+    output_color = velocity_selection.object_mask > 0.5f
+                       ? saturate(residual_magnitude / max(velocity_visualization_range, 0.01f)).xxx
+                       : 0.f.xxx;
   }
 
   current_history_output[dispatch_thread_id.xy] = exact_raw_current
