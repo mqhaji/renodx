@@ -109,7 +109,9 @@ The clone descriptor deliberately matches the underlying `b8g8r8a8_typeless` res
 render-target views. The addon activates the clone before the first `GBufferVelocity` or `GBufferMaskedVelocity` draw and
 keeps it active through `MotionBlurCameraVelocity`, which composites camera and object motion into a separate RGBA16F
 clone for TAA. This avoids losing object motion to BGRA8's approximately 0.502-pixel code spacing before the final float
-write. Runtime validation of the new object-input clone remains pending.
+write. Runtime validation confirmed that both the object input and final velocity are sampled through RGBA16F clones.
+Three minimal pixel-shader replacements preserve the native encoding and `/64` scale while allowing the existing
+unit-length motion clamp to be bypassed by a default-Off TAA diagnostic.
 
 ### LUT Builder (Inline Upgrade)
 
@@ -132,9 +134,9 @@ write. Runtime validation of the new object-input clone remains pending.
 | 0xE2D609B1 | DOF_ScatterCompositeNear | Depth-of-field near pass | ✓ | Yes | Arms post-DOF tracking flag |
 | 0x7C017264 | DOF_ScatterCompositeFar | Depth-of-field far pass | ✓ | Yes | Refreshes the DoF-copy window |
 | 0xFC5542BB | DOF_ScatterCompositeFinal | DoF final composite | ✓ | Yes | Closes the DoF-copy window |
-| 0x9815404F | GBufferVelocity | Deformation-aware object velocity | ✓ | TAA | Shared RGBA16F object-velocity clone |
-| 0x58C10658 | GBufferMaskedVelocity | Alpha-tested object velocity | ✓ | TAA | Writes the same RGBA16F object-velocity clone |
-| 0xA13321B6 | MotionBlurCameraVelocity | Final full-resolution velocity | ✓ | TAA | RGBA16F clone; velocity encoded in `.ba` |
+| 0x9815404F | GBufferVelocity | Deformation-aware object velocity | ✓ | TAA | Minimal replacement; shared RGBA16F clone and optional motion unclamp |
+| 0x58C10658 | GBufferMaskedVelocity | Alpha-tested object velocity | ✓ | TAA | Minimal replacement preserving native alpha tests and optional motion unclamp |
+| 0xA13321B6 | MotionBlurCameraVelocity | Final full-resolution velocity | ✓ | TAA | Minimal replacement; RGBA16F `.ba` velocity and optional camera-motion unclamp |
 | 0xF05DCBFD | Motion-blur tile max | Velocity tile preparation | — | No | Arms the next motion-blur input copy |
 | 0x512E2B48 | Motion-blur tile refine | Velocity tile refinement | — | No | Refreshes the motion-blur input-copy gate |
 | 0x83272BCB | CopyRenderBuffer | Generic scene/intermediate copy | Conditional | Conditional | Upgraded only inside a proven DoF or motion-blur window |
@@ -222,27 +224,33 @@ disabled, MGSV keeps its original FXAA path and the native projection remains un
 
 When enabled, the TAA path:
 
-1. Applies an eight-sample base-(2,3) Halton sequence only to the proven gameplay projection copy at
+1. Applies an eight-sample base-(2,3) Halton sequence first to the proven gameplay projection copy at
    `ShaderManager+0x680`.
 2. Publishes the exact applied jitter together with its frame token, sample index, and render dimensions.
-3. Captures vanilla no-jitter projection/view matrices at the same native boundary, computes the current inverse and
+3. Reuses that publication at guarded velocity, forward/model/alpha/overlay, and local-light native boundaries that
+   otherwise recopy persistent unjittered viewport projection.
+4. Captures vanilla no-jitter projection/view matrices at the main boundary, computes the current inverse and
    previous VP relation in double precision, and promotes current VP only after a successful temporal dispatch.
-4. Captures the final `MotionBlurCameraVelocity` target through the targeted RGBA16F velocity clone.
-5. Reprojects RGBA16F history on a fixed output grid using exact depth-derived camera motion for background pixels and
-   MGSV's deformation-aware velocity for object-mask pixels, with Alias Isolation's nearest-absolute-depth selection.
-6. Resolves immediately before `DOF_ScatterBakeFirst`, so the game creates its DoF and motion-blur inputs from resolved
+5. Captures the final `MotionBlurCameraVelocity` target through the targeted RGBA16F velocity clone.
+6. Reprojects RGBA16F history on a fixed output grid using exact depth-derived camera motion for background pixels and
+   MGSV's deformation-aware velocity for object-mask pixels, selecting the largest raw depth for positive reverse-Z.
+7. Resolves immediately before `DOF_ScatterBakeFirst`, so the game creates its DoF and motion-blur inputs from resolved
    scene color.
-7. Bypasses the original FXAA filter only while TAA is active.
+8. Bypasses the original FXAA filter only while TAA is active.
 
-**TAA Jitter Pattern** exposes only the production eight-phase Halton sequence and an **Off** diagnostic that leaves the
-resolve active with zero projection jitter. **TAA Diagnostic View** isolates the temporal result, raw current frame,
-3x3-filtered current frame, and raw center-pixel velocity direction or magnitude. **TAA Velocity View Range** controls
-the scale of the velocity visualizations. Pattern and diagnostic changes invalidate and reseed history.
+**TAA Jitter Pattern** is under **TAA Diagnostics** and exposes the production eight-phase Halton sequence plus an **Off**
+diagnostic that leaves the resolve active with zero projection jitter. The default build hides the extended diagnostic
+view, velocity range, object-motion selector, and per-path jitter controls behind
+`ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS=0`; their runtime values are pinned to production defaults. Resolve-tuning controls
+remain available, along with the default-Off **Unclamp Motion Vectors** experiment. Relevant changes invalidate and reseed
+history.
 
 The resolve fails closed: a missing or stale native jitter publication, stale velocity, or dimension mismatch skips temporal
 accumulation and invalidates history instead of blending misaligned frames. Enable/disable transitions also reset temporal
-state, and disabling verifies exact restoration of the vanilla projection copy. A scoped replacement for VS `0x200DBED9`
-applies the same published jitter to a light path that otherwise receives an unjittered projection.
+state, and disabling verifies exact restoration of the vanilla projection copy. A former scoped replacement for VS `0x200DBED9`
+previously proved the missing light jitter and has been removed. Brief runtime testing indicates that the native
+alpha-model correction controls the affected lights; the separate guarded local-light callback remains an additional
+known-path correction pending isolated runtime classification.
 
 See [`taa/README.md`](taa/README.md) for the current implementation and validation contract. Future temporal quality and
 native-resolution DLAA work is tracked in [`taa/ROADMAP.md`](taa/ROADMAP.md).
@@ -349,6 +357,7 @@ Use CMake Tools in VS Code, select the desired configuration, and build the `mgs
 - `build/Release/renodx-mgsv.addon64` (or the matching configuration directory)
 - `build/mgsv.include/embed/mgsv_taa.cso`
 - `build/mgsv.include/embed/mgsv_taa.h`
+- `build/mgsv.include/embed/0x9815404F.cso`, `0x58C10658.cso`, and `0xA13321B6.cso`
 
 ### Deploy
 
@@ -370,9 +379,12 @@ copy build\Release\renodx-mgsv.addon64 "C:\Program Files (x86)\Steam\steamapps\c
 1. Start with **Temporal Anti-Aliasing** disabled and confirm the original FXAA presentation is stable.
 2. Enable TAA with jitter **Off**, then switch to **Halton** and confirm that each pattern change resets history.
 3. Inspect static edges, foliage, slow and fast camera pans, aiming, binoculars, menus, DoF, and motion blur.
-4. Exercise all five diagnostic views and confirm the log has no recurring publication, capture, setup, or dispatch warnings.
-5. Disable TAA and verify that the scene returns without a persistent subpixel shift or stale-history frame.
-6. Repeat an enable/disable cycle after a resolution or display-mode change to verify history is recreated at the new size.
+4. Compare **Unclamp Motion Vectors** Off/On during motion above approximately 64 pixels; verify object motion and native
+   motion blur, then return it to its default **Off** state.
+5. With `ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS=1`, exercise all diagnostic views and per-path controls; otherwise verify
+   the production defaults and confirm the log has no recurring publication, capture, setup, or dispatch warnings.
+6. Disable TAA and verify that the scene returns without a persistent subpixel shift, stale-history frame, or freeze.
+7. Repeat an enable/disable cycle after a resolution or display-mode change to verify history is recreated at the new size.
 
 ---
 

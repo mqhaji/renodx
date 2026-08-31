@@ -748,17 +748,6 @@ static_assert(sizeof(ShaderInjectData) % 16u == 0u, "ShaderInjectData must remai
 
 renodx::mods::shader::CustomShaders custom_shaders = []() {
   renodx::mods::shader::CustomShaders shaders = {
-      {
-          0x200DBED9,
-          {
-              .crc32 = 0x200DBED9,
-              .code = __0x200DBED9,
-              .on_draw = [](auto*) {
-                taa::UpdateShaderInjectionJitter(&shader_injection);
-                return true;
-              },
-          },
-      },
       UpgradeRTVReplaceShaderCallback(0xE2D609B1, ArmDofFinalCopyRenderBufferWindow),            // DOF_ScatterCompositeNear
       UpgradeRTVReplaceShaderCallback(0x7C017264, ArmDofFinalCopyRenderBufferWindow),            // DOF_ScatterCompositeFar
       UpgradeRTVReplaceShaderCallback(0xFC5542BB, DisarmDofFinalCopyRenderBufferAfterDofFinal),  // DOF_ScatterCompositeFinal
