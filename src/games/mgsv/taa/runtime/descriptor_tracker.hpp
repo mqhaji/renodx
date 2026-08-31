@@ -34,8 +34,9 @@ struct __declspec(uuid("9F1A3A38-9D2A-4E5B-B5A3-3F2D0F38CD33")) CommandListData 
 
 inline CommandListData* Get(reshade::api::command_list* cmd_list) {
   if (cmd_list == nullptr) return nullptr;
-  auto* data = cmd_list->get_private_data<CommandListData>();
-  return data != nullptr ? data : cmd_list->create_private_data<CommandListData>();
+  // ReShade creates this state in init_command_list. Do not allocate lazily
+  // from descriptor or draw callbacks, which may run concurrently.
+  return cmd_list->get_private_data<CommandListData>();
 }
 
 inline bool ResolveRegister(
@@ -115,9 +116,6 @@ inline void OnPushDescriptors(
     reshade::api::pipeline_layout layout,
     uint32_t layout_param,
     const reshade::api::descriptor_table_update& update) {
-  auto* data = Get(cmd_list);
-  if (data == nullptr) return;
-
   const bool tracks_pixel = renodx::utils::bitwise::HasFlag(stages, reshade::api::shader_stage::pixel);
 
   switch (update.type) {
@@ -129,6 +127,9 @@ inline void OnPushDescriptors(
     default:
       return;
   }
+
+  auto* data = Get(cmd_list);
+  if (data == nullptr) return;
 
   for (uint32_t i = 0; i < update.count; ++i) {
     RegisterSlot slot = {};

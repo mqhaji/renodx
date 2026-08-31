@@ -28,9 +28,9 @@
 #error ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS must be 0 or 1
 #endif
 
-namespace taa::constant_buffers {
+namespace taa::state {
 
-enum class ProjectionJitterPath : size_t {
+enum class ProjectionJitterPath : std::uint8_t {
   VELOCITY,
   FORWARD,
   MODEL,
@@ -40,7 +40,7 @@ enum class ProjectionJitterPath : size_t {
   COUNT,
 };
 
-inline constexpr size_t PROJECTION_JITTER_PATH_COUNT = static_cast<size_t>(ProjectionJitterPath::COUNT);
+inline constexpr std::size_t PROJECTION_JITTER_PATH_COUNT = static_cast<std::size_t>(ProjectionJitterPath::COUNT);
 inline constexpr float DEFAULT_DIAGNOSTIC_VIEW = 0.f;
 inline constexpr float DEFAULT_VELOCITY_VISUALIZATION_RANGE = 8.f;
 inline constexpr uint32_t DEFAULT_OBJECT_MOTION_MODE = 0u;
@@ -50,10 +50,12 @@ struct FrameState {
   uint32_t taa_sample_index = 0u;
   uint64_t frame_index = 0u;
   bool taa_ran_this_frame = false;
+  bool full_resolution_candidate_seen = false;
 
   // Pipeline markers used to identify which CopyRenderBuffer invocation
-  // is the right TAA insertion point. DoF runs at all times in observed
-  // captures and runs before motion blur, so it is the primary gate.
+  // is the right TAA insertion point. The primary DoF hash can also run on
+  // lower-resolution inputs, so these later full-resolution gates remain
+  // available when that candidate is skipped.
   // Motion-blur tile prep is a fallback gate for scenes where DoF is
   // somehow absent but MB is active. Both flags clear every frame in
   // BeginFrame.
@@ -64,12 +66,10 @@ struct FrameState {
 inline float enabled = 0.f;
 inline float* enabled_binding = &enabled;
 inline float jitter_pattern = 1.f;
+#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
 inline float diagnostic_view = 0.f;
 inline float velocity_visualization_range = 8.f;
 inline float object_motion_mode = 0.f;
-inline float clip_tightness = 0.5f;
-inline float history_clip_strength = 1.f;
-inline float current_frame_blend = 0.15f;
 inline std::array<float, PROJECTION_JITTER_PATH_COUNT> projection_jitter_scales = {
     1.f,
     1.f,
@@ -78,14 +78,16 @@ inline std::array<float, PROJECTION_JITTER_PATH_COUNT> projection_jitter_scales 
     1.f,
     1.f,
 };
+#endif
+inline float clip_tightness = 0.5f;
+inline float history_clip_strength = 1.f;
+inline float current_frame_blend = 0.15f;
 inline std::atomic<bool> runtime_enabled = false;
 inline std::atomic<uint32_t> runtime_jitter_pattern = 1u;
+#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
 inline std::atomic<float> runtime_diagnostic_view = 0.f;
 inline std::atomic<float> runtime_velocity_visualization_range = 8.f;
 inline std::atomic<uint32_t> runtime_object_motion_mode = 0u;
-inline std::atomic<float> runtime_clip_tightness = 0.5f;
-inline std::atomic<float> runtime_history_clip_strength = 1.f;
-inline std::atomic<float> runtime_current_frame_blend = 0.15f;
 inline std::array<std::atomic<float>, PROJECTION_JITTER_PATH_COUNT> runtime_projection_jitter_scales = {
     std::atomic<float>{1.f},
     std::atomic<float>{1.f},
@@ -94,6 +96,10 @@ inline std::array<std::atomic<float>, PROJECTION_JITTER_PATH_COUNT> runtime_proj
     std::atomic<float>{1.f},
     std::atomic<float>{1.f},
 };
+#endif
+inline std::atomic<float> runtime_clip_tightness = 0.5f;
+inline std::atomic<float> runtime_history_clip_strength = 1.f;
+inline std::atomic<float> runtime_current_frame_blend = 0.15f;
 inline std::atomic<uint64_t> runtime_settings_generation = 0u;
 inline std::atomic<uint64_t> current_frame_token = 0u;
 inline std::atomic<uint32_t> current_sample_index = 0u;
@@ -130,13 +136,9 @@ inline uint32_t GetJitterPattern() {
   return runtime_jitter_pattern.load(std::memory_order_acquire);
 }
 
-inline void SetDiagnosticView(float value) {
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
+inline void SetDiagnosticView(float value) {
   value = static_cast<float>(static_cast<uint32_t>(std::clamp(value, 0.f, 10.f)));
-#else
-  (void)value;
-  value = DEFAULT_DIAGNOSTIC_VIEW;
-#endif
   diagnostic_view = value;
   if (runtime_diagnostic_view.exchange(value, std::memory_order_acq_rel) != value) {
     runtime_settings_generation.fetch_add(1u, std::memory_order_release);
@@ -146,6 +148,7 @@ inline void SetDiagnosticView(float value) {
 inline void SyncDiagnosticView() {
   SetDiagnosticView(diagnostic_view);
 }
+#endif
 
 inline float GetDiagnosticView() {
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
@@ -155,13 +158,9 @@ inline float GetDiagnosticView() {
 #endif
 }
 
-inline void SetVelocityVisualizationRange(float value) {
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
+inline void SetVelocityVisualizationRange(float value) {
   value = value > 0.01f ? value : 0.01f;
-#else
-  (void)value;
-  value = DEFAULT_VELOCITY_VISUALIZATION_RANGE;
-#endif
   velocity_visualization_range = value;
   runtime_velocity_visualization_range.store(value, std::memory_order_release);
 }
@@ -169,6 +168,7 @@ inline void SetVelocityVisualizationRange(float value) {
 inline void SyncVelocityVisualizationRange() {
   SetVelocityVisualizationRange(velocity_visualization_range);
 }
+#endif
 
 inline float GetVelocityVisualizationRange() {
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
@@ -178,13 +178,9 @@ inline float GetVelocityVisualizationRange() {
 #endif
 }
 
-inline void SetObjectMotionMode(float value) {
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
+inline void SetObjectMotionMode(float value) {
   const uint32_t mode = static_cast<uint32_t>(std::clamp(value, 0.f, 5.f));
-#else
-  (void)value;
-  const uint32_t mode = DEFAULT_OBJECT_MOTION_MODE;
-#endif
   object_motion_mode = static_cast<float>(mode);
   if (runtime_object_motion_mode.exchange(mode, std::memory_order_acq_rel) != mode) {
     runtime_settings_generation.fetch_add(1u, std::memory_order_release);
@@ -194,6 +190,7 @@ inline void SetObjectMotionMode(float value) {
 inline void SyncObjectMotionMode() {
   SetObjectMotionMode(object_motion_mode);
 }
+#endif
 
 inline uint32_t GetObjectMotionMode() {
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
@@ -244,14 +241,10 @@ inline float GetCurrentFrameBlend() {
   return runtime_current_frame_blend.load(std::memory_order_acquire);
 }
 
-inline void SetProjectionJitterScale(ProjectionJitterPath path, float value) {
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
+inline void SetProjectionJitterScale(ProjectionJitterPath path, float value) {
   value = std::clamp(value, -2.f, 2.f);
-#else
-  (void)value;
-  value = DEFAULT_PROJECTION_JITTER_SCALE;
-#endif
-  const size_t index = static_cast<size_t>(path);
+  const std::size_t index = static_cast<std::size_t>(path);
   projection_jitter_scales[index] = value;
   if (runtime_projection_jitter_scales[index].exchange(value, std::memory_order_acq_rel) != value) {
     runtime_settings_generation.fetch_add(1u, std::memory_order_release);
@@ -259,16 +252,17 @@ inline void SetProjectionJitterScale(ProjectionJitterPath path, float value) {
 }
 
 inline void SyncProjectionJitterScales() {
-  for (size_t index = 0u; index < PROJECTION_JITTER_PATH_COUNT; ++index) {
+  for (std::size_t index = 0u; index < PROJECTION_JITTER_PATH_COUNT; ++index) {
     SetProjectionJitterScale(
         static_cast<ProjectionJitterPath>(index),
         projection_jitter_scales[index]);
   }
 }
+#endif
 
 inline float GetProjectionJitterScale(ProjectionJitterPath path) {
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
-  return runtime_projection_jitter_scales[static_cast<size_t>(path)].load(std::memory_order_acquire);
+  return runtime_projection_jitter_scales[static_cast<std::size_t>(path)].load(std::memory_order_acquire);
 #else
   (void)path;
   return DEFAULT_PROJECTION_JITTER_SCALE;
@@ -329,15 +323,21 @@ inline std::array<float, 2> JitterForSample(uint32_t sample_index, uint32_t widt
 inline void ResetTemporalState() {
   frame_state.taa_sample_index = 0u;
   frame_state.taa_ran_this_frame = false;
+  frame_state.full_resolution_candidate_seen = false;
   current_sample_index.store(0u, std::memory_order_release);
 }
 
 inline void BeginFrame() {
   ++frame_state.frame_index;
   frame_state.taa_ran_this_frame = false;
+  frame_state.full_resolution_candidate_seen = false;
   frame_state.dof_fired = false;
   frame_state.mb_tile_prep_fired = false;
   current_frame_token.store(frame_state.frame_index, std::memory_order_release);
+}
+
+inline void MarkFullResolutionCandidate() {
+  frame_state.full_resolution_candidate_seen = true;
 }
 
 // Called only after a successful compute dispatch and copy-back.
@@ -347,4 +347,4 @@ inline void MarkTaaDispatched() {
   current_sample_index.store(frame_state.taa_sample_index, std::memory_order_release);
 }
 
-}  // namespace taa::constant_buffers
+}  // namespace taa::state

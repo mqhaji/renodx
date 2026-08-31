@@ -37,10 +37,10 @@
 #include "../../../../utils/resource.hpp"
 #include "../../../../utils/resource_upgrade.hpp"
 #include "../../../../utils/state.hpp"
-#include "./constant_buffers.hpp"
 #include "./descriptor_tracker.hpp"
 #include "./logging.hpp"
 #include "./projection_jitter.hpp"
+#include "./state.hpp"
 
 namespace taa::resolve {
 
@@ -72,6 +72,7 @@ struct Resources {
   reshade::api::resource_view depth_srv = {0};
   reshade::api::resource_view object_velocity_srv = {0};
   uint64_t capture_frame = std::numeric_limits<uint64_t>::max();
+  uint32_t capture_sample_index = std::numeric_limits<uint32_t>::max();
 
   reshade::api::pipeline_layout compute_layout = {0};
   reshade::api::pipeline compute_pipeline = {0};
@@ -106,12 +107,13 @@ inline uint64_t last_stale_capture_log = std::numeric_limits<uint64_t>::max();
 inline uint64_t last_compute_fail_log = std::numeric_limits<uint64_t>::max();
 inline uint64_t last_history_format_log = std::numeric_limits<uint64_t>::max();
 inline uint64_t last_history_create_fail_log = std::numeric_limits<uint64_t>::max();
-inline uint64_t last_color_size_reject_log = std::numeric_limits<uint64_t>::max();
+inline bool logged_non_full_resolution_candidate = false;
+inline bool logged_waiting_for_native_jitter = false;
 inline uint64_t last_missing_native_jitter_log = std::numeric_limits<uint64_t>::max();
 inline uint64_t last_history_invalidate_log = std::numeric_limits<uint64_t>::max();
 
 inline bool LogEvery(uint64_t& last_frame, uint64_t interval = 120u) {
-  return logging::ShouldLogFrame(constant_buffers::frame_state.frame_index, last_frame, interval);
+  return logging::ShouldLogFrame(state::frame_state.frame_index, last_frame, interval);
 }
 
 inline void LockExecution() {
@@ -132,6 +134,10 @@ inline bool IsExecutionLockedOnThisThread() {
 
 struct ExecutionGuard {
   ExecutionGuard() { LockExecution(); }
+  ExecutionGuard(const ExecutionGuard&) = delete;
+  ExecutionGuard& operator=(const ExecutionGuard&) = delete;
+  ExecutionGuard(ExecutionGuard&&) = delete;
+  ExecutionGuard& operator=(ExecutionGuard&&) = delete;
   ~ExecutionGuard() { UnlockExecution(); }
 };
 
@@ -141,6 +147,11 @@ struct OptionalExecutionGuard {
   OptionalExecutionGuard() : acquired(!IsExecutionLockedOnThisThread()) {
     if (acquired) LockExecution();
   }
+
+  OptionalExecutionGuard(const OptionalExecutionGuard&) = delete;
+  OptionalExecutionGuard& operator=(const OptionalExecutionGuard&) = delete;
+  OptionalExecutionGuard(OptionalExecutionGuard&&) = delete;
+  OptionalExecutionGuard& operator=(OptionalExecutionGuard&&) = delete;
 
   ~OptionalExecutionGuard() {
     if (acquired) UnlockExecution();
@@ -169,6 +180,7 @@ inline void ProcessDestroyedResourceViewsLocked() {
     resources.depth_srv = {0};
     resources.object_velocity_srv = {0};
     resources.capture_frame = std::numeric_limits<uint64_t>::max();
+    resources.capture_sample_index = std::numeric_limits<uint32_t>::max();
   }
   for (auto& slot : destroyed_view_mailbox) {
     const uint64_t handle = slot.exchange(0u, std::memory_order_acq_rel);
@@ -273,7 +285,7 @@ inline void InvalidateHistory(const char* reason = "unspecified") {
   projection_jitter::ResetMatrixHistory();
   if (was_initialized && LogEvery(last_history_invalidate_log, 1u)) {
     logging::Info("invalidated TAA history reason=", reason,
-                  " frame=", constant_buffers::CurrentFrameToken());
+                  " frame=", state::CurrentFrameToken());
   }
 }
 
@@ -286,6 +298,7 @@ inline void DestroyVelocitySrv(reshade::api::device* device) {
   resources.velocity_view_format = reshade::api::format::unknown;
   resources.object_velocity_srv = {0};
   resources.capture_frame = std::numeric_limits<uint64_t>::max();
+  resources.capture_sample_index = std::numeric_limits<uint32_t>::max();
 }
 
 inline void Destroy(reshade::api::device* device) {
@@ -293,6 +306,8 @@ inline void Destroy(reshade::api::device* device) {
   DestroyHistory(device);
   DestroyVelocitySrv(device);
   resources = {};
+  logged_non_full_resolution_candidate = false;
+  logged_waiting_for_native_jitter = false;
 }
 
 // Layout mirrors the compute shader registers:
@@ -472,7 +487,7 @@ inline bool EnsureHistory(
     if (LogEvery(last_history_format_log)) {
       logging::Warn("unsupported TAA color format resource_format=", static_cast<uint32_t>(color_desc.texture.format),
                     " view_format=", static_cast<uint32_t>(color_view_desc.format),
-                    " frame=", constant_buffers::frame_state.frame_index);
+                    " frame=", state::frame_state.frame_index);
     }
     return false;
   }
@@ -646,7 +661,8 @@ inline void CaptureCameraMotion(
 
   resources.depth_srv = depth_srv;
   resources.object_velocity_srv = object_velocity_srv;
-  resources.capture_frame = constant_buffers::frame_state.frame_index;
+  resources.capture_frame = state::CurrentFrameToken();
+  resources.capture_sample_index = state::CurrentSampleIndex();
 }
 
 inline bool DispatchCompute(
@@ -730,7 +746,8 @@ inline bool DispatchCompute(
 
 inline bool ColorMatchesCapturedInputs(
     reshade::api::command_list* cmd_list,
-    reshade::api::resource_view color_srv) {
+    reshade::api::resource_view color_srv,
+    const char* insertion_name) {
   auto* device = cmd_list != nullptr ? cmd_list->get_device() : nullptr;
   if (device == nullptr
       || color_srv.handle == 0u
@@ -755,13 +772,12 @@ inline bool ColorMatchesCapturedInputs(
                        && color_desc.texture.height == depth_desc.texture.height
                        && color_desc.texture.width == object_velocity_desc.texture.width
                        && color_desc.texture.height == object_velocity_desc.texture.height;
-  if (!matches && LogEvery(last_color_size_reject_log, 30u)) {
-    logging::Warn("TAA input dimensions mismatch color=", color_desc.texture.width, "x", color_desc.texture.height,
+  if (!matches && !logged_non_full_resolution_candidate) {
+    logged_non_full_resolution_candidate = true;
+    logging::Info("skipping non-full-resolution TAA insertion candidate insertion=", insertion_name,
+                  " color=", color_desc.texture.width, "x", color_desc.texture.height,
                   " depth=", depth_desc.texture.width, "x", depth_desc.texture.height,
-                  " object_velocity=", object_velocity_desc.texture.width, "x", object_velocity_desc.texture.height,
-                  " color_srv=", logging::Hex{color_srv.handle},
-                  " depth_srv=", logging::Hex{resources.depth_srv.handle},
-                  " object_velocity_srv=", logging::Hex{resources.object_velocity_srv.handle});
+                  " object_velocity=", object_velocity_desc.texture.width, "x", object_velocity_desc.texture.height);
   }
   return matches;
 }
@@ -773,8 +789,8 @@ inline bool MaybeRunFromColorSrvLocked(
     reshade::api::resource_usage color_final_usage = reshade::api::resource_usage::shader_resource,
     const char* insertion_name = "unknown") {
   ProcessDestroyedResourceViewsLocked();
-  if (!constant_buffers::IsEnabled()) return false;
-  if (constant_buffers::frame_state.taa_ran_this_frame) return false;
+  if (!state::IsEnabled()) return false;
+  if (state::frame_state.taa_ran_this_frame) return false;
 
   if (color_srv.handle == 0u
       || resources.velocity_srv.handle == 0u
@@ -789,26 +805,48 @@ inline bool MaybeRunFromColorSrvLocked(
     }
     return false;
   }
-  if (resources.capture_frame != constant_buffers::frame_state.frame_index) {
+  if (!ColorMatchesCapturedInputs(cmd_list, color_srv, insertion_name)) {
+    return false;
+  }
+  state::MarkFullResolutionCandidate();
+
+  const uint64_t frame_token = state::CurrentFrameToken();
+  const uint32_t expected_sample_index = state::CurrentSampleIndex();
+  // Camera motion can be captured before Present while the matching insertion
+  // callback arrives after it. The unchanged sample distinguishes that render
+  // from a genuinely stale capture left over from a completed TAA frame.
+  const bool capture_frame_matches = resources.capture_frame == frame_token
+                                     || (frame_token != 0u && resources.capture_frame == frame_token - 1u);
+  if (!capture_frame_matches || resources.capture_sample_index != expected_sample_index) {
     if (LogEvery(last_stale_capture_log)) {
       logging::Warn("insertion reached with stale camera velocity capture insertion=", insertion_name,
                     " capture_frame=", resources.capture_frame,
-                    " frame=", constant_buffers::frame_state.frame_index);
+                    " frame=", frame_token,
+                    " capture_sample=", resources.capture_sample_index,
+                    " sample=", expected_sample_index);
     }
     return false;
   }
-  if (!ColorMatchesCapturedInputs(cmd_list, color_srv)) {
-    return false;
-  }
 
-  const uint64_t frame_token = constant_buffers::CurrentFrameToken();
-  const uint32_t expected_sample_index = constant_buffers::CurrentSampleIndex();
   const auto native_jitter = projection_jitter::GetAppliedJitter();
+  // MGSV can commit the native projection before Present while the matching
+  // draw callbacks are recorded after it. In that ordering, the publication
+  // legitimately trails the presentation epoch by one but still carries the
+  // exact sample and camera state used by this render.
+  const bool native_frame_matches = native_jitter.frame_token == frame_token
+                                    || (frame_token != 0u && native_jitter.frame_token == frame_token - 1u);
   if (!native_jitter.valid
-      || native_jitter.frame_token != frame_token
+      || !native_frame_matches
       || native_jitter.sample_index != expected_sample_index) {
-    InvalidateHistory("missing or stale native jitter");
-    if (LogEvery(last_missing_native_jitter_log, 30u)) {
+    if (!resources.initialized
+        && expected_sample_index == 0u
+        && !native_jitter.valid) {
+      if (!logged_waiting_for_native_jitter) {
+        logged_waiting_for_native_jitter = true;
+        logging::Info("waiting for first native jitter publication insertion=", insertion_name,
+                      " frame=", frame_token);
+      }
+    } else if (LogEvery(last_missing_native_jitter_log)) {
       logging::Warn("rejecting TAA dispatch without matching native jitter insertion=", insertion_name,
                     " frame=", frame_token,
                     " sample=", expected_sample_index,
@@ -831,7 +869,7 @@ inline bool MaybeRunFromColorSrvLocked(
     InvalidateHistory("native camera matrix history unavailable");
   }
 
-  const uint64_t settings_generation = constant_buffers::RuntimeSettingsGeneration();
+  const uint64_t settings_generation = state::RuntimeSettingsGeneration();
   if (resources.settings_generation != settings_generation) {
     InvalidateHistory("TAA runtime settings changed");
   }
@@ -864,19 +902,19 @@ inline bool MaybeRunFromColorSrvLocked(
       native_jitter.jitter_uv_y,
   };
   const ResolveConstants resolve_constants = {
-      .diagnostic_view = constant_buffers::GetDiagnosticView(),
-      .velocity_visualization_range = constant_buffers::GetVelocityVisualizationRange(),
+      .diagnostic_view = state::GetDiagnosticView(),
+      .velocity_visualization_range = state::GetVelocityVisualizationRange(),
       .camera_reprojection_valid = !history_seeded && native_jitter.camera_reprojection_valid ? 1.f : 0.f,
-      .object_motion_mode = static_cast<float>(constant_buffers::GetObjectMotionMode()),
+      .object_motion_mode = static_cast<float>(state::GetObjectMotionMode()),
       .current_jitter_uv = applied_jitter,
       .previous_jitter_uv = {
           native_jitter.previous_jitter_uv_x,
           native_jitter.previous_jitter_uv_y,
       },
-      .velocity_projection_jitter_scale = constant_buffers::GetProjectionJitterScale(constant_buffers::ProjectionJitterPath::VELOCITY),
-      .clip_tightness = constant_buffers::GetClipTightness(),
-      .history_clip_strength = constant_buffers::GetHistoryClipStrength(),
-      .current_frame_blend = constant_buffers::GetCurrentFrameBlend(),
+      .velocity_projection_jitter_scale = state::GetProjectionJitterScale(state::ProjectionJitterPath::VELOCITY),
+      .clip_tightness = state::GetClipTightness(),
+      .history_clip_strength = state::GetHistoryClipStrength(),
+      .current_frame_blend = state::GetCurrentFrameBlend(),
       .current_to_previous_clip = native_jitter.current_to_previous_clip,
   };
   if (!DispatchCompute(
@@ -891,15 +929,23 @@ inline bool MaybeRunFromColorSrvLocked(
     return false;
   }
 
+  if (history_seeded) {
+    logging::Info("TAA accumulation started insertion=", insertion_name,
+                  " frame=", frame_token,
+                  " native_frame=", native_jitter.frame_token,
+                  " sample=", expected_sample_index,
+                  " size=", resources.width, "x", resources.height);
+  }
+
   resources.accum_index = previous;
   resources.settings_generation = settings_generation;
   const bool camera_matrix_committed = projection_jitter::CommitCameraMatrix(
-      frame_token,
+      native_jitter.frame_token,
       expected_sample_index);
   if (!camera_matrix_committed) {
     InvalidateHistory("native camera matrix commit failed");
   }
-  constant_buffers::MarkTaaDispatched();
+  state::MarkTaaDispatched();
   return true;
 }
 
@@ -909,7 +955,7 @@ inline bool MaybeRunFromColorSrv(
     reshade::api::resource_usage color_initial_usage = reshade::api::resource_usage::shader_resource,
     reshade::api::resource_usage color_final_usage = reshade::api::resource_usage::shader_resource,
     const char* insertion_name = "unknown") {
-  if (!constant_buffers::IsEnabled()) return false;
+  if (!state::IsEnabled()) return false;
   OptionalExecutionGuard execution_guard;
   return MaybeRunFromColorSrvLocked(
       cmd_list,
