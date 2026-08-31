@@ -17,9 +17,34 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 
+#ifndef ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
+#define ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS 0
+#endif
+
+#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS != 0 && ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS != 1
+#error ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS must be 0 or 1
+#endif
+
 namespace taa::constant_buffers {
+
+enum class ProjectionJitterPath : size_t {
+  VELOCITY,
+  FORWARD,
+  MODEL,
+  ALPHA_MODEL,
+  OVERLAY_MODEL,
+  LOCAL_LIGHT,
+  COUNT,
+};
+
+inline constexpr size_t PROJECTION_JITTER_PATH_COUNT = static_cast<size_t>(ProjectionJitterPath::COUNT);
+inline constexpr float DEFAULT_DIAGNOSTIC_VIEW = 0.f;
+inline constexpr float DEFAULT_VELOCITY_VISUALIZATION_RANGE = 8.f;
+inline constexpr uint32_t DEFAULT_OBJECT_MOTION_MODE = 0u;
+inline constexpr float DEFAULT_PROJECTION_JITTER_SCALE = 1.f;
 
 struct FrameState {
   uint32_t taa_sample_index = 0u;
@@ -41,10 +66,34 @@ inline float* enabled_binding = &enabled;
 inline float jitter_pattern = 1.f;
 inline float diagnostic_view = 0.f;
 inline float velocity_visualization_range = 8.f;
+inline float object_motion_mode = 0.f;
+inline float clip_tightness = 0.5f;
+inline float history_clip_strength = 1.f;
+inline float current_frame_blend = 0.15f;
+inline std::array<float, PROJECTION_JITTER_PATH_COUNT> projection_jitter_scales = {
+    1.f,
+    1.f,
+    1.f,
+    1.f,
+    1.f,
+    1.f,
+};
 inline std::atomic<bool> runtime_enabled = false;
 inline std::atomic<uint32_t> runtime_jitter_pattern = 1u;
 inline std::atomic<float> runtime_diagnostic_view = 0.f;
 inline std::atomic<float> runtime_velocity_visualization_range = 8.f;
+inline std::atomic<uint32_t> runtime_object_motion_mode = 0u;
+inline std::atomic<float> runtime_clip_tightness = 0.5f;
+inline std::atomic<float> runtime_history_clip_strength = 1.f;
+inline std::atomic<float> runtime_current_frame_blend = 0.15f;
+inline std::array<std::atomic<float>, PROJECTION_JITTER_PATH_COUNT> runtime_projection_jitter_scales = {
+    std::atomic<float>{1.f},
+    std::atomic<float>{1.f},
+    std::atomic<float>{1.f},
+    std::atomic<float>{1.f},
+    std::atomic<float>{1.f},
+    std::atomic<float>{1.f},
+};
 inline std::atomic<uint64_t> runtime_settings_generation = 0u;
 inline std::atomic<uint64_t> current_frame_token = 0u;
 inline std::atomic<uint32_t> current_sample_index = 0u;
@@ -82,7 +131,12 @@ inline uint32_t GetJitterPattern() {
 }
 
 inline void SetDiagnosticView(float value) {
-  value = static_cast<float>(static_cast<uint32_t>(std::clamp(value, 0.f, 4.f)));
+#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
+  value = static_cast<float>(static_cast<uint32_t>(std::clamp(value, 0.f, 10.f)));
+#else
+  (void)value;
+  value = DEFAULT_DIAGNOSTIC_VIEW;
+#endif
   diagnostic_view = value;
   if (runtime_diagnostic_view.exchange(value, std::memory_order_acq_rel) != value) {
     runtime_settings_generation.fetch_add(1u, std::memory_order_release);
@@ -94,11 +148,22 @@ inline void SyncDiagnosticView() {
 }
 
 inline float GetDiagnosticView() {
+#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
   return runtime_diagnostic_view.load(std::memory_order_acquire);
+#else
+  return DEFAULT_DIAGNOSTIC_VIEW;
+#endif
 }
 
 inline void SetVelocityVisualizationRange(float value) {
-  runtime_velocity_visualization_range.store(value > 0.01f ? value : 0.01f, std::memory_order_release);
+#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
+  value = value > 0.01f ? value : 0.01f;
+#else
+  (void)value;
+  value = DEFAULT_VELOCITY_VISUALIZATION_RANGE;
+#endif
+  velocity_visualization_range = value;
+  runtime_velocity_visualization_range.store(value, std::memory_order_release);
 }
 
 inline void SyncVelocityVisualizationRange() {
@@ -106,7 +171,108 @@ inline void SyncVelocityVisualizationRange() {
 }
 
 inline float GetVelocityVisualizationRange() {
+#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
   return runtime_velocity_visualization_range.load(std::memory_order_acquire);
+#else
+  return DEFAULT_VELOCITY_VISUALIZATION_RANGE;
+#endif
+}
+
+inline void SetObjectMotionMode(float value) {
+#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
+  const uint32_t mode = static_cast<uint32_t>(std::clamp(value, 0.f, 5.f));
+#else
+  (void)value;
+  const uint32_t mode = DEFAULT_OBJECT_MOTION_MODE;
+#endif
+  object_motion_mode = static_cast<float>(mode);
+  if (runtime_object_motion_mode.exchange(mode, std::memory_order_acq_rel) != mode) {
+    runtime_settings_generation.fetch_add(1u, std::memory_order_release);
+  }
+}
+
+inline void SyncObjectMotionMode() {
+  SetObjectMotionMode(object_motion_mode);
+}
+
+inline uint32_t GetObjectMotionMode() {
+#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
+  return runtime_object_motion_mode.load(std::memory_order_acquire);
+#else
+  return DEFAULT_OBJECT_MOTION_MODE;
+#endif
+}
+
+inline void SetResolveTuningValue(
+    float& binding,
+    std::atomic<float>& runtime_value,
+    float value) {
+  value = std::clamp(value, 0.f, 1.f);
+  binding = value;
+  if (runtime_value.exchange(value, std::memory_order_acq_rel) != value) {
+    runtime_settings_generation.fetch_add(1u, std::memory_order_release);
+  }
+}
+
+inline void SetClipTightness(float value) {
+  SetResolveTuningValue(clip_tightness, runtime_clip_tightness, value);
+}
+
+inline void SetHistoryClipStrength(float value) {
+  SetResolveTuningValue(history_clip_strength, runtime_history_clip_strength, value);
+}
+
+inline void SetCurrentFrameBlend(float value) {
+  SetResolveTuningValue(current_frame_blend, runtime_current_frame_blend, value);
+}
+
+inline void SyncResolveTuning() {
+  SetClipTightness(clip_tightness);
+  SetHistoryClipStrength(history_clip_strength);
+  SetCurrentFrameBlend(current_frame_blend);
+}
+
+inline float GetClipTightness() {
+  return runtime_clip_tightness.load(std::memory_order_acquire);
+}
+
+inline float GetHistoryClipStrength() {
+  return runtime_history_clip_strength.load(std::memory_order_acquire);
+}
+
+inline float GetCurrentFrameBlend() {
+  return runtime_current_frame_blend.load(std::memory_order_acquire);
+}
+
+inline void SetProjectionJitterScale(ProjectionJitterPath path, float value) {
+#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
+  value = std::clamp(value, -2.f, 2.f);
+#else
+  (void)value;
+  value = DEFAULT_PROJECTION_JITTER_SCALE;
+#endif
+  const size_t index = static_cast<size_t>(path);
+  projection_jitter_scales[index] = value;
+  if (runtime_projection_jitter_scales[index].exchange(value, std::memory_order_acq_rel) != value) {
+    runtime_settings_generation.fetch_add(1u, std::memory_order_release);
+  }
+}
+
+inline void SyncProjectionJitterScales() {
+  for (size_t index = 0u; index < PROJECTION_JITTER_PATH_COUNT; ++index) {
+    SetProjectionJitterScale(
+        static_cast<ProjectionJitterPath>(index),
+        projection_jitter_scales[index]);
+  }
+}
+
+inline float GetProjectionJitterScale(ProjectionJitterPath path) {
+#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
+  return runtime_projection_jitter_scales[static_cast<size_t>(path)].load(std::memory_order_acquire);
+#else
+  (void)path;
+  return DEFAULT_PROJECTION_JITTER_SCALE;
+#endif
 }
 
 inline uint64_t RuntimeSettingsGeneration() {

@@ -65,9 +65,10 @@ Create a consumer-independent input layer shared by custom TAA and DLAA:
 
 - Derive background camera motion exactly from depth and no-jitter matrices.
 - Preserve native current/previous bones and object transforms for object motion.
-- Investigate the velocity-specific `MakeVelocityBuffer` orchestration boundary with a bounded read-only observer before
-  any native correction.
-- Remove the native packed-motion bias and approximately 64-pixel clamp only on an owned temporal path.
+- Continue validating the scoped `MakeVelocityBuffer` correction now that its viewport-projection reset and setter
+  boundary have been identified and jittered.
+- Use the default-Off shared-signal **Unclamp Motion Vectors** option only as a diagnostic. A production implementation
+  should remove the native packed-motion bias and approximately 64-pixel clamp on an owned temporal path instead.
 - Keep native motion blur as a separate compatibility consumer until expanded vectors are proven safe.
 
 ### Deferred masks

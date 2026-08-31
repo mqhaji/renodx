@@ -32,6 +32,70 @@
 namespace taa::projection_jitter {
 
 using SetViewMatrixState = void(__fastcall*)(const float* view_matrix);
+using RenderPluginCallback = void(__fastcall*)(void* plugin, void* render, void* viewport);
+
+inline constexpr uintptr_t VELOCITY_SET_VIEW_RETURN_RVA = 0x1C57C8u;
+inline constexpr uintptr_t MODEL_SET_VIEW_RETURN_RVA = 0x1CD63Au;
+inline constexpr uintptr_t ALPHA_MODEL_SET_VIEW_RETURN_RVA = 0x1CFA0Du;
+inline constexpr uintptr_t OVERLAY_MODEL_SET_VIEW_RETURN_RVA = 0x208D9Cu;
+inline constexpr uintptr_t FORWARD_RENDERING_RVA = 0x1CD460u;
+inline constexpr uintptr_t LOCAL_LIGHT_MAIN_EXEC_RVA = 0x20AA00u;
+inline constexpr uintptr_t LOCAL_LIGHT_VIEWPORT_280_COPY_RVA = 0x20B48Cu;
+
+inline constexpr std::array<uint8_t, 16> FORWARD_RENDERING_PROLOGUE = {
+    0x40,
+    0x53,
+    0x48,
+    0x83,
+    0xEC,
+    0x20,
+    0x8B,
+    0x0D,
+    0x4C,
+    0x7D,
+    0x81,
+    0x02,
+    0x49,
+    0x8B,
+    0xD8,
+    0xE8,
+};
+inline constexpr std::array<uint8_t, 16> LOCAL_LIGHT_MAIN_EXEC_PROLOGUE = {
+    0x48,
+    0x8B,
+    0xC4,
+    0x55,
+    0x56,
+    0x57,
+    0x41,
+    0x54,
+    0x41,
+    0x55,
+    0x41,
+    0x56,
+    0x41,
+    0x57,
+    0x48,
+    0x8D,
+};
+inline constexpr std::array<uint8_t, 16> LOCAL_LIGHT_VIEWPORT_280_COPY_PATTERN = {
+    0x41,
+    0x0F,
+    0x28,
+    0x87,
+    0x80,
+    0x02,
+    0x00,
+    0x00,
+    0x41,
+    0x0F,
+    0x29,
+    0x86,
+    0xA0,
+    0x01,
+    0x00,
+    0x00,
+};
 
 inline constexpr std::array<uint8_t, 26> PROJECTION_COMMIT_PATTERN = {
     0x83,
@@ -134,6 +198,8 @@ struct AppliedJitter {
   uint32_t height = 0u;
   float jitter_uv_x = 0.f;
   float jitter_uv_y = 0.f;
+  float previous_jitter_uv_x = 0.f;
+  float previous_jitter_uv_y = 0.f;
   std::array<float, 16> current_to_previous_clip = {};
 };
 
@@ -142,9 +208,15 @@ struct Matrix4d {
 };
 
 inline SetViewMatrixState set_view_matrix_state = nullptr;
+inline RenderPluginCallback forward_rendering = nullptr;
+inline RenderPluginCallback local_light_main_exec = nullptr;
 inline uint8_t* projection_commit_address = nullptr;
 inline uint8_t* helper_entry_address = nullptr;
 inline uint8_t* expected_return_address = nullptr;
+inline void* velocity_return_address = nullptr;
+inline void* model_return_address = nullptr;
+inline void* alpha_model_return_address = nullptr;
+inline void* overlay_model_return_address = nullptr;
 inline void** shader_manager_global = nullptr;
 inline bool installed = false;
 
@@ -160,6 +232,11 @@ inline std::atomic<bool> production_awaiting_restoration = false;
 inline std::atomic<bool> logged_first_accept = false;
 inline std::atomic<bool> logged_first_production_jitter = false;
 inline std::atomic<uint32_t> hook_calls_in_flight = 0u;
+inline std::array<std::atomic<uint64_t>, constant_buffers::PROJECTION_JITTER_PATH_COUNT> additional_jitter_writes = {};
+inline std::array<std::atomic<uint64_t>, constant_buffers::PROJECTION_JITTER_PATH_COUNT> additional_jitter_rejects = {};
+inline std::array<std::atomic<bool>, constant_buffers::PROJECTION_JITTER_PATH_COUNT> logged_first_additional_jitter = {};
+inline std::atomic_flag local_light_projection_lock = ATOMIC_FLAG_INIT;
+inline thread_local bool local_light_projection_active = false;
 
 inline std::atomic<uint64_t> published_sequence = 0u;
 inline std::atomic<bool> published_valid = false;
@@ -169,6 +246,8 @@ inline std::atomic<uint32_t> published_width = 0u;
 inline std::atomic<uint32_t> published_height = 0u;
 inline std::atomic<float> published_jitter_uv_x = 0.f;
 inline std::atomic<float> published_jitter_uv_y = 0.f;
+inline std::atomic<float> published_previous_jitter_uv_x = 0.f;
+inline std::atomic<float> published_previous_jitter_uv_y = 0.f;
 inline std::atomic<bool> published_camera_matrix_valid = false;
 inline std::atomic<bool> published_camera_reprojection_valid = false;
 inline std::array<std::atomic<float>, 16> published_current_to_previous_clip = {};
@@ -178,6 +257,7 @@ inline std::atomic_flag publication_write_lock = ATOMIC_FLAG_INIT;
 // matrix here, while only a successful TAA dispatch promotes it to previous.
 inline Matrix4d staged_current_view_projection = {};
 inline Matrix4d committed_previous_view_projection = {};
+inline std::array<float, 2> committed_previous_jitter_uv = {0.f, 0.f};
 inline bool staged_current_view_projection_valid = false;
 inline bool committed_previous_view_projection_valid = false;
 
@@ -264,6 +344,7 @@ inline std::array<float, 16> ToRowMajorFloatArray(const Matrix4d& matrix) {
 
 inline void ResetMatrixHistoryLocked() {
   committed_previous_view_projection = {};
+  committed_previous_jitter_uv = {0.f, 0.f};
   committed_previous_view_projection_valid = false;
 }
 
@@ -299,6 +380,8 @@ inline void PublishAppliedJitterLocked(const AppliedJitter& jitter) {
   published_height.store(jitter.height, std::memory_order_relaxed);
   published_jitter_uv_x.store(jitter.jitter_uv_x, std::memory_order_relaxed);
   published_jitter_uv_y.store(jitter.jitter_uv_y, std::memory_order_relaxed);
+  published_previous_jitter_uv_x.store(jitter.previous_jitter_uv_x, std::memory_order_relaxed);
+  published_previous_jitter_uv_y.store(jitter.previous_jitter_uv_y, std::memory_order_relaxed);
   published_camera_matrix_valid.store(jitter.camera_matrix_valid, std::memory_order_relaxed);
   published_camera_reprojection_valid.store(jitter.camera_reprojection_valid, std::memory_order_relaxed);
   for (uint32_t index = 0u; index < jitter.current_to_previous_clip.size(); ++index) {
@@ -322,6 +405,8 @@ inline AppliedJitter GetAppliedJitter() {
     result.height = published_height.load(std::memory_order_relaxed);
     result.jitter_uv_x = published_jitter_uv_x.load(std::memory_order_relaxed);
     result.jitter_uv_y = published_jitter_uv_y.load(std::memory_order_relaxed);
+    result.previous_jitter_uv_x = published_previous_jitter_uv_x.load(std::memory_order_relaxed);
+    result.previous_jitter_uv_y = published_previous_jitter_uv_y.load(std::memory_order_relaxed);
     result.camera_matrix_valid = published_camera_matrix_valid.load(std::memory_order_relaxed);
     result.camera_reprojection_valid = published_camera_reprojection_valid.load(std::memory_order_relaxed);
     for (uint32_t index = 0u; index < result.current_to_previous_clip.size(); ++index) {
@@ -351,6 +436,10 @@ inline bool CommitCameraMatrix(uint64_t frame_token, uint32_t sample_index) {
                        && staged_current_view_projection_valid;
   if (matches) {
     committed_previous_view_projection = staged_current_view_projection;
+    committed_previous_jitter_uv = {
+        published_jitter_uv_x.load(std::memory_order_relaxed),
+        published_jitter_uv_y.load(std::memory_order_relaxed),
+    };
     committed_previous_view_projection_valid = true;
   }
   UnlockPublicationWriter();
@@ -447,6 +536,39 @@ inline void** DecodeShaderManagerGlobal(uint8_t* commit) {
   return reinterpret_cast<void**>(load + 7u + displacement);
 }
 
+template <size_t Size>
+inline bool MatchesBytes(const uint8_t* address, const std::array<uint8_t, Size>& expected) {
+  return address != nullptr && std::memcmp(address, expected.data(), expected.size()) == 0;
+}
+
+inline bool InitializeAdditionalHookAddresses(HMODULE module) {
+  if (module == nullptr || helper_entry_address == nullptr) return false;
+  auto* base = reinterpret_cast<uint8_t*>(module);
+
+  auto* velocity_return = base + VELOCITY_SET_VIEW_RETURN_RVA;
+  auto* model_return = base + MODEL_SET_VIEW_RETURN_RVA;
+  auto* alpha_return = base + ALPHA_MODEL_SET_VIEW_RETURN_RVA;
+  auto* overlay_return = base + OVERLAY_MODEL_SET_VIEW_RETURN_RVA;
+  if (DecodeRelativeCall(velocity_return - 5u) != helper_entry_address
+      || DecodeRelativeCall(model_return - 5u) != helper_entry_address
+      || DecodeRelativeCall(alpha_return - 5u) != helper_entry_address
+      || DecodeRelativeCall(overlay_return - 5u) != helper_entry_address
+      || !MatchesBytes(base + FORWARD_RENDERING_RVA, FORWARD_RENDERING_PROLOGUE)
+      || !MatchesBytes(base + LOCAL_LIGHT_MAIN_EXEC_RVA, LOCAL_LIGHT_MAIN_EXEC_PROLOGUE)
+      || !MatchesBytes(base + LOCAL_LIGHT_VIEWPORT_280_COPY_RVA, LOCAL_LIGHT_VIEWPORT_280_COPY_PATTERN)) {
+    logging::Warn("known additional projection jitter paths failed executable validation");
+    return false;
+  }
+
+  velocity_return_address = velocity_return;
+  model_return_address = model_return;
+  alpha_model_return_address = alpha_return;
+  overlay_model_return_address = overlay_return;
+  forward_rendering = reinterpret_cast<RenderPluginCallback>(base + FORWARD_RENDERING_RVA);
+  local_light_main_exec = reinterpret_cast<RenderPluginCallback>(base + LOCAL_LIGHT_MAIN_EXEC_RVA);
+  return true;
+}
+
 inline bool LooksLikeGameplayProjection(
     const float* projection,
     uint32_t width,
@@ -475,11 +597,106 @@ inline void ApplyProjectionJitter(
   *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(shader_manager) + 0x894u) |= 0x08u;
 }
 
+inline void ApplyProjectionJitter(float* projection, float jitter_uv_x, float jitter_uv_y) {
+  projection[8] += 2.f * jitter_uv_x;
+  projection[9] -= 2.f * jitter_uv_y;
+}
+
+inline const char* PathName(constant_buffers::ProjectionJitterPath path) {
+  switch (path) {
+    case constant_buffers::ProjectionJitterPath::VELOCITY:
+      return "velocity";
+    case constant_buffers::ProjectionJitterPath::FORWARD:
+      return "forward";
+    case constant_buffers::ProjectionJitterPath::MODEL:
+      return "model";
+    case constant_buffers::ProjectionJitterPath::ALPHA_MODEL:
+      return "alpha_model";
+    case constant_buffers::ProjectionJitterPath::OVERLAY_MODEL:
+      return "overlay_model";
+    case constant_buffers::ProjectionJitterPath::LOCAL_LIGHT:
+      return "local_light";
+    default:
+      return "unknown";
+  }
+}
+
+struct HookCallGuard {
+  HookCallGuard() { hook_calls_in_flight.fetch_add(1u, std::memory_order_acq_rel); }
+  ~HookCallGuard() { hook_calls_in_flight.fetch_sub(1u, std::memory_order_acq_rel); }
+};
+
+inline bool GetPublishedJitterForViewport(
+    const uint8_t* viewport,
+    constant_buffers::ProjectionJitterPath path,
+    std::array<float, 2>& jitter_uv) {
+  if (!constant_buffers::IsEnabled() || viewport == nullptr) return false;
+
+  const float scale = constant_buffers::GetProjectionJitterScale(path);
+  if (scale == 0.f) return false;
+
+  const auto* projection = reinterpret_cast<const float*>(viewport + 0x280u);
+  const uint32_t width = *reinterpret_cast<const uint32_t*>(viewport + 0x5D8u);
+  const uint32_t height = *reinterpret_cast<const uint32_t*>(viewport + 0x5DCu);
+  const uint8_t flags = *(viewport + 0x6E2u);
+  void* camera = *reinterpret_cast<void* const*>(viewport + 0x570u);
+  const AppliedJitter published = GetAppliedJitter();
+  if (!LooksLikeGameplayProjection(projection, width, height, flags, camera)
+      || !published.valid
+      || published.frame_token != constant_buffers::CurrentFrameToken()
+      || published.width != width
+      || published.height != height) {
+    return false;
+  }
+
+  jitter_uv = {
+      published.jitter_uv_x * scale,
+      published.jitter_uv_y * scale,
+  };
+  return true;
+}
+
+inline bool ApplyPublishedJitterToActiveProjection(
+    const uint8_t* viewport,
+    constant_buffers::ProjectionJitterPath path) {
+  std::array<float, 2> jitter_uv = {};
+  void* shader_manager = shader_manager_global != nullptr ? *shader_manager_global : nullptr;
+  if (shader_manager == nullptr || !GetPublishedJitterForViewport(viewport, path, jitter_uv)) return false;
+
+  const auto* projection = reinterpret_cast<const float*>(viewport + 0x280u);
+  auto* active_projection = reinterpret_cast<float*>(static_cast<uint8_t*>(shader_manager) + 0x680u);
+  if (std::memcmp(projection, active_projection, 16u * sizeof(float)) != 0) return false;
+
+  ApplyProjectionJitter(active_projection, shader_manager, jitter_uv[0], jitter_uv[1]);
+  const size_t index = static_cast<size_t>(path);
+  additional_jitter_writes[index].fetch_add(1u, std::memory_order_relaxed);
+  if (!logged_first_additional_jitter[index].exchange(true, std::memory_order_relaxed)) {
+    logging::Info("native additional projection jitter path=", PathName(path),
+                  " scale=", constant_buffers::GetProjectionJitterScale(path),
+                  " jitter_uv=", jitter_uv[0], ",", jitter_uv[1]);
+  }
+  return true;
+}
+
+inline bool GetPathForReturnAddress(
+    void* return_address,
+    constant_buffers::ProjectionJitterPath& path) {
+  if (return_address == velocity_return_address) {
+    path = constant_buffers::ProjectionJitterPath::VELOCITY;
+  } else if (return_address == model_return_address) {
+    path = constant_buffers::ProjectionJitterPath::MODEL;
+  } else if (return_address == alpha_model_return_address) {
+    path = constant_buffers::ProjectionJitterPath::ALPHA_MODEL;
+  } else if (return_address == overlay_model_return_address) {
+    path = constant_buffers::ProjectionJitterPath::OVERLAY_MODEL;
+  } else {
+    return false;
+  }
+  return true;
+}
+
 inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
-  struct HookCallGuard {
-    HookCallGuard() { hook_calls_in_flight.fetch_add(1u, std::memory_order_acq_rel); }
-    ~HookCallGuard() { hook_calls_in_flight.fetch_sub(1u, std::memory_order_acq_rel); }
-  } hook_call_guard;
+  HookCallGuard hook_call_guard;
 
   void* return_address = _ReturnAddress();
   const auto original = set_view_matrix_state;
@@ -487,6 +704,16 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   original(view_matrix);
 
   if (return_address != expected_return_address) {
+    constant_buffers::ProjectionJitterPath path = constant_buffers::ProjectionJitterPath::VELOCITY;
+    if (GetPathForReturnAddress(return_address, path)) {
+      const auto* viewport = reinterpret_cast<const uint8_t*>(view_matrix) - 0x2C0u;
+      if (!ApplyPublishedJitterToActiveProjection(viewport, path)
+          && constant_buffers::IsEnabled()
+          && constant_buffers::GetProjectionJitterScale(path) != 0.f) {
+        additional_jitter_rejects[static_cast<size_t>(path)].fetch_add(1u, std::memory_order_relaxed);
+      }
+      return;
+    }
     rejected_return_address.fetch_add(1u, std::memory_order_relaxed);
     return;
   }
@@ -576,6 +803,8 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
             .height = height,
             .jitter_uv_x = production_jitter_uv[0],
             .jitter_uv_y = production_jitter_uv[1],
+            .previous_jitter_uv_x = committed_previous_jitter_uv[0],
+            .previous_jitter_uv_y = committed_previous_jitter_uv[1],
             .current_to_previous_clip = current_to_previous_clip,
         });
         production_write_committed = true;
@@ -610,6 +839,72 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   }
 }
 
+inline void __fastcall HookForwardRendering(void* plugin, void* render, void* viewport_pointer) {
+  HookCallGuard hook_call_guard;
+  const auto original = forward_rendering;
+  if (original == nullptr) return;
+  original(plugin, render, viewport_pointer);
+
+  constexpr auto path = constant_buffers::ProjectionJitterPath::FORWARD;
+  if (!ApplyPublishedJitterToActiveProjection(static_cast<const uint8_t*>(viewport_pointer), path)
+      && constant_buffers::IsEnabled()
+      && constant_buffers::GetProjectionJitterScale(path) != 0.f) {
+    additional_jitter_rejects[static_cast<size_t>(path)].fetch_add(1u, std::memory_order_relaxed);
+  }
+}
+
+inline void __fastcall HookLocalLightMainExec(void* plugin, void* render, void* viewport_pointer) {
+  HookCallGuard hook_call_guard;
+  const auto original = local_light_main_exec;
+  if (original == nullptr) return;
+
+  constexpr auto path = constant_buffers::ProjectionJitterPath::LOCAL_LIGHT;
+  auto* viewport = static_cast<uint8_t*>(viewport_pointer);
+  std::array<float, 2> jitter_uv = {};
+  if (local_light_projection_active
+      || !GetPublishedJitterForViewport(viewport, path, jitter_uv)) {
+    if (!local_light_projection_active
+        && constant_buffers::IsEnabled()
+        && constant_buffers::GetProjectionJitterScale(path) != 0.f) {
+      additional_jitter_rejects[static_cast<size_t>(path)].fetch_add(1u, std::memory_order_relaxed);
+    }
+    original(plugin, render, viewport_pointer);
+    return;
+  }
+
+  while (local_light_projection_lock.test_and_set(std::memory_order_acquire)) {
+    _mm_pause();
+  }
+  local_light_projection_active = true;
+  auto* projection = reinterpret_cast<float*>(viewport + 0x280u);
+  {
+    struct ProjectionRestoreGuard {
+      float* projection;
+      std::array<float, 16> original;
+
+      explicit ProjectionRestoreGuard(float* target) : projection(target) {
+        std::memcpy(original.data(), projection, sizeof(original));
+      }
+
+      ~ProjectionRestoreGuard() {
+        std::memcpy(projection, original.data(), sizeof(original));
+        local_light_projection_active = false;
+        local_light_projection_lock.clear(std::memory_order_release);
+      }
+    } restore_guard(projection);
+    ApplyProjectionJitter(projection, jitter_uv[0], jitter_uv[1]);
+    original(plugin, render, viewport_pointer);
+  }
+
+  const size_t index = static_cast<size_t>(path);
+  additional_jitter_writes[index].fetch_add(1u, std::memory_order_relaxed);
+  if (!logged_first_additional_jitter[index].exchange(true, std::memory_order_relaxed)) {
+    logging::Info("native additional projection jitter path=local_light scale=",
+                  constant_buffers::GetProjectionJitterScale(path),
+                  " jitter_uv=", jitter_uv[0], ",", jitter_uv[1]);
+  }
+}
+
 inline bool Attach() {
   if (installed) return true;
 
@@ -624,9 +919,13 @@ inline bool Attach() {
   helper_entry_address = DecodeRelativeCall(call);
   set_view_matrix_state = reinterpret_cast<SetViewMatrixState>(helper_entry_address);
   shader_manager_global = DecodeShaderManagerGlobal(projection_commit_address);
-  if (set_view_matrix_state == nullptr || shader_manager_global == nullptr) {
+  if (set_view_matrix_state == nullptr
+      || shader_manager_global == nullptr
+      || !InitializeAdditionalHookAddresses(module)) {
     logging::Warn("failed to decode native projection hook addresses");
     set_view_matrix_state = nullptr;
+    forward_rendering = nullptr;
+    local_light_main_exec = nullptr;
     return false;
   }
 
@@ -642,9 +941,25 @@ inline bool Attach() {
     DetourTransactionAbort();
     return false;
   }
+  if (DetourAttach(
+          reinterpret_cast<void**>(&forward_rendering),
+          reinterpret_cast<void*>(HookForwardRendering))
+      != NO_ERROR) {
+    DetourTransactionAbort();
+    return false;
+  }
+  if (DetourAttach(
+          reinterpret_cast<void**>(&local_light_main_exec),
+          reinterpret_cast<void*>(HookLocalLightMainExec))
+      != NO_ERROR) {
+    DetourTransactionAbort();
+    return false;
+  }
   if (DetourTransactionCommit() != NO_ERROR) {
     DetourTransactionAbort();
     set_view_matrix_state = nullptr;
+    forward_rendering = nullptr;
+    local_light_main_exec = nullptr;
     return false;
   }
 
@@ -653,6 +968,8 @@ inline bool Attach() {
                 logging::Hex{reinterpret_cast<uintptr_t>(projection_commit_address)},
                 " helper=", logging::Hex{reinterpret_cast<uintptr_t>(helper_entry_address)},
                 " return=", logging::Hex{reinterpret_cast<uintptr_t>(expected_return_address)},
+                " forward=", logging::Hex{reinterpret_cast<uintptr_t>(forward_rendering)},
+                " local_light=", logging::Hex{reinterpret_cast<uintptr_t>(local_light_main_exec)},
                 " shader_manager_global=", logging::Hex{reinterpret_cast<uintptr_t>(shader_manager_global)});
   return true;
 }
@@ -675,6 +992,20 @@ inline void Detach(bool wait_for_hook_calls = true, bool transition_runtime = tr
   if (DetourDetach(
           reinterpret_cast<void**>(&set_view_matrix_state),
           reinterpret_cast<void*>(HookSetViewMatrixState))
+      != NO_ERROR) {
+    DetourTransactionAbort();
+    return;
+  }
+  if (DetourDetach(
+          reinterpret_cast<void**>(&forward_rendering),
+          reinterpret_cast<void*>(HookForwardRendering))
+      != NO_ERROR) {
+    DetourTransactionAbort();
+    return;
+  }
+  if (DetourDetach(
+          reinterpret_cast<void**>(&local_light_main_exec),
+          reinterpret_cast<void*>(HookLocalLightMainExec))
       != NO_ERROR) {
     DetourTransactionAbort();
     return;
@@ -702,6 +1033,8 @@ inline void Detach(bool wait_for_hook_calls = true, bool transition_runtime = tr
                 production_restoration_mismatches.load(std::memory_order_relaxed));
   if (hook_calls_in_flight.load(std::memory_order_acquire) == 0u) {
     set_view_matrix_state = nullptr;
+    forward_rendering = nullptr;
+    local_light_main_exec = nullptr;
   }
 }
 
