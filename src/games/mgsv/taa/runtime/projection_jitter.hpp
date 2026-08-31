@@ -26,8 +26,8 @@
 
 #include <detours.h>
 
-#include "./constant_buffers.hpp"
 #include "./logging.hpp"
+#include "./state.hpp"
 
 namespace taa::projection_jitter {
 
@@ -220,21 +220,9 @@ inline void* overlay_model_return_address = nullptr;
 inline void** shader_manager_global = nullptr;
 inline bool installed = false;
 
-inline std::atomic<uint64_t> accepted_calls = 0u;
-inline std::atomic<uint64_t> rejected_return_address = 0u;
-inline std::atomic<uint64_t> rejected_structure = 0u;
-inline std::atomic<uint64_t> projection_mismatches = 0u;
-inline std::atomic<uint64_t> production_jitter_writes = 0u;
-inline std::atomic<uint64_t> production_jitter_rejects = 0u;
 inline std::atomic<uint32_t> production_restoration_hits = 0u;
-inline std::atomic<uint32_t> production_restoration_mismatches = 0u;
 inline std::atomic<bool> production_awaiting_restoration = false;
-inline std::atomic<bool> logged_first_accept = false;
-inline std::atomic<bool> logged_first_production_jitter = false;
 inline std::atomic<uint32_t> hook_calls_in_flight = 0u;
-inline std::array<std::atomic<uint64_t>, constant_buffers::PROJECTION_JITTER_PATH_COUNT> additional_jitter_writes = {};
-inline std::array<std::atomic<uint64_t>, constant_buffers::PROJECTION_JITTER_PATH_COUNT> additional_jitter_rejects = {};
-inline std::array<std::atomic<bool>, constant_buffers::PROJECTION_JITTER_PATH_COUNT> logged_first_additional_jitter = {};
 inline std::atomic_flag local_light_projection_lock = ATOMIC_FLAG_INIT;
 inline thread_local bool local_light_projection_active = false;
 
@@ -358,6 +346,17 @@ inline void UnlockPublicationWriter() {
   publication_write_lock.clear(std::memory_order_release);
 }
 
+// Publication fields and matrix history form one logical snapshot. Writers
+// must update them together; readers remain lock-free through published_sequence.
+struct PublicationWriterGuard {
+  PublicationWriterGuard() { LockPublicationWriter(); }
+  PublicationWriterGuard(const PublicationWriterGuard&) = delete;
+  PublicationWriterGuard& operator=(const PublicationWriterGuard&) = delete;
+  PublicationWriterGuard(PublicationWriterGuard&&) = delete;
+  PublicationWriterGuard& operator=(PublicationWriterGuard&&) = delete;
+  ~PublicationWriterGuard() { UnlockPublicationWriter(); }
+};
+
 inline void InvalidateAppliedJitterLocked() {
   published_sequence.fetch_add(1u, std::memory_order_acq_rel);
   published_valid.store(false, std::memory_order_relaxed);
@@ -367,9 +366,8 @@ inline void InvalidateAppliedJitterLocked() {
 }
 
 inline void InvalidateAppliedJitter() {
-  LockPublicationWriter();
+  PublicationWriterGuard guard;
   InvalidateAppliedJitterLocked();
-  UnlockPublicationWriter();
 }
 
 inline void PublishAppliedJitterLocked(const AppliedJitter& jitter) {
@@ -395,6 +393,7 @@ inline void PublishAppliedJitterLocked(const AppliedJitter& jitter) {
 
 inline AppliedJitter GetAppliedJitter() {
   AppliedJitter result = {};
+  // Retry if a writer was active or changed the snapshot while it was read.
   for (;;) {
     const uint64_t before = published_sequence.load(std::memory_order_acquire);
     if ((before & 1u) != 0u) continue;
@@ -422,13 +421,12 @@ inline AppliedJitter GetAppliedJitter() {
 }
 
 inline void ResetMatrixHistory() {
-  LockPublicationWriter();
+  PublicationWriterGuard guard;
   ResetMatrixHistoryLocked();
-  UnlockPublicationWriter();
 }
 
 inline bool CommitCameraMatrix(uint64_t frame_token, uint32_t sample_index) {
-  LockPublicationWriter();
+  PublicationWriterGuard guard;
   const bool matches = published_valid.load(std::memory_order_relaxed)
                        && published_camera_matrix_valid.load(std::memory_order_relaxed)
                        && published_frame_token.load(std::memory_order_relaxed) == frame_token
@@ -442,7 +440,6 @@ inline bool CommitCameraMatrix(uint64_t frame_token, uint32_t sample_index) {
     };
     committed_previous_view_projection_valid = true;
   }
-  UnlockPublicationWriter();
   return matches;
 }
 
@@ -452,13 +449,12 @@ inline bool IsInstalled() {
 
 inline void BeginProductionRestorationCheck() {
   production_restoration_hits.store(0u, std::memory_order_relaxed);
-  production_restoration_mismatches.store(0u, std::memory_order_relaxed);
   production_awaiting_restoration.store(true, std::memory_order_release);
   logging::Info("awaiting exact production projection restoration");
 }
 
-inline bool CancelProductionRestorationCheck() {
-  return production_awaiting_restoration.exchange(false, std::memory_order_acq_rel);
+inline void CancelProductionRestorationCheck() {
+  production_awaiting_restoration.store(false, std::memory_order_release);
 }
 
 inline bool MatchesProjectionCommit(const uint8_t* candidate) {
@@ -602,37 +598,22 @@ inline void ApplyProjectionJitter(float* projection, float jitter_uv_x, float ji
   projection[9] -= 2.f * jitter_uv_y;
 }
 
-inline const char* PathName(constant_buffers::ProjectionJitterPath path) {
-  switch (path) {
-    case constant_buffers::ProjectionJitterPath::VELOCITY:
-      return "velocity";
-    case constant_buffers::ProjectionJitterPath::FORWARD:
-      return "forward";
-    case constant_buffers::ProjectionJitterPath::MODEL:
-      return "model";
-    case constant_buffers::ProjectionJitterPath::ALPHA_MODEL:
-      return "alpha_model";
-    case constant_buffers::ProjectionJitterPath::OVERLAY_MODEL:
-      return "overlay_model";
-    case constant_buffers::ProjectionJitterPath::LOCAL_LIGHT:
-      return "local_light";
-    default:
-      return "unknown";
-  }
-}
-
 struct HookCallGuard {
   HookCallGuard() { hook_calls_in_flight.fetch_add(1u, std::memory_order_acq_rel); }
+  HookCallGuard(const HookCallGuard&) = delete;
+  HookCallGuard& operator=(const HookCallGuard&) = delete;
+  HookCallGuard(HookCallGuard&&) = delete;
+  HookCallGuard& operator=(HookCallGuard&&) = delete;
   ~HookCallGuard() { hook_calls_in_flight.fetch_sub(1u, std::memory_order_acq_rel); }
 };
 
 inline bool GetPublishedJitterForViewport(
     const uint8_t* viewport,
-    constant_buffers::ProjectionJitterPath path,
+    state::ProjectionJitterPath path,
     std::array<float, 2>& jitter_uv) {
-  if (!constant_buffers::IsEnabled() || viewport == nullptr) return false;
+  if (!state::IsEnabled() || viewport == nullptr) return false;
 
-  const float scale = constant_buffers::GetProjectionJitterScale(path);
+  const float scale = state::GetProjectionJitterScale(path);
   if (scale == 0.f) return false;
 
   const auto* projection = reinterpret_cast<const float*>(viewport + 0x280u);
@@ -643,7 +624,7 @@ inline bool GetPublishedJitterForViewport(
   const AppliedJitter published = GetAppliedJitter();
   if (!LooksLikeGameplayProjection(projection, width, height, flags, camera)
       || !published.valid
-      || published.frame_token != constant_buffers::CurrentFrameToken()
+      || published.frame_token != state::CurrentFrameToken()
       || published.width != width
       || published.height != height) {
     return false;
@@ -658,37 +639,30 @@ inline bool GetPublishedJitterForViewport(
 
 inline bool ApplyPublishedJitterToActiveProjection(
     const uint8_t* viewport,
-    constant_buffers::ProjectionJitterPath path) {
+    state::ProjectionJitterPath jitter_path) {
   std::array<float, 2> jitter_uv = {};
   void* shader_manager = shader_manager_global != nullptr ? *shader_manager_global : nullptr;
-  if (shader_manager == nullptr || !GetPublishedJitterForViewport(viewport, path, jitter_uv)) return false;
+  if (shader_manager == nullptr || !GetPublishedJitterForViewport(viewport, jitter_path, jitter_uv)) return false;
 
   const auto* projection = reinterpret_cast<const float*>(viewport + 0x280u);
   auto* active_projection = reinterpret_cast<float*>(static_cast<uint8_t*>(shader_manager) + 0x680u);
   if (std::memcmp(projection, active_projection, 16u * sizeof(float)) != 0) return false;
 
   ApplyProjectionJitter(active_projection, shader_manager, jitter_uv[0], jitter_uv[1]);
-  const size_t index = static_cast<size_t>(path);
-  additional_jitter_writes[index].fetch_add(1u, std::memory_order_relaxed);
-  if (!logged_first_additional_jitter[index].exchange(true, std::memory_order_relaxed)) {
-    logging::Info("native additional projection jitter path=", PathName(path),
-                  " scale=", constant_buffers::GetProjectionJitterScale(path),
-                  " jitter_uv=", jitter_uv[0], ",", jitter_uv[1]);
-  }
   return true;
 }
 
 inline bool GetPathForReturnAddress(
     void* return_address,
-    constant_buffers::ProjectionJitterPath& path) {
+    state::ProjectionJitterPath& path) {
   if (return_address == velocity_return_address) {
-    path = constant_buffers::ProjectionJitterPath::VELOCITY;
+    path = state::ProjectionJitterPath::VELOCITY;
   } else if (return_address == model_return_address) {
-    path = constant_buffers::ProjectionJitterPath::MODEL;
+    path = state::ProjectionJitterPath::MODEL;
   } else if (return_address == alpha_model_return_address) {
-    path = constant_buffers::ProjectionJitterPath::ALPHA_MODEL;
+    path = state::ProjectionJitterPath::ALPHA_MODEL;
   } else if (return_address == overlay_model_return_address) {
-    path = constant_buffers::ProjectionJitterPath::OVERLAY_MODEL;
+    path = state::ProjectionJitterPath::OVERLAY_MODEL;
   } else {
     return false;
   }
@@ -704,17 +678,20 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   original(view_matrix);
 
   if (return_address != expected_return_address) {
-    constant_buffers::ProjectionJitterPath path = constant_buffers::ProjectionJitterPath::VELOCITY;
+    state::ProjectionJitterPath path = state::ProjectionJitterPath::VELOCITY;
     if (GetPathForReturnAddress(return_address, path)) {
       const auto* viewport = reinterpret_cast<const uint8_t*>(view_matrix) - 0x2C0u;
-      if (!ApplyPublishedJitterToActiveProjection(viewport, path)
-          && constant_buffers::IsEnabled()
-          && constant_buffers::GetProjectionJitterScale(path) != 0.f) {
-        additional_jitter_rejects[static_cast<size_t>(path)].fetch_add(1u, std::memory_order_relaxed);
-      }
+      ApplyPublishedJitterToActiveProjection(viewport, path);
       return;
     }
-    rejected_return_address.fetch_add(1u, std::memory_order_relaxed);
+    return;
+  }
+
+  const bool taa_enabled = state::IsEnabled();
+  // The hook stays installed for the process lifetime, but default-Off work
+  // stops here unless a short exact-restoration check is still pending.
+  if (!taa_enabled
+      && !production_awaiting_restoration.load(std::memory_order_acquire)) {
     return;
   }
 
@@ -727,41 +704,29 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   void* shader_manager = shader_manager_global != nullptr ? *shader_manager_global : nullptr;
 
   if (!LooksLikeGameplayProjection(projection, width, height, flags, camera) || shader_manager == nullptr) {
-    rejected_structure.fetch_add(1u, std::memory_order_relaxed);
     return;
   }
 
   auto* active_projection = reinterpret_cast<float*>(
       static_cast<uint8_t*>(shader_manager) + 0x680u);
   const bool projection_matches = std::memcmp(projection, active_projection, 16u * sizeof(float)) == 0;
-  if (!projection_matches) {
-    projection_mismatches.fetch_add(1u, std::memory_order_relaxed);
-  }
 
-  accepted_calls.fetch_add(1u, std::memory_order_relaxed);
-
-  const bool taa_enabled = constant_buffers::IsEnabled();
+  // Three consecutive vanilla copies prove that disabling TAA restored the
+  // active projection before the verification flag is cleared.
   if (!taa_enabled
       && production_awaiting_restoration.load(std::memory_order_acquire)) {
     if (projection_matches) {
       const uint32_t hit = production_restoration_hits.fetch_add(1u, std::memory_order_relaxed) + 1u;
       if (hit >= REQUIRED_RESTORATION_HITS
           && production_awaiting_restoration.exchange(false, std::memory_order_acq_rel)) {
-        logging::Info("production projection restored exactly restoration_hits=", hit,
-                      " restoration_mismatches=",
-                      production_restoration_mismatches.load(std::memory_order_relaxed));
+        logging::Info("production projection restored exactly restoration_hits=", hit);
       }
     } else {
       production_restoration_hits.store(0u, std::memory_order_relaxed);
-      production_restoration_mismatches.fetch_add(1u, std::memory_order_relaxed);
     }
   }
+  if (!taa_enabled) return;
 
-  bool production_write_committed = false;
-  bool production_write_rejected = false;
-  uint64_t production_frame_token = 0u;
-  uint32_t production_sample_index = 0u;
-  std::array<float, 2> production_jitter_uv = {0.f, 0.f};
   const Matrix4d current_view_projection = Multiply(
       LoadColumnMajorMatrix(projection),
       LoadColumnMajorMatrix(view_matrix));
@@ -769,74 +734,40 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   const bool current_camera_matrix_valid = Invert(
       current_view_projection,
       current_inverse_view_projection);
-  if (taa_enabled) {
-    LockPublicationWriter();
-    if (constant_buffers::IsEnabled()) {
-      if (!projection_matches) {
-        InvalidateAppliedJitterLocked();
-        production_write_rejected = true;
-      } else {
-        production_frame_token = constant_buffers::CurrentFrameToken();
-        production_sample_index = constant_buffers::CurrentSampleIndex();
-        production_jitter_uv = constant_buffers::JitterForSample(production_sample_index, width, height);
-        ApplyProjectionJitter(
-            active_projection,
-            shader_manager,
-            production_jitter_uv[0],
-            production_jitter_uv[1]);
-        staged_current_view_projection = current_view_projection;
-        staged_current_view_projection_valid = current_camera_matrix_valid;
-        const bool camera_reprojection_valid = current_camera_matrix_valid
-                                               && committed_previous_view_projection_valid;
-        const auto current_to_previous_clip = camera_reprojection_valid
-                                                  ? ToRowMajorFloatArray(Multiply(
-                                                        committed_previous_view_projection,
-                                                        current_inverse_view_projection))
-                                                  : std::array<float, 16>{};
-        PublishAppliedJitterLocked(AppliedJitter{
-            .valid = true,
-            .camera_matrix_valid = current_camera_matrix_valid,
-            .camera_reprojection_valid = camera_reprojection_valid,
-            .frame_token = production_frame_token,
-            .sample_index = production_sample_index,
-            .width = width,
-            .height = height,
-            .jitter_uv_x = production_jitter_uv[0],
-            .jitter_uv_y = production_jitter_uv[1],
-            .previous_jitter_uv_x = committed_previous_jitter_uv[0],
-            .previous_jitter_uv_y = committed_previous_jitter_uv[1],
-            .current_to_previous_clip = current_to_previous_clip,
-        });
-        production_write_committed = true;
-      }
-    }
-    UnlockPublicationWriter();
+  PublicationWriterGuard publication_guard;
+  if (!state::IsEnabled()) return;
+  if (!projection_matches) {
+    InvalidateAppliedJitterLocked();
+    return;
   }
 
-  if (production_write_rejected) {
-    production_jitter_rejects.fetch_add(1u, std::memory_order_relaxed);
-  }
-  if (production_write_committed) {
-    production_jitter_writes.fetch_add(1u, std::memory_order_relaxed);
-
-    if (!logged_first_production_jitter.exchange(true, std::memory_order_relaxed)) {
-      logging::Info("native projection jitter active frame=", production_frame_token,
-                    " sample=", production_sample_index,
-                    " pattern=", constant_buffers::GetJitterPattern(),
-                    " dimensions=", width, "x", height,
-                    " jitter_uv=", production_jitter_uv[0], ",", production_jitter_uv[1]);
-    }
-  }
-
-  if (!logged_first_accept.exchange(true, std::memory_order_relaxed)) {
-    logging::Info("native projection hook accepted viewport=",
-                  logging::Hex{reinterpret_cast<uintptr_t>(viewport)},
-                  " shader_manager=", logging::Hex{reinterpret_cast<uintptr_t>(shader_manager)},
-                  " camera=", logging::Hex{reinterpret_cast<uintptr_t>(camera)},
-                  " dimensions=", width, "x", height,
-                  " flags=", logging::Hex{flags},
-                  " projection_scale=", projection[0], ",", projection[5]);
-  }
+  const uint64_t frame_token = state::CurrentFrameToken();
+  const uint32_t sample_index = state::CurrentSampleIndex();
+  const auto jitter_uv = state::JitterForSample(sample_index, width, height);
+  ApplyProjectionJitter(active_projection, shader_manager, jitter_uv[0], jitter_uv[1]);
+  staged_current_view_projection = current_view_projection;
+  staged_current_view_projection_valid = current_camera_matrix_valid;
+  const bool camera_reprojection_valid = current_camera_matrix_valid
+                                         && committed_previous_view_projection_valid;
+  const auto current_to_previous_clip = camera_reprojection_valid
+                                            ? ToRowMajorFloatArray(Multiply(
+                                                  committed_previous_view_projection,
+                                                  current_inverse_view_projection))
+                                            : std::array<float, 16>{};
+  PublishAppliedJitterLocked(AppliedJitter{
+      .valid = true,
+      .camera_matrix_valid = current_camera_matrix_valid,
+      .camera_reprojection_valid = camera_reprojection_valid,
+      .frame_token = frame_token,
+      .sample_index = sample_index,
+      .width = width,
+      .height = height,
+      .jitter_uv_x = jitter_uv[0],
+      .jitter_uv_y = jitter_uv[1],
+      .previous_jitter_uv_x = committed_previous_jitter_uv[0],
+      .previous_jitter_uv_y = committed_previous_jitter_uv[1],
+      .current_to_previous_clip = current_to_previous_clip,
+  });
 }
 
 inline void __fastcall HookForwardRendering(void* plugin, void* render, void* viewport_pointer) {
@@ -845,12 +776,8 @@ inline void __fastcall HookForwardRendering(void* plugin, void* render, void* vi
   if (original == nullptr) return;
   original(plugin, render, viewport_pointer);
 
-  constexpr auto path = constant_buffers::ProjectionJitterPath::FORWARD;
-  if (!ApplyPublishedJitterToActiveProjection(static_cast<const uint8_t*>(viewport_pointer), path)
-      && constant_buffers::IsEnabled()
-      && constant_buffers::GetProjectionJitterScale(path) != 0.f) {
-    additional_jitter_rejects[static_cast<size_t>(path)].fetch_add(1u, std::memory_order_relaxed);
-  }
+  constexpr auto path = state::ProjectionJitterPath::FORWARD;
+  ApplyPublishedJitterToActiveProjection(static_cast<const uint8_t*>(viewport_pointer), path);
 }
 
 inline void __fastcall HookLocalLightMainExec(void* plugin, void* render, void* viewport_pointer) {
@@ -858,16 +785,11 @@ inline void __fastcall HookLocalLightMainExec(void* plugin, void* render, void* 
   const auto original = local_light_main_exec;
   if (original == nullptr) return;
 
-  constexpr auto path = constant_buffers::ProjectionJitterPath::LOCAL_LIGHT;
+  constexpr auto path = state::ProjectionJitterPath::LOCAL_LIGHT;
   auto* viewport = static_cast<uint8_t*>(viewport_pointer);
   std::array<float, 2> jitter_uv = {};
   if (local_light_projection_active
       || !GetPublishedJitterForViewport(viewport, path, jitter_uv)) {
-    if (!local_light_projection_active
-        && constant_buffers::IsEnabled()
-        && constant_buffers::GetProjectionJitterScale(path) != 0.f) {
-      additional_jitter_rejects[static_cast<size_t>(path)].fetch_add(1u, std::memory_order_relaxed);
-    }
     original(plugin, render, viewport_pointer);
     return;
   }
@@ -886,6 +808,11 @@ inline void __fastcall HookLocalLightMainExec(void* plugin, void* render, void* 
         std::memcpy(original.data(), projection, sizeof(original));
       }
 
+      ProjectionRestoreGuard(const ProjectionRestoreGuard&) = delete;
+      ProjectionRestoreGuard& operator=(const ProjectionRestoreGuard&) = delete;
+      ProjectionRestoreGuard(ProjectionRestoreGuard&&) = delete;
+      ProjectionRestoreGuard& operator=(ProjectionRestoreGuard&&) = delete;
+
       ~ProjectionRestoreGuard() {
         std::memcpy(projection, original.data(), sizeof(original));
         local_light_projection_active = false;
@@ -894,14 +821,6 @@ inline void __fastcall HookLocalLightMainExec(void* plugin, void* render, void* 
     } restore_guard(projection);
     ApplyProjectionJitter(projection, jitter_uv[0], jitter_uv[1]);
     original(plugin, render, viewport_pointer);
-  }
-
-  const size_t index = static_cast<size_t>(path);
-  additional_jitter_writes[index].fetch_add(1u, std::memory_order_relaxed);
-  if (!logged_first_additional_jitter[index].exchange(true, std::memory_order_relaxed)) {
-    logging::Info("native additional projection jitter path=local_light scale=",
-                  constant_buffers::GetProjectionJitterScale(path),
-                  " jitter_uv=", jitter_uv[0], ",", jitter_uv[1]);
   }
 }
 
@@ -978,10 +897,9 @@ inline void Detach(bool wait_for_hook_calls = true, bool transition_runtime = tr
   if (!installed || set_view_matrix_state == nullptr) return;
 
   if (transition_runtime) {
-    LockPublicationWriter();
-    constant_buffers::SetEnabled(false);
+    PublicationWriterGuard publication_guard;
+    state::SetEnabled(false);
     InvalidateAppliedJitterLocked();
-    UnlockPublicationWriter();
   }
 
   if (DetourTransactionBegin() != NO_ERROR) return;
@@ -1021,16 +939,7 @@ inline void Detach(bool wait_for_hook_calls = true, bool transition_runtime = tr
       _mm_pause();
     }
   }
-  logging::Info("detached native projection hook accepted=",
-                accepted_calls.load(std::memory_order_relaxed),
-                " rejected_return=", rejected_return_address.load(std::memory_order_relaxed),
-                " rejected_structure=", rejected_structure.load(std::memory_order_relaxed),
-                " projection_mismatches=", projection_mismatches.load(std::memory_order_relaxed),
-                " production_jitter_writes=", production_jitter_writes.load(std::memory_order_relaxed),
-                " production_jitter_rejects=", production_jitter_rejects.load(std::memory_order_relaxed),
-                " production_restoration_hits=", production_restoration_hits.load(std::memory_order_relaxed),
-                " production_restoration_mismatches=",
-                production_restoration_mismatches.load(std::memory_order_relaxed));
+  logging::Info("detached native projection hook");
   if (hook_calls_in_flight.load(std::memory_order_acquire) == 0u) {
     set_view_matrix_state = nullptr;
     forward_rendering = nullptr;

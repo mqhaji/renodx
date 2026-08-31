@@ -7,8 +7,7 @@ Future quality work and the native-resolution DLAA plan are tracked in [ROADMAP.
 
 ## User controls
 
-**Temporal Anti-Aliasing** is under **Effects**. Jitter, resolve tuning, and motion unclamping are under
-**TAA Diagnostics**; extended motion/jitter views are compile-time gated:
+All TAA controls are under **Temporal Anti-Aliasing**; extended motion/jitter views are compile-time gated:
 
 | Control | Behavior |
 |---|---|
@@ -21,7 +20,7 @@ Future quality work and the native-resolution DLAA plan are tracked in [ROADMAP.
 | **TAA Current Frame Blend** | Sets the maximum adaptive filtered-current contribution after clipping. Defaults to `0.15`. |
 | **Unclamp Motion Vectors** | Removes the unit-length saturate from object and camera velocity encoding while TAA is enabled. Defaults to **Off**. |
 
-`ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS` in `runtime/constant_buffers.hpp` controls the diagnostic-view selector, velocity
+`ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS` in `runtime/state.hpp` controls the diagnostic-view selector, velocity
 visualization range, object-motion selector, and the independent velocity, forward, model, alpha-model, overlay-model,
 and local-light projection-jitter sliders. It defaults to `0`, which omits those controls and hardcodes Temporal Resolve,
 an `8 px` visualization range, corrected native object motion, and `1x` on every known jitter path. Set it to `1` to
@@ -38,8 +37,9 @@ outside `[0,1]` for motion above approximately 64 pixels. The native clamp remai
 Off. Because MGSV's motion-blur passes consume the same signal, the option can also increase native motion blur and is
 diagnostic by default.
 
-Changing the jitter pattern or diagnostic view invalidates history. Preset Off disables TAA and restores the vanilla
-projection path.
+Changing the jitter pattern, resolve tuning, motion-vector clamp, diagnostic view, object-motion mode, or per-path jitter
+scale invalidates history. The velocity visualization range does not affect accumulation. Preset Off disables TAA and
+restores the vanilla projection path.
 
 ## Frame pipeline
 
@@ -53,7 +53,8 @@ The runtime executes this sequence while TAA is enabled:
 4. MGSV renders the jittered scene, depth, and native object velocity.
 5. `MotionBlurCameraVelocity` writes the final camera/object velocity target. The addon captures its depth and
    object-velocity inputs and keeps both velocity stages in RGBA16F.
-6. Immediately before `DOF_ScatterBakeFirst`, the addon dispatches the TAA resolve against the full-resolution scene.
+6. At `DOF_ScatterBakeFirst`, the addon accepts only an invocation whose scene color dimensions match the captured
+  full-resolution depth and motion inputs. Lower-resolution DoF invocations are skipped.
 7. The resolved image is copied back before MGSV creates its depth-of-field and motion-blur inputs.
 8. The game's FXAA shader becomes a pass-through only for the enabled TAA frame.
 
@@ -64,7 +65,10 @@ The fallback insertion cascade is:
 3. The sequence-qualified `CopyRenderBuffer` after motion-blur tile preparation
 4. Tonemap or Tonemap 1D-LUT when the earlier passes are absent
 
-Only one resolve may run per frame.
+Only one resolve may run per frame. The native projection hook and `MotionBlurCameraVelocity` capture can execute
+immediately before `Present` while their matching insertion callback executes immediately afterward on another thread.
+A publication or capture from the immediately preceding presentation epoch is therefore valid only when its Halton sample
+still matches; older or differently sampled inputs remain rejected.
 
 ## Native jitter contract
 
@@ -130,6 +134,11 @@ The current frame is decoded before its 3x3 filter. Background pixels use depth-
 native no-jitter matrix relation. Object-mask pixels retain MGSV's bone-aware velocity. Velocity selection currently uses
 the center and four diagonal taps and chooses the largest raw depth, matching MGSV's positive reverse-Z nearest surface.
 
+Depth and object-velocity references are refreshed on every successful `MotionBlurCameraVelocity` capture. The capture
+records both its presentation epoch and TAA sample so a one-epoch scheduling offset cannot admit motion from a previously
+completed temporal frame. Stable color and velocity view caches are keyed by resource/view handles and cleared through
+resource-destruction notifications; they avoid repeated descriptor queries and SRV creation without defining freshness.
+
 The resolve point-loads and decodes the complete 4x4 history footprint before 16-tap Catmull-Rom reconstruction in linear
 light. It clips history to equally blended broad/tight current RGB bounds and computes an adaptive blend from luminance
 position and subpixel velocity. Scene alpha is copied exactly from the current frame because downstream MGSV passes use
@@ -138,25 +147,52 @@ it for highlight/emissive behavior.
 ## History and failure policy
 
 Two RGBA16F resources ping-pong as history. History is seeded from current scene color after creation, resize, enable,
-pattern change, diagnostic change, or any rejected frame.
+pattern change, diagnostic change, or a full-resolution candidate that cannot resolve. Presents with no new
+full-resolution candidate preserve history, and rejected lower-resolution candidates do not reset it while later
+candidates remain available.
 
-The dispatch fails closed and invalidates history when:
+Each insertion candidate fails closed when:
 
-- The native jitter publication is missing, stale, or for a different sample.
+- The native jitter publication is missing, older than the permitted one-epoch ordering, or for a different sample.
 - The publication dimensions do not match scene color.
-- Current native camera state or previous matrix history is unavailable.
-- Velocity, depth, or object-velocity capture is missing or stale.
+- Current native camera state is unavailable.
+- Velocity, depth, or object-velocity capture is missing, more than one presentation epoch old, or belongs to a different
+  Halton sample.
 - Input dimensions or required resource formats do not match.
 - Compute pipeline or history setup fails.
 
-No temporal output is produced from mismatched frame data.
+Candidate rejection does not immediately reset valid history while a later insertion remains possible. `OnPresent`
+invalidates history only if a full-resolution candidate was observed since the previous Present but no resolve completed.
+Missing previous matrix history also invalidates and reseeds accumulation before using the valid current frame. No
+temporal output is produced from mismatched frame data.
+
+## Runtime logging
+
+`MGSV_TAA_LOGGING` defaults to `1`. The normal lifecycle is intentionally concise:
+
+- **initial runtime state** reports whether a persisted TAA setting was already enabled when the addon attached.
+- **TAA runtime enabled** records the transition reason, frame, and active jitter pattern.
+- **waiting for first native jitter publication** is emitted once while startup rendering has not yet reached the proven
+  native gameplay projection path.
+- **TAA accumulation started** records the accepted insertion, callback frame, native-publication frame, sample, and
+  dimensions after each history seed.
+- **TAA runtime disabled** records the reason, frame, and number of completed temporal samples.
+- **skipping non-full-resolution TAA insertion candidate** is expected at mixed-resolution DoF passes and is emitted only
+  once per device lifetime.
+
+One accumulation-start line after enabling, resizing, or intentionally changing a history-affecting setting is expected.
+Repeated accumulation-start lines while standing still with unchanged settings prove that history is being invalidated and
+should be paired with the preceding invalidation or warning. Recurring warnings remain actionable; successful dispatches
+are not logged every frame. When TAA was restored from persisted configuration, **initial runtime state enabled=true**
+replaces the interactive **TAA runtime enabled** transition line.
 
 ## Source layout
 
 | File | Role |
 |---|---|
-| `taa.hpp` | Settings, lifecycle, draw routing, and insertion cascade |
-| `runtime/constant_buffers.hpp` | Frame/sample state and Off/Halton jitter generation |
+| `taa.hpp` | Callback lifecycle, draw routing, and insertion cascade |
+| `settings.hpp` | RenoDX controls and synchronized runtime transitions |
+| `runtime/state.hpp` | Frame/sample state and Off/Halton jitter generation |
 | `runtime/descriptor_tracker.hpp` | Per-command-list pixel SRV tracking |
 | `runtime/projection_jitter.hpp` | Native hook, jitter publication, matrix history, and restoration checks |
 | `runtime/resolve.hpp` | Resource capture, history lifecycle, compute dispatch, and copy-back |
@@ -167,8 +203,10 @@ No temporal output is produced from mismatched frame data.
 
 ## Validated behavior
 
-- Eight bounded synchronization runs completed 600 temporal frames each with one history seed, no native publication or
-  dimension rejects, and three exact restoration copies.
+- Initial bounded synchronization runs completed 600 temporal frames each with one history seed and three exact
+  restoration copies. Later 4K traces proved mixed-resolution insertion candidates and one-epoch native/camera callback
+  ordering. The current source selects only dimension-matched draws and requires matching samples for bounded one-epoch
+  inputs; the camera-capture extension still needs the static-menu runtime recheck below.
 - The final velocity path was observed as RGBA16F rather than the original BGRA8 target, substantially reducing
   camera-wide wobble.
 - Native jitter and the compute resolve agree on frame, sample, dimensions, and current camera state before dispatch.
@@ -199,18 +237,21 @@ Build the `mgsv` target with the configured CMake Tools profile. Inspect the add
 Minimum runtime verification:
 
 1. Launch with TAA disabled and confirm vanilla FXAA and projection behavior.
-2. Enable TAA with jitter **Off** and confirm the temporal resolve runs without projection motion.
+2. Enable TAA with jitter **Off** and confirm one **TAA runtime enabled** line followed by one **TAA accumulation started**
+   line; standing still must not repeatedly restart accumulation.
 3. Switch to **Halton**. With `ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS=1`, test each additional jitter slider independently
-  at `0x`, `1x`, and `-1x`; isolate Alpha Model versus Local Light on the formerly affected lights.
+   at `0x`, `1x`, and `-1x`; isolate Alpha Model versus Local Light on the formerly affected lights.
 4. In that diagnostic build, confirm Velocity `1x` removes whole-model Raw Object Mask phase flicker while default native
-  motion remains aligned.
+   motion remains aligned.
 5. Compare **Unclamp Motion Vectors** Off/On above approximately 64 pixels and check both TAA and native motion blur.
 6. In that diagnostic build, exercise all gated views and verify velocity direction/magnitude during camera and character
   motion.
 7. Test static and fast camera motion, aiming, binoculars, menus, camera cuts, DoF and motion blur on/off, and a resolution
    change.
-8. Confirm no recurring publication, dimension, capture, setup, or dispatch warnings.
-9. Disable TAA and confirm exact projection restoration with no stale-history frame.
+8. At 4K with DoF enabled, confirm lower-resolution DoF candidates do not reset accumulation and that there are no
+  recurring stale-publication, missing-resolve, capture, setup, or dispatch warnings. Also leave a static menu camera
+  running long enough to verify one-epoch camera captures remain accepted.
+9. Disable TAA and confirm a **TAA runtime disabled** line, exact projection restoration, and no stale-history frame.
 
 For a stationary high-frequency grating, isolate the resolve parameters rather than changing several simultaneously:
 

@@ -3,8 +3,6 @@
 
 #define FIX_UNORM_SRGB 1
 
-// Must be 32bit aligned
-// Should be 4x32
 struct ShaderInjectData {
   float tone_map_type;
   float peak_white_nits;
@@ -32,7 +30,6 @@ struct ShaderInjectData {
   float taa_jitter_uv_x;
   float taa_jitter_uv_y;
   float unclamp_motion_vectors;
-  float taa_jitter_padding_2;
 };
 
 #ifndef __cplusplus
