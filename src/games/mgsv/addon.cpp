@@ -23,6 +23,7 @@
 #include "../../mods/shader.hpp"
 #include "../../mods/swapchain_v2.hpp"
 #include "../../utils/date.hpp"
+#include "../../utils/random.hpp"
 #include "../../utils/settings.hpp"
 #include "./shared.h"
 #include "./taa/taa.hpp"
@@ -995,6 +996,15 @@ renodx::utils::settings::Settings settings = {
         .tooltip = "Boosts the brightness of the sun.",
     },
     new renodx::utils::settings::Setting{
+        .key = "FxFilmGrain",
+        .binding = &shader_injection.custom_grain_strength,
+        .default_value = 0.f,
+        .label = "Film Grain",
+        .section = "Effects",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.02f; },
+    },
+    new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
         .label = "Reset All",
         .section = "Options",
@@ -1092,6 +1102,7 @@ void OnPresetOff() {
       {"FxBloomType", 0.f},
       {"FxBloom", 100.f},
       {"FxBoostSun", 0.f},
+      {"FxFilmGrain", 0.f},
   });
   taa::settings::OnPresetOff();
 }
@@ -1194,6 +1205,9 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   // path and remains default-off.
   taa::prepare_velocity_target = PrepareTaaVelocityTarget;
   taa::Use(fdw_reason, &shader_injection);
+
+  renodx::utils::random::Use(fdw_reason, {&shader_injection.custom_random});
+
   renodx::utils::settings::Use(fdw_reason, &settings, &OnPresetOff);
 
   renodx::mods::swapchain::Use(fdw_reason, &shader_injection);
