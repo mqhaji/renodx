@@ -1,25 +1,13 @@
 #pragma once
 
 /*
- * Entry point for the self-contained MGSV TAA integration.
- *
- * addon.cpp includes this header only. This file registers ReShade callbacks
- * and routes draw-time events into the native jitter and resolve modules.
- *
- * Modules:
- *   - settings: RenoDX controls and synchronized runtime transitions.
- *   - state: master enable, frame/sample state, jitter sequence.
- *   - descriptor_tracker: per-command-list pixel SRV state.
- *   - projection_jitter: native projection injection and applied-jitter publication.
- *   - resolve: compute resolve dispatch + ping-pong history.
- *
- * Insertion is gated by shader-hash and frame-sequence markers; see README.md.
- * The primary hook is DOF_ScatterBakeFirst, immediately before the game creates
- * its DoF and motion-blur inputs. Velocity/depth are captured from
- * MotionBlurCameraVelocity earlier in the same frame.
+ * ReShade lifecycle and insertion routing for MGSV temporal reconstruction.
+ * The primary insertion is pre-DoF; resolve.hpp validates shared inputs and
+ * dispatches the selected analytical or FSR2 implementation.
  */
 
 #include <windows.h>
+
 #include <cstdint>
 
 #include <include/reshade.hpp>
@@ -29,6 +17,7 @@
 #include "../../../utils/shader.hpp"
 #include "../../../utils/state.hpp"
 #include "../shared.h"
+#include "./fsr/runtime.hpp"
 #include "./runtime/descriptor_tracker.hpp"
 #include "./runtime/logging.hpp"
 #include "./runtime/projection_jitter.hpp"
@@ -180,8 +169,7 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list) {
   // resolutions. MaybeRun accepts the full-resolution scene-color draw and
   // leaves lower-resolution DoF candidates for the later fallback cascade.
   if (pixel_hash == shader_hashes::DOF_SCATTER_BAKE_FIRST_PS) {
-    LogObservedShader("pixel", "DOF_ScatterBakeFirst",
-                      pixel_hash, logged_scatter_bake);
+    LogObservedShader("pixel", "DOF_ScatterBakeFirst", pixel_hash, logged_scatter_bake);
     resolve::MaybeRun(cmd_list, *data, "DOF_ScatterBakeFirst");
     return false;
   }
@@ -268,6 +256,7 @@ inline void OnDestroyDevice(reshade::api::device* device) {
   resolve::ExecutionGuard execution_guard;
   logging::Info("destroy device");
   resolve::Destroy(device);
+  fsr::Destroy(device);
 }
 
 inline void OnPresent(
@@ -277,13 +266,13 @@ inline void OnPresent(
     const reshade::api::rect* dest_rect,
     uint32_t dirty_rect_count,
     const reshade::api::rect* dirty_rects) {
-  (void)queue;
   (void)swapchain;
   (void)source_rect;
   (void)dest_rect;
   (void)dirty_rect_count;
   (void)dirty_rects;
   settings::SyncRuntimeEnabledFromBinding();
+  settings::SyncReconstructionMethodFromBinding();
   settings::SyncJitterPatternFromBinding();
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
   state::SyncDiagnosticView();
@@ -295,10 +284,18 @@ inline void OnPresent(
   state::SyncProjectionJitterScales();
 #endif
   resolve::ExecutionGuard execution_guard;
-  const bool taa_ran_this_frame = state::frame_state.taa_ran_this_frame;
-  if (state::IsEnabled()
+  auto* device = queue != nullptr ? queue->get_device() : nullptr;
+  const bool enabled = state::IsEnabled();
+  const auto method = state::GetReconstructionMethod();
+  if (!enabled || method == state::ReconstructionMethod::AMD_FSR2) {
+    resolve::ReleaseHistory(device);
+  }
+  if (!enabled || method == state::ReconstructionMethod::ANALYTICAL_TAA) {
+    fsr::ReleaseTemporalResources(device);
+  }
+  if (enabled
       && state::frame_state.full_resolution_candidate_seen
-      && !taa_ran_this_frame) {
+      && !state::frame_state.taa_ran_this_frame) {
     // Candidate insertion draws may be lower-resolution DoF work. Preserve
     // history when no new full-resolution scene was submitted, and reset only
     // after a matching candidate was seen but no resolve completed.
@@ -311,6 +308,7 @@ inline void Use(DWORD fdw_reason, ShaderInjectData* shader_injection) {
   state::enabled_binding =
       shader_injection != nullptr ? &shader_injection->custom_taa : &state::enabled;
   state::SyncEnabled();
+  state::SyncReconstructionMethod();
   state::SyncJitterPattern();
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
   state::SyncDiagnosticView();
@@ -326,11 +324,11 @@ inline void Use(DWORD fdw_reason, ShaderInjectData* shader_injection) {
   renodx::utils::pipeline_layout::Use(fdw_reason);
   renodx::utils::shader::Use(fdw_reason);
   renodx::utils::state::Use(fdw_reason);
-
   switch (fdw_reason) {
     case DLL_PROCESS_ATTACH:
       if (attached) return;
       attached = true;
+      resolve::SetFsrCallbacks(fsr::TryResolve, fsr::ReleaseTemporalResources);
       logging::Info("attach");
       logging::Info("initial runtime state enabled=", logging::Bool{state::IsEnabled()},
                     " jitter_pattern=", state::GetJitterPattern() == 0u ? "off" : "halton_8");
@@ -351,6 +349,7 @@ inline void Use(DWORD fdw_reason, ShaderInjectData* shader_injection) {
     case DLL_PROCESS_DETACH:
       if (!attached) return;
       attached = false;
+      resolve::SetFsrCallbacks(nullptr, nullptr);
       logging::Info("detach");
       // DllMain holds the loader lock. Runtime transitions and resource
       // quiescence happen in destroy_device; process detach only unregisters.

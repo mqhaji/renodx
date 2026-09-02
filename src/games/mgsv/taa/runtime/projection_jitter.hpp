@@ -200,6 +200,7 @@ struct AppliedJitter {
   float jitter_uv_y = 0.f;
   float previous_jitter_uv_x = 0.f;
   float previous_jitter_uv_y = 0.f;
+  std::array<float, 4> device_to_view_depth = {};
   std::array<float, 16> current_to_previous_clip = {};
 };
 
@@ -238,6 +239,7 @@ inline std::atomic<float> published_previous_jitter_uv_x = 0.f;
 inline std::atomic<float> published_previous_jitter_uv_y = 0.f;
 inline std::atomic<bool> published_camera_matrix_valid = false;
 inline std::atomic<bool> published_camera_reprojection_valid = false;
+inline std::array<std::atomic<float>, 4> published_device_to_view_depth = {};
 inline std::array<std::atomic<float>, 16> published_current_to_previous_clip = {};
 inline std::atomic_flag publication_write_lock = ATOMIC_FLAG_INIT;
 
@@ -301,7 +303,9 @@ inline bool Invert(const Matrix4d& input, Matrix4d& output) {
     }
 
     const double pivot_value = augmented[col][col];
-    for (double& value : augmented[col]) value /= pivot_value;
+    for (double& value : augmented[col]) {
+      value /= pivot_value;
+    }
 
     for (uint32_t row = 0u; row < 4u; ++row) {
       if (row == col) continue;
@@ -382,6 +386,11 @@ inline void PublishAppliedJitterLocked(const AppliedJitter& jitter) {
   published_previous_jitter_uv_y.store(jitter.previous_jitter_uv_y, std::memory_order_relaxed);
   published_camera_matrix_valid.store(jitter.camera_matrix_valid, std::memory_order_relaxed);
   published_camera_reprojection_valid.store(jitter.camera_reprojection_valid, std::memory_order_relaxed);
+  for (uint32_t index = 0u; index < jitter.device_to_view_depth.size(); ++index) {
+    published_device_to_view_depth[index].store(
+        jitter.device_to_view_depth[index],
+        std::memory_order_relaxed);
+  }
   for (uint32_t index = 0u; index < jitter.current_to_previous_clip.size(); ++index) {
     published_current_to_previous_clip[index].store(
         jitter.current_to_previous_clip[index],
@@ -408,6 +417,10 @@ inline AppliedJitter GetAppliedJitter() {
     result.previous_jitter_uv_y = published_previous_jitter_uv_y.load(std::memory_order_relaxed);
     result.camera_matrix_valid = published_camera_matrix_valid.load(std::memory_order_relaxed);
     result.camera_reprojection_valid = published_camera_reprojection_valid.load(std::memory_order_relaxed);
+    for (uint32_t index = 0u; index < result.device_to_view_depth.size(); ++index) {
+      result.device_to_view_depth[index] =
+          published_device_to_view_depth[index].load(std::memory_order_relaxed);
+    }
     for (uint32_t index = 0u; index < result.current_to_previous_clip.size(); ++index) {
       result.current_to_previous_clip[index] =
           published_current_to_previous_clip[index].load(std::memory_order_relaxed);
@@ -754,6 +767,13 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
                                                   committed_previous_view_projection,
                                                   current_inverse_view_projection))
                                             : std::array<float, 16>{};
+  const float projection_w_scale = projection[11];
+  const std::array<float, 4> device_to_view_depth = {
+      projection[10] / projection_w_scale,
+      projection[14] / projection_w_scale,
+      projection_w_scale / projection[0],
+      projection_w_scale / projection[5],
+  };
   PublishAppliedJitterLocked(AppliedJitter{
       .valid = true,
       .camera_matrix_valid = current_camera_matrix_valid,
@@ -766,6 +786,7 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
       .jitter_uv_y = jitter_uv[1],
       .previous_jitter_uv_x = committed_previous_jitter_uv[0],
       .previous_jitter_uv_y = committed_previous_jitter_uv[1],
+      .device_to_view_depth = device_to_view_depth,
       .current_to_previous_clip = current_to_previous_clip,
   });
 }
@@ -776,8 +797,9 @@ inline void __fastcall HookForwardRendering(void* plugin, void* render, void* vi
   if (original == nullptr) return;
   original(plugin, render, viewport_pointer);
 
-  constexpr auto path = state::ProjectionJitterPath::FORWARD;
-  ApplyPublishedJitterToActiveProjection(static_cast<const uint8_t*>(viewport_pointer), path);
+  ApplyPublishedJitterToActiveProjection(
+      static_cast<const uint8_t*>(viewport_pointer),
+      state::ProjectionJitterPath::FORWARD);
 }
 
 inline void __fastcall HookLocalLightMainExec(void* plugin, void* render, void* viewport_pointer) {
@@ -785,11 +807,10 @@ inline void __fastcall HookLocalLightMainExec(void* plugin, void* render, void* 
   const auto original = local_light_main_exec;
   if (original == nullptr) return;
 
-  constexpr auto path = state::ProjectionJitterPath::LOCAL_LIGHT;
   auto* viewport = static_cast<uint8_t*>(viewport_pointer);
   std::array<float, 2> jitter_uv = {};
   if (local_light_projection_active
-      || !GetPublishedJitterForViewport(viewport, path, jitter_uv)) {
+      || !GetPublishedJitterForViewport(viewport, state::ProjectionJitterPath::LOCAL_LIGHT, jitter_uv)) {
     original(plugin, render, viewport_pointer);
     return;
   }

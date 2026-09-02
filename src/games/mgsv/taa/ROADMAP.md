@@ -1,7 +1,7 @@
 # MGSV Temporal Reconstruction Roadmap
 
-Future work for improving the current analytical TAA and preparing reusable native-resolution DLAA inputs. This document
-is intentionally prospective; [README.md](README.md) describes only the current implementation.
+Future work for improving the current analytical TAA, validating the experimental native-resolution FSR2 D3D11 port,
+and preparing reusable native-resolution DLAA inputs. [README.md](README.md) describes the current implementation.
 
 ## Scope
 
@@ -10,7 +10,10 @@ is intentionally prospective; [README.md](README.md) describes only the current 
 - Target DLAA specifically, not DLSS Super Resolution.
 - Keep MGSV's bone-aware object motion rather than replacing it with depth-only camera motion.
 - Do not restore broad mapped-constant-buffer mutation.
-- Treat an FSR-style architecture as a source of proven analytical techniques, not as a drop-in D3D11 integration.
+- Keep the manually adapted FSR2 SM5 path isolated and experimental until its complete D3D11 pass/resource contract is
+  proven in game; do not represent it as AMD's supported D3D11 integration.
+- FSR2 is the reconstruction fallback when no method key is persisted, including configurations predating the selector.
+  This does not replace runtime quality, reset, resource, and restoration validation. The master TAA control remains Off.
 
 ## Priority 1: signal correctness
 
@@ -75,7 +78,8 @@ Create a consumer-independent input layer shared by custom TAA and DLAA:
 
 Reactive and transparency/composition masks are useful for particles, alpha blending, reflections, and animated textures,
 but they should not block the required color/depth/motion/reset contract. Material-derived masks are preferable to
-final-image heuristics when they become necessary.
+final-image heuristics when they become necessary. The FSR2 port retains both its optimized zero-input-mask permutation
+and a full-mask permutation; connect a proven `TppFxRain` raindrop mask by selecting the full path only on affected frames.
 
 ## Priority 5: native-resolution DLAA
 
@@ -94,9 +98,10 @@ No internal resolution changes, DLSS Super Resolution modes, or game viewport/cu
 
 - Add reactive/transparency handling for proven material classes.
 - Add luminance stability history for shading changes and exposure transitions.
-- Add optional RCAS only after wire stability, disocclusion, and camera reset are working.
-- Re-evaluate a native-resolution analytical FSR path only after custom TAA and DLAA are stable. Public FSR2 backends are
-  primarily DX12/Vulkan, so MGSV's D3D11 integration would require deliberate backend or shader adaptation.
+- Add optional RCAS only after wire stability, disocclusion, and camera reset are working. RCAS source remains vendored,
+  but the current runtime creates no RCAS pipeline and produces unsharpened output.
+- Validate the default native-resolution FSR2 2.3.4 SM5 adaptation against the analytical resolve. Its source-only D3D11
+  scheduler must remain local and must not introduce an external SDK link.
 
 ## Validation matrix
 
