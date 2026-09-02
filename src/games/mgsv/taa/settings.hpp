@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 #include <intrin.h>
@@ -98,6 +99,7 @@ inline void TransitionRuntimeEnabled(
 }
 
 inline void SyncRuntimeEnabledFromBinding() {
+  const std::unique_lock settings_lock(renodx::utils::mutex::global_mutex);
   const bool desired = state::enabled_binding != nullptr
                        && *state::enabled_binding > 0.f;
   if (desired != state::IsEnabled()) {
@@ -105,37 +107,89 @@ inline void SyncRuntimeEnabledFromBinding() {
   }
 }
 
-inline void TransitionJitterPattern(float value) {
-  const uint32_t pattern = static_cast<uint32_t>(std::clamp(value, 0.f, 1.f));
-  state::jitter_pattern = static_cast<float>(pattern);
-  if (pattern == state::GetJitterPattern()) return;
+inline void TransitionReconstructionMethodLocked(float value, const char* reason) {
+  const uint32_t method_value = static_cast<uint32_t>(std::clamp(value, 0.f, 1.f));
+  const auto method = static_cast<state::ReconstructionMethod>(method_value);
+  const uint32_t effective_jitter_pattern = method == state::ReconstructionMethod::AMD_FSR2
+                                                ? 1u
+                                                : static_cast<uint32_t>(std::clamp(state::jitter_pattern, 0.f, 1.f));
+  state::reconstruction_method = static_cast<float>(method_value);
+  if (method == state::GetReconstructionMethod()
+      && effective_jitter_pattern == state::GetJitterPattern()) {
+    return;
+  }
 
+  resolve::ExecutionGuard execution_guard;
+  projection_jitter::PublicationWriterGuard publication_guard;
+  state::SetReconstructionMethod(static_cast<float>(method_value));
+  state::SetJitterPattern(static_cast<float>(effective_jitter_pattern));
+  projection_jitter::InvalidateAppliedJitterLocked();
+  resolve::InvalidateHistoryWithPublicationLocked(reason);
+  state::ResetTemporalState();
+
+  logging::Info("TAA reconstruction method changed method=",
+                method == state::ReconstructionMethod::AMD_FSR2 ? "fsr2_2_3_4" : "analytical",
+                " jitter_pattern=", effective_jitter_pattern == 0u ? "off" : "halton_8");
+}
+
+inline void TransitionReconstructionMethod(float value, const char* reason) {
   RuntimeTransitionGuard transition_guard;
+  TransitionReconstructionMethodLocked(value, reason);
+}
+
+inline void SyncReconstructionMethodFromBinding() {
+  const std::unique_lock settings_lock(renodx::utils::mutex::global_mutex);
+  RuntimeTransitionGuard transition_guard;
+  const uint32_t desired = static_cast<uint32_t>(std::clamp(state::reconstruction_method, 0.f, 1.f));
+  const uint32_t effective_jitter_pattern = desired == static_cast<uint32_t>(state::ReconstructionMethod::AMD_FSR2)
+                                                ? 1u
+                                                : static_cast<uint32_t>(std::clamp(state::jitter_pattern, 0.f, 1.f));
+  if (desired != static_cast<uint32_t>(state::GetReconstructionMethod())
+      || effective_jitter_pattern != state::GetJitterPattern()) {
+    TransitionReconstructionMethodLocked(static_cast<float>(desired), "reconstruction method synchronized");
+  }
+}
+
+inline void TransitionJitterPatternLocked(float value) {
+  const uint32_t preference = static_cast<uint32_t>(std::clamp(value, 0.f, 1.f));
+  const uint32_t effective_pattern = state::GetReconstructionMethod() == state::ReconstructionMethod::AMD_FSR2
+                                         ? 1u
+                                         : preference;
+  state::jitter_pattern = static_cast<float>(preference);
+  if (effective_pattern == state::GetJitterPattern()) return;
 
   // Resolve already uses execution -> publication ordering when committing
   // matrix history. Preserve that order so the hook cannot publish a sample
   // from the previous pattern while history/sample state is being reset.
   resolve::ExecutionGuard execution_guard;
-  {
-    projection_jitter::PublicationWriterGuard publication_guard;
-    state::SetJitterPattern(static_cast<float>(pattern));
-    projection_jitter::InvalidateAppliedJitterLocked();
-  }
-  resolve::InvalidateHistory("jitter pattern changed");
+  projection_jitter::PublicationWriterGuard publication_guard;
+  state::SetJitterPattern(static_cast<float>(effective_pattern));
+  projection_jitter::InvalidateAppliedJitterLocked();
+  resolve::InvalidateHistoryWithPublicationLocked("jitter pattern changed");
   state::ResetTemporalState();
 
-  logging::Info("TAA jitter pattern changed pattern=", pattern);
+  logging::Info("TAA jitter pattern changed pattern=", effective_pattern);
+}
+
+inline void TransitionJitterPattern(float value) {
+  RuntimeTransitionGuard transition_guard;
+  TransitionJitterPatternLocked(value);
 }
 
 inline void SyncJitterPatternFromBinding() {
-  const uint32_t desired = static_cast<uint32_t>(std::clamp(state::jitter_pattern, 0.f, 1.f));
-  state::jitter_pattern = static_cast<float>(desired);
-  if (desired != state::GetJitterPattern()) {
-    TransitionJitterPattern(static_cast<float>(desired));
+  const std::unique_lock settings_lock(renodx::utils::mutex::global_mutex);
+  RuntimeTransitionGuard transition_guard;
+  const uint32_t preference = static_cast<uint32_t>(std::clamp(state::jitter_pattern, 0.f, 1.f));
+  state::jitter_pattern = static_cast<float>(preference);
+  const uint32_t effective_pattern = state::GetReconstructionMethod() == state::ReconstructionMethod::AMD_FSR2
+                                         ? 1u
+                                         : preference;
+  if (effective_pattern != state::GetJitterPattern()) {
+    TransitionJitterPatternLocked(static_cast<float>(preference));
   }
 }
 
-inline void InvalidateHistoryForDiagnostic(const char* reason) {
+inline void InvalidateHistoryForSetting(const char* reason) {
   resolve::ExecutionGuard execution_guard;
   resolve::InvalidateHistory(reason);
 }
@@ -146,7 +200,7 @@ inline void SetProjectionJitterScale(
     float value,
     const char* reason) {
   state::SetProjectionJitterScale(path, value);
-  InvalidateHistoryForDiagnostic(reason);
+  InvalidateHistoryForSetting(reason);
 }
 #endif
 
@@ -168,6 +222,23 @@ inline void AppendSettings(
             (void)previous;
             TransitionRuntimeEnabled(current > 0.f, "setting changed");
           },
+      },
+      new renodx::utils::settings::Setting{
+          .key = "FxTaaReconstructionMethod",
+          .binding = &state::reconstruction_method,
+          .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+          .default_value = static_cast<float>(state::DEFAULT_RECONSTRUCTION_METHOD),
+          .label = "Temporal Reconstruction Method",
+          .section = "Temporal Anti-Aliasing",
+          .tooltip = "Selects the existing analytical TAA or the experimental native-resolution D3D11 port of AMD FSR2 2.3.4. Changing methods resets temporal state.",
+          .labels = {
+              "Analytical TAA",
+              "AMD FSR 2.3.4",
+          },
+          .on_change_value = [](float previous, float current) {
+            if (static_cast<uint32_t>(previous) == static_cast<uint32_t>(current)) return;
+            TransitionReconstructionMethod(current, "reconstruction method changed"); },
+          .is_visible = [] { return state::IsEnabled(); },
       },
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
       new renodx::utils::settings::Setting{
@@ -194,8 +265,9 @@ inline void AppendSettings(
           .on_change_value = [](float previous, float current) {
             (void)previous;
             state::SetDiagnosticView(current);
-            InvalidateHistoryForDiagnostic("diagnostic view changed"); },
-          .is_visible = [] { return state::IsEnabled(); },
+            InvalidateHistoryForSetting("diagnostic view changed"); },
+          .is_visible = [] { return state::IsEnabled()
+                                    && state::GetReconstructionMethod() == state::ReconstructionMethod::ANALYTICAL_TAA; },
       },
 #endif
       new renodx::utils::settings::Setting{
@@ -205,12 +277,13 @@ inline void AppendSettings(
           .default_value = 1.f,
           .label = "TAA Jitter Pattern",
           .section = "Temporal Anti-Aliasing",
-          .tooltip = "Diagnostic projection sampling pattern. Off keeps temporal resolve active with zero projection jitter. Halton is the eight-phase production sequence. Changing modes resets temporal history and the sample sequence.",
+          .tooltip = "Diagnostic projection sampling pattern. Off keeps analytical TAA active with zero projection jitter. AMD FSR2 requires and enforces the eight-phase Halton sequence. Changing modes resets temporal history and the sample sequence.",
           .labels = {"Off", "Halton (2,3) - 8 Phase"},
           .on_change_value = [](float previous, float current) {
             if (static_cast<uint32_t>(previous) == static_cast<uint32_t>(current)) return;
             TransitionJitterPattern(current); },
-          .is_visible = [] { return state::IsEnabled(); },
+          .is_visible = [] { return state::IsEnabled()
+                                    && state::GetReconstructionMethod() == state::ReconstructionMethod::ANALYTICAL_TAA; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxTaaUnclampMotionVectors",
@@ -222,7 +295,7 @@ inline void AppendSettings(
           .tooltip = "Removes only MGSV's unit-length saturate from object and camera velocity encoding while retaining the original 64-pixel scale. This can improve motion above 64 pixels but also changes native motion blur.",
           .on_change_value = [](float previous, float current) {
             if ((previous > 0.f) == (current > 0.f)) return;
-            InvalidateHistoryForDiagnostic("motion-vector clamp changed"); },
+            InvalidateHistoryForSetting("motion-vector clamp changed"); },
           .is_visible = [] { return state::IsEnabled(); },
       },
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
@@ -265,7 +338,7 @@ inline void AppendSettings(
           .on_change_value = [](float previous, float current) {
             (void)previous;
             state::SetObjectMotionMode(current);
-            InvalidateHistoryForDiagnostic("object motion mode changed"); },
+            InvalidateHistoryForSetting("object motion mode changed"); },
           .is_visible = [] { return state::IsEnabled(); },
       },
 #endif
@@ -283,8 +356,9 @@ inline void AppendSettings(
           .on_change_value = [](float previous, float current) {
             (void)previous;
             state::SetClipTightness(current);
-            InvalidateHistoryForDiagnostic("clip tightness changed"); },
-          .is_visible = [] { return state::IsEnabled(); },
+            InvalidateHistoryForSetting("clip tightness changed"); },
+          .is_visible = [] { return state::IsEnabled()
+                                    && state::GetReconstructionMethod() == state::ReconstructionMethod::ANALYTICAL_TAA; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxTaaHistoryClipStrength",
@@ -300,8 +374,9 @@ inline void AppendSettings(
           .on_change_value = [](float previous, float current) {
             (void)previous;
             state::SetHistoryClipStrength(current);
-            InvalidateHistoryForDiagnostic("history clip strength changed"); },
-          .is_visible = [] { return state::IsEnabled(); },
+            InvalidateHistoryForSetting("history clip strength changed"); },
+          .is_visible = [] { return state::IsEnabled()
+                                    && state::GetReconstructionMethod() == state::ReconstructionMethod::ANALYTICAL_TAA; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxTaaCurrentFrameBlend",
@@ -317,8 +392,9 @@ inline void AppendSettings(
           .on_change_value = [](float previous, float current) {
             (void)previous;
             state::SetCurrentFrameBlend(current);
-            InvalidateHistoryForDiagnostic("current frame blend changed"); },
-          .is_visible = [] { return state::IsEnabled(); },
+            InvalidateHistoryForSetting("current frame blend changed"); },
+          .is_visible = [] { return state::IsEnabled()
+                                    && state::GetReconstructionMethod() == state::ReconstructionMethod::ANALYTICAL_TAA; },
       },
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
       new renodx::utils::settings::Setting{
@@ -446,6 +522,7 @@ inline void AppendSettings(
 }
 
 inline void OnPresetOff() {
+  // Programmatic setting updates do not invoke on_change_value.
   renodx::utils::settings::UpdateSetting("FxTaa", 0.f);
   TransitionRuntimeEnabled(false, "preset off", true);
 }

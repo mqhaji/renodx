@@ -9,8 +9,10 @@
 
 #include <cstdint>
 #include <limits>
+#include <ostream>
 #include <sstream>
 #include <string>
+#include <utility>
 
 #include <include/reshade.hpp>
 
@@ -25,12 +27,13 @@ inline constexpr const char* TAG = "MgsvTaa: ";
 struct Hex {
   uint64_t value;
 };
+
 struct Bool {
   bool value;
 };
 
 inline std::ostream& operator<<(std::ostream& os, Hex hex) {
-  std::ios_base::fmtflags flags = os.flags();
+  const auto flags = os.flags();
   os << "0x" << std::hex << std::uppercase << hex.value;
   os.flags(flags);
   return os;
@@ -62,7 +65,7 @@ inline void Warn(Args&&... args) {
 #endif
 }
 
-inline bool ShouldLogFrame(uint64_t frame, uint64_t& last_logged, uint64_t interval = 120) {
+inline bool ShouldLogFrame(uint64_t frame, uint64_t& last_logged, uint64_t interval = 120u) {
   if (last_logged == std::numeric_limits<uint64_t>::max() || frame - last_logged >= interval) {
     last_logged = frame;
     return true;

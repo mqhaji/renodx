@@ -4,12 +4,12 @@
  * Per-command-list descriptor tracker for the MGSV TAA runtime.
  *
  * This module records the current per-command-list pixel SRV state so
- * draw-time code can capture color/depth resources safely.
+ * draw-time code can capture color, depth, and object motion safely.
  *
  * Current snapshot facts:
  *   - Insertion draws bind HDR scene color at pixel t0.
  *   - MotionBlurCameraVelocity writes velocity to RTV0 and reads depth at
- *     pixel t2.
+ *     pixel t2 and object velocity at pixel t3.
  */
 
 #include <cstdint>
@@ -29,7 +29,7 @@ struct __declspec(uuid("9F1A3A38-9D2A-4E5B-B5A3-3F2D0F38CD33")) CommandListData 
   // Draw-time pixel SRVs used by the TAA router.
   reshade::api::resource_view pixel_srv_t0 = {0};  // HDR color at insertion draws
   reshade::api::resource_view pixel_srv_t2 = {0};  // Depth at MotionBlurCameraVelocity
-  reshade::api::resource_view pixel_srv_t3 = {0};
+  reshade::api::resource_view pixel_srv_t3 = {0};  // Object velocity at MotionBlurCameraVelocity
 };
 
 inline CommandListData* Get(reshade::api::command_list* cmd_list) {
@@ -131,7 +131,7 @@ inline void OnPushDescriptors(
   auto* data = Get(cmd_list);
   if (data == nullptr) return;
 
-  for (uint32_t i = 0; i < update.count; ++i) {
+  for (uint32_t i = 0u; i < update.count; ++i) {
     RegisterSlot slot = {};
     if (!ResolveRegister(layout, layout_param, update, i, slot)) continue;
 
