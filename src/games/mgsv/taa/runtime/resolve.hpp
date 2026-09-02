@@ -1,31 +1,20 @@
 #pragma once
 
 /*
- * MGSV temporal resolve implementation.
+ * Shared temporal input validation and analytical TAA dispatch.
  *
- * Reads HDR color at the insertion draw, captures camera velocity/depth from
- * MotionBlurCameraVelocity earlier in the same frame, dispatches the embedded
- * compute shader, ping-pongs history textures, and copies the resolved result
- * back into the HDR color resource before the insertion draw runs.
- *
- *   - EnsureComputePipeline: layout / pipeline / samplers, one-time setup.
- *   - EnsureHistory: ping-pong RGBA16F textures sized to current color.
- *   - DispatchCompute: barriers, bind, dispatch, copy-back, restore state.
- *   - MaybeRun: enable + inputs gate, then run.
- *
- * History format follows the HDR scene clone (RGBA16F). addon.cpp already
- * clone-upgrades the typeless BGRA8 underlying resource, so the clone SRV
- * is what we sample and the clone resource is what we copy back into.
- *
- * MGSV differs from Alien Isolation in the resource slots/formats:
- * MotionBlurCameraVelocity writes encoded velocity to RTV0 and reads depth at
- * pixel t2. While TAA is active, the addon upgrades the earlier object-velocity
- * target and this final composite target to RGBA16F.
+ * MotionBlurCameraVelocity supplies velocity, depth, and object motion. After
+ * frame/sample validation, this module routes to FSR2 or its owned analytical
+ * history. ExecutionGuard serializes dispatch, resource release, and teardown.
  */
 
+#include <d3d11.h>
 #include <intrin.h>
+#include <wrl/client.h>
+
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <utility>
@@ -79,6 +68,16 @@ struct Resources {
   std::array<reshade::api::sampler, 1> samplers = {};
 };
 
+// FSR2 registers through callbacks to avoid a resolve.hpp/runtime.hpp include cycle.
+using FsrResolveCallback = bool (*)(
+    reshade::api::command_list*,
+    reshade::api::resource_view,
+    reshade::api::resource_usage,
+    reshade::api::resource_usage,
+    const projection_jitter::AppliedJitter&,
+    const char*);
+using FsrReleaseCallback = void (*)(reshade::api::device*);
+
 struct alignas(16) ResolveConstants {
   float diagnostic_view = 0.f;
   float velocity_visualization_range = 8.f;
@@ -96,6 +95,8 @@ struct alignas(16) ResolveConstants {
 static_assert(sizeof(ResolveConstants) == 112u, "TAA resolve constants must occupy seven 16-byte registers");
 
 inline Resources resources;
+inline FsrResolveCallback fsr_resolve = nullptr;
+inline FsrReleaseCallback fsr_release = nullptr;
 inline std::atomic_flag execution_lock = ATOMIC_FLAG_INIT;
 inline thread_local bool execution_locked_on_thread = false;
 inline constexpr size_t DESTROYED_VIEW_MAILBOX_SIZE = 64u;
@@ -130,6 +131,11 @@ inline void UnlockExecution() {
 
 inline bool IsExecutionLockedOnThisThread() {
   return execution_locked_on_thread;
+}
+
+inline void SetFsrCallbacks(FsrResolveCallback resolve_callback, FsrReleaseCallback release_callback) {
+  fsr_resolve = resolve_callback;
+  fsr_release = release_callback;
 }
 
 struct ExecutionGuard {
@@ -208,6 +214,13 @@ struct PreviousComputeState {
   uint32_t pipeline_count = 0u;
   reshade::api::pipeline_layout layout = {0};
   std::vector<reshade::api::descriptor_table> descriptor_tables;
+  std::array<Microsoft::WRL::ComPtr<ID3D11SamplerState>, 2> samplers;
+  std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 12> shader_resources;
+  std::array<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>, 5> unordered_access_views;
+  std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>, 3> constant_buffers;
+  Microsoft::WRL::ComPtr<ID3D11ComputeShader> compute_shader;
+  std::vector<Microsoft::WRL::ComPtr<ID3D11ClassInstance>> class_instances;
+  bool native_descriptors_captured = false;
 };
 
 inline bool IsComputePipelineStage(reshade::api::pipeline_stage stage) {
@@ -217,14 +230,52 @@ inline bool IsComputePipelineStage(reshade::api::pipeline_stage stage) {
 inline PreviousComputeState CaptureComputeState(reshade::api::command_list* cmd_list) {
   PreviousComputeState result = {};
   const auto* state = renodx::utils::state::GetCurrentState(cmd_list);
-  if (state == nullptr) return result;
-
-  for (const auto& [stage, pipeline] : state->pipelines) {
-    if (!IsComputePipelineStage(stage) || result.pipeline_count >= result.pipelines.size()) continue;
-    result.pipelines[result.pipeline_count++] = {stage, pipeline};
+  if (state != nullptr) {
+    for (const auto& [stage, pipeline] : state->pipelines) {
+      if (!IsComputePipelineStage(stage) || result.pipeline_count >= result.pipelines.size()) continue;
+      result.pipelines[result.pipeline_count++] = {stage, pipeline};
+    }
+    result.layout = state->compute_pipeline_layout;
+    result.descriptor_tables = state->compute_descriptor_tables;
   }
-  result.layout = state->compute_pipeline_layout;
-  result.descriptor_tables = state->compute_descriptor_tables;
+
+  if (cmd_list == nullptr || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return result;
+  auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
+  if (context == nullptr) return result;
+
+  std::array<ID3D11SamplerState*, 2> samplers = {};
+  std::array<ID3D11ShaderResourceView*, 12> shader_resources = {};
+  std::array<ID3D11UnorderedAccessView*, 5> unordered_access_views = {};
+  std::array<ID3D11Buffer*, 3> constant_buffers = {};
+  std::array<ID3D11ClassInstance*, 256> class_instances = {};
+  ID3D11ComputeShader* compute_shader = nullptr;
+  UINT class_instance_count = static_cast<UINT>(class_instances.size());
+  context->CSGetShader(&compute_shader, class_instances.data(), &class_instance_count);
+  context->CSGetSamplers(0u, static_cast<UINT>(samplers.size()), samplers.data());
+  context->CSGetShaderResources(0u, static_cast<UINT>(shader_resources.size()), shader_resources.data());
+  context->CSGetUnorderedAccessViews(
+      0u,
+      static_cast<UINT>(unordered_access_views.size()),
+      unordered_access_views.data());
+  context->CSGetConstantBuffers(0u, static_cast<UINT>(constant_buffers.size()), constant_buffers.data());
+  for (size_t index = 0u; index < samplers.size(); ++index) {
+    result.samplers[index].Attach(samplers[index]);
+  }
+  for (size_t index = 0u; index < shader_resources.size(); ++index) {
+    result.shader_resources[index].Attach(shader_resources[index]);
+  }
+  for (size_t index = 0u; index < unordered_access_views.size(); ++index) {
+    result.unordered_access_views[index].Attach(unordered_access_views[index]);
+  }
+  for (size_t index = 0u; index < constant_buffers.size(); ++index) {
+    result.constant_buffers[index].Attach(constant_buffers[index]);
+  }
+  result.compute_shader.Attach(compute_shader);
+  result.class_instances.resize(class_instance_count);
+  for (size_t index = 0u; index < result.class_instances.size(); ++index) {
+    result.class_instances[index].Attach(class_instances[index]);
+  }
+  result.native_descriptors_captured = true;
   return result;
 }
 
@@ -240,6 +291,64 @@ inline void RestoreComputeState(reshade::api::command_list* cmd_list, const Prev
         static_cast<uint32_t>(state.descriptor_tables.size()),
         state.descriptor_tables.data());
   }
+  if (!state.native_descriptors_captured
+      || cmd_list == nullptr
+      || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) {
+    return;
+  }
+
+  auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
+  if (context == nullptr) return;
+  std::array<ID3D11SamplerState*, 2> samplers = {};
+  std::array<ID3D11ShaderResourceView*, 12> shader_resources = {};
+  std::array<ID3D11UnorderedAccessView*, 5> unordered_access_views = {};
+  std::array<ID3D11Buffer*, 3> constant_buffers = {};
+  for (size_t index = 0u; index < samplers.size(); ++index) {
+    samplers[index] = state.samplers[index].Get();
+  }
+  for (size_t index = 0u; index < shader_resources.size(); ++index) {
+    shader_resources[index] = state.shader_resources[index].Get();
+  }
+  for (size_t index = 0u; index < unordered_access_views.size(); ++index) {
+    unordered_access_views[index] = state.unordered_access_views[index].Get();
+  }
+  for (size_t index = 0u; index < constant_buffers.size(); ++index) {
+    constant_buffers[index] = state.constant_buffers[index].Get();
+  }
+  std::vector<ID3D11ClassInstance*> class_instances(state.class_instances.size());
+  for (size_t index = 0u; index < class_instances.size(); ++index) {
+    class_instances[index] = state.class_instances[index].Get();
+  }
+
+  const std::array<ID3D11ShaderResourceView*, 12> null_shader_resources = {};
+  const std::array<ID3D11UnorderedAccessView*, 5> null_unordered_access_views = {};
+  context->CSSetShaderResources(
+      0u,
+      static_cast<UINT>(null_shader_resources.size()),
+      null_shader_resources.data());
+  context->CSSetUnorderedAccessViews(
+      0u,
+      static_cast<UINT>(null_unordered_access_views.size()),
+      null_unordered_access_views.data(),
+      nullptr);
+  context->CSSetSamplers(0u, static_cast<UINT>(samplers.size()), samplers.data());
+  context->CSSetShaderResources(
+      0u,
+      static_cast<UINT>(shader_resources.size()),
+      shader_resources.data());
+  context->CSSetUnorderedAccessViews(
+      0u,
+      static_cast<UINT>(unordered_access_views.size()),
+      unordered_access_views.data(),
+      nullptr);
+  context->CSSetConstantBuffers(
+      0u,
+      static_cast<UINT>(constant_buffers.size()),
+      constant_buffers.data());
+  context->CSSetShader(
+      state.compute_shader.Get(),
+      class_instances.empty() ? nullptr : class_instances.data(),
+      static_cast<UINT>(class_instances.size()));
 }
 
 inline void DestroyCompute(reshade::api::device* device) {
@@ -278,15 +387,36 @@ inline void DestroyHistory(reshade::api::device* device) {
   resources.settings_generation = std::numeric_limits<uint64_t>::max();
 }
 
-inline void InvalidateHistory(const char* reason = "unspecified") {
+inline void ReleaseHistory(reshade::api::device* device) {
+  if (device == nullptr
+      || (resources.history[0].resource.handle == 0u
+          && resources.history[1].resource.handle == 0u)) {
+    return;
+  }
+  const uint32_t released_width = resources.width;
+  const uint32_t released_height = resources.height;
+  DestroyHistory(device);
+  logging::Info("released inactive analytical TAA history size=", released_width, "x", released_height);
+}
+
+inline void InvalidateHistoryState(const char* reason) {
   const bool was_initialized = resources.initialized;
   resources.initialized = false;
   resources.accum_index = 0u;
-  projection_jitter::ResetMatrixHistory();
   if (was_initialized && LogEvery(last_history_invalidate_log, 1u)) {
     logging::Info("invalidated TAA history reason=", reason,
                   " frame=", state::CurrentFrameToken());
   }
+}
+
+inline void InvalidateHistory(const char* reason = "unspecified") {
+  InvalidateHistoryState(reason);
+  projection_jitter::ResetMatrixHistory();
+}
+
+inline void InvalidateHistoryWithPublicationLocked(const char* reason) {
+  InvalidateHistoryState(reason);
+  projection_jitter::ResetMatrixHistoryLocked();
 }
 
 inline void DestroyVelocitySrv(reshade::api::device* device) {
@@ -358,7 +488,7 @@ inline bool EnsureComputePipeline(reshade::api::command_list* cmd_list) {
       reshade::api::sampler_desc{.filter = reshade::api::filter_mode::min_mag_mip_point},
   };
 
-  for (size_t i = 0; i < sampler_descs.size(); ++i) {
+  for (size_t i = 0u; i < sampler_descs.size(); ++i) {
     if (!device->create_sampler(sampler_descs[i], &resources.samplers[i])) {
       if (LogEvery(last_compute_fail_log)) logging::Warn("failed to create TAA sampler index=", i);
       DestroyCompute(device);
@@ -865,6 +995,24 @@ inline bool MaybeRunFromColorSrvLocked(
     }
     return false;
   }
+  if (state::GetReconstructionMethod() == state::ReconstructionMethod::AMD_FSR2) {
+    if (fsr_resolve == nullptr) {
+      if (LogEvery(last_compute_fail_log)) {
+        logging::Warn("AMD FSR2 resolve selected but its runtime is unavailable");
+      }
+      return false;
+    }
+    return fsr_resolve(
+        cmd_list,
+        color_srv,
+        color_initial_usage,
+        color_final_usage,
+        native_jitter,
+        insertion_name);
+  }
+  if (fsr_release != nullptr) {
+    fsr_release(cmd_list->get_device());
+  }
   if (resources.initialized && !native_jitter.camera_reprojection_valid) {
     InvalidateHistory("native camera matrix history unavailable");
   }
@@ -897,16 +1045,15 @@ inline bool MaybeRunFromColorSrvLocked(
 
   const uint32_t current = resources.accum_index;
   const uint32_t previous = 1u - current;
-  const std::array<float, 2> applied_jitter = {
-      native_jitter.jitter_uv_x,
-      native_jitter.jitter_uv_y,
-  };
   const ResolveConstants resolve_constants = {
       .diagnostic_view = state::GetDiagnosticView(),
       .velocity_visualization_range = state::GetVelocityVisualizationRange(),
       .camera_reprojection_valid = !history_seeded && native_jitter.camera_reprojection_valid ? 1.f : 0.f,
       .object_motion_mode = static_cast<float>(state::GetObjectMotionMode()),
-      .current_jitter_uv = applied_jitter,
+      .current_jitter_uv = {
+          native_jitter.jitter_uv_x,
+          native_jitter.jitter_uv_y,
+      },
       .previous_jitter_uv = {
           native_jitter.previous_jitter_uv_x,
           native_jitter.previous_jitter_uv_y,
@@ -939,41 +1086,28 @@ inline bool MaybeRunFromColorSrvLocked(
 
   resources.accum_index = previous;
   resources.settings_generation = settings_generation;
-  const bool camera_matrix_committed = projection_jitter::CommitCameraMatrix(
-      native_jitter.frame_token,
-      expected_sample_index);
-  if (!camera_matrix_committed) {
+  if (!projection_jitter::CommitCameraMatrix(
+          native_jitter.frame_token,
+          expected_sample_index)) {
     InvalidateHistory("native camera matrix commit failed");
   }
   state::MarkTaaDispatched();
   return true;
 }
 
-inline bool MaybeRunFromColorSrv(
-    reshade::api::command_list* cmd_list,
-    reshade::api::resource_view color_srv,
-    reshade::api::resource_usage color_initial_usage = reshade::api::resource_usage::shader_resource,
-    reshade::api::resource_usage color_final_usage = reshade::api::resource_usage::shader_resource,
-    const char* insertion_name = "unknown") {
-  if (!state::IsEnabled()) return false;
-  OptionalExecutionGuard execution_guard;
-  return MaybeRunFromColorSrvLocked(
-      cmd_list,
-      color_srv,
-      color_initial_usage,
-      color_final_usage,
-      insertion_name);
-}
-
 inline bool MaybeRun(
     reshade::api::command_list* cmd_list,
     const descriptor_tracker::CommandListData& command_data,
     const char* insertion_name = "SRV") {
+  if (!state::IsEnabled()) return false;
+  OptionalExecutionGuard execution_guard;
   const auto color_srv = NormalizeColorSrv(command_data.pixel_srv_t0);
-  return MaybeRunFromColorSrv(cmd_list, color_srv,
-                              reshade::api::resource_usage::shader_resource,
-                              reshade::api::resource_usage::shader_resource,
-                              insertion_name);
+  return MaybeRunFromColorSrvLocked(
+      cmd_list,
+      color_srv,
+      reshade::api::resource_usage::shader_resource,
+      reshade::api::resource_usage::shader_resource,
+      insertion_name);
 }
 
 inline void OnDestroyResourceView(renodx::utils::resource::ResourceViewInfo* info) {
