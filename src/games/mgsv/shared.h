@@ -12,9 +12,10 @@ struct ShaderInjectData {
 
   float tone_map_exposure;
   float tone_map_highlights;
+  float tone_map_contrast_highlights;
   float tone_map_shadows;
   float tone_map_contrast;
-  float tone_map_cone_contrast;
+  float tone_map_contrast_shadows;
   float tone_map_saturation;
   float tone_map_highlight_saturation;
   float tone_map_dechroma;
@@ -45,9 +46,10 @@ cbuffer cb13 : register(b13) {
 
 #define RENODX_TONE_MAP_EXPOSURE             shader_injection.tone_map_exposure
 #define RENODX_TONE_MAP_HIGHLIGHTS           shader_injection.tone_map_highlights
+#define RENODX_TONE_MAP_CONTRAST_HIGHLIGHTS  shader_injection.tone_map_contrast_highlights
 #define RENODX_TONE_MAP_SHADOWS              shader_injection.tone_map_shadows
+#define RENODX_TONE_MAP_CONTRAST_SHADOWS     shader_injection.tone_map_contrast_shadows
 #define RENODX_TONE_MAP_CONTRAST             shader_injection.tone_map_contrast
-#define RENODX_TONE_MAP_CONE_CONTRAST        shader_injection.tone_map_cone_contrast
 #define RENODX_TONE_MAP_SATURATION           shader_injection.tone_map_saturation
 #define RENODX_TONE_MAP_HIGHLIGHT_SATURATION shader_injection.tone_map_highlight_saturation
 #define RENODX_TONE_MAP_DECHROMA             shader_injection.tone_map_dechroma
