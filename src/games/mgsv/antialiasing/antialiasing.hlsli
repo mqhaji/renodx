@@ -4,11 +4,11 @@ namespace renodx_game {
 namespace antialiasing {
 
 float GetSceneScaleInverse() {
-  return renodx::math::SafeDivision(RENODX_GRAPHICS_WHITE_NITS, RENODX_DIFFUSE_WHITE_NITS, 1.f);
+  return RENODX_GRAPHICS_WHITE_NITS / RENODX_DIFFUSE_WHITE_NITS;
 }
 
 float GetSceneScale() {
-  return renodx::math::SafeDivision(RENODX_DIFFUSE_WHITE_NITS, RENODX_GRAPHICS_WHITE_NITS, 1.f);
+  return RENODX_DIFFUSE_WHITE_NITS / RENODX_GRAPHICS_WHITE_NITS;
 }
 
 float3 DecodeScene(float3 color) {
