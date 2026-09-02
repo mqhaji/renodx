@@ -26,6 +26,8 @@ struct ShaderInjectData {
   float custom_bloom_type;
   float custom_bloom;
   float custom_boost_sun;
+  float custom_random;
+  float custom_grain_strength;
 
   float custom_taa;
   float taa_jitter_uv_x;
@@ -57,9 +59,11 @@ cbuffer cb13 : register(b13) {
 #define RENODX_COLOR_GRADE_STRENGTH          shader_injection.scene_grade_strength
 #define RENODX_COLOR_GRADE_SCALING           shader_injection.scene_grade_scaling
 
-#define CUSTOM_BLOOM_TYPE shader_injection.custom_bloom_type
-#define CUSTOM_BLOOM      shader_injection.custom_bloom
-#define CUSTOM_BOOST_SUN  shader_injection.custom_boost_sun
+#define CUSTOM_BLOOM_TYPE     shader_injection.custom_bloom_type
+#define CUSTOM_BLOOM          shader_injection.custom_bloom
+#define CUSTOM_BOOST_SUN      shader_injection.custom_boost_sun
+#define CUSTOM_RANDOM         shader_injection.custom_random
+#define CUSTOM_GRAIN_STRENGTH shader_injection.custom_grain_strength
 
 #define CUSTOM_TAA                    shader_injection.custom_taa
 #define TAA_JITTER_UV                 float2(shader_injection.taa_jitter_uv_x, shader_injection.taa_jitter_uv_y)
