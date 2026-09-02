@@ -30,6 +30,13 @@
 
 namespace taa::state {
 
+enum class ReconstructionMethod : std::uint8_t {
+  ANALYTICAL_TAA = 0u,
+  AMD_FSR2 = 1u,
+};
+
+inline constexpr ReconstructionMethod DEFAULT_RECONSTRUCTION_METHOD = ReconstructionMethod::AMD_FSR2;
+
 enum class ProjectionJitterPath : std::uint8_t {
   VELOCITY,
   FORWARD,
@@ -65,6 +72,7 @@ struct FrameState {
 
 inline float enabled = 0.f;
 inline float* enabled_binding = &enabled;
+inline float reconstruction_method = static_cast<float>(DEFAULT_RECONSTRUCTION_METHOD);
 inline float jitter_pattern = 1.f;
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
 inline float diagnostic_view = 0.f;
@@ -83,6 +91,7 @@ inline float clip_tightness = 0.5f;
 inline float history_clip_strength = 1.f;
 inline float current_frame_blend = 0.15f;
 inline std::atomic<bool> runtime_enabled = false;
+inline std::atomic<uint32_t> runtime_reconstruction_method = static_cast<std::uint32_t>(DEFAULT_RECONSTRUCTION_METHOD);
 inline std::atomic<uint32_t> runtime_jitter_pattern = 1u;
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
 inline std::atomic<float> runtime_diagnostic_view = 0.f;
@@ -118,6 +127,22 @@ inline void SyncEnabled() {
 
 inline bool IsEnabled() {
   return runtime_enabled.load(std::memory_order_acquire);
+}
+
+inline void SetReconstructionMethod(float value) {
+  const uint32_t method = static_cast<uint32_t>(std::clamp(value, 0.f, 1.f));
+  reconstruction_method = static_cast<float>(method);
+  if (runtime_reconstruction_method.exchange(method, std::memory_order_acq_rel) != method) {
+    runtime_settings_generation.fetch_add(1u, std::memory_order_release);
+  }
+}
+
+inline void SyncReconstructionMethod() {
+  SetReconstructionMethod(reconstruction_method);
+}
+
+inline ReconstructionMethod GetReconstructionMethod() {
+  return static_cast<ReconstructionMethod>(runtime_reconstruction_method.load(std::memory_order_acquire));
 }
 
 inline void SetJitterPattern(float value) {

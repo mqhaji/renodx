@@ -569,27 +569,29 @@ bool OnCopyTonemapOutputResource(
   return true;
 }
 
-#define UpgradeRTVReplaceShader(value)                                                                \
-  {                                                                                                   \
-      value,                                                                                          \
-      {                                                                                               \
-          .crc32 = value,                                                                             \
-          .code = __##value,                                                                          \
-          .on_draw = [](auto* cmd_list) {                                                             \
-            auto rtvs = renodx::utils::swapchain::GetRenderTargets(cmd_list);                         \
-            auto* device = cmd_list->get_device();                                                    \
-            bool changed = false;                                                                     \
-            for (auto rtv : rtvs) {                                                                   \
-              changed = ActivateCloneHotSwapIfTracked(device, rtv) || changed;                        \
-              ArmTonemapCopyResourcePropagationForRTV(device, rtv);                                   \
-            }                                                                                         \
-            if (changed) {                                                                            \
-              renodx::mods::swapchain::FlushDescriptors(cmd_list);                                    \
-              renodx::mods::swapchain::RewriteRenderTargets(cmd_list, rtvs.size(), rtvs.data(), {0}); \
-            }                                                                                         \
-            return true;                                                                              \
-          },                                                                                          \
-      },                                                                                              \
+bool OnUpgradeRTVReplaceShaderDraw(reshade::api::command_list* cmd_list) {
+  auto rtvs = renodx::utils::swapchain::GetRenderTargets(cmd_list);
+  auto* device = cmd_list->get_device();
+  bool changed = false;
+  for (auto rtv : rtvs) {
+    changed = ActivateCloneHotSwapIfTracked(device, rtv) || changed;
+    ArmTonemapCopyResourcePropagationForRTV(device, rtv);
+  }
+  if (changed) {
+    renodx::mods::swapchain::FlushDescriptors(cmd_list);
+    renodx::mods::swapchain::RewriteRenderTargets(cmd_list, rtvs.size(), rtvs.data(), {0});
+  }
+  return true;
+}
+
+#define UpgradeRTVReplaceShader(value)               \
+  {                                                  \
+      value,                                         \
+      {                                              \
+          .crc32 = value,                            \
+          .code = __##value,                         \
+          .on_draw = &OnUpgradeRTVReplaceShaderDraw, \
+      },                                             \
   }
 
 #define UpgradeRTVReplaceShaderCallback(value, callback)                                              \
