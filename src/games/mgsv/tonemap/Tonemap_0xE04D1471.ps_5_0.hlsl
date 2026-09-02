@@ -52,17 +52,22 @@ void main(
   r0.zw = r0.zw;
   r1.xyz = inImage.Sample(g_samplerPoint_Wrap_s, r0.xy).xyz;
 
-  // tonemap to sdr before bloom
+  // Run bloom through a per-channel SDR proxy so its white blend reconstructs without max-channel amplification.
+  float3 perch_scale = 1.f;
   float maxch_scale = 1.f;
   if (RENODX_TONE_MAP_TYPE != 0.f) {
-    r1.rgb = renodx::color::srgb::DecodeSafe(r1.rgb);
-    maxch_scale = ComputeMaxChCompressionScale(r1.rgb, 0.5f);
-    r1.rgb *= maxch_scale;
-    r1.rgb = renodx::color::srgb::EncodeSafe(r1.rgb);
+    r1.rgb *= r1.rgb;
+
+    // convert to lms normalized to d65 white
+    const float3 perch_tonemapped = ApplyAnchoredCInfinityShoulder(r1.rgb, 1.f, 0.5f, 2.f);
+    perch_scale = renodx::math::DivideSafe(perch_tonemapped, r1.rgb, 1.f);
+    // convert back to bt709
+    r1.rgb = perch_tonemapped;
+  } else {
+    r1.xyz = r1.xyz * r1.xyz;
   }
 
   r1.xyz = r1.xyz;
-  r1.xyz = r1.xyz * r1.xyz;
   r0.xy = float2(4, 4) * g_psSystem.m_renderBuffer.zw;
   r0.xy = float2(0.5, 0.5) * r0.xy;
   r0.xy = r0.xy + r0.zw;
@@ -71,14 +76,23 @@ void main(
   r0.rgb = lerp(0, r0.rgb, CUSTOM_BLOOM);
   r0.xyz = lerp(r1.xyz, 1.f, r0.xyz);
 
+  // Reconstruct bloom in HDR, then use a hue-preserving SDR proxy for the LUT.
+  if (RENODX_TONE_MAP_TYPE != 0.f) {
+    // convert to lms normalized to d65 white
+    r0.rgb /= perch_scale;
+    maxch_scale = ComputeAnchoredCInfinityMaxChannelScale(r0.rgb, 1.f, 0.5f, 2.f);
+    r0.rgb *= maxch_scale;
+    // convert to bt709
+  }
+
   r0.rgb = Sample2DLUTWithScaling(r0.rgb, inColorLUT, g_samplerLinear_Clamp_s);
 
-  // invert tonemap after LUT
+  // Restore the LUT result to HDR and return to the gamma domain expected by ApplyFinalTonemap.
   r0.rgb = max(0, r0.rgb);
   if (RENODX_TONE_MAP_TYPE != 0.f) {
-    r0.rgb = renodx::color::srgb::DecodeSafe(r0.rgb);
+    r0.rgb *= r0.rgb;
     r0.rgb /= maxch_scale;
-    r0.rgb = renodx::color::srgb::EncodeSafe(r0.rgb);
+    r0.rgb = renodx::math::SqrtSafe(r0.rgb);
   }
 
   r0.rgb = ApplyFinalTonemap(r0.rgb);
