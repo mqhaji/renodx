@@ -10,9 +10,10 @@
 
 #include "../../../utils/settings.hpp"
 #include "../shared.h"
+#include "./runtime/camera_state.hpp"
+#include "./runtime/coordinator.hpp"
 #include "./runtime/logging.hpp"
 #include "./runtime/projection_jitter.hpp"
-#include "./runtime/resolve.hpp"
 #include "./runtime/state.hpp"
 
 namespace taa::settings {
@@ -38,12 +39,9 @@ struct RuntimeTransitionGuard {
 };
 
 inline void SetRuntimeEnabled(bool enabled) {
-  projection_jitter::PublicationWriterGuard publication_guard;
-  if (state::enabled_binding != nullptr) {
-    *state::enabled_binding = enabled ? 1.f : 0.f;
-  }
+  camera_state::PublicationWriterGuard publication_guard;
   state::SetEnabled(enabled);
-  projection_jitter::InvalidateAppliedJitterLocked();
+  camera_state::InvalidateLocked();
 }
 
 inline void TransitionRuntimeEnabled(
@@ -56,15 +54,13 @@ inline void TransitionRuntimeEnabled(
   const bool was_enabled = state::IsEnabled();
   if (was_enabled == enabled && !force_reset) return;
   const uint64_t transition_frame = state::CurrentFrameToken();
-  const uint32_t completed_samples = state::frame_state.taa_sample_index;
+  const uint32_t completed_samples = state::frame_state.sample_index;
 
   // Disable projection writes before waiting for an in-flight resolve. Enable
   // only after history/sample state is reset, so the native hook cannot publish
   // a sample from the previous temporal sequence.
-  bool publication_invalidated = false;
   if (!enabled && was_enabled) {
     SetRuntimeEnabled(false);
-    publication_invalidated = true;
     if (verify_restoration && projection_jitter::IsInstalled()) {
       projection_jitter::BeginProductionRestorationCheck();
     }
@@ -73,14 +69,8 @@ inline void TransitionRuntimeEnabled(
     projection_jitter::CancelProductionRestorationCheck();
   }
 
-  resolve::ExecutionGuard execution_guard;
-  // Normal disable already invalidated publication before waiting for resolve.
-  // A forced reset while already disabled still needs one explicit invalidation.
-  if (!enabled && !publication_invalidated) {
-    projection_jitter::InvalidateAppliedJitter();
-  }
-  resolve::InvalidateHistory(reason);
-  state::ResetTemporalState();
+  coordinator::ExecutionGuard execution_guard;
+  coordinator::ResetTemporalState(reason);
   if (enabled) {
     projection_jitter::CancelProductionRestorationCheck();
     SetRuntimeEnabled(true);
@@ -97,15 +87,6 @@ inline void TransitionRuntimeEnabled(
   }
 }
 
-inline void SyncRuntimeEnabledFromBinding() {
-  const std::unique_lock settings_lock(renodx::utils::mutex::global_mutex);
-  const bool desired = state::enabled_binding != nullptr
-                       && *state::enabled_binding > 0.f;
-  if (desired != state::IsEnabled()) {
-    TransitionRuntimeEnabled(desired, "setting synchronized");
-  }
-}
-
 inline void TransitionReconstructionMethodLocked(float value, const char* reason) {
   const auto method = state::NormalizeReconstructionMethod(value);
   const uint32_t method_value = static_cast<uint32_t>(method);
@@ -118,13 +99,11 @@ inline void TransitionReconstructionMethodLocked(float value, const char* reason
     return;
   }
 
-  resolve::ExecutionGuard execution_guard;
-  projection_jitter::PublicationWriterGuard publication_guard;
+  coordinator::ExecutionGuard execution_guard;
+  camera_state::PublicationWriterGuard publication_guard;
   state::SetReconstructionMethod(static_cast<float>(method_value));
   state::SetJitterPattern(static_cast<float>(effective_jitter_pattern));
-  projection_jitter::InvalidateAppliedJitterLocked();
-  resolve::InvalidateHistoryWithPublicationLocked(reason);
-  state::ResetTemporalState();
+  coordinator::ResetTemporalStateWithPublicationLocked(reason);
 
   logging::Info(
       "TAA reconstruction method changed method=",
@@ -138,12 +117,6 @@ inline void TransitionReconstructionMethod(float value, const char* reason) {
   TransitionReconstructionMethodLocked(value, reason);
 }
 
-inline void SyncReconstructionMethodFromBinding() {
-  const std::unique_lock settings_lock(renodx::utils::mutex::global_mutex);
-  RuntimeTransitionGuard transition_guard;
-  TransitionReconstructionMethodLocked(state::reconstruction_method, "reconstruction method synchronized");
-}
-
 inline void TransitionJitterPatternLocked(float value) {
   const uint32_t preference = static_cast<uint32_t>(std::clamp(value, 0.f, 1.f));
   const uint32_t effective_pattern = state::GetReconstructionMethod() == state::ReconstructionMethod::AMD_FSR3
@@ -155,12 +128,10 @@ inline void TransitionJitterPatternLocked(float value) {
   // Resolve already uses execution -> publication ordering when committing
   // matrix history. Preserve that order so the hook cannot publish a sample
   // from the previous pattern while history/sample state is being reset.
-  resolve::ExecutionGuard execution_guard;
-  projection_jitter::PublicationWriterGuard publication_guard;
+  coordinator::ExecutionGuard execution_guard;
+  camera_state::PublicationWriterGuard publication_guard;
   state::SetJitterPattern(static_cast<float>(effective_pattern));
-  projection_jitter::InvalidateAppliedJitterLocked();
-  resolve::InvalidateHistoryWithPublicationLocked("jitter pattern changed");
-  state::ResetTemporalState();
+  coordinator::ResetTemporalStateWithPublicationLocked("jitter pattern changed");
 
   logging::Info("TAA jitter pattern changed pattern=", effective_pattern);
 }
@@ -170,15 +141,9 @@ inline void TransitionJitterPattern(float value) {
   TransitionJitterPatternLocked(value);
 }
 
-inline void SyncJitterPatternFromBinding() {
-  const std::unique_lock settings_lock(renodx::utils::mutex::global_mutex);
-  RuntimeTransitionGuard transition_guard;
-  TransitionJitterPatternLocked(state::jitter_pattern);
-}
-
 inline void InvalidateHistoryForSetting(const char* reason) {
-  resolve::ExecutionGuard execution_guard;
-  resolve::InvalidateHistory(reason);
+  coordinator::ExecutionGuard execution_guard;
+  coordinator::ResetTemporalState(reason);
 }
 
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
@@ -191,11 +156,126 @@ inline void SetProjectionJitterScale(
 }
 #endif
 
+struct BindingSnapshot {
+  bool enabled = false;
+  float reconstruction_method = static_cast<float>(state::DEFAULT_RECONSTRUCTION_METHOD);
+  float jitter_pattern = static_cast<float>(state::DEFAULT_JITTER_PATTERN);
+  float clip_tightness = state::DEFAULT_CLIP_TIGHTNESS;
+  float history_clip_strength = state::DEFAULT_HISTORY_CLIP_STRENGTH;
+  float current_frame_blend = state::DEFAULT_CURRENT_FRAME_BLEND;
+#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
+  float diagnostic_view = state::DEFAULT_DIAGNOSTIC_VIEW;
+  float velocity_visualization_range = state::DEFAULT_VELOCITY_VISUALIZATION_RANGE;
+  float object_motion_mode = static_cast<float>(state::DEFAULT_OBJECT_MOTION_MODE);
+  std::array<float, state::PROJECTION_JITTER_PATH_COUNT> projection_jitter_scales = {};
+#endif
+};
+
+inline void ApplySettingsSnapshot() {
+  BindingSnapshot snapshot = {};
+  {
+    const std::unique_lock settings_lock(renodx::utils::mutex::global_mutex);
+    snapshot.enabled = state::enabled_binding != nullptr && *state::enabled_binding > 0.f;
+    snapshot.reconstruction_method = state::reconstruction_method;
+    snapshot.jitter_pattern = state::jitter_pattern;
+    snapshot.clip_tightness = state::clip_tightness;
+    snapshot.history_clip_strength = state::history_clip_strength;
+    snapshot.current_frame_blend = state::current_frame_blend;
+#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
+    snapshot.diagnostic_view = state::diagnostic_view;
+    snapshot.velocity_visualization_range = state::velocity_visualization_range;
+    snapshot.object_motion_mode = state::object_motion_mode;
+    snapshot.projection_jitter_scales = state::projection_jitter_scales;
+#endif
+  }
+
+  const bool was_enabled = state::IsEnabled();
+  if (was_enabled && !snapshot.enabled) {
+    TransitionRuntimeEnabled(false, "setting synchronized");
+  }
+  TransitionReconstructionMethod(snapshot.reconstruction_method, "reconstruction method synchronized");
+  TransitionJitterPattern(snapshot.jitter_pattern);
+  if (!was_enabled && snapshot.enabled) {
+    TransitionRuntimeEnabled(true, "setting synchronized");
+  }
+  bool history_settings_changed = state::GetClipTightness() != std::clamp(snapshot.clip_tightness, 0.f, 1.f)
+                                  || state::GetHistoryClipStrength()
+                                         != std::clamp(snapshot.history_clip_strength, 0.f, 1.f)
+                                  || state::GetCurrentFrameBlend()
+                                         != std::clamp(snapshot.current_frame_blend, 0.f, 1.f);
+#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
+  history_settings_changed = history_settings_changed
+                             || state::GetDiagnosticView()
+                                    != static_cast<float>(static_cast<uint32_t>(
+                                        std::clamp(snapshot.diagnostic_view, 0.f, 10.f)))
+                             || state::GetObjectMotionMode()
+                                    != static_cast<uint32_t>(
+                                        std::clamp(snapshot.object_motion_mode, 0.f, 5.f));
+  for (std::size_t index = 0u; index < snapshot.projection_jitter_scales.size(); ++index) {
+    history_settings_changed = history_settings_changed
+                               || state::GetProjectionJitterScale(
+                                      static_cast<state::ProjectionJitterPath>(index))
+                                      != std::clamp(snapshot.projection_jitter_scales[index], -2.f, 2.f);
+  }
+#endif
+  state::SetClipTightness(snapshot.clip_tightness);
+  state::SetHistoryClipStrength(snapshot.history_clip_strength);
+  state::SetCurrentFrameBlend(snapshot.current_frame_blend);
+#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
+  state::SetDiagnosticView(snapshot.diagnostic_view);
+  state::SetVelocityVisualizationRange(snapshot.velocity_visualization_range);
+  state::SetObjectMotionMode(snapshot.object_motion_mode);
+  for (std::size_t index = 0u; index < snapshot.projection_jitter_scales.size(); ++index) {
+    state::SetProjectionJitterScale(
+        static_cast<state::ProjectionJitterPath>(index),
+        snapshot.projection_jitter_scales[index]);
+  }
+#endif
+  if (history_settings_changed) {
+    InvalidateHistoryForSetting("settings synchronized");
+  }
+}
+
+inline void MigrateReconstructionMethodSetting() {
+  constexpr std::array<const char*, 3> preset_sections = {
+      "renodx-preset1",
+      "renodx-preset2",
+      "renodx-preset3",
+  };
+  for (const char* section : preset_sections) {
+    int current_value = 0;
+    if (reshade::get_config_value(
+            nullptr,
+            section,
+            "FxTemporalReconstructionMethod",
+            current_value)) {
+      continue;
+    }
+    int legacy_value = 0;
+    if (!reshade::get_config_value(
+            nullptr,
+            section,
+            "FxTaaReconstructionMethod",
+            legacy_value)) {
+      continue;
+    }
+    const int migrated_value = legacy_value == 0
+                                   ? static_cast<int>(state::ReconstructionMethod::ANALYTICAL_TAA)
+                                   : static_cast<int>(state::ReconstructionMethod::AMD_FSR3);
+    reshade::set_config_value(
+        nullptr,
+        section,
+        "FxTemporalReconstructionMethod",
+        migrated_value);
+  }
+}
+
 inline void AppendSettings(
     renodx::utils::settings::Settings& settings,
     ShaderInjectData* shader_injection) {
   if (settings_appended || shader_injection == nullptr) return;
   settings_appended = true;
+  MigrateReconstructionMethodSetting();
 
   std::vector<renodx::utils::settings::Setting*> taa_settings = {
       new renodx::utils::settings::Setting{
@@ -211,7 +291,7 @@ inline void AppendSettings(
           },
       },
       new renodx::utils::settings::Setting{
-          .key = "FxTaaReconstructionMethod",
+          .key = "FxTemporalReconstructionMethod",
           .binding = &state::reconstruction_method,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
           .default_value = static_cast<float>(state::DEFAULT_RECONSTRUCTION_METHOD),

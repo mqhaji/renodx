@@ -66,9 +66,9 @@ inline constexpr float DEFAULT_HISTORY_CLIP_STRENGTH = 1.f;
 inline constexpr float DEFAULT_CURRENT_FRAME_BLEND = 0.15f;
 
 struct FrameState {
-  uint32_t taa_sample_index = 0u;
+  uint32_t sample_index = 0u;
   uint64_t frame_index = 0u;
-  bool taa_ran_this_frame = false;
+  bool reconstruction_completed = false;
   bool full_resolution_candidate_seen = false;
 
   // Pipeline markers used to identify which CopyRenderBuffer invocation
@@ -121,20 +121,13 @@ inline std::array<std::atomic<float>, PROJECTION_JITTER_PATH_COUNT> runtime_proj
 inline std::atomic<float> runtime_clip_tightness = DEFAULT_CLIP_TIGHTNESS;
 inline std::atomic<float> runtime_history_clip_strength = DEFAULT_HISTORY_CLIP_STRENGTH;
 inline std::atomic<float> runtime_current_frame_blend = DEFAULT_CURRENT_FRAME_BLEND;
-inline std::atomic<uint64_t> runtime_settings_generation = 0u;
 inline std::atomic<uint64_t> current_frame_token = 0u;
 inline std::atomic<uint32_t> current_sample_index = 0u;
 inline FrameState frame_state = {};
 inline constexpr uint32_t HALTON_SEQUENCE_LENGTH = 8u;
 
 inline void SetEnabled(bool value) {
-  if (runtime_enabled.exchange(value, std::memory_order_acq_rel) != value) {
-    runtime_settings_generation.fetch_add(1u, std::memory_order_release);
-  }
-}
-
-inline void SyncEnabled() {
-  SetEnabled(enabled_binding != nullptr && *enabled_binding > 0.f);
+  runtime_enabled.store(value, std::memory_order_release);
 }
 
 inline bool IsEnabled() {
@@ -145,13 +138,7 @@ inline void SetReconstructionMethod(float value) {
   const auto method = NormalizeReconstructionMethod(value);
   const uint32_t method_value = static_cast<uint32_t>(method);
   reconstruction_method = static_cast<float>(method_value);
-  if (runtime_reconstruction_method.exchange(method_value, std::memory_order_acq_rel) != method_value) {
-    runtime_settings_generation.fetch_add(1u, std::memory_order_release);
-  }
-}
-
-inline void SyncReconstructionMethod() {
-  SetReconstructionMethod(reconstruction_method);
+  runtime_reconstruction_method.store(method_value, std::memory_order_release);
 }
 
 inline ReconstructionMethod GetReconstructionMethod() {
@@ -160,14 +147,7 @@ inline ReconstructionMethod GetReconstructionMethod() {
 
 inline void SetJitterPattern(float value) {
   const uint32_t pattern = static_cast<uint32_t>(std::clamp(value, 0.f, 1.f));
-  if (runtime_jitter_pattern.exchange(pattern, std::memory_order_acq_rel) != pattern) {
-    runtime_settings_generation.fetch_add(1u, std::memory_order_release);
-  }
-}
-
-inline void SyncJitterPattern() {
-  jitter_pattern = static_cast<float>(static_cast<uint32_t>(std::clamp(jitter_pattern, 0.f, 1.f)));
-  SetJitterPattern(jitter_pattern);
+  runtime_jitter_pattern.store(pattern, std::memory_order_release);
 }
 
 inline uint32_t GetJitterPattern() {
@@ -178,13 +158,7 @@ inline uint32_t GetJitterPattern() {
 inline void SetDiagnosticView(float value) {
   value = static_cast<float>(static_cast<uint32_t>(std::clamp(value, 0.f, 10.f)));
   diagnostic_view = value;
-  if (runtime_diagnostic_view.exchange(value, std::memory_order_acq_rel) != value) {
-    runtime_settings_generation.fetch_add(1u, std::memory_order_release);
-  }
-}
-
-inline void SyncDiagnosticView() {
-  SetDiagnosticView(diagnostic_view);
+  runtime_diagnostic_view.store(value, std::memory_order_release);
 }
 #endif
 
@@ -202,10 +176,6 @@ inline void SetVelocityVisualizationRange(float value) {
   velocity_visualization_range = value;
   runtime_velocity_visualization_range.store(value, std::memory_order_release);
 }
-
-inline void SyncVelocityVisualizationRange() {
-  SetVelocityVisualizationRange(velocity_visualization_range);
-}
 #endif
 
 inline float GetVelocityVisualizationRange() {
@@ -220,13 +190,7 @@ inline float GetVelocityVisualizationRange() {
 inline void SetObjectMotionMode(float value) {
   const uint32_t mode = static_cast<uint32_t>(std::clamp(value, 0.f, 5.f));
   object_motion_mode = static_cast<float>(mode);
-  if (runtime_object_motion_mode.exchange(mode, std::memory_order_acq_rel) != mode) {
-    runtime_settings_generation.fetch_add(1u, std::memory_order_release);
-  }
-}
-
-inline void SyncObjectMotionMode() {
-  SetObjectMotionMode(object_motion_mode);
+  runtime_object_motion_mode.store(mode, std::memory_order_release);
 }
 #endif
 
@@ -244,9 +208,7 @@ inline void SetResolveTuningValue(
     float value) {
   value = std::clamp(value, 0.f, 1.f);
   binding = value;
-  if (runtime_value.exchange(value, std::memory_order_acq_rel) != value) {
-    runtime_settings_generation.fetch_add(1u, std::memory_order_release);
-  }
+  runtime_value.store(value, std::memory_order_release);
 }
 
 inline void SetClipTightness(float value) {
@@ -259,12 +221,6 @@ inline void SetHistoryClipStrength(float value) {
 
 inline void SetCurrentFrameBlend(float value) {
   SetResolveTuningValue(current_frame_blend, runtime_current_frame_blend, value);
-}
-
-inline void SyncResolveTuning() {
-  SetClipTightness(clip_tightness);
-  SetHistoryClipStrength(history_clip_strength);
-  SetCurrentFrameBlend(current_frame_blend);
 }
 
 inline float GetClipTightness() {
@@ -284,17 +240,7 @@ inline void SetProjectionJitterScale(ProjectionJitterPath path, float value) {
   value = std::clamp(value, -2.f, 2.f);
   const std::size_t index = static_cast<std::size_t>(path);
   projection_jitter_scales[index] = value;
-  if (runtime_projection_jitter_scales[index].exchange(value, std::memory_order_acq_rel) != value) {
-    runtime_settings_generation.fetch_add(1u, std::memory_order_release);
-  }
-}
-
-inline void SyncProjectionJitterScales() {
-  for (std::size_t index = 0u; index < PROJECTION_JITTER_PATH_COUNT; ++index) {
-    SetProjectionJitterScale(
-        static_cast<ProjectionJitterPath>(index),
-        projection_jitter_scales[index]);
-  }
+  runtime_projection_jitter_scales[index].store(value, std::memory_order_release);
 }
 #endif
 
@@ -305,10 +251,6 @@ inline float GetProjectionJitterScale(ProjectionJitterPath path) {
   (void)path;
   return DEFAULT_PROJECTION_JITTER_SCALE;
 #endif
-}
-
-inline uint64_t RuntimeSettingsGeneration() {
-  return runtime_settings_generation.load(std::memory_order_acquire);
 }
 
 inline uint64_t CurrentFrameToken() {
@@ -359,15 +301,15 @@ inline std::array<float, 2> JitterForSample(uint32_t sample_index, uint32_t widt
 }
 
 inline void ResetTemporalState() {
-  frame_state.taa_sample_index = 0u;
-  frame_state.taa_ran_this_frame = false;
+  frame_state.sample_index = 0u;
+  frame_state.reconstruction_completed = false;
   frame_state.full_resolution_candidate_seen = false;
   current_sample_index.store(0u, std::memory_order_release);
 }
 
 inline void BeginFrame() {
   ++frame_state.frame_index;
-  frame_state.taa_ran_this_frame = false;
+  frame_state.reconstruction_completed = false;
   frame_state.full_resolution_candidate_seen = false;
   frame_state.dof_fired = false;
   frame_state.mb_tile_prep_fired = false;
@@ -378,11 +320,15 @@ inline void MarkFullResolutionCandidate() {
   frame_state.full_resolution_candidate_seen = true;
 }
 
+inline void MarkReconstructionCompleted() {
+  frame_state.reconstruction_completed = true;
+}
+
 // Called only after a successful compute dispatch and copy-back.
-inline void MarkTaaDispatched() {
-  frame_state.taa_ran_this_frame = true;
-  ++frame_state.taa_sample_index;
-  current_sample_index.store(frame_state.taa_sample_index, std::memory_order_release);
+inline void CommitTemporalFrame() {
+  MarkReconstructionCompleted();
+  ++frame_state.sample_index;
+  current_sample_index.store(frame_state.sample_index, std::memory_order_release);
 }
 
 }  // namespace taa::state

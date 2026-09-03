@@ -234,7 +234,8 @@ When enabled, the TAA path:
    otherwise recopy persistent unjittered viewport projection.
 4. Captures vanilla no-jitter projection/view matrices at the main boundary, computes the current inverse and
    previous VP relation in double precision, and promotes current VP only after a successful temporal dispatch.
-5. Captures the final `MotionBlurCameraVelocity` target through the targeted RGBA16F velocity clone.
+5. Captures the final `MotionBlurCameraVelocity` target, depth, object velocity, and matching camera publication into one
+   validated game-native frame.
 6. Builds linear color and signed RG16F motion, then runs AMD's FSR3 3.1.5 host schedule through the custom D3D11/SM5
    backend or the optional analytical history resolve. Both retain exact matrix camera motion for background pixels and
    MGSV's deformation-aware object motion.
@@ -256,12 +257,12 @@ shading-change, prepare-reactivity, disocclusion, motion-divergence, and luma-in
 game-derived mask integration, beginning with proven material paths such as `TppFxRain`, is tracked in
 [`taa/ROADMAP.md`](taa/ROADMAP.md). Sharpening is disabled even though the host creates its RCAS pipeline.
 
-The resolve fails closed: a missing native publication, stale velocity, or dimension mismatch skips that insertion
-candidate instead of blending misaligned inputs. MGSV may commit projection and capture camera motion before `Present`
-while recording the matching insertion callback afterward. Both inputs may therefore trail the callback epoch by one only
-when their Halton sample still matches. Presents without a new full-resolution insertion candidate preserve history;
-history resets only after a matching candidate is seen but cannot resolve. Enable/disable transitions also reset temporal
-state, and disabling verifies exact restoration of the vanilla projection copy. A former scoped
+The coordinator fails closed: a missing camera publication, stale capture, device mismatch, or resource mismatch skips
+that insertion candidate instead of blending unrelated inputs. Camera, depth, final velocity, and object velocity are
+snapshotted together and validated once before method dispatch. MGSV callbacks may trail `Present` by one epoch only when
+their Halton sample still matches. Presents without a new full-resolution insertion candidate preserve history; history
+resets only after a matching candidate is seen but cannot resolve. Enable/disable transitions also reset temporal state,
+and disabling verifies exact restoration of the vanilla projection copy. A former scoped
 replacement for VS `0x200DBED9` previously proved the missing light jitter and has been removed. Brief runtime testing indicates that the native
 alpha-model correction controls the affected lights; the separate guarded local-light callback remains an additional
 known-path correction pending isolated runtime classification.
