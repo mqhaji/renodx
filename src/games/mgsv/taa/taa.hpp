@@ -2,8 +2,8 @@
 
 /*
  * ReShade lifecycle and insertion routing for MGSV temporal reconstruction.
- * The primary insertion is pre-DoF; resolve.hpp validates shared inputs and
- * dispatches the selected analytical or FSR3 Upscaler implementation.
+ * The primary insertion is pre-DoF; coordinator.hpp validates one immutable
+ * game-native frame and dispatches the selected reconstruction method.
  */
 
 #include <windows.h>
@@ -17,11 +17,11 @@
 #include "../../../utils/shader.hpp"
 #include "../../../utils/state.hpp"
 #include "../shared.h"
-#include "./fsr3/runtime.hpp"
+#include "./runtime/coordinator.hpp"
 #include "./runtime/descriptor_tracker.hpp"
+#include "./runtime/input_capture.hpp"
 #include "./runtime/logging.hpp"
 #include "./runtime/projection_jitter.hpp"
-#include "./runtime/resolve.hpp"
 #include "./runtime/state.hpp"
 #include "./settings.hpp"
 
@@ -128,7 +128,7 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list) {
   auto* data = descriptor_tracker::Get(cmd_list);
   if (data == nullptr) return false;
 
-  resolve::ExecutionGuard execution_guard;
+  coordinator::ExecutionGuard execution_guard;
   if (!state::IsEnabled()) return false;
 
   if (is_gbuffer_velocity || is_gbuffer_masked_velocity) {
@@ -148,7 +148,7 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list) {
     if (prepare_velocity_target != nullptr) {
       velocity_rtv = prepare_velocity_target(cmd_list, velocity_rtv);
     }
-    resolve::CaptureCameraMotionLocked(cmd_list, *data, velocity_rtv);
+    input_capture::CaptureCameraMotionLocked(cmd_list, *data, velocity_rtv);
   }
 
   // Sequence markers arm the later CopyRenderBuffer fallbacks. The DoF
@@ -163,14 +163,14 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list) {
     state::frame_state.mb_tile_prep_fired = true;
   }
 
-  if (state::frame_state.taa_ran_this_frame) return false;
+  if (state::frame_state.reconstruction_completed) return false;
 
   // Priority 1: DOF_ScatterBakeFirst. The shader hash is reused at multiple
   // resolutions. MaybeRun accepts the full-resolution scene-color draw and
   // leaves lower-resolution DoF candidates for the later fallback cascade.
   if (pixel_hash == shader_hashes::DOF_SCATTER_BAKE_FIRST_PS) {
     LogObservedShader("pixel", "DOF_ScatterBakeFirst", pixel_hash, logged_scatter_bake);
-    resolve::MaybeRunLocked(cmd_list, *data, "DOF_ScatterBakeFirst");
+    coordinator::MaybeRunLocked(cmd_list, *data, "DOF_ScatterBakeFirst");
     return false;
   }
 
@@ -181,12 +181,12 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list) {
   if (pixel_hash == shader_hashes::COPY_RENDER_BUFFER_PS) {
     if (state::frame_state.dof_fired) {
       LogObservedShader("pixel", "CRB after DoF", pixel_hash, logged_dof_gate);
-      resolve::MaybeRunLocked(cmd_list, *data, "CopyRenderBufferAfterDoF");
+      coordinator::MaybeRunLocked(cmd_list, *data, "CopyRenderBufferAfterDoF");
       return false;
     }
     if (state::frame_state.mb_tile_prep_fired) {
       LogObservedShader("pixel", "CRB after MB tile prep", pixel_hash, logged_mb_gate);
-      resolve::MaybeRunLocked(cmd_list, *data, "CopyRenderBufferAfterMBTilePrep");
+      coordinator::MaybeRunLocked(cmd_list, *data, "CopyRenderBufferAfterMBTilePrep");
       return false;
     }
   }
@@ -200,7 +200,7 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list) {
   if (is_tonemap_lut) LogObservedShader("pixel", "Tonemap_1DLUT", pixel_hash, logged_tonemap_lut);
 
   if (is_tonemap || is_tonemap_lut) {
-    resolve::MaybeRunLocked(cmd_list, *data, is_tonemap ? "Tonemap" : "Tonemap_1DLUT");
+    coordinator::MaybeRunLocked(cmd_list, *data, is_tonemap ? "Tonemap" : "Tonemap_1DLUT");
   }
 
   // Always return false: we never replace the original game draw, we just
@@ -253,10 +253,10 @@ inline bool OnDrawOrDispatchIndirect(
 
 inline void OnDestroyDevice(reshade::api::device* device) {
   settings::TransitionRuntimeEnabled(false, "device destroyed", true, false);
-  resolve::ExecutionGuard execution_guard;
+  coordinator::ExecutionGuard execution_guard;
   logging::Info("destroy device");
-  resolve::Destroy(device);
-  fsr3::Destroy();
+  projection_jitter::Detach();
+  coordinator::Destroy(device);
 }
 
 inline void OnPresent(
@@ -271,35 +271,19 @@ inline void OnPresent(
   (void)dest_rect;
   (void)dirty_rect_count;
   (void)dirty_rects;
-  settings::SyncRuntimeEnabledFromBinding();
-  settings::SyncReconstructionMethodFromBinding();
-  settings::SyncJitterPatternFromBinding();
-#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
-  state::SyncDiagnosticView();
-  state::SyncVelocityVisualizationRange();
-  state::SyncObjectMotionMode();
-#endif
-  state::SyncResolveTuning();
-#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
-  state::SyncProjectionJitterScales();
-#endif
-  resolve::ExecutionGuard execution_guard;
+  settings::ApplySettingsSnapshot();
+  coordinator::ExecutionGuard execution_guard;
   auto* device = queue != nullptr ? queue->get_device() : nullptr;
   const bool enabled = state::IsEnabled();
   const auto method = state::GetReconstructionMethod();
-  if (!enabled || method != state::ReconstructionMethod::ANALYTICAL_TAA) {
-    resolve::ReleaseHistory(device);
-  }
-  if (!enabled || method != state::ReconstructionMethod::AMD_FSR3) {
-    fsr3::ReleaseTemporalResources(device);
-  }
+  coordinator::ReleaseInactiveResources(device, enabled, method);
   if (enabled
       && state::frame_state.full_resolution_candidate_seen
-      && !state::frame_state.taa_ran_this_frame) {
+      && !state::frame_state.reconstruction_completed) {
     // Candidate insertion draws may be lower-resolution DoF work. Preserve
     // history when no new full-resolution scene was submitted, and reset only
     // after a matching candidate was seen but no resolve completed.
-    resolve::InvalidateHistory("enabled frame ended without TAA resolve");
+    coordinator::ResetTemporalState("enabled frame ended without TAA resolve");
   }
   state::BeginFrame();
 }
@@ -315,19 +299,7 @@ inline void Use(DWORD fdw_reason, ShaderInjectData* shader_injection) {
       attached = true;
       state::enabled_binding =
           shader_injection != nullptr ? &shader_injection->custom_taa : &state::enabled;
-      state::SyncEnabled();
-      state::SyncReconstructionMethod();
-      state::SyncJitterPattern();
-#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
-      state::SyncDiagnosticView();
-      state::SyncVelocityVisualizationRange();
-      state::SyncObjectMotionMode();
-#endif
-      state::SyncResolveTuning();
-#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
-      state::SyncProjectionJitterScales();
-#endif
-      resolve::SetFsr3ResolveCallback(fsr3::TryResolve);
+      settings::ApplySettingsSnapshot();
       logging::Info("attach");
       logging::Info("initial runtime state enabled=", logging::Bool{state::IsEnabled()},
                     " jitter_pattern=", state::GetJitterPattern() == 0u ? "off" : "halton_8");
@@ -342,13 +314,12 @@ inline void Use(DWORD fdw_reason, ShaderInjectData* shader_injection) {
       reshade::register_event<reshade::addon_event::draw_or_dispatch_indirect>(OnDrawOrDispatchIndirect);
       reshade::register_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
       reshade::register_event<reshade::addon_event::present>(OnPresent);
-      renodx::utils::resource::RegisterOnDestroyResourceViewInfoCallback(resolve::OnDestroyResourceView);
+      renodx::utils::resource::RegisterOnDestroyResourceViewInfoCallback(input_capture::OnDestroyResourceView);
       break;
 
     case DLL_PROCESS_DETACH:
       if (!attached) return;
       attached = false;
-      resolve::SetFsr3ResolveCallback(nullptr);
       logging::Info("detach");
       // DllMain holds the loader lock. Runtime transitions and resource
       // quiescence happen in destroy_device; process detach only unregisters.
@@ -363,7 +334,7 @@ inline void Use(DWORD fdw_reason, ShaderInjectData* shader_injection) {
       reshade::unregister_event<reshade::addon_event::draw_or_dispatch_indirect>(OnDrawOrDispatchIndirect);
       reshade::unregister_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
       reshade::unregister_event<reshade::addon_event::present>(OnPresent);
-      renodx::utils::resource::UnregisterOnDestroyResourceViewInfoCallback(resolve::OnDestroyResourceView);
+      renodx::utils::resource::UnregisterOnDestroyResourceViewInfoCallback(input_capture::OnDestroyResourceView);
       break;
   }
 }
