@@ -1078,6 +1078,11 @@ renodx::utils::settings::Settings settings = {
         .label = std::string("Build: ") + renodx::utils::date::ISO_DATE_TIME,
         .section = "About",
     },
+    new renodx::utils::settings::Setting{
+        .value_type = renodx::utils::settings::SettingValueType::TEXT,
+        .label = std::string("- Thanks to Maple for the FSR3 implementation\n"),
+        .section = "About",
+    },
 };
 
 void OnPresetOff() {
@@ -1201,8 +1206,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       reshade::unregister_addon(h_module);
       break;
   }
-  // The persistent experimental toggle registers the native-jitter/resolve
-  // path and remains default-off.
+  // The persistent TAA toggle registers the native-jitter/resolve path and
+  // remains default-off.
   taa::prepare_velocity_target = PrepareTaaVelocityTarget;
   taa::Use(fdw_reason, &shader_injection);
 
