@@ -8,9 +8,9 @@
 #include <cstdint>
 #include <span>
 
+#include "ffx/upscalers/fsr3/include/ffx_fsr3upscaler.h"
 #include "ffx/upscalers/fsr3/internal/ffx_fsr3upscaler_private.h"
 #include "ffx/upscalers/fsr3/internal/ffx_fsr3upscaler_shaderblobs.h"
-
 
 #include <embed/fsr3sdk_accumulate.h>
 #include <embed/fsr3sdk_accumulate_sharpen.h>
