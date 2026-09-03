@@ -3,7 +3,7 @@
 /*
  * ReShade lifecycle and insertion routing for MGSV temporal reconstruction.
  * The primary insertion is pre-DoF; resolve.hpp validates shared inputs and
- * dispatches the selected analytical or FSR2 implementation.
+ * dispatches the selected analytical or FSR3 Upscaler implementation.
  */
 
 #include <windows.h>
@@ -17,7 +17,7 @@
 #include "../../../utils/shader.hpp"
 #include "../../../utils/state.hpp"
 #include "../shared.h"
-#include "./fsr/runtime.hpp"
+#include "./fsr3/runtime.hpp"
 #include "./runtime/descriptor_tracker.hpp"
 #include "./runtime/logging.hpp"
 #include "./runtime/projection_jitter.hpp"
@@ -256,7 +256,7 @@ inline void OnDestroyDevice(reshade::api::device* device) {
   resolve::ExecutionGuard execution_guard;
   logging::Info("destroy device");
   resolve::Destroy(device);
-  fsr::Destroy(device);
+  fsr3::Destroy();
 }
 
 inline void OnPresent(
@@ -287,11 +287,11 @@ inline void OnPresent(
   auto* device = queue != nullptr ? queue->get_device() : nullptr;
   const bool enabled = state::IsEnabled();
   const auto method = state::GetReconstructionMethod();
-  if (!enabled || method == state::ReconstructionMethod::AMD_FSR2) {
+  if (!enabled || method != state::ReconstructionMethod::ANALYTICAL_TAA) {
     resolve::ReleaseHistory(device);
   }
-  if (!enabled || method == state::ReconstructionMethod::ANALYTICAL_TAA) {
-    fsr::ReleaseTemporalResources(device);
+  if (!enabled || method != state::ReconstructionMethod::AMD_FSR3) {
+    fsr3::ReleaseTemporalResources(device);
   }
   if (enabled
       && state::frame_state.full_resolution_candidate_seen
@@ -328,7 +328,7 @@ inline void Use(DWORD fdw_reason, ShaderInjectData* shader_injection) {
     case DLL_PROCESS_ATTACH:
       if (attached) return;
       attached = true;
-      resolve::SetFsrCallbacks(fsr::TryResolve, fsr::ReleaseTemporalResources);
+      resolve::SetFsr3Callbacks(fsr3::TryResolve, fsr3::ReleaseTemporalResources);
       logging::Info("attach");
       logging::Info("initial runtime state enabled=", logging::Bool{state::IsEnabled()},
                     " jitter_pattern=", state::GetJitterPattern() == 0u ? "off" : "halton_8");
@@ -349,7 +349,7 @@ inline void Use(DWORD fdw_reason, ShaderInjectData* shader_injection) {
     case DLL_PROCESS_DETACH:
       if (!attached) return;
       attached = false;
-      resolve::SetFsrCallbacks(nullptr, nullptr);
+      resolve::SetFsr3Callbacks(nullptr, nullptr);
       logging::Info("detach");
       // DllMain holds the loader lock. Runtime transitions and resource
       // quiescence happen in destroy_device; process detach only unregisters.

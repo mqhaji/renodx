@@ -36,7 +36,7 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 
 **4. Temporal Anti-Aliasing**
 - Installs a narrowly validated native projection hook during device initialization
-- Captures the final camera/object velocity target and resolves into RGBA16F ping-pong history
+- Captures the final camera/object velocity target and routes validated inputs to FSR3 or analytical history
 - Requires exact frame, sample, and render-dimension agreement between the native jitter and resolve
 - Leaves TAA disabled by default and preserves the original FXAA path while disabled
 
@@ -221,9 +221,9 @@ The native `copy_resource` callback is separately armed from a proven scene-tone
 
 The addon includes optional native-resolution temporal reconstruction under **Temporal Anti-Aliasing**. It defaults to
 **Off**. While disabled, MGSV keeps its original FXAA path and the native projection remains unmodified. Enabled users
-can select **AMD FSR 2.3.4** or the established analytical TAA. FSR2 is used whenever no reconstruction-method key is
-persisted, including configurations created before the selector existed. The FSR2 option uses the addon's experimental
-native-resolution D3D11/SM5 adaptation; an explicitly persisted method continues to override the default.
+can select **AMD FSR 3.1.5** or the established analytical TAA. FSR3 is the default reconstruction method when no method
+key is persisted. The former FSR2 implementation has been removed; both legacy AMD selector values migrate to FSR3, while
+an explicitly persisted Analytical TAA value remains analytical.
 
 When enabled, the TAA path:
 
@@ -235,20 +235,26 @@ When enabled, the TAA path:
 4. Captures vanilla no-jitter projection/view matrices at the main boundary, computes the current inverse and
    previous VP relation in double precision, and promotes current VP only after a successful temporal dispatch.
 5. Captures the final `MotionBlurCameraVelocity` target through the targeted RGBA16F velocity clone.
-6. Builds canonical linear color and signed motion, then runs the default FSR2 SM5 graph or the optional analytical
-   history resolve. Both retain exact matrix camera motion for background pixels and MGSV's deformation-aware object motion.
+6. Builds linear color and signed RG16F motion, then runs AMD's FSR3 3.1.5 host schedule through the custom D3D11/SM5
+   backend or the optional analytical history resolve. Both retain exact matrix camera motion for background pixels and
+   MGSV's deformation-aware object motion.
 7. Resolves at the first `DOF_ScatterBakeFirst` invocation whose scene color matches the full-resolution depth and motion
    inputs. Lower-resolution DoF invocations are skipped so the fallback cascade can continue.
 8. Bypasses the original FXAA filter while TAA is enabled.
 
 **TAA Jitter Pattern** is visible only with Analytical TAA and exposes the production eight-phase Halton sequence plus an
-**Off** diagnostic that leaves the analytical resolve active with zero projection jitter. FSR2 always uses eight-phase
+**Off** diagnostic that leaves the analytical resolve active with zero projection jitter. FSR3 always uses eight-phase
 Halton and hides the selector. The default build hides the extended diagnostic view, velocity range, object-motion selector, and per-path jitter controls behind
 `ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS=0`; their runtime values are pinned to production defaults. Analytical resolve-tuning
-controls are hidden while FSR2 is selected. The default-Off **Unclamp Motion Vectors** experiment remains shared. Relevant
+controls are hidden while FSR3 is selected. The default-Off **Unclamp Motion Vectors** experiment remains shared. Relevant
 changes invalidate and reseed history.
-FSR2 forces only the effective runtime pattern, so switching back to Analytical TAA restores its persisted Off/Halton
+FSR3 forces only the effective runtime pattern, so switching back to Analytical TAA restores its persisted Off/Halton
 preference.
+
+The current FSR3 dispatch does not provide external reactive or transparency/composition masks. AMD's internal
+shading-change, prepare-reactivity, disocclusion, motion-divergence, and luma-instability passes remain active. Planned
+game-derived mask integration, beginning with proven material paths such as `TppFxRain`, is tracked in
+[`taa/ROADMAP.md`](taa/ROADMAP.md). Sharpening is disabled even though the host creates its RCAS pipeline.
 
 The resolve fails closed: a missing native publication, stale velocity, or dimension mismatch skips that insertion
 candidate instead of blending misaligned inputs. MGSV may commit projection and capture camera motion before `Present`
@@ -260,8 +266,9 @@ replacement for VS `0x200DBED9` previously proved the missing light jitter and h
 alpha-model correction controls the affected lights; the separate guarded local-light callback remains an additional
 known-path correction pending isolated runtime classification.
 
-Default builds log explicit TAA enable/disable transitions. FSR2 logs one pipeline/resource creation pair and one
-**AMD FSR2 accumulation started** line after each reset; analytical TAA logs **TAA accumulation started**. Repeated
+Default builds log explicit TAA enable/disable transitions. FSR3 logs **FSR3.1 D3D11 context probe succeeded** when its
+context is created and **AMD FSR3.1 accumulation started** after each reset; analytical TAA logs **TAA accumulation
+started**. Repeated
 accumulation-start lines while settings and resolution are unchanged indicate that history is still being reset.
 Persisted startup state and waiting for the first native publication are logged once. The expected lower-resolution DoF
 candidate is also logged only once per device lifetime.
@@ -371,9 +378,11 @@ Use CMake Tools in VS Code, select the desired configuration, and build the `mgs
 - `build/Release/renodx-mgsv.addon64` (or the matching configuration directory)
 - `build/mgsv.include/embed/mgsv_taa.cso`
 - `build/mgsv.include/embed/mgsv_taa.h`
-- `build/mgsv.include/embed/fsr2_prepare_inputs.cso`, `fsr2_luminance_pyramid.cso`,
-  `fsr2_reconstruct_previous_depth.cso`, `fsr2_depth_clip.cso`, `fsr2_depth_clip_zero_masks.cso`, `fsr2_lock.cso`, and
-  `fsr2_accumulate.cso`
+- `build/mgsv.include/embed/fsr3_prepare_game_inputs.cso` and `fsr3_encode_game_output.cso`
+- `build/mgsv.include/embed/fsr3sdk_prepare_inputs.cso`, `fsr3sdk_luma_pyramid.cso`,
+  `fsr3sdk_shading_change_pyramid.cso`, `fsr3sdk_shading_change.cso`, `fsr3sdk_prepare_reactivity.cso`,
+  `fsr3sdk_luma_instability.cso`, `fsr3sdk_accumulate.cso`, `fsr3sdk_accumulate_sharpen.cso`, `fsr3sdk_rcas.cso`,
+  `fsr3sdk_generate_reactive.cso`, and `fsr3sdk_debug_view.cso`
 - `build/mgsv.include/embed/0x9815404F.cso`, `0x58C10658.cso`, and `0xA13321B6.cso`
 
 ### Deploy
@@ -394,12 +403,14 @@ copy build\Release\renodx-mgsv.addon64 "C:\Program Files (x86)\Steam\steamapps\c
 ### Manual TAA Verification
 
 1. Start with **Temporal Anti-Aliasing** disabled and confirm the original FXAA presentation is stable.
-2. Enable TAA with the default **AMD FSR 2.3.4** method. Confirm the jitter-pattern control is hidden, one FSR2 pipeline/resource
-   creation pair appears, and one **AMD FSR2 accumulation started** line is logged. Standing still should not restart it.
+2. Enable TAA with the default **AMD FSR 3.1.5** method. Confirm the jitter-pattern control is hidden, one **FSR3.1 D3D11
+   context probe succeeded** line appears, and one **AMD FSR3.1 accumulation started** line is logged. Standing still
+   should not restart it.
 3. Inspect static edges, thin wires, foliage, slow and fast camera pans, aiming, binoculars, menus, camera cuts, DoF, and
-   motion blur. Pay particular attention to the approximate history kernel around moving silhouettes and disocclusions.
+   motion blur. Pay particular attention to moving silhouettes, disocclusions, rain, particles, and transparency while
+   external reactive masks are not yet connected.
 4. Switch to **Analytical TAA**, verify one reset and that **TAA Jitter Pattern** becomes visible, then compare it with
-   FSR2. Analytical jitter **Off** remains diagnostic; FSR2 always enforces the eight-phase Halton sequence.
+   FSR3. Analytical jitter **Off** remains diagnostic; FSR3 always enforces the eight-phase Halton sequence.
 5. Compare **Unclamp Motion Vectors** Off/On during motion above approximately 64 pixels; verify object motion and native
    motion blur, then return it to its default **Off** state.
 6. With `ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS=1`, exercise all diagnostic views and per-path controls; otherwise verify
