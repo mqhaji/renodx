@@ -211,8 +211,6 @@ struct Matrix4d {
 inline SetViewMatrixState set_view_matrix_state = nullptr;
 inline RenderPluginCallback forward_rendering = nullptr;
 inline RenderPluginCallback local_light_main_exec = nullptr;
-inline uint8_t* projection_commit_address = nullptr;
-inline uint8_t* helper_entry_address = nullptr;
 inline uint8_t* expected_return_address = nullptr;
 inline void* velocity_return_address = nullptr;
 inline void* model_return_address = nullptr;
@@ -550,7 +548,7 @@ inline bool MatchesBytes(const uint8_t* address, const std::array<uint8_t, Size>
   return address != nullptr && std::memcmp(address, expected.data(), expected.size()) == 0;
 }
 
-inline bool InitializeAdditionalHookAddresses(HMODULE module) {
+inline bool InitializeAdditionalHookAddresses(HMODULE module, const uint8_t* helper_entry_address) {
   if (module == nullptr || helper_entry_address == nullptr) return false;
   auto* base = reinterpret_cast<uint8_t*>(module);
 
@@ -665,23 +663,6 @@ inline bool ApplyPublishedJitterToActiveProjection(
   return true;
 }
 
-inline bool GetPathForReturnAddress(
-    void* return_address,
-    state::ProjectionJitterPath& path) {
-  if (return_address == velocity_return_address) {
-    path = state::ProjectionJitterPath::VELOCITY;
-  } else if (return_address == model_return_address) {
-    path = state::ProjectionJitterPath::MODEL;
-  } else if (return_address == alpha_model_return_address) {
-    path = state::ProjectionJitterPath::ALPHA_MODEL;
-  } else if (return_address == overlay_model_return_address) {
-    path = state::ProjectionJitterPath::OVERLAY_MODEL;
-  } else {
-    return false;
-  }
-  return true;
-}
-
 inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   HookCallGuard hook_call_guard;
 
@@ -691,20 +672,27 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   original(view_matrix);
 
   if (return_address != expected_return_address) {
-    state::ProjectionJitterPath path = state::ProjectionJitterPath::VELOCITY;
-    if (GetPathForReturnAddress(return_address, path)) {
-      const auto* viewport = reinterpret_cast<const uint8_t*>(view_matrix) - 0x2C0u;
-      ApplyPublishedJitterToActiveProjection(viewport, path);
+    state::ProjectionJitterPath path;
+    if (return_address == velocity_return_address) {
+      path = state::ProjectionJitterPath::VELOCITY;
+    } else if (return_address == model_return_address) {
+      path = state::ProjectionJitterPath::MODEL;
+    } else if (return_address == alpha_model_return_address) {
+      path = state::ProjectionJitterPath::ALPHA_MODEL;
+    } else if (return_address == overlay_model_return_address) {
+      path = state::ProjectionJitterPath::OVERLAY_MODEL;
+    } else {
       return;
     }
+    const auto* viewport = reinterpret_cast<const uint8_t*>(view_matrix) - 0x2C0u;
+    ApplyPublishedJitterToActiveProjection(viewport, path);
     return;
   }
 
   const bool taa_enabled = state::IsEnabled();
   // The hook stays installed for the process lifetime, but default-Off work
   // stops here unless a short exact-restoration check is still pending.
-  if (!taa_enabled
-      && !production_awaiting_restoration.load(std::memory_order_acquire)) {
+  if (!taa_enabled && !production_awaiting_restoration.load(std::memory_order_acquire)) {
     return;
   }
 
@@ -851,17 +839,17 @@ inline bool Attach() {
   InvalidateAppliedJitter();
 
   HMODULE module = GetModuleHandleW(nullptr);
-  projection_commit_address = FindProjectionCommit(module);
+  auto* projection_commit_address = FindProjectionCommit(module);
   if (projection_commit_address == nullptr) return false;
 
   auto* call = projection_commit_address + RELATIVE_CALL_OFFSET;
   expected_return_address = call + 5u;
-  helper_entry_address = DecodeRelativeCall(call);
+  auto* helper_entry_address = DecodeRelativeCall(call);
   set_view_matrix_state = reinterpret_cast<SetViewMatrixState>(helper_entry_address);
   shader_manager_global = DecodeShaderManagerGlobal(projection_commit_address);
   if (set_view_matrix_state == nullptr
       || shader_manager_global == nullptr
-      || !InitializeAdditionalHookAddresses(module)) {
+      || !InitializeAdditionalHookAddresses(module, helper_entry_address)) {
     logging::Warn("failed to decode native projection hook addresses");
     set_view_matrix_state = nullptr;
     forward_rendering = nullptr;

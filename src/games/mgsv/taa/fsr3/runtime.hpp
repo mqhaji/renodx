@@ -25,12 +25,12 @@
 #include <embed/fsr3_prepare_game_inputs.h>
 #include <include/reshade.hpp>
 
-#include "backend_dx11.hpp"
-#include "ffx/upscalers/fsr3/include/ffx_fsr3upscaler.h"
 #include "../runtime/logging.hpp"
 #include "../runtime/projection_jitter.hpp"
 #include "../runtime/resolve.hpp"
 #include "../runtime/state.hpp"
+#include "backend_dx11.hpp"
+#include "ffx/upscalers/fsr3/include/ffx_fsr3upscaler.h"
 
 #ifndef FFX_FSR3UPSCALER_DISABLE_WATERMARK
 #define FFX_FSR3UPSCALER_DISABLE_WATERMARK 1
@@ -39,6 +39,12 @@
 namespace taa::fsr3 {
 
 inline constexpr uint32_t THREAD_GROUP_SIZE = 8u;
+
+enum class LocalView : uint8_t {
+  NONE,
+  SRV,
+  UAV,
+};
 
 struct Texture {
   Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
@@ -125,10 +131,10 @@ inline bool IsCameraDiscontinuity(const projection_jitter::AppliedJitter& native
 inline DXGI_FORMAT ToDxgiFormat(FfxApiSurfaceFormat format) {
   switch (format) {
     case FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT;
-    case FFX_API_SURFACE_FORMAT_R16G16_FLOAT: return DXGI_FORMAT_R16G16_FLOAT;
-    case FFX_API_SURFACE_FORMAT_R32_FLOAT: return DXGI_FORMAT_R32_FLOAT;
-    case FFX_API_SURFACE_FORMAT_R32_UINT: return DXGI_FORMAT_R32_UINT;
-    default: return DXGI_FORMAT_UNKNOWN;
+    case FFX_API_SURFACE_FORMAT_R16G16_FLOAT:       return DXGI_FORMAT_R16G16_FLOAT;
+    case FFX_API_SURFACE_FORMAT_R32_FLOAT:          return DXGI_FORMAT_R32_FLOAT;
+    case FFX_API_SURFACE_FORMAT_R32_UINT:           return DXGI_FORMAT_R32_UINT;
+    default:                                        return DXGI_FORMAT_UNKNOWN;
   }
 }
 
@@ -153,7 +159,7 @@ inline bool CreateTexture(
     ID3D11Device* device,
     Texture& output,
     const FfxApiResourceDescription& ffx_description,
-    bool create_local_views) {
+    LocalView local_view) {
   if (device == nullptr || ffx_description.width == 0u || ffx_description.height == 0u) return false;
   const DXGI_FORMAT format = ToDxgiFormat(static_cast<FfxApiSurfaceFormat>(ffx_description.format));
   if (format == DXGI_FORMAT_UNKNOWN) return false;
@@ -171,9 +177,14 @@ inline bool CreateTexture(
   output.description = ffx_description;
   output.description.mipCount = 1u;
 
-  if (!create_local_views) return true;
-  if (FAILED(device->CreateShaderResourceView(output.texture.Get(), nullptr, &output.srv))) return false;
-  if (FAILED(device->CreateUnorderedAccessView(output.texture.Get(), nullptr, &output.uav))) return false;
+  if (local_view == LocalView::SRV
+      && FAILED(device->CreateShaderResourceView(output.texture.Get(), nullptr, &output.srv))) {
+    return false;
+  }
+  if (local_view == LocalView::UAV
+      && FAILED(device->CreateUnorderedAccessView(output.texture.Get(), nullptr, &output.uav))) {
+    return false;
+  }
   return true;
 }
 
@@ -253,8 +264,8 @@ inline bool CreateResources(ID3D11Device* device, uint32_t width, uint32_t heigh
   FfxFsr3UpscalerContextDescription context_description = {};
   context_description.flags = FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE
                               | FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED;
-  context_description.maxRenderSize = {width, height};
-  context_description.maxUpscaleSize = {width, height};
+  context_description.maxRenderSize = {.width = width, .height = height};
+  context_description.maxUpscaleSize = {.width = width, .height = height};
   context_description.backendInterface = backend_interface;
   result = ffxFsr3UpscalerContextCreate(&resources.context, &context_description);
   if (result != FFX_OK) {
@@ -270,6 +281,16 @@ inline bool CreateResources(ID3D11Device* device, uint32_t width, uint32_t heigh
     return false;
   }
   resources.context_created = true;
+  float shading_change_scale = 0.15f;
+  float accumulation_added_per_frame = 1.f / 3.f;
+  ffxFsr3UpscalerSetConstant(
+      &resources.context,
+      FFX_FSR3UPSCALER_CONFIGURE_UPSCALE_KEY_FSHADINGCHANGESCALE,
+      &shading_change_scale);
+  ffxFsr3UpscalerSetConstant(
+      &resources.context,
+      FFX_FSR3UPSCALER_CONFIGURE_UPSCALE_KEY_FACCUMULATIONADDEDPERFRAME,
+      &accumulation_added_per_frame);
 
   if (!CreateComputeShader(device, __fsr3_prepare_game_inputs, resources.prepare_shader)
       || !CreateComputeShader(device, __fsr3_encode_game_output, resources.encode_shader)) {
@@ -291,28 +312,28 @@ inline bool CreateResources(ID3D11Device* device, uint32_t width, uint32_t heigh
     return false;
   }
 
-  const FfxApiResourceUsage sampled_uav = static_cast<FfxApiResourceUsage>(
+  const auto sampled_uav = static_cast<FfxApiResourceUsage>(
       FFX_API_RESOURCE_USAGE_READ_ONLY | FFX_API_RESOURCE_USAGE_UAV);
   if (!CreateTexture(
           device,
           resources.linear_input,
           MakeDescription(FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT, width, height, sampled_uav),
-          true)
+          LocalView::UAV)
       || !CreateTexture(
           device,
           resources.motion_input,
           MakeDescription(FFX_API_SURFACE_FORMAT_R16G16_FLOAT, width, height, sampled_uav),
-          true)
+          LocalView::UAV)
       || !CreateTexture(
           device,
           resources.linear_output,
           MakeDescription(FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT, width, height, sampled_uav),
-          true)
+          LocalView::SRV)
       || !CreateTexture(
           device,
           resources.encoded_output,
           MakeDescription(FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT, width, height, sampled_uav),
-          true)) {
+          LocalView::UAV)) {
     Destroy();
     return false;
   }
@@ -324,17 +345,17 @@ inline bool CreateResources(ID3D11Device* device, uint32_t width, uint32_t heigh
           device,
           resources.reconstructed_previous_nearest_depth,
           shared_descriptions.reconstructedPrevNearestDepth.resourceDescription,
-          false)
+          LocalView::NONE)
       || !CreateTexture(
           device,
           resources.dilated_depth,
           shared_descriptions.dilatedDepth.resourceDescription,
-          false)
+          LocalView::NONE)
       || !CreateTexture(
           device,
           resources.dilated_motion,
           shared_descriptions.dilatedMotionVectors.resourceDescription,
-          false)) {
+          LocalView::NONE)) {
     if (LogEvery(1u)) logging::Warn("failed to create FSR3.1 shared resources error=", result);
     Destroy();
     return false;
@@ -374,9 +395,9 @@ inline bool PrepareGameInputs(
     bool reset) {
   auto& captured = resolve::resources;
   const std::array<ID3D11ShaderResourceView*, 4> srvs = {
-      reinterpret_cast<ID3D11ShaderResourceView*>(color_srv.handle),  // NOLINT(performance-no-int-to-ptr)
-      reinterpret_cast<ID3D11ShaderResourceView*>(captured.velocity_srv.handle),  // NOLINT(performance-no-int-to-ptr)
-      reinterpret_cast<ID3D11ShaderResourceView*>(captured.depth_srv.handle),  // NOLINT(performance-no-int-to-ptr)
+      reinterpret_cast<ID3D11ShaderResourceView*>(color_srv.handle),                     // NOLINT(performance-no-int-to-ptr)
+      reinterpret_cast<ID3D11ShaderResourceView*>(captured.velocity_srv.handle),         // NOLINT(performance-no-int-to-ptr)
+      reinterpret_cast<ID3D11ShaderResourceView*>(captured.depth_srv.handle),            // NOLINT(performance-no-int-to-ptr)
       reinterpret_cast<ID3D11ShaderResourceView*>(captured.object_velocity_srv.handle),  // NOLINT(performance-no-int-to-ptr)
   };
   const std::array<ID3D11UnorderedAccessView*, 2> uavs = {
@@ -421,7 +442,7 @@ inline bool PrepareGameInputs(
   return true;
 }
 
-inline bool EncodeGameOutput(
+inline void EncodeGameOutput(
     ID3D11DeviceContext* context,
     reshade::api::resource_view encoded_scene_srv) {
   const std::array<ID3D11ShaderResourceView*, 2> srvs = {
@@ -438,7 +459,6 @@ inline bool EncodeGameOutput(
       (resources.height + THREAD_GROUP_SIZE - 1u) / THREAD_GROUP_SIZE,
       1u);
   UnbindComputeResources(context);
-  return true;
 }
 
 inline float FrameDeltaMilliseconds(bool reset) {
@@ -514,15 +534,15 @@ inline bool Dispatch(
           FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
       dispatch.output = MakeResource(resources.linear_output, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
       dispatch.jitterOffset = {
-          native_jitter.jitter_uv_x * static_cast<float>(resources.width),
-          native_jitter.jitter_uv_y * static_cast<float>(resources.height),
+          .x = native_jitter.jitter_uv_x * static_cast<float>(resources.width),
+          .y = native_jitter.jitter_uv_y * static_cast<float>(resources.height),
       };
       dispatch.motionVectorScale = {
-          static_cast<float>(resources.width),
-          static_cast<float>(resources.height),
+          .x = static_cast<float>(resources.width),
+          .y = static_cast<float>(resources.height),
       };
-      dispatch.renderSize = {resources.width, resources.height};
-      dispatch.upscaleSize = {resources.width, resources.height};
+      dispatch.renderSize = {.width = resources.width, .height = resources.height};
+      dispatch.upscaleSize = {.width = resources.width, .height = resources.height};
       dispatch.enableSharpening = false;
       dispatch.sharpness = 0.f;
       dispatch.frameTimeDelta = FrameDeltaMilliseconds(reset);
@@ -538,7 +558,7 @@ inline bool Dispatch(
   }
 
   if (succeeded) {
-    succeeded = EncodeGameOutput(context, color_srv);
+    EncodeGameOutput(context, color_srv);
   }
   if (succeeded) {
     cmd_list->barrier(
@@ -584,7 +604,7 @@ inline bool TryResolve(
                           && color_view_description.texture.first_level == 0u
                           && color_view_description.texture.first_layer == 0u
                           && color_format == reshade::api::format::r16g16b16a16_float
-                            && (depth_format == reshade::api::format::r32_float
+                          && (depth_format == reshade::api::format::r32_float
                               || depth_format == reshade::api::format::r32_float_x8_uint);
   if (!compatible) {
     if (LogEvery(30u)) {
@@ -606,7 +626,6 @@ inline bool TryResolve(
           color_description.texture.height)) {
     return false;
   }
-  resolve::ReleaseHistory(device);
 
   const uint64_t settings_generation = state::RuntimeSettingsGeneration();
   const bool reset = !resources.initialized
@@ -649,8 +668,8 @@ inline bool TryResolve(
 // MGSV addons are intentionally built as a single translation unit. Keep the
 // pinned host and custom backend local to this game without modifying core CMake.
 #include "backend_dx11.cpp"
-#include "shader_blobs.cpp"
 #include "ffx/api/internal/ffx_assert.cpp"
 #include "ffx/api/internal/ffx_message.cpp"
 #include "ffx/api/internal/ffx_object_management.cpp"
 #include "ffx/upscalers/fsr3/internal/ffx_fsr3upscaler.cpp"
+#include "shader_blobs.cpp"
