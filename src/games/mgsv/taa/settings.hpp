@@ -27,7 +27,6 @@ struct RuntimeTransitionGuard {
       _mm_pause();
     }
   }
-
   RuntimeTransitionGuard(const RuntimeTransitionGuard&) = delete;
   RuntimeTransitionGuard& operator=(const RuntimeTransitionGuard&) = delete;
   RuntimeTransitionGuard(RuntimeTransitionGuard&&) = delete;
@@ -142,16 +141,7 @@ inline void TransitionReconstructionMethod(float value, const char* reason) {
 inline void SyncReconstructionMethodFromBinding() {
   const std::unique_lock settings_lock(renodx::utils::mutex::global_mutex);
   RuntimeTransitionGuard transition_guard;
-  const auto desired_method = state::NormalizeReconstructionMethod(state::reconstruction_method);
-  const uint32_t desired = static_cast<uint32_t>(desired_method);
-  state::reconstruction_method = static_cast<float>(desired);
-  const uint32_t effective_jitter_pattern = desired_method == state::ReconstructionMethod::AMD_FSR3
-                                                ? 1u
-                                                : static_cast<uint32_t>(std::clamp(state::jitter_pattern, 0.f, 1.f));
-  if (desired != static_cast<uint32_t>(state::GetReconstructionMethod())
-      || effective_jitter_pattern != state::GetJitterPattern()) {
-    TransitionReconstructionMethodLocked(static_cast<float>(desired), "reconstruction method synchronized");
-  }
+  TransitionReconstructionMethodLocked(state::reconstruction_method, "reconstruction method synchronized");
 }
 
 inline void TransitionJitterPatternLocked(float value) {
@@ -183,14 +173,7 @@ inline void TransitionJitterPattern(float value) {
 inline void SyncJitterPatternFromBinding() {
   const std::unique_lock settings_lock(renodx::utils::mutex::global_mutex);
   RuntimeTransitionGuard transition_guard;
-  const uint32_t preference = static_cast<uint32_t>(std::clamp(state::jitter_pattern, 0.f, 1.f));
-  state::jitter_pattern = static_cast<float>(preference);
-  const uint32_t effective_pattern = state::GetReconstructionMethod() == state::ReconstructionMethod::AMD_FSR3
-                                         ? 1u
-                                         : preference;
-  if (effective_pattern != state::GetJitterPattern()) {
-    TransitionJitterPatternLocked(static_cast<float>(preference));
-  }
+  TransitionJitterPatternLocked(state::jitter_pattern);
 }
 
 inline void InvalidateHistoryForSetting(const char* reason) {
@@ -250,7 +233,7 @@ inline void AppendSettings(
           .key = "FxTaaDiagnosticView",
           .binding = &state::diagnostic_view,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-          .default_value = 0.f,
+          .default_value = state::DEFAULT_DIAGNOSTIC_VIEW,
           .label = "TAA Diagnostic View",
           .section = "Temporal Anti-Aliasing",
           .tooltip = "Compares current color, raw/final motion, object-mask coverage, selected motion, and native-object motion relative to matrix camera motion. Changing modes resets temporal history.",
@@ -279,7 +262,7 @@ inline void AppendSettings(
           .key = "FxTaaJitterPattern",
           .binding = &state::jitter_pattern,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-          .default_value = 1.f,
+          .default_value = static_cast<float>(state::DEFAULT_JITTER_PATTERN),
           .label = "TAA Jitter Pattern",
           .section = "Temporal Anti-Aliasing",
           .tooltip = "Diagnostic projection sampling pattern. Off keeps analytical TAA active with zero projection jitter. "
@@ -310,7 +293,7 @@ inline void AppendSettings(
           .key = "FxTaaVelocityVisualizationRange",
           .binding = &state::velocity_visualization_range,
           .value_type = renodx::utils::settings::SettingValueType::FLOAT,
-          .default_value = 8.f,
+          .default_value = state::DEFAULT_VELOCITY_VISUALIZATION_RANGE,
           .label = "TAA Velocity View Range",
           .section = "Temporal Anti-Aliasing",
           .tooltip = "Pixel velocity represented by full intensity in the direction and magnitude diagnostic views.",
@@ -330,7 +313,7 @@ inline void AppendSettings(
           .key = "FxTaaObjectMotionMode",
           .binding = &state::object_motion_mode,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-          .default_value = 0.f,
+          .default_value = static_cast<float>(state::DEFAULT_OBJECT_MOTION_MODE),
           .label = "TAA Object Motion Source",
           .section = "Temporal Anti-Aliasing",
           .tooltip = "Tests whether native skinned motion contains projection jitter. Matrix Camera Everywhere intentionally removes animation motion. Add modes are sign checks. Changing modes resets history.",
@@ -353,7 +336,7 @@ inline void AppendSettings(
           .key = "FxTaaClipTightness",
           .binding = &state::clip_tightness,
           .value_type = renodx::utils::settings::SettingValueType::FLOAT,
-          .default_value = 0.5f,
+          .default_value = state::DEFAULT_CLIP_TIGHTNESS,
           .label = "TAA Clip Tightness",
           .section = "Temporal Anti-Aliasing",
           .tooltip = "Blends broad 3x3 history bounds toward the tighter cross-shaped bounds. 0 uses broad bounds; 1 uses tight bounds. Lower values may preserve unstable thin detail but increase ghosting.",
@@ -371,7 +354,7 @@ inline void AppendSettings(
           .key = "FxTaaHistoryClipStrength",
           .binding = &state::history_clip_strength,
           .value_type = renodx::utils::settings::SettingValueType::FLOAT,
-          .default_value = 1.f,
+          .default_value = state::DEFAULT_HISTORY_CLIP_STRENGTH,
           .label = "TAA History Clip Strength",
           .section = "Temporal Anti-Aliasing",
           .tooltip = "Controls how strongly reprojected history is clipped to current-frame color bounds. 0 disables clipping; 1 is the current full clip. Lower values may stabilize fine patterns but can cause ghosting.",
@@ -389,7 +372,7 @@ inline void AppendSettings(
           .key = "FxTaaCurrentFrameBlend",
           .binding = &state::current_frame_blend,
           .value_type = renodx::utils::settings::SettingValueType::FLOAT,
-          .default_value = 0.15f,
+          .default_value = state::DEFAULT_CURRENT_FRAME_BLEND,
           .label = "TAA Current Frame Blend",
           .section = "Temporal Anti-Aliasing",
           .tooltip = "Maximum adaptive contribution from filtered current color after history clipping. 0 retains clipped history completely; higher values respond faster but can expose jitter-phase flicker.",
@@ -408,7 +391,7 @@ inline void AppendSettings(
           .key = "FxTaaVelocityProjectionJitterScale",
           .binding = &state::projection_jitter_scales[static_cast<std::size_t>(state::ProjectionJitterPath::VELOCITY)],
           .value_type = renodx::utils::settings::SettingValueType::FLOAT,
-          .default_value = 1.f,
+          .default_value = state::DEFAULT_PROJECTION_JITTER_SCALE,
           .label = "Velocity Projection Jitter",
           .section = "Temporal Anti-Aliasing",
           .tooltip = "Scales same-frame jitter applied after MakeVelocityBuffer resets the active projection. Default native object motion automatically removes this current-jitter term.",
@@ -427,7 +410,7 @@ inline void AppendSettings(
           .key = "FxTaaForwardProjectionJitterScale",
           .binding = &state::projection_jitter_scales[static_cast<std::size_t>(state::ProjectionJitterPath::FORWARD)],
           .value_type = renodx::utils::settings::SettingValueType::FLOAT,
-          .default_value = 1.f,
+          .default_value = state::DEFAULT_PROJECTION_JITTER_SCALE,
           .label = "Forward Projection Jitter",
           .section = "Temporal Anti-Aliasing",
           .tooltip = "Scales same-frame jitter applied by the GrPluginForwardRendering setup callback.",
@@ -446,7 +429,7 @@ inline void AppendSettings(
           .key = "FxTaaModelProjectionJitterScale",
           .binding = &state::projection_jitter_scales[static_cast<std::size_t>(state::ProjectionJitterPath::MODEL)],
           .value_type = renodx::utils::settings::SettingValueType::FLOAT,
-          .default_value = 1.f,
+          .default_value = state::DEFAULT_PROJECTION_JITTER_SCALE,
           .label = "Model Projection Jitter",
           .section = "Temporal Anti-Aliasing",
           .tooltip = "Scales same-frame jitter applied after GrPluginModel installs viewport projection state.",
@@ -465,7 +448,7 @@ inline void AppendSettings(
           .key = "FxTaaAlphaProjectionJitterScale",
           .binding = &state::projection_jitter_scales[static_cast<std::size_t>(state::ProjectionJitterPath::ALPHA_MODEL)],
           .value_type = renodx::utils::settings::SettingValueType::FLOAT,
-          .default_value = 1.f,
+          .default_value = state::DEFAULT_PROJECTION_JITTER_SCALE,
           .label = "Alpha Model Projection Jitter",
           .section = "Temporal Anti-Aliasing",
           .tooltip = "Scales same-frame jitter applied after GrPluginAlphaModel installs viewport projection state.",
@@ -484,7 +467,7 @@ inline void AppendSettings(
           .key = "FxTaaOverlayProjectionJitterScale",
           .binding = &state::projection_jitter_scales[static_cast<std::size_t>(state::ProjectionJitterPath::OVERLAY_MODEL)],
           .value_type = renodx::utils::settings::SettingValueType::FLOAT,
-          .default_value = 1.f,
+          .default_value = state::DEFAULT_PROJECTION_JITTER_SCALE,
           .label = "Overlay Model Projection Jitter",
           .section = "Temporal Anti-Aliasing",
           .tooltip = "Scales same-frame jitter applied after GrPluginOverlayModel installs viewport projection state.",
@@ -503,7 +486,7 @@ inline void AppendSettings(
           .key = "FxTaaLocalLightProjectionJitterScale",
           .binding = &state::projection_jitter_scales[static_cast<std::size_t>(state::ProjectionJitterPath::LOCAL_LIGHT)],
           .value_type = renodx::utils::settings::SettingValueType::FLOAT,
-          .default_value = 1.f,
+          .default_value = state::DEFAULT_PROJECTION_JITTER_SCALE,
           .label = "Local Light Projection Jitter",
           .section = "Temporal Anti-Aliasing",
           .tooltip = "Temporarily scales jitter on GrViewport projection while GrPluginLocalLight builds its private scene packet, then restores the exact original matrix.",
