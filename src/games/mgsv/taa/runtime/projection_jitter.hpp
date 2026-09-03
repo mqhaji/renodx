@@ -26,6 +26,7 @@
 
 #include <detours.h>
 
+#include "./camera_state.hpp"
 #include "./logging.hpp"
 #include "./state.hpp"
 
@@ -188,26 +189,6 @@ inline constexpr std::array<uint8_t, 56> PROJECTION_COPY_PATTERN = {
 };
 inline constexpr uint32_t REQUIRED_RESTORATION_HITS = 3u;
 
-struct AppliedJitter {
-  bool valid = false;
-  bool camera_matrix_valid = false;
-  bool camera_reprojection_valid = false;
-  uint64_t frame_token = 0u;
-  uint32_t sample_index = 0u;
-  uint32_t width = 0u;
-  uint32_t height = 0u;
-  float jitter_uv_x = 0.f;
-  float jitter_uv_y = 0.f;
-  float previous_jitter_uv_x = 0.f;
-  float previous_jitter_uv_y = 0.f;
-  std::array<float, 4> device_to_view_depth = {};
-  std::array<float, 16> current_to_previous_clip = {};
-};
-
-struct Matrix4d {
-  double m[4][4] = {};
-};
-
 inline SetViewMatrixState set_view_matrix_state = nullptr;
 inline RenderPluginCallback forward_rendering = nullptr;
 inline RenderPluginCallback local_light_main_exec = nullptr;
@@ -217,7 +198,7 @@ inline void* model_return_address = nullptr;
 inline void* alpha_model_return_address = nullptr;
 inline void* overlay_model_return_address = nullptr;
 inline void** shader_manager_global = nullptr;
-inline bool installed = false;
+inline std::atomic<bool> installed = false;
 
 inline std::atomic<uint32_t> production_restoration_hits = 0u;
 inline std::atomic<bool> production_awaiting_restoration = false;
@@ -225,237 +206,8 @@ inline std::atomic<uint32_t> hook_calls_in_flight = 0u;
 inline std::atomic_flag local_light_projection_lock = ATOMIC_FLAG_INIT;
 inline thread_local bool local_light_projection_active = false;
 
-inline std::atomic<uint64_t> published_sequence = 0u;
-inline std::atomic<bool> published_valid = false;
-inline std::atomic<uint64_t> published_frame_token = 0u;
-inline std::atomic<uint32_t> published_sample_index = 0u;
-inline std::atomic<uint32_t> published_width = 0u;
-inline std::atomic<uint32_t> published_height = 0u;
-inline std::atomic<float> published_jitter_uv_x = 0.f;
-inline std::atomic<float> published_jitter_uv_y = 0.f;
-inline std::atomic<float> published_previous_jitter_uv_x = 0.f;
-inline std::atomic<float> published_previous_jitter_uv_y = 0.f;
-inline std::atomic<bool> published_camera_matrix_valid = false;
-inline std::atomic<bool> published_camera_reprojection_valid = false;
-inline std::array<std::atomic<float>, 4> published_device_to_view_depth = {};
-inline std::array<std::atomic<float>, 16> published_current_to_previous_clip = {};
-inline std::atomic_flag publication_write_lock = ATOMIC_FLAG_INIT;
-
-// Protected by publication_write_lock. The hook stages the current no-jitter
-// matrix here, while only a successful TAA dispatch promotes it to previous.
-inline Matrix4d staged_current_view_projection = {};
-inline Matrix4d committed_previous_view_projection = {};
-inline std::array<float, 2> committed_previous_jitter_uv = {0.f, 0.f};
-inline bool staged_current_view_projection_valid = false;
-inline bool committed_previous_view_projection_valid = false;
-
-inline Matrix4d LoadColumnMajorMatrix(const float* values) {
-  Matrix4d result = {};
-  if (values == nullptr) return result;
-  for (uint32_t col = 0u; col < 4u; ++col) {
-    for (uint32_t row = 0u; row < 4u; ++row) {
-      result.m[row][col] = static_cast<double>(values[(col * 4u) + row]);
-    }
-  }
-  return result;
-}
-
-inline Matrix4d Multiply(const Matrix4d& a, const Matrix4d& b) {
-  Matrix4d result = {};
-  for (uint32_t row = 0u; row < 4u; ++row) {
-    for (uint32_t col = 0u; col < 4u; ++col) {
-      for (uint32_t k = 0u; k < 4u; ++k) {
-        result.m[row][col] += a.m[row][k] * b.m[k][col];
-      }
-    }
-  }
-  return result;
-}
-
-inline bool Invert(const Matrix4d& input, Matrix4d& output) {
-  double augmented[4][8] = {};
-  for (uint32_t row = 0u; row < 4u; ++row) {
-    for (uint32_t col = 0u; col < 4u; ++col) {
-      augmented[row][col] = input.m[row][col];
-    }
-    augmented[row][4u + row] = 1.0;
-  }
-
-  for (uint32_t col = 0u; col < 4u; ++col) {
-    uint32_t pivot = col;
-    double best = std::abs(augmented[col][col]);
-    for (uint32_t row = col + 1u; row < 4u; ++row) {
-      const double candidate = std::abs(augmented[row][col]);
-      if (candidate > best) {
-        best = candidate;
-        pivot = row;
-      }
-    }
-    if (best <= 1e-12) return false;
-    if (pivot != col) {
-      for (uint32_t index = 0u; index < 8u; ++index) {
-        const double value = augmented[pivot][index];
-        augmented[pivot][index] = augmented[col][index];
-        augmented[col][index] = value;
-      }
-    }
-
-    const double pivot_value = augmented[col][col];
-    for (double& value : augmented[col]) {
-      value /= pivot_value;
-    }
-
-    for (uint32_t row = 0u; row < 4u; ++row) {
-      if (row == col) continue;
-      const double scale = augmented[row][col];
-      for (uint32_t index = 0u; index < 8u; ++index) {
-        augmented[row][index] -= scale * augmented[col][index];
-      }
-    }
-  }
-
-  for (uint32_t row = 0u; row < 4u; ++row) {
-    for (uint32_t col = 0u; col < 4u; ++col) {
-      output.m[row][col] = augmented[row][4u + col];
-    }
-  }
-  return true;
-}
-
-inline std::array<float, 16> ToRowMajorFloatArray(const Matrix4d& matrix) {
-  std::array<float, 16> result = {};
-  for (uint32_t row = 0u; row < 4u; ++row) {
-    for (uint32_t col = 0u; col < 4u; ++col) {
-      result[(row * 4u) + col] = static_cast<float>(matrix.m[row][col]);
-    }
-  }
-  return result;
-}
-
-inline void ResetMatrixHistoryLocked() {
-  committed_previous_view_projection = {};
-  committed_previous_jitter_uv = {0.f, 0.f};
-  committed_previous_view_projection_valid = false;
-}
-
-inline void LockPublicationWriter() {
-  while (publication_write_lock.test_and_set(std::memory_order_acquire)) {
-    _mm_pause();
-  }
-}
-
-inline void UnlockPublicationWriter() {
-  publication_write_lock.clear(std::memory_order_release);
-}
-
-// Publication fields and matrix history form one logical snapshot. Writers
-// must update them together; readers remain lock-free through published_sequence.
-struct PublicationWriterGuard {
-  PublicationWriterGuard() { LockPublicationWriter(); }
-  PublicationWriterGuard(const PublicationWriterGuard&) = delete;
-  PublicationWriterGuard& operator=(const PublicationWriterGuard&) = delete;
-  PublicationWriterGuard(PublicationWriterGuard&&) = delete;
-  PublicationWriterGuard& operator=(PublicationWriterGuard&&) = delete;
-  ~PublicationWriterGuard() { UnlockPublicationWriter(); }
-};
-
-inline void InvalidateAppliedJitterLocked() {
-  published_sequence.fetch_add(1u, std::memory_order_acq_rel);
-  published_valid.store(false, std::memory_order_relaxed);
-  published_camera_matrix_valid.store(false, std::memory_order_relaxed);
-  published_camera_reprojection_valid.store(false, std::memory_order_relaxed);
-  published_sequence.fetch_add(1u, std::memory_order_release);
-}
-
-inline void InvalidateAppliedJitter() {
-  PublicationWriterGuard guard;
-  InvalidateAppliedJitterLocked();
-}
-
-inline void PublishAppliedJitterLocked(const AppliedJitter& jitter) {
-  published_sequence.fetch_add(1u, std::memory_order_acq_rel);
-  published_frame_token.store(jitter.frame_token, std::memory_order_relaxed);
-  published_sample_index.store(jitter.sample_index, std::memory_order_relaxed);
-  published_width.store(jitter.width, std::memory_order_relaxed);
-  published_height.store(jitter.height, std::memory_order_relaxed);
-  published_jitter_uv_x.store(jitter.jitter_uv_x, std::memory_order_relaxed);
-  published_jitter_uv_y.store(jitter.jitter_uv_y, std::memory_order_relaxed);
-  published_previous_jitter_uv_x.store(jitter.previous_jitter_uv_x, std::memory_order_relaxed);
-  published_previous_jitter_uv_y.store(jitter.previous_jitter_uv_y, std::memory_order_relaxed);
-  published_camera_matrix_valid.store(jitter.camera_matrix_valid, std::memory_order_relaxed);
-  published_camera_reprojection_valid.store(jitter.camera_reprojection_valid, std::memory_order_relaxed);
-  for (uint32_t index = 0u; index < jitter.device_to_view_depth.size(); ++index) {
-    published_device_to_view_depth[index].store(
-        jitter.device_to_view_depth[index],
-        std::memory_order_relaxed);
-  }
-  for (uint32_t index = 0u; index < jitter.current_to_previous_clip.size(); ++index) {
-    published_current_to_previous_clip[index].store(
-        jitter.current_to_previous_clip[index],
-        std::memory_order_relaxed);
-  }
-  published_valid.store(jitter.valid, std::memory_order_relaxed);
-  published_sequence.fetch_add(1u, std::memory_order_release);
-}
-
-inline AppliedJitter GetAppliedJitter() {
-  AppliedJitter result = {};
-  // Retry if a writer was active or changed the snapshot while it was read.
-  for (;;) {
-    const uint64_t before = published_sequence.load(std::memory_order_acquire);
-    if ((before & 1u) != 0u) continue;
-
-    result.frame_token = published_frame_token.load(std::memory_order_relaxed);
-    result.sample_index = published_sample_index.load(std::memory_order_relaxed);
-    result.width = published_width.load(std::memory_order_relaxed);
-    result.height = published_height.load(std::memory_order_relaxed);
-    result.jitter_uv_x = published_jitter_uv_x.load(std::memory_order_relaxed);
-    result.jitter_uv_y = published_jitter_uv_y.load(std::memory_order_relaxed);
-    result.previous_jitter_uv_x = published_previous_jitter_uv_x.load(std::memory_order_relaxed);
-    result.previous_jitter_uv_y = published_previous_jitter_uv_y.load(std::memory_order_relaxed);
-    result.camera_matrix_valid = published_camera_matrix_valid.load(std::memory_order_relaxed);
-    result.camera_reprojection_valid = published_camera_reprojection_valid.load(std::memory_order_relaxed);
-    for (uint32_t index = 0u; index < result.device_to_view_depth.size(); ++index) {
-      result.device_to_view_depth[index] =
-          published_device_to_view_depth[index].load(std::memory_order_relaxed);
-    }
-    for (uint32_t index = 0u; index < result.current_to_previous_clip.size(); ++index) {
-      result.current_to_previous_clip[index] =
-          published_current_to_previous_clip[index].load(std::memory_order_relaxed);
-    }
-    result.valid = published_valid.load(std::memory_order_relaxed);
-
-    const uint64_t after = published_sequence.load(std::memory_order_acquire);
-    if (before == after) break;
-  }
-  return result;
-}
-
-inline void ResetMatrixHistory() {
-  PublicationWriterGuard guard;
-  ResetMatrixHistoryLocked();
-}
-
-inline bool CommitCameraMatrix(uint64_t frame_token, uint32_t sample_index) {
-  PublicationWriterGuard guard;
-  const bool matches = published_valid.load(std::memory_order_relaxed)
-                       && published_camera_matrix_valid.load(std::memory_order_relaxed)
-                       && published_frame_token.load(std::memory_order_relaxed) == frame_token
-                       && published_sample_index.load(std::memory_order_relaxed) == sample_index
-                       && staged_current_view_projection_valid;
-  if (matches) {
-    committed_previous_view_projection = staged_current_view_projection;
-    committed_previous_jitter_uv = {
-        published_jitter_uv_x.load(std::memory_order_relaxed),
-        published_jitter_uv_y.load(std::memory_order_relaxed),
-    };
-    committed_previous_view_projection_valid = true;
-  }
-  return matches;
-}
-
 inline bool IsInstalled() {
-  return installed;
+  return installed.load(std::memory_order_acquire);
 }
 
 inline void BeginProductionRestorationCheck() {
@@ -632,10 +384,11 @@ inline bool GetPublishedJitterForViewport(
   const uint32_t height = *reinterpret_cast<const uint32_t*>(viewport + 0x5DCu);
   const uint8_t flags = *(viewport + 0x6E2u);
   void* camera = *reinterpret_cast<void* const*>(viewport + 0x570u);
-  const AppliedJitter published = GetAppliedJitter();
+  const camera_state::CameraFrame published = camera_state::Get();
   if (!LooksLikeGameplayProjection(projection, width, height, flags, camera)
       || !published.valid
       || published.frame_token != state::CurrentFrameToken()
+      || published.sample_index != state::CurrentSampleIndex()
       || published.width != width
       || published.height != height) {
     return false;
@@ -728,17 +481,17 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   }
   if (!taa_enabled) return;
 
-  const Matrix4d current_view_projection = Multiply(
-      LoadColumnMajorMatrix(projection),
-      LoadColumnMajorMatrix(view_matrix));
-  Matrix4d current_inverse_view_projection = {};
-  const bool current_camera_matrix_valid = Invert(
+  const camera_state::Matrix4d current_view_projection = camera_state::Multiply(
+      camera_state::LoadColumnMajorMatrix(projection),
+      camera_state::LoadColumnMajorMatrix(view_matrix));
+  camera_state::Matrix4d current_inverse_view_projection = {};
+  const bool current_camera_matrix_valid = camera_state::Invert(
       current_view_projection,
       current_inverse_view_projection);
-  PublicationWriterGuard publication_guard;
+  camera_state::PublicationWriterGuard publication_guard;
   if (!state::IsEnabled()) return;
   if (!projection_matches) {
-    InvalidateAppliedJitterLocked();
+    camera_state::InvalidateLocked();
     return;
   }
 
@@ -746,13 +499,13 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   const uint32_t sample_index = state::CurrentSampleIndex();
   const auto jitter_uv = state::JitterForSample(sample_index, width, height);
   ApplyProjectionJitter(active_projection, shader_manager, jitter_uv[0], jitter_uv[1]);
-  staged_current_view_projection = current_view_projection;
-  staged_current_view_projection_valid = current_camera_matrix_valid;
+    camera_state::staged_current_view_projection = current_view_projection;
+    camera_state::staged_current_view_projection_valid = current_camera_matrix_valid;
   const bool camera_reprojection_valid = current_camera_matrix_valid
-                                         && committed_previous_view_projection_valid;
+                   && camera_state::committed_previous_view_projection_valid;
   const auto current_to_previous_clip = camera_reprojection_valid
-                                            ? ToRowMajorFloatArray(Multiply(
-                                                  committed_previous_view_projection,
+                  ? camera_state::ToRowMajorFloatArray(camera_state::Multiply(
+                    camera_state::committed_previous_view_projection,
                                                   current_inverse_view_projection))
                                             : std::array<float, 16>{};
   const float projection_w_scale = projection[11];
@@ -762,7 +515,7 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
       projection_w_scale / projection[0],
       projection_w_scale / projection[5],
   };
-  PublishAppliedJitterLocked(AppliedJitter{
+  camera_state::PublishLocked(camera_state::CameraFrame{
       .valid = true,
       .camera_matrix_valid = current_camera_matrix_valid,
       .camera_reprojection_valid = camera_reprojection_valid,
@@ -772,8 +525,8 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
       .height = height,
       .jitter_uv_x = jitter_uv[0],
       .jitter_uv_y = jitter_uv[1],
-      .previous_jitter_uv_x = committed_previous_jitter_uv[0],
-      .previous_jitter_uv_y = committed_previous_jitter_uv[1],
+      .previous_jitter_uv_x = camera_state::committed_previous_jitter_uv[0],
+      .previous_jitter_uv_y = camera_state::committed_previous_jitter_uv[1],
       .device_to_view_depth = device_to_view_depth,
       .current_to_previous_clip = current_to_previous_clip,
   });
@@ -834,9 +587,9 @@ inline void __fastcall HookLocalLightMainExec(void* plugin, void* render, void* 
 }
 
 inline bool Attach() {
-  if (installed) return true;
+  if (installed.load(std::memory_order_acquire)) return true;
 
-  InvalidateAppliedJitter();
+  camera_state::Invalidate();
 
   HMODULE module = GetModuleHandleW(nullptr);
   auto* projection_commit_address = FindProjectionCommit(module);
@@ -891,7 +644,7 @@ inline bool Attach() {
     return false;
   }
 
-  installed = true;
+  installed.store(true, std::memory_order_release);
   logging::Info("installed native projection hook aob=",
                 logging::Hex{reinterpret_cast<uintptr_t>(projection_commit_address)},
                 " helper=", logging::Hex{reinterpret_cast<uintptr_t>(helper_entry_address)},
@@ -903,12 +656,12 @@ inline bool Attach() {
 }
 
 inline void Detach(bool wait_for_hook_calls = true, bool transition_runtime = true) {
-  if (!installed || set_view_matrix_state == nullptr) return;
+  if (!installed.load(std::memory_order_acquire) || set_view_matrix_state == nullptr) return;
 
   if (transition_runtime) {
-    PublicationWriterGuard publication_guard;
+    camera_state::PublicationWriterGuard publication_guard;
     state::SetEnabled(false);
-    InvalidateAppliedJitterLocked();
+    camera_state::InvalidateLocked();
   }
 
   if (DetourTransactionBegin() != NO_ERROR) return;
@@ -942,7 +695,7 @@ inline void Detach(bool wait_for_hook_calls = true, bool transition_runtime = tr
     return;
   }
 
-  installed = false;
+  installed.store(false, std::memory_order_release);
   if (wait_for_hook_calls) {
     while (hook_calls_in_flight.load(std::memory_order_acquire) != 0u) {
       _mm_pause();
@@ -961,18 +714,11 @@ inline void OnInitDevice(reshade::api::device* device) {
   Attach();
 }
 
-inline void OnDestroyDevice(reshade::api::device* device) {
-  (void)device;
-  Detach();
-}
-
 inline void Use(DWORD reason) {
   if (reason == DLL_PROCESS_ATTACH) {
     reshade::register_event<reshade::addon_event::init_device>(OnInitDevice);
-    reshade::register_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
   } else if (reason == DLL_PROCESS_DETACH) {
     reshade::unregister_event<reshade::addon_event::init_device>(OnInitDevice);
-    reshade::unregister_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
     // DllMain holds the loader lock. Do not wait for another game thread here;
     // normal destroy_device teardown already performs a quiescent detach.
     Detach(false, false);

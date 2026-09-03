@@ -52,7 +52,10 @@ Locks should selectively protect depth-consistent thin detail. They should not b
 
 ## Priority 4: canonical temporal inputs
 
-Create a consumer-independent input layer shared by analytical TAA, FSR3, and DLAA:
+The CPU now produces one immutable, device-checked `ValidatedFrameInputs` value shared by Analytical TAA and FSR3. It
+snapshots color, depth, final velocity, object velocity, and camera publication together, then centralizes method
+selection, copy-back, camera commit, and sample advancement. Its resources remain explicitly game-native; continue toward
+the following canonical contracts before sharing converted resources with DLAA:
 
 | Input | Target contract |
 |---|---|
@@ -94,12 +97,14 @@ logic remains active. Add game-derived masks without replacing those mechanisms:
 
 After the canonical inputs are stable:
 
-1. Integrate Streamline/DLAA with identical render and output extents.
+1. Add an isolated `dlss/module_hooks.hpp` for `nvngx_dlss.dll` discovery/export hooks and `dlss/runtime.hpp` for NGX
+   parameters, feature ownership, evaluation, reset, and release. Do not mix NGX hooks with projection Detours.
 2. Supply row-major no-jitter camera matrices and jitter separately in the SDK's documented units.
 3. Validate motion direction, Y convention, scale, reverse-Z, reset, and frame-token lifetime with SDK diagnostics.
 4. Establish a valid HUDless input and reintegration point before evaluating image quality.
 5. Use auto exposure initially unless a proven MGSV exposure resource is available.
-6. Compare analytical TAA, FSR3, and DLAA against the same canonical inputs.
+6. Add DLAA as one direct coordinator switch case; do not introduce a virtual method registry or another callback seam.
+7. Compare analytical TAA, FSR3, and DLAA against the same validated inputs.
 
 No internal resolution changes, DLSS Super Resolution modes, or game viewport/culling modifications are planned.
 
