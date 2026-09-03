@@ -35,9 +35,11 @@ effect is a design reference only; it is not the algorithm compiled here.
 - AMD's 3.1.5 host owns the temporal pass schedule.
 - `backend_dx11.cpp` implements the required D3D11 interface, including the Feature Level 11_0 fallback.
 - `shader_blobs.cpp` supplies fixed FXC `cs_5_0`/FP32 permutations for every host-created pipeline.
+- `../runtime/input_capture.hpp` validates one immutable game-native color/depth/motion/camera frame before dispatch.
 - `fsr3_prepare_game_inputs` decodes MGSV scene color to linear RGB and builds signed RG16F current-to-previous motion.
 - `fsr3_encode_game_output` restores MGSV's encoded RGBA16F scene contract and preserves current-frame alpha.
-- Render and output extents are identical, sharpening is disabled, and frame generation is not included.
+- The common coordinator copies that encoded output back, restores compute/resource state, commits camera history, and
+	advances the sample. Render and output extents are identical, sharpening is disabled, and frame generation is absent.
 
 MGSV currently supplies no external reactive or transparency/composition mask. The host's internal shading-change,
 prepare-reactivity, disocclusion, motion-divergence, and luma-instability work remains active. The optional
