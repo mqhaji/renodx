@@ -1,31 +1,29 @@
 # MGSV Temporal Reconstruction Roadmap
 
-Future work for improving the current analytical TAA, validating the experimental native-resolution FSR2 D3D11 port,
-and preparing reusable native-resolution DLAA inputs. [README.md](README.md) describes the current implementation.
+Future work for improving the analytical TAA and FSR3 paths, adding game-derived reactive masks, and preparing reusable
+native-resolution DLAA inputs. [README.md](README.md) describes the current implementation.
 
 ## Scope
 
-- Keep all temporal features default-Off until their input and restoration contracts are validated.
+- Keep the master temporal feature default-Off until its input and restoration contracts are fully validated.
 - Preserve native render/output resolution. Game resolution scaling and dynamic resolution are out of scope.
-- Target DLAA specifically, not DLSS Super Resolution.
 - Keep MGSV's bone-aware object motion rather than replacing it with depth-only camera motion.
 - Do not restore broad mapped-constant-buffer mutation.
-- Keep the manually adapted FSR2 SM5 path isolated and experimental until its complete D3D11 pass/resource contract is
-  proven in game; do not represent it as AMD's supported D3D11 integration.
-- FSR2 is the reconstruction fallback when no method key is persisted, including configurations predating the selector.
-  This does not replace runtime quality, reset, resource, and restoration validation. The master TAA control remains Off.
+- Keep the FSR3 3.1.5 source, custom D3D11 backend, and fixed SM5 permutations local to MGSV. AMD's host must continue
+  to own the pass schedule; this is a source adaptation, not an AMD-supported D3D11 integration.
+- Target DLAA specifically, not DLSS Super Resolution.
 
 ## Priority 1: signal correctness
 
-1. **Linear history reconstruction**
-   - Per-texel decode before 16-tap Catmull-Rom is validated and now preserves correct linear-light reconstruction.
-   - Store temporal history in linear RGBA16F to recover optimized Catmull-Rom sampling, then encode only the copy written
-     back into MGSV's scene domain.
+1. **Linear analytical history**
+   - Per-texel decode before 16-tap Catmull-Rom is validated and preserves correct linear-light reconstruction.
+   - Store analytical history in linear RGBA16F to recover optimized Catmull-Rom sampling, then encode only the copy
+     written back into MGSV's scene domain.
 2. **Camera-cut reset**
-   - Detect large view/projection/FOV discontinuities and invalidate history before accumulation.
+   - Replace or supplement the current clip-space discontinuity heuristic with a proven native game signal if one exists.
    - Cover aiming, binocular transitions, cutscenes, teleportation, pause/resume, and display-mode changes.
 
-## Priority 2: modern history validation
+## Priority 2: modern analytical history validation
 
 1. Store or reconstruct previous-frame depth.
 2. Compare reprojected expected depth against observed previous depth.
@@ -39,9 +37,10 @@ ghosting.
 ## Priority 3: optional thin-feature stability
 
 Selecting the largest raw reverse-Z depth fixed the observed disappearing-wire failure by keeping nearest-surface motion
-at thin foreground geometry. Add temporal locks only if other thin features still fail under intermittent jitter coverage.
+at thin foreground geometry. Add an analytical temporal lock only if other thin features still fail under intermittent
+jitter coverage.
 
-An FSR2-inspired native-resolution lock should track:
+A native-resolution lock should track:
 
 - Thin-feature detection from a local luminance neighborhood.
 - Reprojected lock lifetime.
@@ -53,7 +52,7 @@ Locks should selectively protect depth-consistent thin detail. They should not b
 
 ## Priority 4: canonical temporal inputs
 
-Create a consumer-independent input layer shared by custom TAA and DLAA:
+Create a consumer-independent input layer shared by analytical TAA, FSR3, and DLAA:
 
 | Input | Target contract |
 |---|---|
@@ -74,12 +73,22 @@ Create a consumer-independent input layer shared by custom TAA and DLAA:
   should remove the native packed-motion bias and approximately 64-pixel clamp on an owned temporal path instead.
 - Keep native motion blur as a separate compatibility consumer until expanded vectors are proven safe.
 
-### Deferred masks
+### Reactive and transparency masks
 
-Reactive and transparency/composition masks are useful for particles, alpha blending, reflections, and animated textures,
-but they should not block the required color/depth/motion/reset contract. Material-derived masks are preferable to
-final-image heuristics when they become necessary. The FSR2 port retains both its optimized zero-input-mask permutation
-and a full-mask permutation; connect a proven `TppFxRain` raindrop mask by selecting the full path only on affected frames.
+FSR3 currently receives null external reactive and transparency/composition resources, which the AMD host maps to its
+internal zero resource. Internal shading-change, prepare-reactivity, disocclusion, motion-divergence, and luma-instability
+logic remains active. Add game-derived masks without replacing those mechanisms:
+
+1. Identify material-stage signals for rain, particles, alpha blending, animated textures, reflections, and emissive
+   transparency. Prefer proven material membership over final-image differences.
+2. Start with the known `TppFxRain` raindrop path and confirm that its mask aligns with the native-resolution scene at the
+   FSR3 insertion point.
+3. Accumulate a bounded reactive mask and, where appropriate, a transparency/composition mask in owned full-resolution
+   resources without modifying MGSV's original material targets.
+4. Bind those resources through `FfxFsr3UpscalerDispatchDescription::reactive` and
+   `FfxFsr3UpscalerDispatchDescription::transparencyAndComposition` only when their frame token, sample, and dimensions
+   match the accepted color/depth/motion inputs.
+5. Validate reduced ghosting without destabilizing foliage, thin geometry, opaque character motion, or exposure changes.
 
 ## Priority 5: native-resolution DLAA
 
@@ -90,22 +99,20 @@ After the canonical inputs are stable:
 3. Validate motion direction, Y convention, scale, reverse-Z, reset, and frame-token lifetime with SDK diagnostics.
 4. Establish a valid HUDless input and reintegration point before evaluating image quality.
 5. Use auto exposure initially unless a proven MGSV exposure resource is available.
-6. Compare custom TAA and DLAA against the same canonical inputs.
+6. Compare analytical TAA, FSR3, and DLAA against the same canonical inputs.
 
 No internal resolution changes, DLSS Super Resolution modes, or game viewport/culling modifications are planned.
 
 ## Optional finishing work
 
-- Add reactive/transparency handling for proven material classes.
-- Add luminance stability history for shading changes and exposure transitions.
-- Add optional RCAS only after wire stability, disocclusion, and camera reset are working. RCAS source remains vendored,
-  but the current runtime creates no RCAS pipeline and produces unsharpened output.
-- Validate the default native-resolution FSR2 2.3.4 SM5 adaptation against the analytical resolve. Its source-only D3D11
-  scheduler must remain local and must not introduce an external SDK link.
+- Add luminance stability history for analytical shading changes and exposure transitions.
+- Evaluate optional FSR3 RCAS only after wire stability, disocclusion, camera reset, and mask integration are working. The
+  host creates the RCAS pipeline, but current MGSV dispatch sets `enableSharpening = false` and remains unsharpened.
+- Continue comparing native-resolution FSR3 3.1.5 against the analytical resolve across the full validation matrix.
 
 ## Validation matrix
 
-Every temporal-input revision should cover:
+Every temporal-input or mask revision should cover:
 
 - Static camera and geometry.
 - Slow and fast camera pans.
@@ -115,9 +122,9 @@ Every temporal-input revision should cover:
 - Pause/resume, cutscenes, camera cuts, and teleportation.
 - DoF and motion blur enabled and disabled.
 - Presents without a new full-resolution scene and render callbacks that straddle `Present`.
-- Rain, particles, transparency, NoIR, and sonar.
+- Rain, particles, transparency, NoIR, sonar, reflections, and emissive effects.
 - Resolution/display-mode changes.
 - First frame after enable, resize, reset, camera cut, and failed input capture.
 
 Required diagnostics should eventually include camera-only and object-only signed motion, motion validity, selected depth,
-reverse-Z visualization, disocclusion confidence, lock state, current jitter, and reset state.
+reverse-Z visualization, external mask coverage, disocclusion confidence, lock state, current jitter, and reset state.

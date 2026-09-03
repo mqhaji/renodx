@@ -4,7 +4,7 @@
  * Shared temporal input validation and analytical TAA dispatch.
  *
  * MotionBlurCameraVelocity supplies velocity, depth, and object motion. After
- * frame/sample validation, this module routes to FSR2 or its owned analytical
+ * frame/sample validation, this module routes to FSR3 or its owned analytical
  * history. ExecutionGuard serializes dispatch, resource release, and teardown.
  */
 
@@ -68,7 +68,7 @@ struct Resources {
   std::array<reshade::api::sampler, 1> samplers = {};
 };
 
-// FSR2 registers through callbacks to avoid a resolve.hpp/runtime.hpp include cycle.
+// FSR3 registers through callbacks to avoid a resolve.hpp/runtime.hpp include cycle.
 using FsrResolveCallback = bool (*)(
     reshade::api::command_list*,
     reshade::api::resource_view,
@@ -95,8 +95,8 @@ struct alignas(16) ResolveConstants {
 static_assert(sizeof(ResolveConstants) == 112u, "TAA resolve constants must occupy seven 16-byte registers");
 
 inline Resources resources;
-inline FsrResolveCallback fsr_resolve = nullptr;
-inline FsrReleaseCallback fsr_release = nullptr;
+inline FsrResolveCallback fsr3_resolve = nullptr;
+inline FsrReleaseCallback fsr3_release = nullptr;
 inline std::atomic_flag execution_lock = ATOMIC_FLAG_INIT;
 inline thread_local bool execution_locked_on_thread = false;
 inline constexpr size_t DESTROYED_VIEW_MAILBOX_SIZE = 64u;
@@ -133,9 +133,9 @@ inline bool IsExecutionLockedOnThisThread() {
   return execution_locked_on_thread;
 }
 
-inline void SetFsrCallbacks(FsrResolveCallback resolve_callback, FsrReleaseCallback release_callback) {
-  fsr_resolve = resolve_callback;
-  fsr_release = release_callback;
+inline void SetFsr3Callbacks(FsrResolveCallback resolve_callback, FsrReleaseCallback release_callback) {
+  fsr3_resolve = resolve_callback;
+  fsr3_release = release_callback;
 }
 
 struct ExecutionGuard {
@@ -215,8 +215,8 @@ struct PreviousComputeState {
   reshade::api::pipeline_layout layout = {0};
   std::vector<reshade::api::descriptor_table> descriptor_tables;
   std::array<Microsoft::WRL::ComPtr<ID3D11SamplerState>, 2> samplers;
-  std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 12> shader_resources;
-  std::array<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>, 5> unordered_access_views;
+  std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 16> shader_resources;
+  std::array<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>, 8> unordered_access_views;
   std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>, 3> constant_buffers;
   Microsoft::WRL::ComPtr<ID3D11ComputeShader> compute_shader;
   std::vector<Microsoft::WRL::ComPtr<ID3D11ClassInstance>> class_instances;
@@ -244,8 +244,8 @@ inline PreviousComputeState CaptureComputeState(reshade::api::command_list* cmd_
   if (context == nullptr) return result;
 
   std::array<ID3D11SamplerState*, 2> samplers = {};
-  std::array<ID3D11ShaderResourceView*, 12> shader_resources = {};
-  std::array<ID3D11UnorderedAccessView*, 5> unordered_access_views = {};
+  std::array<ID3D11ShaderResourceView*, 16> shader_resources = {};
+  std::array<ID3D11UnorderedAccessView*, 8> unordered_access_views = {};
   std::array<ID3D11Buffer*, 3> constant_buffers = {};
   std::array<ID3D11ClassInstance*, 256> class_instances = {};
   ID3D11ComputeShader* compute_shader = nullptr;
@@ -300,8 +300,8 @@ inline void RestoreComputeState(reshade::api::command_list* cmd_list, const Prev
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   if (context == nullptr) return;
   std::array<ID3D11SamplerState*, 2> samplers = {};
-  std::array<ID3D11ShaderResourceView*, 12> shader_resources = {};
-  std::array<ID3D11UnorderedAccessView*, 5> unordered_access_views = {};
+  std::array<ID3D11ShaderResourceView*, 16> shader_resources = {};
+  std::array<ID3D11UnorderedAccessView*, 8> unordered_access_views = {};
   std::array<ID3D11Buffer*, 3> constant_buffers = {};
   for (size_t index = 0u; index < samplers.size(); ++index) {
     samplers[index] = state.samplers[index].Get();
@@ -320,8 +320,8 @@ inline void RestoreComputeState(reshade::api::command_list* cmd_list, const Prev
     class_instances[index] = state.class_instances[index].Get();
   }
 
-  const std::array<ID3D11ShaderResourceView*, 12> null_shader_resources = {};
-  const std::array<ID3D11UnorderedAccessView*, 5> null_unordered_access_views = {};
+  const std::array<ID3D11ShaderResourceView*, 16> null_shader_resources = {};
+  const std::array<ID3D11UnorderedAccessView*, 8> null_unordered_access_views = {};
   context->CSSetShaderResources(
       0u,
       static_cast<UINT>(null_shader_resources.size()),
@@ -995,14 +995,14 @@ inline bool MaybeRunFromColorSrvLocked(
     }
     return false;
   }
-  if (state::GetReconstructionMethod() == state::ReconstructionMethod::AMD_FSR2) {
-    if (fsr_resolve == nullptr) {
+  if (state::GetReconstructionMethod() == state::ReconstructionMethod::AMD_FSR3) {
+    if (fsr3_resolve == nullptr) {
       if (LogEvery(last_compute_fail_log)) {
-        logging::Warn("AMD FSR2 resolve selected but its runtime is unavailable");
+        logging::Warn("AMD FSR3.1 resolve selected but its runtime is unavailable");
       }
       return false;
     }
-    return fsr_resolve(
+    return fsr3_resolve(
         cmd_list,
         color_srv,
         color_initial_usage,
@@ -1010,9 +1010,7 @@ inline bool MaybeRunFromColorSrvLocked(
         native_jitter,
         insertion_name);
   }
-  if (fsr_release != nullptr) {
-    fsr_release(cmd_list->get_device());
-  }
+  if (fsr3_release != nullptr) fsr3_release(cmd_list->get_device());
   if (resources.initialized && !native_jitter.camera_reprojection_valid) {
     InvalidateHistory("native camera matrix history unavailable");
   }

@@ -32,10 +32,18 @@ namespace taa::state {
 
 enum class ReconstructionMethod : std::uint8_t {
   ANALYTICAL_TAA = 0u,
-  AMD_FSR2 = 1u,
+  AMD_FSR3 = 1u,
 };
 
-inline constexpr ReconstructionMethod DEFAULT_RECONSTRUCTION_METHOD = ReconstructionMethod::AMD_FSR2;
+inline constexpr ReconstructionMethod DEFAULT_RECONSTRUCTION_METHOD = ReconstructionMethod::AMD_FSR3;
+
+inline ReconstructionMethod NormalizeReconstructionMethod(float value) {
+  // The previous selector used 1 for FSR2 and 2 for FSR3. Treat every
+  // non-analytical persisted value as FSR3 so both configurations migrate.
+  return value == static_cast<float>(ReconstructionMethod::ANALYTICAL_TAA)
+             ? ReconstructionMethod::ANALYTICAL_TAA
+             : ReconstructionMethod::AMD_FSR3;
+}
 
 enum class ProjectionJitterPath : std::uint8_t {
   VELOCITY,
@@ -130,9 +138,10 @@ inline bool IsEnabled() {
 }
 
 inline void SetReconstructionMethod(float value) {
-  const uint32_t method = static_cast<uint32_t>(std::clamp(value, 0.f, 1.f));
-  reconstruction_method = static_cast<float>(method);
-  if (runtime_reconstruction_method.exchange(method, std::memory_order_acq_rel) != method) {
+  const auto method = NormalizeReconstructionMethod(value);
+  const uint32_t method_value = static_cast<uint32_t>(method);
+  reconstruction_method = static_cast<float>(method_value);
+  if (runtime_reconstruction_method.exchange(method_value, std::memory_order_acq_rel) != method_value) {
     runtime_settings_generation.fetch_add(1u, std::memory_order_release);
   }
 }
