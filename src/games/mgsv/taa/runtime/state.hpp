@@ -60,6 +60,10 @@ inline constexpr float DEFAULT_DIAGNOSTIC_VIEW = 0.f;
 inline constexpr float DEFAULT_VELOCITY_VISUALIZATION_RANGE = 8.f;
 inline constexpr uint32_t DEFAULT_OBJECT_MOTION_MODE = 0u;
 inline constexpr float DEFAULT_PROJECTION_JITTER_SCALE = 1.f;
+inline constexpr uint32_t DEFAULT_JITTER_PATTERN = 1u;
+inline constexpr float DEFAULT_CLIP_TIGHTNESS = 0.5f;
+inline constexpr float DEFAULT_HISTORY_CLIP_STRENGTH = 1.f;
+inline constexpr float DEFAULT_CURRENT_FRAME_BLEND = 0.15f;
 
 struct FrameState {
   uint32_t taa_sample_index = 0u;
@@ -81,42 +85,42 @@ struct FrameState {
 inline float enabled = 0.f;
 inline float* enabled_binding = &enabled;
 inline float reconstruction_method = static_cast<float>(DEFAULT_RECONSTRUCTION_METHOD);
-inline float jitter_pattern = 1.f;
+inline float jitter_pattern = static_cast<float>(DEFAULT_JITTER_PATTERN);
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
-inline float diagnostic_view = 0.f;
-inline float velocity_visualization_range = 8.f;
-inline float object_motion_mode = 0.f;
+inline float diagnostic_view = DEFAULT_DIAGNOSTIC_VIEW;
+inline float velocity_visualization_range = DEFAULT_VELOCITY_VISUALIZATION_RANGE;
+inline float object_motion_mode = static_cast<float>(DEFAULT_OBJECT_MOTION_MODE);
 inline std::array<float, PROJECTION_JITTER_PATH_COUNT> projection_jitter_scales = {
-    1.f,
-    1.f,
-    1.f,
-    1.f,
-    1.f,
-    1.f,
+    DEFAULT_PROJECTION_JITTER_SCALE,
+    DEFAULT_PROJECTION_JITTER_SCALE,
+    DEFAULT_PROJECTION_JITTER_SCALE,
+    DEFAULT_PROJECTION_JITTER_SCALE,
+    DEFAULT_PROJECTION_JITTER_SCALE,
+    DEFAULT_PROJECTION_JITTER_SCALE,
 };
 #endif
-inline float clip_tightness = 0.5f;
-inline float history_clip_strength = 1.f;
-inline float current_frame_blend = 0.15f;
+inline float clip_tightness = DEFAULT_CLIP_TIGHTNESS;
+inline float history_clip_strength = DEFAULT_HISTORY_CLIP_STRENGTH;
+inline float current_frame_blend = DEFAULT_CURRENT_FRAME_BLEND;
 inline std::atomic<bool> runtime_enabled = false;
 inline std::atomic<uint32_t> runtime_reconstruction_method = static_cast<std::uint32_t>(DEFAULT_RECONSTRUCTION_METHOD);
-inline std::atomic<uint32_t> runtime_jitter_pattern = 1u;
+inline std::atomic<uint32_t> runtime_jitter_pattern = DEFAULT_JITTER_PATTERN;
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
-inline std::atomic<float> runtime_diagnostic_view = 0.f;
-inline std::atomic<float> runtime_velocity_visualization_range = 8.f;
-inline std::atomic<uint32_t> runtime_object_motion_mode = 0u;
+inline std::atomic<float> runtime_diagnostic_view = DEFAULT_DIAGNOSTIC_VIEW;
+inline std::atomic<float> runtime_velocity_visualization_range = DEFAULT_VELOCITY_VISUALIZATION_RANGE;
+inline std::atomic<uint32_t> runtime_object_motion_mode = DEFAULT_OBJECT_MOTION_MODE;
 inline std::array<std::atomic<float>, PROJECTION_JITTER_PATH_COUNT> runtime_projection_jitter_scales = {
-    std::atomic<float>{1.f},
-    std::atomic<float>{1.f},
-    std::atomic<float>{1.f},
-    std::atomic<float>{1.f},
-    std::atomic<float>{1.f},
-    std::atomic<float>{1.f},
+    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
+    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
+    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
+    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
+    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
+    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
 };
 #endif
-inline std::atomic<float> runtime_clip_tightness = 0.5f;
-inline std::atomic<float> runtime_history_clip_strength = 1.f;
-inline std::atomic<float> runtime_current_frame_blend = 0.15f;
+inline std::atomic<float> runtime_clip_tightness = DEFAULT_CLIP_TIGHTNESS;
+inline std::atomic<float> runtime_history_clip_strength = DEFAULT_HISTORY_CLIP_STRENGTH;
+inline std::atomic<float> runtime_current_frame_blend = DEFAULT_CURRENT_FRAME_BLEND;
 inline std::atomic<uint64_t> runtime_settings_generation = 0u;
 inline std::atomic<uint64_t> current_frame_token = 0u;
 inline std::atomic<uint32_t> current_sample_index = 0u;

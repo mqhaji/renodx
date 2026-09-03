@@ -7,27 +7,24 @@
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <cmath>
+#include <cstdint>
 #include <cstring>
-#include <limits>
 #include <vector>
 
 #include <d3d11_1.h>
-
-#include "ffx/api/internal/ffx_assert.h"
-#include "ffx/api/internal/ffx_util.h"
+#include <wrl/client.h>
 
 namespace taa::fsr3::dx11 {
 namespace {
 
-constexpr uint32_t kMaxMipViews = 16u;
-constexpr uint32_t kMaxComputeSrvs = 16u;
-constexpr uint32_t kMaxComputeUavs = 8u;
+constexpr uint32_t MAX_MIP_VIEWS = 16u;
+constexpr uint32_t MAX_COMPUTE_SRVS = 16u;
+constexpr uint32_t MAX_COMPUTE_UAVS = 8u;
 
 struct Resource {
   ID3D11Resource* resource = nullptr;
   ID3D11ShaderResourceView* srv = nullptr;
-  std::array<ID3D11UnorderedAccessView*, kMaxMipViews> uavs = {};
+  std::array<ID3D11UnorderedAccessView*, MAX_MIP_VIEWS> uavs = {};
   FfxApiResourceDescription description = {};
   uint64_t estimated_size = 0u;
   bool integer_format = false;
@@ -35,7 +32,6 @@ struct Resource {
 };
 
 struct EffectContext {
-  FfxEffect effect = FFX_EFFECT_FSR3UPSCALER;
   uint32_t next_static_resource = 0u;
   uint32_t next_dynamic_resource = 0u;
   FfxApiEffectMemoryUsage memory_usage = {};
@@ -74,95 +70,95 @@ uint32_t FullMipCount(uint32_t width, uint32_t height) {
 DXGI_FORMAT ToDxgiFormat(FfxApiSurfaceFormat format) {
   switch (format) {
     case FFX_API_SURFACE_FORMAT_R32G32B32A32_TYPELESS: return DXGI_FORMAT_R32G32B32A32_TYPELESS;
-    case FFX_API_SURFACE_FORMAT_R32G32B32A32_UINT: return DXGI_FORMAT_R32G32B32A32_UINT;
-    case FFX_API_SURFACE_FORMAT_R32G32B32A32_FLOAT: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+    case FFX_API_SURFACE_FORMAT_R32G32B32A32_UINT:     return DXGI_FORMAT_R32G32B32A32_UINT;
+    case FFX_API_SURFACE_FORMAT_R32G32B32A32_FLOAT:    return DXGI_FORMAT_R32G32B32A32_FLOAT;
     case FFX_API_SURFACE_FORMAT_R16G16B16A16_TYPELESS: return DXGI_FORMAT_R16G16B16A16_TYPELESS;
-    case FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT;
-    case FFX_API_SURFACE_FORMAT_R32G32B32_FLOAT: return DXGI_FORMAT_R32G32B32_FLOAT;
-    case FFX_API_SURFACE_FORMAT_R32G32_TYPELESS: return DXGI_FORMAT_R32G32_TYPELESS;
-    case FFX_API_SURFACE_FORMAT_R32G32_FLOAT: return DXGI_FORMAT_R32G32_FLOAT;
-    case FFX_API_SURFACE_FORMAT_R32G32_UINT: return DXGI_FORMAT_R32G32_UINT;
-    case FFX_API_SURFACE_FORMAT_R32_TYPELESS: return DXGI_FORMAT_R32_TYPELESS;
-    case FFX_API_SURFACE_FORMAT_R32_UINT: return DXGI_FORMAT_R32_UINT;
-    case FFX_API_SURFACE_FORMAT_R32_FLOAT: return DXGI_FORMAT_R32_FLOAT;
-    case FFX_API_SURFACE_FORMAT_R16G16_TYPELESS: return DXGI_FORMAT_R16G16_TYPELESS;
-    case FFX_API_SURFACE_FORMAT_R16G16_FLOAT: return DXGI_FORMAT_R16G16_FLOAT;
-    case FFX_API_SURFACE_FORMAT_R16G16_UINT: return DXGI_FORMAT_R16G16_UINT;
-    case FFX_API_SURFACE_FORMAT_R16G16_SINT: return DXGI_FORMAT_R16G16_SINT;
-    case FFX_API_SURFACE_FORMAT_R16_TYPELESS: return DXGI_FORMAT_R16_TYPELESS;
-    case FFX_API_SURFACE_FORMAT_R16_FLOAT: return DXGI_FORMAT_R16_FLOAT;
-    case FFX_API_SURFACE_FORMAT_R16_UINT: return DXGI_FORMAT_R16_UINT;
-    case FFX_API_SURFACE_FORMAT_R16_UNORM: return DXGI_FORMAT_R16_UNORM;
-    case FFX_API_SURFACE_FORMAT_R16_SNORM: return DXGI_FORMAT_R16_SNORM;
-    case FFX_API_SURFACE_FORMAT_R10G10B10A2_TYPELESS: return DXGI_FORMAT_R10G10B10A2_TYPELESS;
-    case FFX_API_SURFACE_FORMAT_R10G10B10A2_UNORM: return DXGI_FORMAT_R10G10B10A2_UNORM;
-    case FFX_API_SURFACE_FORMAT_R11G11B10_FLOAT: return DXGI_FORMAT_R11G11B10_FLOAT;
-    case FFX_API_SURFACE_FORMAT_R8G8B8A8_TYPELESS: return DXGI_FORMAT_R8G8B8A8_TYPELESS;
-    case FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM: return DXGI_FORMAT_R8G8B8A8_UNORM;
-    case FFX_API_SURFACE_FORMAT_R8G8B8A8_SNORM: return DXGI_FORMAT_R8G8B8A8_SNORM;
-    case FFX_API_SURFACE_FORMAT_R8G8B8A8_SRGB: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-    case FFX_API_SURFACE_FORMAT_B8G8R8A8_TYPELESS: return DXGI_FORMAT_B8G8R8A8_TYPELESS;
-    case FFX_API_SURFACE_FORMAT_B8G8R8A8_UNORM: return DXGI_FORMAT_B8G8R8A8_UNORM;
-    case FFX_API_SURFACE_FORMAT_B8G8R8A8_SRGB: return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
-    case FFX_API_SURFACE_FORMAT_R8G8_TYPELESS: return DXGI_FORMAT_R8G8_TYPELESS;
-    case FFX_API_SURFACE_FORMAT_R8G8_UNORM: return DXGI_FORMAT_R8G8_UNORM;
-    case FFX_API_SURFACE_FORMAT_R8G8_UINT: return DXGI_FORMAT_R8G8_UINT;
-    case FFX_API_SURFACE_FORMAT_R8_TYPELESS: return DXGI_FORMAT_R8_TYPELESS;
-    case FFX_API_SURFACE_FORMAT_R8_UNORM: return DXGI_FORMAT_R8_UNORM;
-    case FFX_API_SURFACE_FORMAT_R8_SNORM: return DXGI_FORMAT_R8_SNORM;
-    case FFX_API_SURFACE_FORMAT_R8_UINT: return DXGI_FORMAT_R8_UINT;
-    case FFX_API_SURFACE_FORMAT_R9G9B9E5_SHAREDEXP: return DXGI_FORMAT_R9G9B9E5_SHAREDEXP;
-    default: return DXGI_FORMAT_UNKNOWN;
+    case FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT:    return DXGI_FORMAT_R16G16B16A16_FLOAT;
+    case FFX_API_SURFACE_FORMAT_R32G32B32_FLOAT:       return DXGI_FORMAT_R32G32B32_FLOAT;
+    case FFX_API_SURFACE_FORMAT_R32G32_TYPELESS:       return DXGI_FORMAT_R32G32_TYPELESS;
+    case FFX_API_SURFACE_FORMAT_R32G32_FLOAT:          return DXGI_FORMAT_R32G32_FLOAT;
+    case FFX_API_SURFACE_FORMAT_R32G32_UINT:           return DXGI_FORMAT_R32G32_UINT;
+    case FFX_API_SURFACE_FORMAT_R32_TYPELESS:          return DXGI_FORMAT_R32_TYPELESS;
+    case FFX_API_SURFACE_FORMAT_R32_UINT:              return DXGI_FORMAT_R32_UINT;
+    case FFX_API_SURFACE_FORMAT_R32_FLOAT:             return DXGI_FORMAT_R32_FLOAT;
+    case FFX_API_SURFACE_FORMAT_R16G16_TYPELESS:       return DXGI_FORMAT_R16G16_TYPELESS;
+    case FFX_API_SURFACE_FORMAT_R16G16_FLOAT:          return DXGI_FORMAT_R16G16_FLOAT;
+    case FFX_API_SURFACE_FORMAT_R16G16_UINT:           return DXGI_FORMAT_R16G16_UINT;
+    case FFX_API_SURFACE_FORMAT_R16G16_SINT:           return DXGI_FORMAT_R16G16_SINT;
+    case FFX_API_SURFACE_FORMAT_R16_TYPELESS:          return DXGI_FORMAT_R16_TYPELESS;
+    case FFX_API_SURFACE_FORMAT_R16_FLOAT:             return DXGI_FORMAT_R16_FLOAT;
+    case FFX_API_SURFACE_FORMAT_R16_UINT:              return DXGI_FORMAT_R16_UINT;
+    case FFX_API_SURFACE_FORMAT_R16_UNORM:             return DXGI_FORMAT_R16_UNORM;
+    case FFX_API_SURFACE_FORMAT_R16_SNORM:             return DXGI_FORMAT_R16_SNORM;
+    case FFX_API_SURFACE_FORMAT_R10G10B10A2_TYPELESS:  return DXGI_FORMAT_R10G10B10A2_TYPELESS;
+    case FFX_API_SURFACE_FORMAT_R10G10B10A2_UNORM:     return DXGI_FORMAT_R10G10B10A2_UNORM;
+    case FFX_API_SURFACE_FORMAT_R11G11B10_FLOAT:       return DXGI_FORMAT_R11G11B10_FLOAT;
+    case FFX_API_SURFACE_FORMAT_R8G8B8A8_TYPELESS:     return DXGI_FORMAT_R8G8B8A8_TYPELESS;
+    case FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM:        return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case FFX_API_SURFACE_FORMAT_R8G8B8A8_SNORM:        return DXGI_FORMAT_R8G8B8A8_SNORM;
+    case FFX_API_SURFACE_FORMAT_R8G8B8A8_SRGB:         return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    case FFX_API_SURFACE_FORMAT_B8G8R8A8_TYPELESS:     return DXGI_FORMAT_B8G8R8A8_TYPELESS;
+    case FFX_API_SURFACE_FORMAT_B8G8R8A8_UNORM:        return DXGI_FORMAT_B8G8R8A8_UNORM;
+    case FFX_API_SURFACE_FORMAT_B8G8R8A8_SRGB:         return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    case FFX_API_SURFACE_FORMAT_R8G8_TYPELESS:         return DXGI_FORMAT_R8G8_TYPELESS;
+    case FFX_API_SURFACE_FORMAT_R8G8_UNORM:            return DXGI_FORMAT_R8G8_UNORM;
+    case FFX_API_SURFACE_FORMAT_R8G8_UINT:             return DXGI_FORMAT_R8G8_UINT;
+    case FFX_API_SURFACE_FORMAT_R8_TYPELESS:           return DXGI_FORMAT_R8_TYPELESS;
+    case FFX_API_SURFACE_FORMAT_R8_UNORM:              return DXGI_FORMAT_R8_UNORM;
+    case FFX_API_SURFACE_FORMAT_R8_SNORM:              return DXGI_FORMAT_R8_SNORM;
+    case FFX_API_SURFACE_FORMAT_R8_UINT:               return DXGI_FORMAT_R8_UINT;
+    case FFX_API_SURFACE_FORMAT_R9G9B9E5_SHAREDEXP:    return DXGI_FORMAT_R9G9B9E5_SHAREDEXP;
+    default:                                           return DXGI_FORMAT_UNKNOWN;
   }
 }
 
 FfxApiSurfaceFormat FromDxgiFormat(DXGI_FORMAT format) {
   switch (format) {
-    case DXGI_FORMAT_R32G32B32A32_TYPELESS: return FFX_API_SURFACE_FORMAT_R32G32B32A32_TYPELESS;
-    case DXGI_FORMAT_R32G32B32A32_UINT: return FFX_API_SURFACE_FORMAT_R32G32B32A32_UINT;
-    case DXGI_FORMAT_R32G32B32A32_FLOAT: return FFX_API_SURFACE_FORMAT_R32G32B32A32_FLOAT;
-    case DXGI_FORMAT_R16G16B16A16_TYPELESS: return FFX_API_SURFACE_FORMAT_R16G16B16A16_TYPELESS;
-    case DXGI_FORMAT_R16G16B16A16_FLOAT: return FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT;
-    case DXGI_FORMAT_R32G32B32_FLOAT: return FFX_API_SURFACE_FORMAT_R32G32B32_FLOAT;
-    case DXGI_FORMAT_R32G32_TYPELESS: return FFX_API_SURFACE_FORMAT_R32G32_TYPELESS;
-    case DXGI_FORMAT_R32G32_FLOAT: return FFX_API_SURFACE_FORMAT_R32G32_FLOAT;
-    case DXGI_FORMAT_R32G32_UINT: return FFX_API_SURFACE_FORMAT_R32G32_UINT;
-    case DXGI_FORMAT_R32_TYPELESS: return FFX_API_SURFACE_FORMAT_R32_TYPELESS;
+    case DXGI_FORMAT_R32G32B32A32_TYPELESS:    return FFX_API_SURFACE_FORMAT_R32G32B32A32_TYPELESS;
+    case DXGI_FORMAT_R32G32B32A32_UINT:        return FFX_API_SURFACE_FORMAT_R32G32B32A32_UINT;
+    case DXGI_FORMAT_R32G32B32A32_FLOAT:       return FFX_API_SURFACE_FORMAT_R32G32B32A32_FLOAT;
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS:    return FFX_API_SURFACE_FORMAT_R16G16B16A16_TYPELESS;
+    case DXGI_FORMAT_R16G16B16A16_FLOAT:       return FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT;
+    case DXGI_FORMAT_R32G32B32_FLOAT:          return FFX_API_SURFACE_FORMAT_R32G32B32_FLOAT;
+    case DXGI_FORMAT_R32G32_TYPELESS:          return FFX_API_SURFACE_FORMAT_R32G32_TYPELESS;
+    case DXGI_FORMAT_R32G32_FLOAT:             return FFX_API_SURFACE_FORMAT_R32G32_FLOAT;
+    case DXGI_FORMAT_R32G32_UINT:              return FFX_API_SURFACE_FORMAT_R32G32_UINT;
+    case DXGI_FORMAT_R32_TYPELESS:             return FFX_API_SURFACE_FORMAT_R32_TYPELESS;
     case DXGI_FORMAT_R32G8X24_TYPELESS:
     case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
     case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:
     case DXGI_FORMAT_D32_FLOAT:
-    case DXGI_FORMAT_R32_FLOAT: return FFX_API_SURFACE_FORMAT_R32_FLOAT;
-    case DXGI_FORMAT_R32_UINT: return FFX_API_SURFACE_FORMAT_R32_UINT;
-    case DXGI_FORMAT_R16G16_TYPELESS: return FFX_API_SURFACE_FORMAT_R16G16_TYPELESS;
-    case DXGI_FORMAT_R16G16_FLOAT: return FFX_API_SURFACE_FORMAT_R16G16_FLOAT;
-    case DXGI_FORMAT_R16G16_UINT: return FFX_API_SURFACE_FORMAT_R16G16_UINT;
-    case DXGI_FORMAT_R16G16_SINT: return FFX_API_SURFACE_FORMAT_R16G16_SINT;
-    case DXGI_FORMAT_R16_TYPELESS: return FFX_API_SURFACE_FORMAT_R16_TYPELESS;
-    case DXGI_FORMAT_R16_FLOAT: return FFX_API_SURFACE_FORMAT_R16_FLOAT;
-    case DXGI_FORMAT_R16_UINT: return FFX_API_SURFACE_FORMAT_R16_UINT;
+    case DXGI_FORMAT_R32_FLOAT:                return FFX_API_SURFACE_FORMAT_R32_FLOAT;
+    case DXGI_FORMAT_R32_UINT:                 return FFX_API_SURFACE_FORMAT_R32_UINT;
+    case DXGI_FORMAT_R16G16_TYPELESS:          return FFX_API_SURFACE_FORMAT_R16G16_TYPELESS;
+    case DXGI_FORMAT_R16G16_FLOAT:             return FFX_API_SURFACE_FORMAT_R16G16_FLOAT;
+    case DXGI_FORMAT_R16G16_UINT:              return FFX_API_SURFACE_FORMAT_R16G16_UINT;
+    case DXGI_FORMAT_R16G16_SINT:              return FFX_API_SURFACE_FORMAT_R16G16_SINT;
+    case DXGI_FORMAT_R16_TYPELESS:             return FFX_API_SURFACE_FORMAT_R16_TYPELESS;
+    case DXGI_FORMAT_R16_FLOAT:                return FFX_API_SURFACE_FORMAT_R16_FLOAT;
+    case DXGI_FORMAT_R16_UINT:                 return FFX_API_SURFACE_FORMAT_R16_UINT;
     case DXGI_FORMAT_D16_UNORM:
-    case DXGI_FORMAT_R16_UNORM: return FFX_API_SURFACE_FORMAT_R16_UNORM;
-    case DXGI_FORMAT_R16_SNORM: return FFX_API_SURFACE_FORMAT_R16_SNORM;
-    case DXGI_FORMAT_R10G10B10A2_TYPELESS: return FFX_API_SURFACE_FORMAT_R10G10B10A2_TYPELESS;
-    case DXGI_FORMAT_R10G10B10A2_UNORM: return FFX_API_SURFACE_FORMAT_R10G10B10A2_UNORM;
-    case DXGI_FORMAT_R11G11B10_FLOAT: return FFX_API_SURFACE_FORMAT_R11G11B10_FLOAT;
-    case DXGI_FORMAT_R8G8B8A8_TYPELESS: return FFX_API_SURFACE_FORMAT_R8G8B8A8_TYPELESS;
-    case DXGI_FORMAT_R8G8B8A8_UNORM: return FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM;
-    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return FFX_API_SURFACE_FORMAT_R8G8B8A8_SRGB;
-    case DXGI_FORMAT_R8G8B8A8_SNORM: return FFX_API_SURFACE_FORMAT_R8G8B8A8_SNORM;
-    case DXGI_FORMAT_B8G8R8A8_TYPELESS: return FFX_API_SURFACE_FORMAT_B8G8R8A8_TYPELESS;
-    case DXGI_FORMAT_B8G8R8A8_UNORM: return FFX_API_SURFACE_FORMAT_B8G8R8A8_UNORM;
-    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return FFX_API_SURFACE_FORMAT_B8G8R8A8_SRGB;
-    case DXGI_FORMAT_R8G8_TYPELESS: return FFX_API_SURFACE_FORMAT_R8G8_TYPELESS;
-    case DXGI_FORMAT_R8G8_UNORM: return FFX_API_SURFACE_FORMAT_R8G8_UNORM;
-    case DXGI_FORMAT_R8G8_UINT: return FFX_API_SURFACE_FORMAT_R8G8_UINT;
-    case DXGI_FORMAT_R8_TYPELESS: return FFX_API_SURFACE_FORMAT_R8_TYPELESS;
-    case DXGI_FORMAT_R8_UNORM: return FFX_API_SURFACE_FORMAT_R8_UNORM;
-    case DXGI_FORMAT_R8_SNORM: return FFX_API_SURFACE_FORMAT_R8_SNORM;
-    case DXGI_FORMAT_R8_UINT: return FFX_API_SURFACE_FORMAT_R8_UINT;
-    case DXGI_FORMAT_R9G9B9E5_SHAREDEXP: return FFX_API_SURFACE_FORMAT_R9G9B9E5_SHAREDEXP;
-    default: return FFX_API_SURFACE_FORMAT_UNKNOWN;
+    case DXGI_FORMAT_R16_UNORM:                return FFX_API_SURFACE_FORMAT_R16_UNORM;
+    case DXGI_FORMAT_R16_SNORM:                return FFX_API_SURFACE_FORMAT_R16_SNORM;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS:     return FFX_API_SURFACE_FORMAT_R10G10B10A2_TYPELESS;
+    case DXGI_FORMAT_R10G10B10A2_UNORM:        return FFX_API_SURFACE_FORMAT_R10G10B10A2_UNORM;
+    case DXGI_FORMAT_R11G11B10_FLOAT:          return FFX_API_SURFACE_FORMAT_R11G11B10_FLOAT;
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:        return FFX_API_SURFACE_FORMAT_R8G8B8A8_TYPELESS;
+    case DXGI_FORMAT_R8G8B8A8_UNORM:           return FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM;
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:      return FFX_API_SURFACE_FORMAT_R8G8B8A8_SRGB;
+    case DXGI_FORMAT_R8G8B8A8_SNORM:           return FFX_API_SURFACE_FORMAT_R8G8B8A8_SNORM;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:        return FFX_API_SURFACE_FORMAT_B8G8R8A8_TYPELESS;
+    case DXGI_FORMAT_B8G8R8A8_UNORM:           return FFX_API_SURFACE_FORMAT_B8G8R8A8_UNORM;
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:      return FFX_API_SURFACE_FORMAT_B8G8R8A8_SRGB;
+    case DXGI_FORMAT_R8G8_TYPELESS:            return FFX_API_SURFACE_FORMAT_R8G8_TYPELESS;
+    case DXGI_FORMAT_R8G8_UNORM:               return FFX_API_SURFACE_FORMAT_R8G8_UNORM;
+    case DXGI_FORMAT_R8G8_UINT:                return FFX_API_SURFACE_FORMAT_R8G8_UINT;
+    case DXGI_FORMAT_R8_TYPELESS:              return FFX_API_SURFACE_FORMAT_R8_TYPELESS;
+    case DXGI_FORMAT_R8_UNORM:                 return FFX_API_SURFACE_FORMAT_R8_UNORM;
+    case DXGI_FORMAT_R8_SNORM:                 return FFX_API_SURFACE_FORMAT_R8_SNORM;
+    case DXGI_FORMAT_R8_UINT:                  return FFX_API_SURFACE_FORMAT_R8_UINT;
+    case DXGI_FORMAT_R9G9B9E5_SHAREDEXP:       return FFX_API_SURFACE_FORMAT_R9G9B9E5_SHAREDEXP;
+    default:                                   return FFX_API_SURFACE_FORMAT_UNKNOWN;
   }
 }
 
@@ -170,13 +166,13 @@ uint32_t BytesPerPixel(FfxApiSurfaceFormat format) {
   switch (format) {
     case FFX_API_SURFACE_FORMAT_R32G32B32A32_TYPELESS:
     case FFX_API_SURFACE_FORMAT_R32G32B32A32_UINT:
-    case FFX_API_SURFACE_FORMAT_R32G32B32A32_FLOAT: return 16u;
-    case FFX_API_SURFACE_FORMAT_R32G32B32_FLOAT: return 12u;
+    case FFX_API_SURFACE_FORMAT_R32G32B32A32_FLOAT:    return 16u;
+    case FFX_API_SURFACE_FORMAT_R32G32B32_FLOAT:       return 12u;
     case FFX_API_SURFACE_FORMAT_R16G16B16A16_TYPELESS:
     case FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT:
     case FFX_API_SURFACE_FORMAT_R32G32_TYPELESS:
     case FFX_API_SURFACE_FORMAT_R32G32_FLOAT:
-    case FFX_API_SURFACE_FORMAT_R32G32_UINT: return 8u;
+    case FFX_API_SURFACE_FORMAT_R32G32_UINT:           return 8u;
     case FFX_API_SURFACE_FORMAT_R32_TYPELESS:
     case FFX_API_SURFACE_FORMAT_R32_UINT:
     case FFX_API_SURFACE_FORMAT_R32_FLOAT:
@@ -194,7 +190,7 @@ uint32_t BytesPerPixel(FfxApiSurfaceFormat format) {
     case FFX_API_SURFACE_FORMAT_B8G8R8A8_TYPELESS:
     case FFX_API_SURFACE_FORMAT_B8G8R8A8_UNORM:
     case FFX_API_SURFACE_FORMAT_B8G8R8A8_SRGB:
-    case FFX_API_SURFACE_FORMAT_R9G9B9E5_SHAREDEXP: return 4u;
+    case FFX_API_SURFACE_FORMAT_R9G9B9E5_SHAREDEXP:    return 4u;
     case FFX_API_SURFACE_FORMAT_R16_TYPELESS:
     case FFX_API_SURFACE_FORMAT_R16_FLOAT:
     case FFX_API_SURFACE_FORMAT_R16_UINT:
@@ -202,12 +198,12 @@ uint32_t BytesPerPixel(FfxApiSurfaceFormat format) {
     case FFX_API_SURFACE_FORMAT_R16_SNORM:
     case FFX_API_SURFACE_FORMAT_R8G8_TYPELESS:
     case FFX_API_SURFACE_FORMAT_R8G8_UNORM:
-    case FFX_API_SURFACE_FORMAT_R8G8_UINT: return 2u;
+    case FFX_API_SURFACE_FORMAT_R8G8_UINT:             return 2u;
     case FFX_API_SURFACE_FORMAT_R8_TYPELESS:
     case FFX_API_SURFACE_FORMAT_R8_UNORM:
     case FFX_API_SURFACE_FORMAT_R8_SNORM:
-    case FFX_API_SURFACE_FORMAT_R8_UINT: return 1u;
-    default: return 0u;
+    case FFX_API_SURFACE_FORMAT_R8_UINT:               return 1u;
+    default:                                           return 0u;
   }
 }
 
@@ -246,12 +242,12 @@ DXGI_FORMAT ViewFormat(DXGI_FORMAT native_format, FfxApiSurfaceFormat requested_
     case DXGI_FORMAT_R10G10B10A2_TYPELESS:
       format = ToDxgiFormat(requested_format);
       break;
-    case DXGI_FORMAT_D32_FLOAT: format = DXGI_FORMAT_R32_FLOAT; break;
-    case DXGI_FORMAT_D16_UNORM: format = DXGI_FORMAT_R16_UNORM; break;
-    case DXGI_FORMAT_D24_UNORM_S8_UINT: format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; break;
+    case DXGI_FORMAT_D32_FLOAT:            format = DXGI_FORMAT_R32_FLOAT; break;
+    case DXGI_FORMAT_D16_UNORM:            format = DXGI_FORMAT_R16_UNORM; break;
+    case DXGI_FORMAT_D24_UNORM_S8_UINT:    format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; break;
     case DXGI_FORMAT_R32G8X24_TYPELESS:
     case DXGI_FORMAT_D32_FLOAT_S8X24_UINT: format = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS; break;
-    default: break;
+    default:                               break;
   }
   if (uav && format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) return DXGI_FORMAT_R8G8B8A8_UNORM;
   if (uav && format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) return DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -299,7 +295,7 @@ FfxErrorCode CreateViews(BackendContext* context, Resource* resource) {
   }
 
   if ((texture_desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0u) {
-    const uint32_t mip_count = std::min<uint32_t>(texture_desc.MipLevels, kMaxMipViews);
+    const uint32_t mip_count = std::min<uint32_t>(texture_desc.MipLevels, MAX_MIP_VIEWS);
     for (uint32_t mip = 0u; mip < mip_count; ++mip) {
       D3D11_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
       uav_desc.Format = ViewFormat(texture_desc.Format, requested_format, true);
@@ -330,7 +326,7 @@ BackendContext* GetContext(FfxInterface* backend_interface) {
   return backend_interface == nullptr ? nullptr : static_cast<BackendContext*>(backend_interface->scratchBuffer);
 }
 
-FfxVersionNumber GetSdkVersion(FfxInterface*) {
+FfxVersionNumber GetSdkVersion(FfxInterface* /*backend_interface*/) {
   return FFX_SDK_MAKE_VERSION(FFX_SDK_VERSION_MAJOR, FFX_SDK_VERSION_MINOR, FFX_SDK_VERSION_PATCH);
 }
 
@@ -366,12 +362,12 @@ FfxErrorCode CreateBackendContext(
     sampler_desc.MinLOD = 0.f;
     sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
     sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
-    if (FAILED(context->device->CreateSamplerState(&sampler_desc, &context->samplers[0]))) {
+    if (FAILED(context->device->CreateSamplerState(&sampler_desc, context->samplers.data()))) {
       context->device->Release();
       return FFX_ERROR_BACKEND_API_ERROR;
     }
     sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    if (FAILED(context->device->CreateSamplerState(&sampler_desc, &context->samplers[1]))) {
+    if (FAILED(context->device->CreateSamplerState(&sampler_desc, context->samplers.data() + 1u))) {
       context->samplers[0]->Release();
       context->samplers[0] = nullptr;
       context->device->Release();
@@ -384,9 +380,8 @@ FfxErrorCode CreateBackendContext(
     if (effect_context.active) continue;
     effect_context = {};
     effect_context.active = true;
-    effect_context.effect = effect;
-    effect_context.next_static_resource = index * FFX_MAX_RESOURCE_COUNT + 1u;
-    effect_context.next_dynamic_resource = (index + 1u) * FFX_MAX_RESOURCE_COUNT - 1u;
+    effect_context.next_static_resource = (index * FFX_MAX_RESOURCE_COUNT) + 1u;
+    effect_context.next_dynamic_resource = ((index + 1u) * FFX_MAX_RESOURCE_COUNT) - 1u;
     *effect_context_id = index;
     ++context->reference_count;
     return FFX_OK;
@@ -394,18 +389,15 @@ FfxErrorCode CreateBackendContext(
   return FFX_ERROR_OUT_OF_RANGE;
 }
 
-FfxErrorCode GetDeviceCapabilities(FfxInterface*, FfxDeviceCapabilities* capabilities) {
+FfxErrorCode GetDeviceCapabilities(
+    FfxInterface* /*backend_interface*/,
+    FfxDeviceCapabilities* capabilities) {
   if (capabilities == nullptr) return FFX_ERROR_INVALID_POINTER;
   *capabilities = {};
   capabilities->maximumSupportedShaderModel = FFX_SHADER_MODEL_5_1;
   capabilities->dedicatedAllocationSupported = true;
   return FFX_OK;
 }
-
-FfxErrorCode DestroyResource(
-    FfxInterface* backend_interface,
-    FfxResourceInternal internal_resource,
-    FfxUInt32 effect_context_id);
 
 FfxErrorCode DestroyBackendContext(FfxInterface* backend_interface, FfxUInt32 effect_context_id) {
   BackendContext* context = GetContext(backend_interface);
@@ -605,7 +597,10 @@ FfxApiResource GetRegisteredResource(FfxInterface* backend_interface, FfxResourc
   return output;
 }
 
-FfxErrorCode UnregisterResources(FfxInterface* backend_interface, FfxCommandList, FfxUInt32 effect_context_id) {
+FfxErrorCode UnregisterResources(
+    FfxInterface* backend_interface,
+    FfxCommandList /*command_list*/,
+    FfxUInt32 effect_context_id) {
   BackendContext* context = GetContext(backend_interface);
   if (context == nullptr || effect_context_id >= context->max_effect_contexts) return FFX_ERROR_INVALID_POINTER;
   EffectContext& effect_context = context->effect_contexts[effect_context_id];
@@ -671,7 +666,7 @@ FfxErrorCode CreatePipeline(
     FfxInterface* backend_interface,
     FfxShaderBlob* shader_blob,
     const FfxPipelineDescription* pipeline_description,
-    FfxUInt32,
+    FfxUInt32 /*effect_context_id*/,
     FfxPipelineState* output) {
   BackendContext* context = GetContext(backend_interface);
   if (context == nullptr || shader_blob == nullptr || pipeline_description == nullptr || output == nullptr) {
@@ -693,8 +688,6 @@ FfxErrorCode CreatePipeline(
   output->pipeline = shader;
   output->srvTextureCount = shader_blob->srvTextureCount;
   output->uavTextureCount = shader_blob->uavTextureCount;
-  output->srvBufferCount = shader_blob->srvBufferCount;
-  output->uavBufferCount = shader_blob->uavBufferCount;
   output->constCount = shader_blob->cbvCount;
   CopyBindings(
       output->srvTextureBindings,
@@ -712,21 +705,13 @@ FfxErrorCode CreatePipeline(
       shader_blob->boundConstantBufferNames,
       shader_blob->boundConstantBuffers);
   wcsncpy_s(output->name, pipeline_description->name, _TRUNCATE);
-
-  for (uint32_t index = 0u; index < output->srvTextureCount; ++index) {
-    output->maxSrvTextureAndBufferIndex = std::max(
-        output->maxSrvTextureAndBufferIndex,
-        output->srvTextureBindings[index].slotIndex);
-  }
-  for (uint32_t index = 0u; index < output->uavTextureCount; ++index) {
-    output->maxUavTextureAndBufferIndex = std::max(
-        output->maxUavTextureAndBufferIndex,
-        output->uavTextureBindings[index].slotIndex);
-  }
   return FFX_OK;
 }
 
-FfxErrorCode DestroyPipeline(FfxInterface*, FfxPipelineState* pipeline, FfxUInt32) {
+FfxErrorCode DestroyPipeline(
+    FfxInterface* /*backend_interface*/,
+    FfxPipelineState* pipeline,
+    FfxUInt32 /*effect_context_id*/) {
   if (pipeline == nullptr) return FFX_OK;
   if (pipeline->pipeline != nullptr) static_cast<ID3D11ComputeShader*>(pipeline->pipeline)->Release();
   *pipeline = {};
@@ -741,20 +726,11 @@ FfxErrorCode ScheduleGpuJob(FfxInterface* backend_interface, const FfxGpuJobDesc
   return FFX_OK;
 }
 
-FfxErrorCode QueryNextGpuJob(FfxInterface* backend_interface, FfxGpuJobDescription** job) {
-  BackendContext* context = GetContext(backend_interface);
-  if (context == nullptr || job == nullptr) return FFX_ERROR_INVALID_POINTER;
-  if (context->gpu_job_count >= FFX_MAX_GPU_JOBS) return FFX_ERROR_INSUFFICIENT_MEMORY;
-  *job = &context->gpu_jobs[context->gpu_job_count++];
-  **job = {};
-  return FFX_OK;
-}
-
 void UnbindComputeResources(ID3D11DeviceContext* device_context) {
-  static const std::array<ID3D11ShaderResourceView*, kMaxComputeSrvs> null_srvs = {};
-  static const std::array<ID3D11UnorderedAccessView*, kMaxComputeUavs> null_uavs = {};
-  device_context->CSSetShaderResources(0u, static_cast<UINT>(null_srvs.size()), null_srvs.data());
-  device_context->CSSetUnorderedAccessViews(0u, static_cast<UINT>(null_uavs.size()), null_uavs.data(), nullptr);
+  static const std::array<ID3D11ShaderResourceView*, MAX_COMPUTE_SRVS> NULL_SRVS = {};
+  static const std::array<ID3D11UnorderedAccessView*, MAX_COMPUTE_UAVS> NULL_UAVS = {};
+  device_context->CSSetShaderResources(0u, static_cast<UINT>(NULL_SRVS.size()), NULL_SRVS.data());
+  device_context->CSSetUnorderedAccessViews(0u, static_cast<UINT>(NULL_UAVS.size()), NULL_UAVS.data(), nullptr);
 }
 
 FfxErrorCode EnsureConstantBuffer(
@@ -800,11 +776,11 @@ FfxErrorCode ExecuteCompute(
     const FfxResourceBinding& binding = job.pipeline->uavTextureBindings[index];
     const int32_t resource_index = job.uavTextures[index].resource.internalIndex;
     const uint32_t mip = job.uavTextures[index].mip;
-    ID3D11UnorderedAccessView* view = resource_index > 0 && mip < kMaxMipViews
-                                         ? context->resources[resource_index].uavs[mip]
-                                         : nullptr;
+    ID3D11UnorderedAccessView* view = resource_index > 0 && mip < MAX_MIP_VIEWS
+                                          ? context->resources[resource_index].uavs[mip]
+                                          : nullptr;
     const uint32_t slot = binding.slotIndex + binding.arrayIndex;
-    if (slot >= kMaxComputeUavs) return FFX_ERROR_OUT_OF_RANGE;
+    if (slot >= MAX_COMPUTE_UAVS) return FFX_ERROR_OUT_OF_RANGE;
     device_context->CSSetUnorderedAccessViews(slot, 1u, &view, nullptr);
   }
 
@@ -838,12 +814,13 @@ FfxErrorCode ExecuteCompute(
 FfxErrorCode ExecuteGpuJobs(
     FfxInterface* backend_interface,
     FfxCommandList command_list,
-    FfxUInt32) {
+    FfxUInt32 /*effect_context_id*/) {
   BackendContext* context = GetContext(backend_interface);
   auto* device_context = static_cast<ID3D11DeviceContext*>(command_list);
   if (context == nullptr || device_context == nullptr) return FFX_ERROR_INVALID_POINTER;
 
   FfxErrorCode result = FFX_OK;
+  Microsoft::WRL::ComPtr<ID3D11DeviceContext1> device_context_1;
   for (uint32_t index = 0u; index < context->gpu_job_count && result == FFX_OK; ++index) {
     const FfxGpuJobDescription& job = context->gpu_jobs[index];
     switch (job.jobType) {
@@ -882,11 +859,11 @@ FfxErrorCode ExecuteGpuJobs(
         break;
       case FFX_GPU_JOB_DISCARD: {
         const Resource& resource = context->resources[job.discardJobDescriptor.target.internalIndex];
-        ID3D11DeviceContext1* device_context_1 = nullptr;
-        if (resource.resource != nullptr
-            && SUCCEEDED(device_context->QueryInterface(IID_PPV_ARGS(&device_context_1)))) {
+        if (resource.resource != nullptr && device_context_1 == nullptr) {
+          device_context->QueryInterface(IID_PPV_ARGS(&device_context_1));
+        }
+        if (resource.resource != nullptr && device_context_1 != nullptr) {
           device_context_1->DiscardResource(resource.resource);
-          device_context_1->Release();
         }
         break;
       }
@@ -959,7 +936,6 @@ FfxErrorCode GetInterface(
   backend_interface->fpDestroyPipeline = DestroyPipeline;
   backend_interface->fpScheduleGpuJob = ScheduleGpuJob;
   backend_interface->fpExecuteGpuJobs = ExecuteGpuJobs;
-  backend_interface->fpQueryNextGpuJobDesc = QueryNextGpuJob;
   backend_interface->scratchBuffer = scratch_buffer;
   backend_interface->scratchBufferSize = scratch_buffer_size;
   backend_interface->device = device;
@@ -1011,28 +987,28 @@ FfxApiResource GetResource(
 }  // namespace taa::fsr3::dx11
 
 FfxErrorCode GetResourceSizeFromDescription(
-    FfxDevice,
+    FfxDevice /*device*/,
     const FfxCreateResourceDescription* create_resource_description,
     uint64_t* size_in_bytes,
     uint64_t* alignment) {
   if (create_resource_description == nullptr || size_in_bytes == nullptr) return FFX_ERROR_INVALID_POINTER;
   const FfxApiResourceDescription& description = create_resource_description->resourceDescription;
-  const uint32_t bytes_per_pixel = [] (FfxApiSurfaceFormat format) {
+  const uint32_t bytes_per_pixel = [](FfxApiSurfaceFormat format) {
     switch (format) {
       case FFX_API_SURFACE_FORMAT_R32G32B32A32_TYPELESS:
       case FFX_API_SURFACE_FORMAT_R32G32B32A32_UINT:
-      case FFX_API_SURFACE_FORMAT_R32G32B32A32_FLOAT: return 16u;
+      case FFX_API_SURFACE_FORMAT_R32G32B32A32_FLOAT:    return 16u;
       case FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT:
       case FFX_API_SURFACE_FORMAT_R32G32_FLOAT:
-      case FFX_API_SURFACE_FORMAT_R32G32_UINT: return 8u;
+      case FFX_API_SURFACE_FORMAT_R32G32_UINT:           return 8u;
       case FFX_API_SURFACE_FORMAT_R32_UINT:
       case FFX_API_SURFACE_FORMAT_R32_FLOAT:
       case FFX_API_SURFACE_FORMAT_R16G16_FLOAT:
-      case FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM: return 4u;
+      case FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM:        return 4u;
       case FFX_API_SURFACE_FORMAT_R16_FLOAT:
-      case FFX_API_SURFACE_FORMAT_R16_SNORM: return 2u;
-      case FFX_API_SURFACE_FORMAT_R8_UNORM: return 1u;
-      default: return 0u;
+      case FFX_API_SURFACE_FORMAT_R16_SNORM:             return 2u;
+      case FFX_API_SURFACE_FORMAT_R8_UNORM:              return 1u;
+      default:                                           return 0u;
     }
   }(static_cast<FfxApiSurfaceFormat>(description.format));
   if (bytes_per_pixel == 0u) return FFX_ERROR_INVALID_ENUM;

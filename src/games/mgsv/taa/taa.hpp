@@ -148,7 +148,7 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list) {
     if (prepare_velocity_target != nullptr) {
       velocity_rtv = prepare_velocity_target(cmd_list, velocity_rtv);
     }
-    resolve::CaptureCameraMotion(cmd_list, *data, velocity_rtv);
+    resolve::CaptureCameraMotionLocked(cmd_list, *data, velocity_rtv);
   }
 
   // Sequence markers arm the later CopyRenderBuffer fallbacks. The DoF
@@ -170,7 +170,7 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list) {
   // leaves lower-resolution DoF candidates for the later fallback cascade.
   if (pixel_hash == shader_hashes::DOF_SCATTER_BAKE_FIRST_PS) {
     LogObservedShader("pixel", "DOF_ScatterBakeFirst", pixel_hash, logged_scatter_bake);
-    resolve::MaybeRun(cmd_list, *data, "DOF_ScatterBakeFirst");
+    resolve::MaybeRunLocked(cmd_list, *data, "DOF_ScatterBakeFirst");
     return false;
   }
 
@@ -181,12 +181,12 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list) {
   if (pixel_hash == shader_hashes::COPY_RENDER_BUFFER_PS) {
     if (state::frame_state.dof_fired) {
       LogObservedShader("pixel", "CRB after DoF", pixel_hash, logged_dof_gate);
-      resolve::MaybeRun(cmd_list, *data, "CopyRenderBufferAfterDoF");
+      resolve::MaybeRunLocked(cmd_list, *data, "CopyRenderBufferAfterDoF");
       return false;
     }
     if (state::frame_state.mb_tile_prep_fired) {
       LogObservedShader("pixel", "CRB after MB tile prep", pixel_hash, logged_mb_gate);
-      resolve::MaybeRun(cmd_list, *data, "CopyRenderBufferAfterMBTilePrep");
+      resolve::MaybeRunLocked(cmd_list, *data, "CopyRenderBufferAfterMBTilePrep");
       return false;
     }
   }
@@ -200,7 +200,7 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list) {
   if (is_tonemap_lut) LogObservedShader("pixel", "Tonemap_1DLUT", pixel_hash, logged_tonemap_lut);
 
   if (is_tonemap || is_tonemap_lut) {
-    resolve::MaybeRun(cmd_list, *data, is_tonemap ? "Tonemap" : "Tonemap_1DLUT");
+    resolve::MaybeRunLocked(cmd_list, *data, is_tonemap ? "Tonemap" : "Tonemap_1DLUT");
   }
 
   // Always return false: we never replace the original game draw, we just
@@ -305,21 +305,6 @@ inline void OnPresent(
 }
 
 inline void Use(DWORD fdw_reason, ShaderInjectData* shader_injection) {
-  state::enabled_binding =
-      shader_injection != nullptr ? &shader_injection->custom_taa : &state::enabled;
-  state::SyncEnabled();
-  state::SyncReconstructionMethod();
-  state::SyncJitterPattern();
-#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
-  state::SyncDiagnosticView();
-  state::SyncVelocityVisualizationRange();
-  state::SyncObjectMotionMode();
-#endif
-  state::SyncResolveTuning();
-#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
-  state::SyncProjectionJitterScales();
-#endif
-
   renodx::utils::resource::Use(fdw_reason);
   renodx::utils::pipeline_layout::Use(fdw_reason);
   renodx::utils::shader::Use(fdw_reason);
@@ -328,7 +313,21 @@ inline void Use(DWORD fdw_reason, ShaderInjectData* shader_injection) {
     case DLL_PROCESS_ATTACH:
       if (attached) return;
       attached = true;
-      resolve::SetFsr3Callbacks(fsr3::TryResolve, fsr3::ReleaseTemporalResources);
+      state::enabled_binding =
+          shader_injection != nullptr ? &shader_injection->custom_taa : &state::enabled;
+      state::SyncEnabled();
+      state::SyncReconstructionMethod();
+      state::SyncJitterPattern();
+#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
+      state::SyncDiagnosticView();
+      state::SyncVelocityVisualizationRange();
+      state::SyncObjectMotionMode();
+#endif
+      state::SyncResolveTuning();
+#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
+      state::SyncProjectionJitterScales();
+#endif
+      resolve::SetFsr3ResolveCallback(fsr3::TryResolve);
       logging::Info("attach");
       logging::Info("initial runtime state enabled=", logging::Bool{state::IsEnabled()},
                     " jitter_pattern=", state::GetJitterPattern() == 0u ? "off" : "halton_8");
@@ -349,7 +348,7 @@ inline void Use(DWORD fdw_reason, ShaderInjectData* shader_injection) {
     case DLL_PROCESS_DETACH:
       if (!attached) return;
       attached = false;
-      resolve::SetFsr3Callbacks(nullptr, nullptr);
+      resolve::SetFsr3ResolveCallback(nullptr);
       logging::Info("detach");
       // DllMain holds the loader lock. Runtime transitions and resource
       // quiescence happen in destroy_device; process detach only unregisters.
