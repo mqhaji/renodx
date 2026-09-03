@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <mutex>
@@ -18,8 +19,32 @@
 
 namespace taa::settings {
 
-inline bool settings_appended = false;
 inline std::atomic_flag runtime_transition_lock = ATOMIC_FLAG_INIT;
+inline renodx::utils::settings::Setting* temporal_mode_setting = nullptr;
+
+using UnavailableReason = const char* (*)();
+
+struct TemporalModeOption {
+  state::TemporalMode mode;
+  const char* label;
+  // Return nullptr when available. Future DLSS/XeSS probes can return a
+  // DLL-missing, unsupported-adapter, or combined diagnostic here.
+  UnavailableReason unavailable_reason = nullptr;
+};
+
+inline constexpr std::array TEMPORAL_MODE_OPTIONS = {
+    TemporalModeOption{state::TemporalMode::OFF, "Off (Vanilla FXAA)"},
+    TemporalModeOption{state::TemporalMode::ANALYTICAL_TAA, "Analytical TAA"},
+    TemporalModeOption{state::TemporalMode::AMD_FSR3, "AMD FSR 3.1.5"},
+};
+
+inline const TemporalModeOption* FindTemporalModeOption(state::TemporalMode mode) {
+  const auto found = std::find_if(
+      TEMPORAL_MODE_OPTIONS.begin(),
+      TEMPORAL_MODE_OPTIONS.end(),
+      [mode](const TemporalModeOption& option) { return option.mode == mode; });
+  return found == TEMPORAL_MODE_OPTIONS.end() ? nullptr : &*found;
+}
 
 // Settings callbacks and preset changes can arrive on different threads.
 struct RuntimeTransitionGuard {
@@ -38,29 +63,56 @@ struct RuntimeTransitionGuard {
   }
 };
 
-inline void SetRuntimeEnabled(bool enabled) {
-  camera_state::PublicationWriterGuard publication_guard;
-  state::SetEnabled(enabled);
-  camera_state::InvalidateLocked();
-}
-
-inline void TransitionRuntimeEnabled(
-    bool enabled,
+inline void TransitionTemporalMode(
+    float value,
     const char* reason,
     bool force_reset = false,
     bool verify_restoration = true) {
-  RuntimeTransitionGuard transition_guard;
+  auto mode = state::NormalizeTemporalMode(value);
+  const auto* option = FindTemporalModeOption(mode);
+  const char* unavailable_reason = "Unknown temporal reconstruction method.";
+  if (option != nullptr) {
+    unavailable_reason = option->unavailable_reason == nullptr
+                             ? nullptr
+                             : option->unavailable_reason();
+  }
+  if (unavailable_reason != nullptr) {
+    logging::Warn("temporal mode unavailable mode=", static_cast<uint32_t>(mode), " reason=", unavailable_reason);
+    mode = state::TemporalMode::OFF;
+    option = FindTemporalModeOption(mode);
+  }
 
-  const bool was_enabled = state::IsEnabled();
-  if (was_enabled == enabled && !force_reset) return;
+  const std::unique_lock settings_lock(renodx::utils::mutex::global_mutex);
+  if (unavailable_reason != nullptr && temporal_mode_setting != nullptr) {
+    temporal_mode_setting->Set(static_cast<float>(state::TemporalMode::OFF))->Write();
+  }
+  if (temporal_mode_setting != nullptr && temporal_mode_setting->binding != nullptr) {
+    *temporal_mode_setting->binding = static_cast<float>(mode);
+  }
+  const float jitter_pattern = state::jitter_pattern;
+
+  RuntimeTransitionGuard transition_guard;
+  const bool enabled = mode != state::TemporalMode::OFF;
+  const uint32_t effective_jitter_pattern = mode == state::TemporalMode::AMD_FSR3
+                                                ? 1u
+                                                : static_cast<uint32_t>(std::clamp(jitter_pattern, 0.f, 1.f));
+  const auto previous_mode = state::GetTemporalMode();
+  const bool was_enabled = previous_mode != state::TemporalMode::OFF;
+  if (previous_mode == mode
+      && (!enabled || effective_jitter_pattern == state::GetJitterPattern())
+      && !force_reset) {
+    return;
+  }
   const uint64_t transition_frame = state::CurrentFrameToken();
-  const uint32_t completed_samples = state::frame_state.sample_index;
+  const uint32_t completed_samples = state::CurrentSampleIndex();
 
   // Disable projection writes before waiting for an in-flight resolve. Enable
   // only after history/sample state is reset, so the native hook cannot publish
   // a sample from the previous temporal sequence.
   if (!enabled && was_enabled) {
-    SetRuntimeEnabled(false);
+    camera_state::PublicationWriterGuard publication_guard;
+    state::SetTemporalMode(state::TemporalMode::OFF);
+    camera_state::InvalidateLocked();
     if (verify_restoration && projection_jitter::IsInstalled()) {
       projection_jitter::BeginProductionRestorationCheck();
     }
@@ -70,59 +122,35 @@ inline void TransitionRuntimeEnabled(
   }
 
   coordinator::ExecutionGuard execution_guard;
-  coordinator::ResetTemporalState(reason);
+  camera_state::PublicationWriterGuard publication_guard;
+  if (enabled) {
+    state::SetJitterPattern(effective_jitter_pattern);
+  }
+  coordinator::ResetTemporalStateWithPublicationLocked(reason);
   if (enabled) {
     projection_jitter::CancelProductionRestorationCheck();
-    SetRuntimeEnabled(true);
+    state::SetTemporalMode(mode);
   }
 
   if (enabled) {
-    logging::Info("TAA runtime enabled reason=", reason,
+    logging::Info("temporal reconstruction selected mode=", option->label,
+                  " reason=", reason,
                   " frame=", transition_frame,
-                  " jitter_pattern=", state::GetJitterPattern() == 0u ? "off" : "halton_8");
+                  " jitter_pattern=", effective_jitter_pattern == 0u ? "off" : "halton_8");
   } else {
-    logging::Info("TAA runtime disabled reason=", reason,
+    logging::Info("temporal reconstruction disabled reason=", reason,
                   " frame=", transition_frame,
                   " completed_samples=", completed_samples);
   }
 }
 
-inline void TransitionReconstructionMethodLocked(float value, const char* reason) {
-  const auto method = state::NormalizeReconstructionMethod(value);
-  const uint32_t method_value = static_cast<uint32_t>(method);
-  const uint32_t effective_jitter_pattern = method == state::ReconstructionMethod::AMD_FSR3
-                                                ? 1u
-                                                : static_cast<uint32_t>(std::clamp(state::jitter_pattern, 0.f, 1.f));
-  state::reconstruction_method = static_cast<float>(method_value);
-  if (method == state::GetReconstructionMethod()
-      && effective_jitter_pattern == state::GetJitterPattern()) {
-    return;
-  }
-
-  coordinator::ExecutionGuard execution_guard;
-  camera_state::PublicationWriterGuard publication_guard;
-  state::SetReconstructionMethod(static_cast<float>(method_value));
-  state::SetJitterPattern(static_cast<float>(effective_jitter_pattern));
-  coordinator::ResetTemporalStateWithPublicationLocked(reason);
-
-  logging::Info(
-      "TAA reconstruction method changed method=",
-      method == state::ReconstructionMethod::AMD_FSR3 ? "fsr3_3_1_5" : "analytical",
-      " jitter_pattern=",
-      effective_jitter_pattern == 0u ? "off" : "halton_8");
-}
-
-inline void TransitionReconstructionMethod(float value, const char* reason) {
+inline void TransitionJitterPattern(float value) {
   RuntimeTransitionGuard transition_guard;
-  TransitionReconstructionMethodLocked(value, reason);
-}
 
-inline void TransitionJitterPatternLocked(float value) {
   const uint32_t preference = static_cast<uint32_t>(std::clamp(value, 0.f, 1.f));
-  const uint32_t effective_pattern = state::GetReconstructionMethod() == state::ReconstructionMethod::AMD_FSR3
+  const uint32_t effective_pattern = state::GetTemporalMode() == state::TemporalMode::AMD_FSR3
                                          ? 1u
                                          : preference;
-  state::jitter_pattern = static_cast<float>(preference);
   if (effective_pattern == state::GetJitterPattern()) return;
 
   // Resolve already uses execution -> publication ordering when committing
@@ -130,15 +158,10 @@ inline void TransitionJitterPatternLocked(float value) {
   // from the previous pattern while history/sample state is being reset.
   coordinator::ExecutionGuard execution_guard;
   camera_state::PublicationWriterGuard publication_guard;
-  state::SetJitterPattern(static_cast<float>(effective_pattern));
+  state::SetJitterPattern(effective_pattern);
   coordinator::ResetTemporalStateWithPublicationLocked("jitter pattern changed");
 
   logging::Info("TAA jitter pattern changed pattern=", effective_pattern);
-}
-
-inline void TransitionJitterPattern(float value) {
-  RuntimeTransitionGuard transition_guard;
-  TransitionJitterPatternLocked(value);
 }
 
 inline void InvalidateHistoryForSetting(const char* reason) {
@@ -157,8 +180,7 @@ inline void SetProjectionJitterScale(
 #endif
 
 struct BindingSnapshot {
-  bool enabled = false;
-  float reconstruction_method = static_cast<float>(state::DEFAULT_RECONSTRUCTION_METHOD);
+  float temporal_mode = static_cast<float>(state::DEFAULT_TEMPORAL_MODE);
   float jitter_pattern = static_cast<float>(state::DEFAULT_JITTER_PATTERN);
   float clip_tightness = state::DEFAULT_CLIP_TIGHTNESS;
   float history_clip_strength = state::DEFAULT_HISTORY_CLIP_STRENGTH;
@@ -175,8 +197,9 @@ inline void ApplySettingsSnapshot() {
   BindingSnapshot snapshot = {};
   {
     const std::unique_lock settings_lock(renodx::utils::mutex::global_mutex);
-    snapshot.enabled = state::enabled_binding != nullptr && *state::enabled_binding > 0.f;
-    snapshot.reconstruction_method = state::reconstruction_method;
+    snapshot.temporal_mode = temporal_mode_setting == nullptr
+                                 ? static_cast<float>(state::TemporalMode::OFF)
+                                 : temporal_mode_setting->GetValue();
     snapshot.jitter_pattern = state::jitter_pattern;
     snapshot.clip_tightness = state::clip_tightness;
     snapshot.history_clip_strength = state::history_clip_strength;
@@ -189,15 +212,8 @@ inline void ApplySettingsSnapshot() {
 #endif
   }
 
-  const bool was_enabled = state::IsEnabled();
-  if (was_enabled && !snapshot.enabled) {
-    TransitionRuntimeEnabled(false, "setting synchronized");
-  }
-  TransitionReconstructionMethod(snapshot.reconstruction_method, "reconstruction method synchronized");
+  TransitionTemporalMode(snapshot.temporal_mode, "temporal mode synchronized");
   TransitionJitterPattern(snapshot.jitter_pattern);
-  if (!was_enabled && snapshot.enabled) {
-    TransitionRuntimeEnabled(true, "setting synchronized");
-  }
   bool history_settings_changed = state::GetClipTightness() != std::clamp(snapshot.clip_tightness, 0.f, 1.f)
                                   || state::GetHistoryClipStrength()
                                          != std::clamp(snapshot.history_clip_strength, 0.f, 1.f)
@@ -236,77 +252,130 @@ inline void ApplySettingsSnapshot() {
   }
 }
 
-inline void MigrateReconstructionMethodSetting() {
+inline void MigrateTemporalModeSetting() {
   constexpr std::array<const char*, 3> preset_sections = {
       "renodx-preset1",
       "renodx-preset2",
       "renodx-preset3",
   };
   for (const char* section : preset_sections) {
-    int current_value = 0;
+    int temporal_mode_value = 0;
     if (reshade::get_config_value(
             nullptr,
             section,
-            "FxTemporalReconstructionMethod",
-            current_value)) {
+            "FxTemporalReconstructionMode",
+            temporal_mode_value)) {
       continue;
     }
-    int legacy_value = 0;
-    if (!reshade::get_config_value(
-            nullptr,
-            section,
-            "FxTaaReconstructionMethod",
-            legacy_value)) {
-      continue;
-    }
-    const int migrated_value = legacy_value == 0
-                                   ? static_cast<int>(state::ReconstructionMethod::ANALYTICAL_TAA)
-                                   : static_cast<int>(state::ReconstructionMethod::AMD_FSR3);
-    reshade::set_config_value(
+
+    int enabled_value = 0;
+    // FxTaa predates the method selectors and originally enabled Analytical TAA.
+    constexpr int legacy_analytical_method = 0;
+    int method_value = legacy_analytical_method;
+    const bool has_enabled = reshade::get_config_value(nullptr, section, "FxTaa", enabled_value);
+    const bool has_current_method = reshade::get_config_value(
         nullptr,
         section,
         "FxTemporalReconstructionMethod",
-        migrated_value);
+        method_value);
+    int legacy_method_value = 0;
+    const bool has_legacy_method = reshade::get_config_value(
+        nullptr,
+        section,
+        "FxTaaReconstructionMethod",
+        legacy_method_value);
+    if (!has_enabled && !has_current_method && !has_legacy_method) {
+      continue;
+    }
+
+    temporal_mode_value = static_cast<int>(state::TemporalMode::OFF);
+    if (has_enabled && enabled_value > 0) {
+      if (!has_current_method && has_legacy_method) {
+        method_value = legacy_method_value;
+      }
+      temporal_mode_value = method_value == legacy_analytical_method
+                                ? static_cast<int>(state::TemporalMode::ANALYTICAL_TAA)
+                                : static_cast<int>(state::TemporalMode::AMD_FSR3);
+    }
+    reshade::set_config_value(
+        nullptr,
+        section,
+        "FxTemporalReconstructionMode",
+        temporal_mode_value);
   }
+}
+
+inline bool DrawTemporalModeSelector() {
+  if (temporal_mode_setting == nullptr) return false;
+
+  const auto current_mode = state::NormalizeTemporalMode(temporal_mode_setting->GetValue());
+  const auto* current_option = FindTemporalModeOption(current_mode);
+  const char* preview = current_option == nullptr ? "Unknown" : current_option->label;
+  const bool combo_open = ImGui::BeginCombo("Temporal Reconstruction", preview);
+  if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
+    ImGui::SetTooltip(
+        "Selects vanilla FXAA, analytical TAA, or AMD FSR 3.1.5. Changing modes resets temporal state.");
+  }
+  if (!combo_open) return false;
+
+  bool changed = false;
+  for (const auto& option : TEMPORAL_MODE_OPTIONS) {
+    const char* unavailable_reason = option.unavailable_reason == nullptr
+                                         ? nullptr
+                                         : option.unavailable_reason();
+    const bool available = unavailable_reason == nullptr;
+    const bool selected = option.mode == current_mode;
+    if (!available) ImGui::BeginDisabled();
+    const bool chosen = ImGui::Selectable(option.label, selected);
+    if (!available) ImGui::EndDisabled();
+
+    if (!available
+        && ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled)) {
+      ImGui::BeginTooltip();
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 0.2f, 0.2f, 1.f));
+      ImGui::TextWrapped("%s", unavailable_reason);
+      ImGui::PopStyleColor();
+      ImGui::EndTooltip();
+    }
+    if (chosen && available && !selected) {
+      changed = renodx::utils::settings::UpdateSetting(
+          "FxTemporalReconstructionMode",
+          static_cast<float>(option.mode));
+      if (changed) {
+        TransitionTemporalMode(static_cast<float>(option.mode), "temporal mode changed");
+      }
+    }
+    if (selected) ImGui::SetItemDefaultFocus();
+  }
+  ImGui::EndCombo();
+  return changed;
 }
 
 inline void AppendSettings(
     renodx::utils::settings::Settings& settings,
     ShaderInjectData* shader_injection) {
-  if (settings_appended || shader_injection == nullptr) return;
-  settings_appended = true;
-  MigrateReconstructionMethodSetting();
+  if (temporal_mode_setting != nullptr || shader_injection == nullptr) return;
+  MigrateTemporalModeSetting();
+
+  temporal_mode_setting = new renodx::utils::settings::Setting{
+      .key = "FxTemporalReconstructionMode",
+      .binding = &shader_injection->custom_taa,
+      .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+      .default_value = static_cast<float>(state::DEFAULT_TEMPORAL_MODE),
+      .label = "Temporal Reconstruction Mode",
+      .section = "Temporal Anti-Aliasing",
+      .max = static_cast<float>(TEMPORAL_MODE_OPTIONS.size()) - 1.f,
+      .is_visible = [] { return false; },
+  };
 
   std::vector<renodx::utils::settings::Setting*> taa_settings = {
+      temporal_mode_setting,
       new renodx::utils::settings::Setting{
-          .key = "FxTaa",
-          .binding = &shader_injection->custom_taa,
-          .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
-          .default_value = 0.f,
-          .label = "Temporal Anti-Aliasing",
+          .value_type = renodx::utils::settings::SettingValueType::CUSTOM,
+          .can_reset = false,
+          .label = "Temporal Reconstruction",
           .section = "Temporal Anti-Aliasing",
-          .on_change_value = [](float previous, float current) {
-            (void)previous;
-            TransitionRuntimeEnabled(current > 0.f, "setting changed");
-          },
-      },
-      new renodx::utils::settings::Setting{
-          .key = "FxTemporalReconstructionMethod",
-          .binding = &state::reconstruction_method,
-          .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-          .default_value = static_cast<float>(state::DEFAULT_RECONSTRUCTION_METHOD),
-          .label = "Temporal Reconstruction Method",
-          .section = "Temporal Anti-Aliasing",
-          .tooltip = "Selects analytical TAA or the native-resolution D3D11 adaptation of AMD FSR3 Upscaler 3.1.5. "
-                     "Changing methods resets temporal state.",
-          .labels = {
-              "Analytical TAA",
-              "AMD FSR 3.1.5",
-          },
-          .on_change_value = [](float previous, float current) {
-            if (static_cast<uint32_t>(previous) == static_cast<uint32_t>(current)) return;
-            TransitionReconstructionMethod(current, "reconstruction method changed"); },
-          .is_visible = [] { return state::IsEnabled(); },
+          .on_draw = DrawTemporalModeSelector,
       },
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
       new renodx::utils::settings::Setting{
@@ -334,8 +403,7 @@ inline void AppendSettings(
             (void)previous;
             state::SetDiagnosticView(current);
             InvalidateHistoryForSetting("diagnostic view changed"); },
-          .is_visible = [] { return state::IsEnabled()
-                                    && state::GetReconstructionMethod() == state::ReconstructionMethod::ANALYTICAL_TAA; },
+          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
       },
 #endif
       new renodx::utils::settings::Setting{
@@ -352,8 +420,7 @@ inline void AppendSettings(
           .on_change_value = [](float previous, float current) {
             if (static_cast<uint32_t>(previous) == static_cast<uint32_t>(current)) return;
             TransitionJitterPattern(current); },
-          .is_visible = [] { return state::IsEnabled()
-                                    && state::GetReconstructionMethod() == state::ReconstructionMethod::ANALYTICAL_TAA; },
+          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxTaaUnclampMotionVectors",
@@ -427,8 +494,7 @@ inline void AppendSettings(
             (void)previous;
             state::SetClipTightness(current);
             InvalidateHistoryForSetting("clip tightness changed"); },
-          .is_visible = [] { return state::IsEnabled()
-                                    && state::GetReconstructionMethod() == state::ReconstructionMethod::ANALYTICAL_TAA; },
+          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxTaaHistoryClipStrength",
@@ -445,8 +511,7 @@ inline void AppendSettings(
             (void)previous;
             state::SetHistoryClipStrength(current);
             InvalidateHistoryForSetting("history clip strength changed"); },
-          .is_visible = [] { return state::IsEnabled()
-                                    && state::GetReconstructionMethod() == state::ReconstructionMethod::ANALYTICAL_TAA; },
+          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxTaaCurrentFrameBlend",
@@ -463,8 +528,7 @@ inline void AppendSettings(
             (void)previous;
             state::SetCurrentFrameBlend(current);
             InvalidateHistoryForSetting("current frame blend changed"); },
-          .is_visible = [] { return state::IsEnabled()
-                                    && state::GetReconstructionMethod() == state::ReconstructionMethod::ANALYTICAL_TAA; },
+          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
       },
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
       new renodx::utils::settings::Setting{
@@ -584,17 +648,15 @@ inline void AppendSettings(
 #endif
   };
 
-  settings.insert(
-      std::find_if(settings.begin(), settings.end(), [](const renodx::utils::settings::Setting* setting) {
-        return setting != nullptr && setting->section == "Options";
-      }),
-      taa_settings.begin(), taa_settings.end());
+  settings.insert(settings.begin(), taa_settings.begin(), taa_settings.end());
 }
 
 inline void OnPresetOff() {
   // Programmatic setting updates do not invoke on_change_value.
-  renodx::utils::settings::UpdateSetting("FxTaa", 0.f);
-  TransitionRuntimeEnabled(false, "preset off", true);
+  renodx::utils::settings::UpdateSetting(
+      "FxTemporalReconstructionMode",
+      static_cast<float>(state::TemporalMode::OFF));
+  TransitionTemporalMode(static_cast<float>(state::TemporalMode::OFF), "preset off", true);
 }
 
 }  // namespace taa::settings
