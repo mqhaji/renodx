@@ -32,7 +32,6 @@
 #include "backend_dx11.hpp"
 #include "ffx/upscalers/fsr3/include/ffx_fsr3upscaler.h"
 
-
 #ifndef FFX_FSR3UPSCALER_DISABLE_WATERMARK
 #define FFX_FSR3UPSCALER_DISABLE_WATERMARK 1
 #endif

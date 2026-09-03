@@ -42,7 +42,7 @@ inline void ResetTemporalStateWithPublicationLocked(const char* reason) {
   state::ResetTemporalState();
 }
 
-inline void ResetTemporalState(const char* reason = "unspecified") {
+inline void ResetTemporalState(const char* reason) {
   camera_state::PublicationWriterGuard publication_guard;
   ResetTemporalStateWithPublicationLocked(reason);
 }
@@ -57,21 +57,20 @@ inline void Destroy(reshade::api::device* device) {
 
 inline void ReleaseInactiveResources(
     reshade::api::device* device,
-    bool enabled,
-    state::ReconstructionMethod method) {
-  if (!enabled || method != state::ReconstructionMethod::ANALYTICAL_TAA) {
+    state::TemporalMode mode) {
+  if (mode != state::TemporalMode::ANALYTICAL_TAA) {
     analytical::Release(device);
   }
-  if (!enabled || method != state::ReconstructionMethod::AMD_FSR3) {
+  if (mode != state::TemporalMode::AMD_FSR3) {
     fsr3::ReleaseTemporalResources(device);
   }
 }
 
-inline bool MaybeRunLocked(
+inline void MaybeRunLocked(
     reshade::api::command_list* cmd_list,
     const descriptor_tracker::CommandListData& command_data,
-    const char* insertion_name = "SRV") {
-  if (!state::IsEnabled() || state::frame_state.reconstruction_completed) return false;
+    const char* insertion_name) {
+  if (!state::IsEnabled() || state::frame_state.reconstruction_completed) return;
 
   ValidatedFrameInputs inputs = {};
   if (!input_capture::BuildValidatedFrameInputsLocked(
@@ -79,11 +78,11 @@ inline bool MaybeRunLocked(
           command_data.pixel_srv_t0,
           insertion_name,
           inputs)) {
-    return false;
+    return;
   }
   if (runtime_device != nullptr && runtime_device != inputs.device) {
     logging::Warn("rejecting temporal dispatch from a second D3D11 device");
-    return false;
+    return;
   }
   runtime_device = inputs.device;
 
@@ -95,12 +94,14 @@ inline bool MaybeRunLocked(
 
   MethodOutput output = {};
   bool succeeded = false;
-  switch (state::GetReconstructionMethod()) {
-    case state::ReconstructionMethod::ANALYTICAL_TAA:
+  switch (state::GetTemporalMode()) {
+    case state::TemporalMode::ANALYTICAL_TAA:
       succeeded = analytical::Dispatch(inputs, output);
       break;
-    case state::ReconstructionMethod::AMD_FSR3:
+    case state::TemporalMode::AMD_FSR3:
       succeeded = fsr3::Dispatch(inputs, output);
+      break;
+    case state::TemporalMode::OFF:
       break;
   }
   if (succeeded && output.resource.handle != 0u) {
@@ -126,16 +127,15 @@ inline bool MaybeRunLocked(
       reshade::api::resource_usage::shader_resource,
       reshade::api::resource_usage::render_target);
   d3d11_compute_state::Restore(cmd_list, previous_compute_state);
-  if (!succeeded) return false;
+  if (!succeeded) return;
 
   if (!camera_state::Commit(inputs.camera.frame_token, inputs.sample_index)) {
     ResetTemporalState("native camera matrix commit failed");
     logging::Warn("temporal native camera matrix commit failed");
-    state::MarkReconstructionCompleted();
-    return true;
+    state::frame_state.reconstruction_completed = true;
+    return;
   }
   state::CommitTemporalFrame();
-  return true;
 }
 
 }  // namespace taa::coordinator

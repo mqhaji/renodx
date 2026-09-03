@@ -5,7 +5,8 @@ native-resolution DLAA inputs. [README.md](README.md) describes the current impl
 
 ## Scope
 
-- Keep the master temporal feature default-Off until its input and restoration contracts are fully validated.
+- Keep **Off (Vanilla FXAA)** exact even though new profiles currently default to FSR3; migrated profiles preserve their
+   previous enabled/disabled state.
 - Preserve native render/output resolution. Game resolution scaling and dynamic resolution are out of scope.
 - Keep MGSV's bone-aware object motion rather than replacing it with depth-only camera motion.
 - Do not restore broad mapped-constant-buffer mutation.
@@ -105,6 +106,11 @@ After the canonical inputs are stable:
 5. Use auto exposure initially unless a proven MGSV exposure resource is available.
 6. Add DLAA as one direct coordinator switch case; do not introduce a virtual method registry or another callback seam.
 7. Compare analytical TAA, FSR3, and DLAA against the same validated inputs.
+
+Add DLAA to the existing mode dropdown only when both `nvngx_dlss.dll` discovery and NVIDIA adapter capability are
+probed. Keep the option visible but disabled when unavailable, with red hover text that distinguishes a missing DLL from
+an unsupported GPU and can report both failures. Runtime selection must independently fail closed to Off. XeSS can use
+the same option-level availability contract if it is integrated later.
 
 No internal resolution changes, DLSS Super Resolution modes, or game viewport/culling modifications are planned.
 
