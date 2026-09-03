@@ -4,7 +4,8 @@ Technical reference for MGSV's optional native-resolution temporal anti-aliasing
 default-Off and keeps the game's original FXAA and projection behavior whenever TAA is disabled. Enabled users can select
 AMD FSR3 Upscaler 3.1.5 or the established analytical resolve. FSR3 is the default enabled method. The former FSR2 path
 has been removed; legacy selector values for either AMD method normalize to FSR3, while persisted Analytical TAA remains
-analytical.
+analytical. The versioned `FxTemporalReconstructionMethod` key migrates old `FxTaaReconstructionMethod` values so the
+legacy FSR2/FSR3 value `2` cannot later be reinterpreted as another method.
 
 Future quality work and the native-resolution DLAA plan are tracked in [ROADMAP.md](ROADMAP.md).
 
@@ -57,11 +58,12 @@ The runtime executes this sequence while TAA is enabled:
   velocity, forward/model/alpha/overlay setup, and the private local-light packet builder.
 4. MGSV renders the jittered scene, depth, and native object velocity.
 5. `MotionBlurCameraVelocity` writes the final camera/object velocity target. The addon captures its depth and
-   object-velocity inputs and keeps both velocity stages in RGBA16F.
+   object-velocity inputs, the matching camera publication, and the final RGBA16F velocity as one immutable frame.
 6. At `DOF_ScatterBakeFirst`, the addon accepts only an invocation whose scene color dimensions match the captured
-  full-resolution depth and motion inputs. Lower-resolution DoF invocations are skipped.
-7. The selected analytical or FSR3 reconstruction writes the resolved image back before MGSV creates its depth-of-field
-  and motion-blur inputs.
+  full-resolution depth, final velocity, object velocity, and camera dimensions. Lower-resolution DoF invocations are
+  skipped.
+7. The coordinator dispatches Analytical TAA or FSR3 from that validated value, copies the method's encoded output back,
+  restores common resource/compute state, commits camera history, and advances the sample once.
 8. The game's FXAA shader becomes a pass-through while TAA is enabled.
 
 The fallback insertion cascade is:
@@ -78,9 +80,10 @@ still matches; older or differently sampled inputs remain rejected.
 
 ## Native jitter contract
 
-`runtime/projection_jitter.hpp` locates the projection commit using an executable-section AOB plus the complete preceding
-projection-copy context. It detours the adjacent `SetViewMatrixState(float*)` function rather than patching a shared
-constant buffer or modifying persistent viewport state.
+`runtime/projection_jitter.hpp` owns executable discovery and the native projection Detours.
+`runtime/camera_state.hpp` separately owns the lock-free publication and double-precision matrix history. The hook locates
+the projection commit using an executable-section AOB plus the complete preceding projection-copy context and detours the
+adjacent `SetViewMatrixState(float*)` function rather than patching a shared constant buffer.
 
 The hook requires all of the following before writing:
 
@@ -126,7 +129,8 @@ should correct synchronized current/previous velocity matrices upstream rather t
 
 ## Resolve inputs
 
-Both methods consume the same validated scene, velocity, depth, object-motion, jitter, and no-jitter camera publication.
+Both methods consume one immutable `ValidatedFrameInputs` value containing the same scene, velocity, depth,
+object-motion, jitter, and no-jitter camera publication.
 The analytical shader uses the direct register contract below. The FSR3 boundary adapter decodes MGSV scene RGB into an
 owned linear RGBA16F input and combines matrix camera motion with native deformation-aware object motion in signed RG16F.
 AMD's 3.1.5 host then schedules the fixed SM5 prepare-input, luminance, shading-change, prepare-reactivity,
@@ -151,10 +155,10 @@ The current frame is decoded before its 3x3 filter. Background pixels use depth-
 native no-jitter matrix relation. Object-mask pixels retain MGSV's bone-aware velocity. Velocity selection currently uses
 the center and four diagonal taps and chooses the largest raw depth, matching MGSV's positive reverse-Z nearest surface.
 
-Depth and object-velocity references are refreshed on every successful `MotionBlurCameraVelocity` capture. The capture
-records both its presentation epoch and TAA sample so a one-epoch scheduling offset cannot admit motion from a previously
-completed temporal frame. Stable color and velocity view caches are keyed by resource/view handles and cleared through
-resource-destruction notifications; they avoid repeated descriptor queries and SRV creation without defining freshness.
+Depth, object velocity, final velocity, and camera state are snapshotted together at `MotionBlurCameraVelocity`. The input
+capture validates their device, resource type, sample count, dimensions, presentation epoch, and temporal sample once;
+method runtimes do not reach back into mutable capture state. The owned velocity SRV is cleared through resource-view
+destruction notifications.
 
 The resolve point-loads and decodes the complete 4x4 history footprint before 16-tap Catmull-Rom reconstruction in linear
 light. It clips history to equally blended broad/tight current RGB bounds and computes an adaptive blend from luminance
@@ -186,10 +190,10 @@ invalidates history only if a full-resolution candidate was observed since the p
 Missing previous matrix history also invalidates and reseeds accumulation before using the valid current frame. No
 temporal output is produced from mismatched frame data.
 
-Method and jitter changes serialize through the resolve/publication locks and reset both matrix and sample history as one
+Method and jitter changes serialize through the coordinator/publication locks and reset method and camera history as one
 transaction. FSR3 forces only the effective runtime pattern to Halton; it does not overwrite the saved analytical jitter
-preference, which is restored when Analytical TAA is selected again. The injected compute graph captures and restores the
-native D3D11 compute shader plus sampler, SRV, UAV, and constant-buffer slots it modifies.
+preference. One common completion path restores D3D11 compute state, copies the encoded method output, commits camera
+history, and advances the sample.
 
 ## Runtime logging
 
@@ -197,7 +201,7 @@ native D3D11 compute shader plus sampler, SRV, UAV, and constant-buffer slots it
 
 - **initial runtime state** reports whether a persisted TAA setting was already enabled when the addon attached.
 - **TAA runtime enabled** records the transition reason, frame, and active jitter pattern.
-- **waiting for first native jitter publication** is emitted once while startup rendering has not yet reached the proven
+- **waiting for first native camera publication** is emitted once while startup rendering has not yet reached the proven
   native gameplay projection path.
 - **TAA accumulation started** records the accepted insertion, callback frame, native-publication frame, sample, and
   dimensions after each analytical history seed.
@@ -219,12 +223,17 @@ replaces the interactive **TAA runtime enabled** transition line.
 | File | Role |
 |---|---|
 | `taa.hpp` | Callback lifecycle, draw routing, and insertion cascade |
-| `settings.hpp` | RenoDX controls and synchronized runtime transitions |
+| `settings.hpp` | RenoDX controls, versioned method migration, and coherent settings snapshots |
+| `analytical/runtime.hpp` | Analytical history, pipeline, tuning constants, and method dispatch |
 | `runtime/state.hpp` | Frame/sample state and Off/Halton jitter generation |
 | `runtime/descriptor_tracker.hpp` | Per-command-list pixel SRV tracking |
-| `runtime/projection_jitter.hpp` | Native hook, jitter publication, matrix history, and restoration checks |
-| `runtime/resolve.hpp` | Shared input validation, analytical history/dispatch, and FSR3 callback routing |
-| `fsr3/runtime.hpp` | FSR3 context lifetime, MGSV boundary dispatch, resets, and copy-back |
+| `runtime/camera_state.hpp` | Coherent camera publication and double-precision temporal matrix history |
+| `runtime/projection_jitter.hpp` | Native projection discovery, Detours, path correction, and restoration checks |
+| `runtime/frame_inputs.hpp` | Immutable game-native input and encoded method-output contracts |
+| `runtime/input_capture.hpp` | Velocity/depth/object/camera capture, lifetime tracking, and validation |
+| `runtime/coordinator.hpp` | Method switch, common transitions/copy-back, camera commit, and sample advancement |
+| `runtime/d3d11_compute_state.hpp` | Compute pipeline and descriptor preservation shared by temporal methods |
+| `fsr3/runtime.hpp` | FSR3 context lifetime, MGSV boundary conversion, host dispatch, and encoded output |
 | `fsr3/backend_dx11.*` | Custom FidelityFX 2.3.0 D3D11 backend with Feature Level 11_0 support |
 | `fsr3/shader_blobs.cpp` | Static host pipeline metadata and fixed SM5 bytecode provider |
 | `fsr3/shaders/` | FSR3 3.1.5 SM5 wrappers plus MGSV color/motion/output adapters |

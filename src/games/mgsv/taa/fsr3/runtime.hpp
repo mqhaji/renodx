@@ -25,12 +25,13 @@
 #include <embed/fsr3_prepare_game_inputs.h>
 #include <include/reshade.hpp>
 
+#include "../runtime/camera_state.hpp"
+#include "../runtime/frame_inputs.hpp"
 #include "../runtime/logging.hpp"
-#include "../runtime/projection_jitter.hpp"
-#include "../runtime/resolve.hpp"
 #include "../runtime/state.hpp"
 #include "backend_dx11.hpp"
 #include "ffx/upscalers/fsr3/include/ffx_fsr3upscaler.h"
+
 
 #ifndef FFX_FSR3UPSCALER_DISABLE_WATERMARK
 #define FFX_FSR3UPSCALER_DISABLE_WATERMARK 1
@@ -82,7 +83,6 @@ struct Resources {
 
   uint32_t width = 0u;
   uint32_t height = 0u;
-  uint64_t settings_generation = std::numeric_limits<uint64_t>::max();
   bool context_created = false;
   bool initialized = false;
   std::chrono::steady_clock::time_point previous_dispatch_time;
@@ -95,7 +95,7 @@ inline bool LogEvery(uint64_t interval = 120u) {
   return logging::ShouldLogFrame(state::CurrentFrameToken(), last_failure_log, interval);
 }
 
-inline bool IsCameraDiscontinuity(const projection_jitter::AppliedJitter& native_jitter) {
+inline bool IsCameraDiscontinuity(const camera_state::CameraFrame& native_jitter) {
   if (!native_jitter.camera_reprojection_valid) return true;
 
   // A valid matrix pair can still span a cut. Mid-depth center/corners catch
@@ -215,7 +215,6 @@ inline void Destroy() {
   }
   resources.width = 0u;
   resources.height = 0u;
-  resources.settings_generation = std::numeric_limits<uint64_t>::max();
   resources.initialized = false;
   resources.previous_dispatch_time = {};
 }
@@ -227,6 +226,10 @@ inline void ReleaseTemporalResources(reshade::api::device* device) {
   const uint32_t height = resources.height;
   Destroy();
   logging::Info("released inactive AMD FSR3.1 resources size=", width, "x", height);
+}
+
+inline void InvalidateHistory() {
+  resources.initialized = false;
 }
 
 inline bool CreateComputeShader(
@@ -390,30 +393,28 @@ inline void UnbindComputeResources(ID3D11DeviceContext* context) {
 
 inline bool PrepareGameInputs(
     ID3D11DeviceContext* context,
-    reshade::api::resource_view color_srv,
-    const projection_jitter::AppliedJitter& native_jitter,
+    const ValidatedFrameInputs& inputs,
     bool reset) {
-  auto& captured = resolve::resources;
   const std::array<ID3D11ShaderResourceView*, 4> srvs = {
-      reinterpret_cast<ID3D11ShaderResourceView*>(color_srv.handle),                     // NOLINT(performance-no-int-to-ptr)
-      reinterpret_cast<ID3D11ShaderResourceView*>(captured.velocity_srv.handle),         // NOLINT(performance-no-int-to-ptr)
-      reinterpret_cast<ID3D11ShaderResourceView*>(captured.depth_srv.handle),            // NOLINT(performance-no-int-to-ptr)
-      reinterpret_cast<ID3D11ShaderResourceView*>(captured.object_velocity_srv.handle),  // NOLINT(performance-no-int-to-ptr)
+      reinterpret_cast<ID3D11ShaderResourceView*>(inputs.color_srv.handle),            // NOLINT(performance-no-int-to-ptr)
+      reinterpret_cast<ID3D11ShaderResourceView*>(inputs.velocity_srv.handle),         // NOLINT(performance-no-int-to-ptr)
+      reinterpret_cast<ID3D11ShaderResourceView*>(inputs.depth_srv.handle),            // NOLINT(performance-no-int-to-ptr)
+      reinterpret_cast<ID3D11ShaderResourceView*>(inputs.object_velocity_srv.handle),  // NOLINT(performance-no-int-to-ptr)
   };
   const std::array<ID3D11UnorderedAccessView*, 2> uavs = {
       resources.linear_input.uav.Get(),
       resources.motion_input.uav.Get(),
   };
   const PrepareConstants constants = {
-      .current_jitter_uv = {native_jitter.jitter_uv_x, native_jitter.jitter_uv_y},
+      .current_jitter_uv = {inputs.camera.jitter_uv_x, inputs.camera.jitter_uv_y},
       .velocity_projection_jitter_scale = state::GetProjectionJitterScale(state::ProjectionJitterPath::VELOCITY),
-      .camera_reprojection_valid = !reset && native_jitter.camera_reprojection_valid ? 1.f : 0.f,
+      .camera_reprojection_valid = !reset && inputs.camera.camera_reprojection_valid ? 1.f : 0.f,
       .render_size = {resources.width, resources.height},
       .reciprocal_render_size = {
           1.f / static_cast<float>(resources.width),
           1.f / static_cast<float>(resources.height),
       },
-      .current_to_previous_clip = native_jitter.current_to_previous_clip,
+      .current_to_previous_clip = inputs.camera.current_to_previous_clip,
   };
 
   D3D11_MAPPED_SUBRESOURCE mapped = {};
@@ -477,189 +478,114 @@ inline FfxApiResource MakeResource(
   return dx11::GetResource(texture.texture.Get(), texture.description, state_value);
 }
 
-inline bool Dispatch(
-    reshade::api::command_list* cmd_list,
-    reshade::api::resource_view color_srv,
-    reshade::api::resource color_resource,
-    reshade::api::resource_usage color_initial_usage,
-    reshade::api::resource_usage color_final_usage,
-    const projection_jitter::AppliedJitter& native_jitter,
+inline bool DispatchHost(
+    const ValidatedFrameInputs& inputs,
     bool reset) {
+  auto* cmd_list = inputs.cmd_list;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   if (context == nullptr) return false;
-  const auto previous_compute_state = resolve::CaptureComputeState(cmd_list);
-  auto& captured = resolve::resources;
 
-  if (color_initial_usage != reshade::api::resource_usage::shader_resource) {
-    cmd_list->barrier(color_resource, color_initial_usage, reshade::api::resource_usage::shader_resource);
-  }
-  cmd_list->barrier(
-      captured.velocity_resource,
-      reshade::api::resource_usage::render_target,
-      reshade::api::resource_usage::shader_resource);
-
-  bool succeeded = PrepareGameInputs(context, color_srv, native_jitter, reset);
+  bool succeeded = PrepareGameInputs(context, inputs, reset);
   if (succeeded) {
-    const auto depth_resource = cmd_list->get_device()->get_resource_from_view(captured.depth_srv);
-    if (depth_resource.handle == 0u) {
-      succeeded = false;
-    } else {
-      auto depth_description = dx11::GetResourceDescription(
-          reinterpret_cast<ID3D11Resource*>(depth_resource.handle));  // NOLINT(performance-no-int-to-ptr)
-      depth_description.format = FFX_API_SURFACE_FORMAT_R32_FLOAT;
-      depth_description.usage = FFX_API_RESOURCE_USAGE_READ_ONLY;
+    auto depth_description = dx11::GetResourceDescription(
+        reinterpret_cast<ID3D11Resource*>(inputs.depth_resource.handle));  // NOLINT(performance-no-int-to-ptr)
+    depth_description.format = FFX_API_SURFACE_FORMAT_R32_FLOAT;
+    depth_description.usage = FFX_API_RESOURCE_USAGE_READ_ONLY;
 
-      const float depth_x = native_jitter.device_to_view_depth[0];
-      const float depth_y = native_jitter.device_to_view_depth[1];
-      float camera_near = depth_y / (1.f - depth_x);
-      float camera_far = -depth_y / depth_x;
-      if (!std::isfinite(camera_near) || !std::isfinite(camera_far)
-          || camera_near <= 0.f || camera_far <= camera_near) {
-        camera_near = 0.1f;
-        camera_far = 4000.f;
-      }
-
-      FfxFsr3UpscalerDispatchDescription dispatch = {};
-      dispatch.commandList = context;
-      dispatch.color = MakeResource(resources.linear_input, FFX_API_RESOURCE_STATE_COMPUTE_READ);
-      dispatch.depth = dx11::GetResource(
-          reinterpret_cast<ID3D11Resource*>(depth_resource.handle),  // NOLINT(performance-no-int-to-ptr)
-          depth_description,
-          FFX_API_RESOURCE_STATE_COMPUTE_READ);
-      dispatch.motionVectors = MakeResource(resources.motion_input, FFX_API_RESOURCE_STATE_COMPUTE_READ);
-      dispatch.dilatedDepth = MakeResource(resources.dilated_depth, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
-      dispatch.dilatedMotionVectors = MakeResource(resources.dilated_motion, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
-      dispatch.reconstructedPrevNearestDepth = MakeResource(
-          resources.reconstructed_previous_nearest_depth,
-          FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
-      dispatch.output = MakeResource(resources.linear_output, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
-      dispatch.jitterOffset = {
-          .x = native_jitter.jitter_uv_x * static_cast<float>(resources.width),
-          .y = native_jitter.jitter_uv_y * static_cast<float>(resources.height),
-      };
-      dispatch.motionVectorScale = {
-          .x = static_cast<float>(resources.width),
-          .y = static_cast<float>(resources.height),
-      };
-      dispatch.renderSize = {.width = resources.width, .height = resources.height};
-      dispatch.upscaleSize = {.width = resources.width, .height = resources.height};
-      dispatch.enableSharpening = false;
-      dispatch.sharpness = 0.f;
-      dispatch.frameTimeDelta = FrameDeltaMilliseconds(reset);
-      dispatch.preExposure = 1.f;
-      dispatch.reset = reset;
-      dispatch.cameraNear = camera_near;
-      dispatch.cameraFar = camera_far;
-      dispatch.cameraFovAngleVertical = 2.f * std::atan(std::abs(native_jitter.device_to_view_depth[3]));
-      dispatch.viewSpaceToMetersFactor = 1.f;
-      dispatch.flags = 0u;
-      succeeded = ffxFsr3UpscalerContextDispatch(&resources.context, &dispatch) == FFX_OK;
+    const float depth_x = inputs.camera.device_to_view_depth[0];
+    const float depth_y = inputs.camera.device_to_view_depth[1];
+    float camera_near = depth_y / (1.f - depth_x);
+    float camera_far = -depth_y / depth_x;
+    if (!std::isfinite(camera_near) || !std::isfinite(camera_far)
+        || camera_near <= 0.f || camera_far <= camera_near) {
+      camera_near = 0.1f;
+      camera_far = 4000.f;
     }
+
+    FfxFsr3UpscalerDispatchDescription dispatch = {};
+    dispatch.commandList = context;
+    dispatch.color = MakeResource(resources.linear_input, FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    dispatch.depth = dx11::GetResource(
+        reinterpret_cast<ID3D11Resource*>(inputs.depth_resource.handle),  // NOLINT(performance-no-int-to-ptr)
+        depth_description,
+        FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    dispatch.motionVectors = MakeResource(resources.motion_input, FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    dispatch.dilatedDepth = MakeResource(resources.dilated_depth, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+    dispatch.dilatedMotionVectors = MakeResource(resources.dilated_motion, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+    dispatch.reconstructedPrevNearestDepth = MakeResource(
+        resources.reconstructed_previous_nearest_depth,
+        FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+    dispatch.output = MakeResource(resources.linear_output, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+    dispatch.jitterOffset = {
+        .x = inputs.camera.jitter_uv_x * static_cast<float>(resources.width),
+        .y = inputs.camera.jitter_uv_y * static_cast<float>(resources.height),
+    };
+    dispatch.motionVectorScale = {
+        .x = static_cast<float>(resources.width),
+        .y = static_cast<float>(resources.height),
+    };
+    dispatch.renderSize = {.width = resources.width, .height = resources.height};
+    dispatch.upscaleSize = {.width = resources.width, .height = resources.height};
+    dispatch.enableSharpening = false;
+    dispatch.sharpness = 0.f;
+    dispatch.frameTimeDelta = FrameDeltaMilliseconds(reset);
+    dispatch.preExposure = 1.f;
+    dispatch.reset = reset;
+    dispatch.cameraNear = camera_near;
+    dispatch.cameraFar = camera_far;
+    dispatch.cameraFovAngleVertical = 2.f * std::atan(std::abs(inputs.camera.device_to_view_depth[3]));
+    dispatch.viewSpaceToMetersFactor = 1.f;
+    dispatch.flags = 0u;
+    succeeded = ffxFsr3UpscalerContextDispatch(&resources.context, &dispatch) == FFX_OK;
   }
 
   if (succeeded) {
-    EncodeGameOutput(context, color_srv);
+    EncodeGameOutput(context, inputs.color_srv);
   }
-  if (succeeded) {
-    cmd_list->barrier(
-        color_resource,
-        reshade::api::resource_usage::shader_resource,
-        reshade::api::resource_usage::copy_dest);
-    context->CopyResource(
-        reinterpret_cast<ID3D11Resource*>(color_resource.handle),  // NOLINT(performance-no-int-to-ptr)
-        resources.encoded_output.texture.Get());
-    cmd_list->barrier(color_resource, reshade::api::resource_usage::copy_dest, color_final_usage);
-  } else if (color_final_usage != reshade::api::resource_usage::shader_resource) {
-    cmd_list->barrier(color_resource, reshade::api::resource_usage::shader_resource, color_final_usage);
-  }
-  cmd_list->barrier(
-      captured.velocity_resource,
-      reshade::api::resource_usage::shader_resource,
-      reshade::api::resource_usage::render_target);
-  resolve::RestoreComputeState(cmd_list, previous_compute_state);
   return succeeded;
 }
 
-inline bool TryResolve(
-    reshade::api::command_list* cmd_list,
-    reshade::api::resource_view color_srv,
-    reshade::api::resource_usage color_initial_usage,
-    reshade::api::resource_usage color_final_usage,
-    const projection_jitter::AppliedJitter& native_jitter,
-    const char* insertion_name) {
-  auto* device = cmd_list != nullptr ? cmd_list->get_device() : nullptr;
+inline bool Dispatch(const ValidatedFrameInputs& inputs, MethodOutput& output) {
+  auto* device = inputs.device;
   if (device == nullptr || device->get_api() != reshade::api::device_api::d3d11) return false;
 
-  const auto color_resource = device->get_resource_from_view(color_srv);
-  if (color_resource.handle == 0u) return false;
-  const auto color_description = device->get_resource_desc(color_resource);
-  const auto color_view_description = device->get_resource_view_desc(color_srv);
-  const auto color_format = resolve::GetTypedViewFormat(device, color_srv);
-  const auto depth_format = resolve::GetTypedViewFormat(device, resolve::resources.depth_srv);
-  const bool compatible = color_description.type == reshade::api::resource_type::texture_2d
-                          && color_description.texture.depth_or_layers == 1u
-                          && color_description.texture.levels == 1u
-                          && color_description.texture.samples == 1u
-                          && color_view_description.type == reshade::api::resource_view_type::texture_2d
-                          && color_view_description.texture.first_level == 0u
-                          && color_view_description.texture.first_layer == 0u
-                          && color_format == reshade::api::format::r16g16b16a16_float
-                          && (depth_format == reshade::api::format::r32_float
-                              || depth_format == reshade::api::format::r32_float_x8_uint);
+  const bool compatible = inputs.color_format == reshade::api::format::r16g16b16a16_float
+                          && (inputs.depth_format == reshade::api::format::r32_float
+                              || inputs.depth_format == reshade::api::format::r32_float_x8_uint);
   if (!compatible) {
     if (LogEvery(30u)) {
-      logging::Warn("rejecting AMD FSR3.1 dispatch with incompatible resources insertion=", insertion_name,
-                    " color_format=", static_cast<uint32_t>(color_format),
-                    " depth_format=", static_cast<uint32_t>(depth_format));
+      logging::Warn("rejecting AMD FSR3.1 dispatch with incompatible resources insertion=", inputs.insertion_name,
+                    " color_format=", static_cast<uint32_t>(inputs.color_format),
+                    " depth_format=", static_cast<uint32_t>(inputs.depth_format));
     }
-    return false;
-  }
-  if (native_jitter.width != color_description.texture.width
-      || native_jitter.height != color_description.texture.height) {
     return false;
   }
 
   auto* native_device = reinterpret_cast<ID3D11Device*>(device->get_native());  // NOLINT(performance-no-int-to-ptr)
-  if (!EnsureResources(
-          native_device,
-          color_description.texture.width,
-          color_description.texture.height)) {
+  if (!EnsureResources(native_device, inputs.width, inputs.height)) {
     return false;
   }
 
-  const uint64_t settings_generation = state::RuntimeSettingsGeneration();
   const bool reset = !resources.initialized
-                     || resources.settings_generation != settings_generation
-                     || IsCameraDiscontinuity(native_jitter);
-  if (!Dispatch(
-          cmd_list,
-          color_srv,
-          color_resource,
-          color_initial_usage,
-          color_final_usage,
-          native_jitter,
-          reset)) {
+                     || IsCameraDiscontinuity(inputs.camera);
+  if (!DispatchHost(inputs, reset)) {
     resources.initialized = false;
-    if (LogEvery(30u)) logging::Warn("AMD FSR3.1 host dispatch failed insertion=", insertion_name);
+    if (LogEvery(30u)) logging::Warn("AMD FSR3.1 host dispatch failed insertion=", inputs.insertion_name);
     return false;
   }
 
   if (reset) {
-    logging::Info("AMD FSR3.1 accumulation started insertion=", insertion_name,
-                  " frame=", state::CurrentFrameToken(),
-                  " native_frame=", native_jitter.frame_token,
-                  " sample=", state::CurrentSampleIndex(),
+    logging::Info("AMD FSR3.1 accumulation started insertion=", inputs.insertion_name,
+                  " frame=", inputs.frame_token,
+                  " native_frame=", inputs.camera.frame_token,
+                  " sample=", inputs.sample_index,
                   " size=", resources.width, "x", resources.height);
   }
   resources.initialized = true;
-  resources.settings_generation = settings_generation;
-
-  if (!projection_jitter::CommitCameraMatrix(native_jitter.frame_token, state::CurrentSampleIndex())) {
-    resources.initialized = false;
-    resolve::InvalidateHistory("AMD FSR3.1 native camera matrix commit failed");
-    logging::Warn("AMD FSR3.1 native camera matrix commit failed");
-  }
-  state::MarkTaaDispatched();
+  output = {
+      .resource = reshade::api::resource{reinterpret_cast<uint64_t>(resources.encoded_output.texture.Get())},
+      .final_usage = reshade::api::resource_usage::unordered_access,
+  };
   return true;
 }
 
