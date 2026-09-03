@@ -4,7 +4,7 @@
  * Shared state for the MGSV TAA runtime.
  *
  * Owns:
- *  - The master enable binding (driven by a settings checkbox).
+ *  - The availability-validated effective temporal mode.
  *  - Per-frame counters used to gate dispatch and advance the jitter sample.
  *  - Diagnostic Off and eight-sample base-(2,3) Halton jitter patterns,
  *    in UV space.
@@ -30,19 +30,20 @@
 
 namespace taa::state {
 
-enum class ReconstructionMethod : std::uint8_t {
-  ANALYTICAL_TAA = 0u,
-  AMD_FSR3 = 1u,
+// Stable persisted values. Append future reconstruction methods instead of
+// reordering these entries so presets remain forward-compatible.
+enum class TemporalMode : std::uint8_t {
+  OFF = 0u,
+  ANALYTICAL_TAA = 1u,
+  AMD_FSR3 = 2u,
 };
 
-inline constexpr ReconstructionMethod DEFAULT_RECONSTRUCTION_METHOD = ReconstructionMethod::AMD_FSR3;
+inline constexpr TemporalMode DEFAULT_TEMPORAL_MODE = TemporalMode::AMD_FSR3;
 
-inline ReconstructionMethod NormalizeReconstructionMethod(float value) {
-  // The previous selector used 1 for FSR2 and 2 for FSR3. Treat every
-  // non-analytical persisted value as FSR3 so both configurations migrate.
-  return value == static_cast<float>(ReconstructionMethod::ANALYTICAL_TAA)
-             ? ReconstructionMethod::ANALYTICAL_TAA
-             : ReconstructionMethod::AMD_FSR3;
+inline TemporalMode NormalizeTemporalMode(float value) {
+  if (value == static_cast<float>(TemporalMode::OFF)) return TemporalMode::OFF;
+  if (value == static_cast<float>(TemporalMode::ANALYTICAL_TAA)) return TemporalMode::ANALYTICAL_TAA;
+  return TemporalMode::AMD_FSR3;
 }
 
 enum class ProjectionJitterPath : std::uint8_t {
@@ -82,9 +83,6 @@ struct FrameState {
   bool mb_tile_prep_fired = false;
 };
 
-inline float enabled = 0.f;
-inline float* enabled_binding = &enabled;
-inline float reconstruction_method = static_cast<float>(DEFAULT_RECONSTRUCTION_METHOD);
 inline float jitter_pattern = static_cast<float>(DEFAULT_JITTER_PATTERN);
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
 inline float diagnostic_view = DEFAULT_DIAGNOSTIC_VIEW;
@@ -102,8 +100,7 @@ inline std::array<float, PROJECTION_JITTER_PATH_COUNT> projection_jitter_scales 
 inline float clip_tightness = DEFAULT_CLIP_TIGHTNESS;
 inline float history_clip_strength = DEFAULT_HISTORY_CLIP_STRENGTH;
 inline float current_frame_blend = DEFAULT_CURRENT_FRAME_BLEND;
-inline std::atomic<bool> runtime_enabled = false;
-inline std::atomic<uint32_t> runtime_reconstruction_method = static_cast<std::uint32_t>(DEFAULT_RECONSTRUCTION_METHOD);
+inline std::atomic<TemporalMode> runtime_temporal_mode = TemporalMode::OFF;
 inline std::atomic<uint32_t> runtime_jitter_pattern = DEFAULT_JITTER_PATTERN;
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
 inline std::atomic<float> runtime_diagnostic_view = DEFAULT_DIAGNOSTIC_VIEW;
@@ -126,28 +123,20 @@ inline std::atomic<uint32_t> current_sample_index = 0u;
 inline FrameState frame_state = {};
 inline constexpr uint32_t HALTON_SEQUENCE_LENGTH = 8u;
 
-inline void SetEnabled(bool value) {
-  runtime_enabled.store(value, std::memory_order_release);
+inline void SetTemporalMode(TemporalMode mode) {
+  runtime_temporal_mode.store(mode, std::memory_order_release);
+}
+
+inline TemporalMode GetTemporalMode() {
+  return runtime_temporal_mode.load(std::memory_order_acquire);
 }
 
 inline bool IsEnabled() {
-  return runtime_enabled.load(std::memory_order_acquire);
+  return GetTemporalMode() != TemporalMode::OFF;
 }
 
-inline void SetReconstructionMethod(float value) {
-  const auto method = NormalizeReconstructionMethod(value);
-  const uint32_t method_value = static_cast<uint32_t>(method);
-  reconstruction_method = static_cast<float>(method_value);
-  runtime_reconstruction_method.store(method_value, std::memory_order_release);
-}
-
-inline ReconstructionMethod GetReconstructionMethod() {
-  return static_cast<ReconstructionMethod>(runtime_reconstruction_method.load(std::memory_order_acquire));
-}
-
-inline void SetJitterPattern(float value) {
-  const uint32_t pattern = static_cast<uint32_t>(std::clamp(value, 0.f, 1.f));
-  runtime_jitter_pattern.store(pattern, std::memory_order_release);
+inline void SetJitterPattern(uint32_t pattern) {
+  runtime_jitter_pattern.store(std::min(pattern, 1u), std::memory_order_release);
 }
 
 inline uint32_t GetJitterPattern() {
@@ -157,7 +146,6 @@ inline uint32_t GetJitterPattern() {
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
 inline void SetDiagnosticView(float value) {
   value = static_cast<float>(static_cast<uint32_t>(std::clamp(value, 0.f, 10.f)));
-  diagnostic_view = value;
   runtime_diagnostic_view.store(value, std::memory_order_release);
 }
 #endif
@@ -173,7 +161,6 @@ inline float GetDiagnosticView() {
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
 inline void SetVelocityVisualizationRange(float value) {
   value = value > 0.01f ? value : 0.01f;
-  velocity_visualization_range = value;
   runtime_velocity_visualization_range.store(value, std::memory_order_release);
 }
 #endif
@@ -189,7 +176,6 @@ inline float GetVelocityVisualizationRange() {
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
 inline void SetObjectMotionMode(float value) {
   const uint32_t mode = static_cast<uint32_t>(std::clamp(value, 0.f, 5.f));
-  object_motion_mode = static_cast<float>(mode);
   runtime_object_motion_mode.store(mode, std::memory_order_release);
 }
 #endif
@@ -203,24 +189,22 @@ inline uint32_t GetObjectMotionMode() {
 }
 
 inline void SetResolveTuningValue(
-    float& binding,
     std::atomic<float>& runtime_value,
     float value) {
   value = std::clamp(value, 0.f, 1.f);
-  binding = value;
   runtime_value.store(value, std::memory_order_release);
 }
 
 inline void SetClipTightness(float value) {
-  SetResolveTuningValue(clip_tightness, runtime_clip_tightness, value);
+  SetResolveTuningValue(runtime_clip_tightness, value);
 }
 
 inline void SetHistoryClipStrength(float value) {
-  SetResolveTuningValue(history_clip_strength, runtime_history_clip_strength, value);
+  SetResolveTuningValue(runtime_history_clip_strength, value);
 }
 
 inline void SetCurrentFrameBlend(float value) {
-  SetResolveTuningValue(current_frame_blend, runtime_current_frame_blend, value);
+  SetResolveTuningValue(runtime_current_frame_blend, value);
 }
 
 inline float GetClipTightness() {
@@ -239,7 +223,6 @@ inline float GetCurrentFrameBlend() {
 inline void SetProjectionJitterScale(ProjectionJitterPath path, float value) {
   value = std::clamp(value, -2.f, 2.f);
   const std::size_t index = static_cast<std::size_t>(path);
-  projection_jitter_scales[index] = value;
   runtime_projection_jitter_scales[index].store(value, std::memory_order_release);
 }
 #endif
@@ -316,17 +299,9 @@ inline void BeginFrame() {
   current_frame_token.store(frame_state.frame_index, std::memory_order_release);
 }
 
-inline void MarkFullResolutionCandidate() {
-  frame_state.full_resolution_candidate_seen = true;
-}
-
-inline void MarkReconstructionCompleted() {
-  frame_state.reconstruction_completed = true;
-}
-
 // Called only after a successful compute dispatch and copy-back.
 inline void CommitTemporalFrame() {
-  MarkReconstructionCompleted();
+  frame_state.reconstruction_completed = true;
   ++frame_state.sample_index;
   current_sample_index.store(frame_state.sample_index, std::memory_order_release);
 }

@@ -16,7 +16,6 @@
 #include "../../../utils/resource.hpp"
 #include "../../../utils/shader.hpp"
 #include "../../../utils/state.hpp"
-#include "../shared.h"
 #include "./runtime/coordinator.hpp"
 #include "./runtime/descriptor_tracker.hpp"
 #include "./runtime/input_capture.hpp"
@@ -252,7 +251,11 @@ inline bool OnDrawOrDispatchIndirect(
 }
 
 inline void OnDestroyDevice(reshade::api::device* device) {
-  settings::TransitionRuntimeEnabled(false, "device destroyed", true, false);
+  settings::TransitionTemporalMode(
+      static_cast<float>(state::TemporalMode::OFF),
+      "device destroyed",
+      true,
+      false);
   coordinator::ExecutionGuard execution_guard;
   logging::Info("destroy device");
   projection_jitter::Detach();
@@ -274,10 +277,9 @@ inline void OnPresent(
   settings::ApplySettingsSnapshot();
   coordinator::ExecutionGuard execution_guard;
   auto* device = queue != nullptr ? queue->get_device() : nullptr;
-  const bool enabled = state::IsEnabled();
-  const auto method = state::GetReconstructionMethod();
-  coordinator::ReleaseInactiveResources(device, enabled, method);
-  if (enabled
+  const auto mode = state::GetTemporalMode();
+  coordinator::ReleaseInactiveResources(device, mode);
+  if (mode != state::TemporalMode::OFF
       && state::frame_state.full_resolution_candidate_seen
       && !state::frame_state.reconstruction_completed) {
     // Candidate insertion draws may be lower-resolution DoF work. Preserve
@@ -288,20 +290,20 @@ inline void OnPresent(
   state::BeginFrame();
 }
 
-inline void Use(DWORD fdw_reason, ShaderInjectData* shader_injection) {
+inline void Use(DWORD fdw_reason) {
   renodx::utils::resource::Use(fdw_reason);
   renodx::utils::pipeline_layout::Use(fdw_reason);
   renodx::utils::shader::Use(fdw_reason);
   renodx::utils::state::Use(fdw_reason);
   switch (fdw_reason) {
-    case DLL_PROCESS_ATTACH:
+    case DLL_PROCESS_ATTACH: {
       if (attached) return;
       attached = true;
-      state::enabled_binding =
-          shader_injection != nullptr ? &shader_injection->custom_taa : &state::enabled;
       settings::ApplySettingsSnapshot();
       logging::Info("attach");
-      logging::Info("initial runtime state enabled=", logging::Bool{state::IsEnabled()},
+      const auto* option = settings::FindTemporalModeOption(state::GetTemporalMode());
+      logging::Info("initial temporal state enabled=", logging::Bool{state::IsEnabled()},
+                    " mode=", option == nullptr ? "unknown" : option->label,
                     " jitter_pattern=", state::GetJitterPattern() == 0u ? "off" : "halton_8");
       projection_jitter::Use(fdw_reason);
 
@@ -316,6 +318,7 @@ inline void Use(DWORD fdw_reason, ShaderInjectData* shader_injection) {
       reshade::register_event<reshade::addon_event::present>(OnPresent);
       renodx::utils::resource::RegisterOnDestroyResourceViewInfoCallback(input_capture::OnDestroyResourceView);
       break;
+    }
 
     case DLL_PROCESS_DETACH:
       if (!attached) return;
