@@ -108,9 +108,9 @@ inline void SyncRuntimeEnabledFromBinding() {
 }
 
 inline void TransitionReconstructionMethodLocked(float value, const char* reason) {
-  const uint32_t method_value = static_cast<uint32_t>(std::clamp(value, 0.f, 1.f));
-  const auto method = static_cast<state::ReconstructionMethod>(method_value);
-  const uint32_t effective_jitter_pattern = method == state::ReconstructionMethod::AMD_FSR2
+  const auto method = state::NormalizeReconstructionMethod(value);
+  const uint32_t method_value = static_cast<uint32_t>(method);
+  const uint32_t effective_jitter_pattern = method == state::ReconstructionMethod::AMD_FSR3
                                                 ? 1u
                                                 : static_cast<uint32_t>(std::clamp(state::jitter_pattern, 0.f, 1.f));
   state::reconstruction_method = static_cast<float>(method_value);
@@ -127,9 +127,11 @@ inline void TransitionReconstructionMethodLocked(float value, const char* reason
   resolve::InvalidateHistoryWithPublicationLocked(reason);
   state::ResetTemporalState();
 
-  logging::Info("TAA reconstruction method changed method=",
-                method == state::ReconstructionMethod::AMD_FSR2 ? "fsr2_2_3_4" : "analytical",
-                " jitter_pattern=", effective_jitter_pattern == 0u ? "off" : "halton_8");
+  logging::Info(
+      "TAA reconstruction method changed method=",
+      method == state::ReconstructionMethod::AMD_FSR3 ? "fsr3_3_1_5" : "analytical",
+      " jitter_pattern=",
+      effective_jitter_pattern == 0u ? "off" : "halton_8");
 }
 
 inline void TransitionReconstructionMethod(float value, const char* reason) {
@@ -140,8 +142,10 @@ inline void TransitionReconstructionMethod(float value, const char* reason) {
 inline void SyncReconstructionMethodFromBinding() {
   const std::unique_lock settings_lock(renodx::utils::mutex::global_mutex);
   RuntimeTransitionGuard transition_guard;
-  const uint32_t desired = static_cast<uint32_t>(std::clamp(state::reconstruction_method, 0.f, 1.f));
-  const uint32_t effective_jitter_pattern = desired == static_cast<uint32_t>(state::ReconstructionMethod::AMD_FSR2)
+  const auto desired_method = state::NormalizeReconstructionMethod(state::reconstruction_method);
+  const uint32_t desired = static_cast<uint32_t>(desired_method);
+  state::reconstruction_method = static_cast<float>(desired);
+  const uint32_t effective_jitter_pattern = desired_method == state::ReconstructionMethod::AMD_FSR3
                                                 ? 1u
                                                 : static_cast<uint32_t>(std::clamp(state::jitter_pattern, 0.f, 1.f));
   if (desired != static_cast<uint32_t>(state::GetReconstructionMethod())
@@ -152,7 +156,7 @@ inline void SyncReconstructionMethodFromBinding() {
 
 inline void TransitionJitterPatternLocked(float value) {
   const uint32_t preference = static_cast<uint32_t>(std::clamp(value, 0.f, 1.f));
-  const uint32_t effective_pattern = state::GetReconstructionMethod() == state::ReconstructionMethod::AMD_FSR2
+  const uint32_t effective_pattern = state::GetReconstructionMethod() == state::ReconstructionMethod::AMD_FSR3
                                          ? 1u
                                          : preference;
   state::jitter_pattern = static_cast<float>(preference);
@@ -181,7 +185,7 @@ inline void SyncJitterPatternFromBinding() {
   RuntimeTransitionGuard transition_guard;
   const uint32_t preference = static_cast<uint32_t>(std::clamp(state::jitter_pattern, 0.f, 1.f));
   state::jitter_pattern = static_cast<float>(preference);
-  const uint32_t effective_pattern = state::GetReconstructionMethod() == state::ReconstructionMethod::AMD_FSR2
+  const uint32_t effective_pattern = state::GetReconstructionMethod() == state::ReconstructionMethod::AMD_FSR3
                                          ? 1u
                                          : preference;
   if (effective_pattern != state::GetJitterPattern()) {
@@ -230,10 +234,11 @@ inline void AppendSettings(
           .default_value = static_cast<float>(state::DEFAULT_RECONSTRUCTION_METHOD),
           .label = "Temporal Reconstruction Method",
           .section = "Temporal Anti-Aliasing",
-          .tooltip = "Selects the existing analytical TAA or the experimental native-resolution D3D11 port of AMD FSR2 2.3.4. Changing methods resets temporal state.",
+          .tooltip = "Selects analytical TAA or the native-resolution D3D11 adaptation of AMD FSR3 Upscaler 3.1.5. "
+                     "Changing methods resets temporal state.",
           .labels = {
               "Analytical TAA",
-              "AMD FSR 2.3.4",
+              "AMD FSR 3.1.5",
           },
           .on_change_value = [](float previous, float current) {
             if (static_cast<uint32_t>(previous) == static_cast<uint32_t>(current)) return;
@@ -277,7 +282,9 @@ inline void AppendSettings(
           .default_value = 1.f,
           .label = "TAA Jitter Pattern",
           .section = "Temporal Anti-Aliasing",
-          .tooltip = "Diagnostic projection sampling pattern. Off keeps analytical TAA active with zero projection jitter. AMD FSR2 requires and enforces the eight-phase Halton sequence. Changing modes resets temporal history and the sample sequence.",
+          .tooltip = "Diagnostic projection sampling pattern. Off keeps analytical TAA active with zero projection jitter. "
+                     "FSR3 enforces the eight-phase Halton sequence. Changing modes resets temporal history and the "
+                     "sample sequence.",
           .labels = {"Off", "Halton (2,3) - 8 Phase"},
           .on_change_value = [](float previous, float current) {
             if (static_cast<uint32_t>(previous) == static_cast<uint32_t>(current)) return;

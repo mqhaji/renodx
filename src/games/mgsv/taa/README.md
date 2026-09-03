@@ -2,8 +2,9 @@
 
 Technical reference for MGSV's optional native-resolution temporal anti-aliasing path. The implementation is deliberately
 default-Off and keeps the game's original FXAA and projection behavior whenever TAA is disabled. Enabled users can select
-AMD FSR2 2.3.4 or the established analytical resolve. FSR2 is the reconstruction fallback whenever no method key is
-persisted, including configurations created before the selector existed; an explicitly persisted method overrides it.
+AMD FSR3 Upscaler 3.1.5 or the established analytical resolve. FSR3 is the default enabled method. The former FSR2 path
+has been removed; legacy selector values for either AMD method normalize to FSR3, while persisted Analytical TAA remains
+analytical.
 
 Future quality work and the native-resolution DLAA plan are tracked in [ROADMAP.md](ROADMAP.md).
 
@@ -14,8 +15,8 @@ All TAA controls are under **Temporal Anti-Aliasing**; extended motion/jitter vi
 | Control | Behavior |
 |---|---|
 | **Temporal Anti-Aliasing** | Enables TAA. Defaults to **Off**. |
-| **Temporal Reconstruction Method** | Selects **Analytical TAA** or **AMD FSR 2.3.4**. Defaults to FSR2. |
-| **TAA Jitter Pattern** | Analytical-only control. **Halton (2,3) — 8 Phase** is the production sequence; **Off** is a zero-jitter diagnostic. Hidden for FSR2, which always enforces Halton. |
+| **Temporal Reconstruction Method** | Selects **Analytical TAA** or **AMD FSR 3.1.5**. Defaults to FSR3. |
+| **TAA Jitter Pattern** | Analytical-only control. **Halton (2,3) — 8 Phase** is the production sequence; **Off** is a zero-jitter diagnostic. Hidden for FSR3, which always enforces Halton. |
 | **TAA Diagnostic View** | Gated diagnostic-build control selecting Temporal Resolve, current color, masks, or motion views. |
 | **TAA Velocity View Range** | Gated diagnostic-build control setting the pixel-motion range represented by full intensity. |
 | **TAA Clip Tightness** | Blends broad 3x3 history bounds toward tight cross-shaped bounds. Defaults to `0.50`. |
@@ -29,7 +30,7 @@ and local-light projection-jitter sliders. It defaults to `0`, which omits those
 an `8 px` visualization range, corrected native object motion, and `1x` on every known jitter path. Set it to `1` to
 restore all of those diagnostics.
 
-The three analytical resolve-tuning sliders are hidden while FSR2 is selected and preserve the existing algorithm at
+The three analytical resolve-tuning sliders are hidden while FSR3 is selected and preserve the existing algorithm at
 their defaults. Lower clip tightness broadens the
 accepted color range, lower clip strength retains more unmodified history, and lower current-frame blend exposes less of
 each new jitter phase. Relaxing any of them can stabilize high-frequency detail but can also increase ghosting.
@@ -59,7 +60,7 @@ The runtime executes this sequence while TAA is enabled:
    object-velocity inputs and keeps both velocity stages in RGBA16F.
 6. At `DOF_ScatterBakeFirst`, the addon accepts only an invocation whose scene color dimensions match the captured
   full-resolution depth and motion inputs. Lower-resolution DoF invocations are skipped.
-7. The selected analytical or FSR2 reconstruction writes the resolved image back before MGSV creates its depth-of-field
+7. The selected analytical or FSR3 reconstruction writes the resolved image back before MGSV creates its depth-of-field
   and motion-blur inputs.
 8. The game's FXAA shader becomes a pass-through while TAA is enabled.
 
@@ -126,8 +127,15 @@ should correct synchronized current/previous velocity matrices upstream rather t
 ## Resolve inputs
 
 Both methods consume the same validated scene, velocity, depth, object-motion, jitter, and no-jitter camera publication.
-The analytical shader uses the direct register contract below. FSR2 first converts those inputs into owned linear RGBA16F
-color and normalized RG16F motion resources, then executes its depth, lock, luminance, and accumulation graph.
+The analytical shader uses the direct register contract below. The FSR3 boundary adapter decodes MGSV scene RGB into an
+owned linear RGBA16F input and combines matrix camera motion with native deformation-aware object motion in signed RG16F.
+AMD's 3.1.5 host then schedules the fixed SM5 prepare-input, luminance, shading-change, prepare-reactivity,
+luma-instability, and accumulation passes through the local D3D11 backend. Render and output extents are identical.
+
+The FSR3 dispatch currently leaves external reactive, transparency/composition, and exposure resources null. AMD maps the
+two mask inputs to its zero resource while retaining internal shading-change, disocclusion, motion-divergence, and
+luma-instability handling. `preExposure` is `1`, sharpening is disabled, and the linear output is encoded back to MGSV's
+scene domain with current-frame alpha preserved. Game-derived masks are planned in [ROADMAP.md](ROADMAP.md).
 
 The analytical compute shader consumes:
 
@@ -155,9 +163,10 @@ it for highlight/emissive behavior.
 
 ## History and failure policy
 
-The analytical method uses two RGBA16F histories in MGSV's encoded scene domain. FSR2 owns separate linear color, lock,
-luma, motion, reconstructed-depth, luminance, and reactive-state resources. Only the selected reconstruction method keeps
-its large temporal resources resident; switching methods or disabling TAA releases the inactive graph. History resets on
+The analytical method uses two RGBA16F histories in MGSV's encoded scene domain. FSR3 owns its component context,
+host-created internal resources, linear boundary textures, motion, reconstructed depth, and caller-owned shared dilated
+resources. Only the selected reconstruction method keeps its large temporal resources resident; switching methods or
+disabling TAA releases the inactive graph. History resets on
 creation, resize, enable, method/settings changes, missing previous camera state, or a detected camera discontinuity.
 Presents with no new full-resolution candidate preserve history, and rejected lower-resolution candidates do not reset it
 while later candidates remain available.
@@ -178,7 +187,7 @@ Missing previous matrix history also invalidates and reseeds accumulation before
 temporal output is produced from mismatched frame data.
 
 Method and jitter changes serialize through the resolve/publication locks and reset both matrix and sample history as one
-transaction. FSR2 forces only the effective runtime pattern to Halton; it does not overwrite the saved analytical jitter
+transaction. FSR3 forces only the effective runtime pattern to Halton; it does not overwrite the saved analytical jitter
 preference, which is restored when Analytical TAA is selected again. The injected compute graph captures and restores the
 native D3D11 compute shader plus sampler, SRV, UAV, and constant-buffer slots it modifies.
 
@@ -192,9 +201,9 @@ native D3D11 compute shader plus sampler, SRV, UAV, and constant-buffer slots it
   native gameplay projection path.
 - **TAA accumulation started** records the accepted insertion, callback frame, native-publication frame, sample, and
   dimensions after each analytical history seed.
-- **created AMD FSR2 2.3.4 D3D11 SM5 pipelines** reports the active approximate-history, zero-mask, and fused-output
-  specialization once per device pipeline lifetime.
-- **AMD FSR2 accumulation started** records the accepted insertion and dimensions after each FSR2 reset/seed.
+- **FSR3.1 D3D11 context probe succeeded** reports feature level, dimensions, host version 3.1.5, and backend interface
+  version 2.3.0 whenever the FSR3 context is created.
+- **AMD FSR3.1 accumulation started** records the accepted insertion and dimensions after each FSR3 reset/seed.
 - **TAA runtime disabled** records the reason, frame, and number of completed temporal samples.
 - **skipping non-full-resolution TAA insertion candidate** is expected at mixed-resolution DoF passes and is emitted only
   once per device lifetime.
@@ -214,10 +223,13 @@ replaces the interactive **TAA runtime enabled** transition line.
 | `runtime/state.hpp` | Frame/sample state and Off/Halton jitter generation |
 | `runtime/descriptor_tracker.hpp` | Per-command-list pixel SRV tracking |
 | `runtime/projection_jitter.hpp` | Native hook, jitter publication, matrix history, and restoration checks |
-| `runtime/resolve.hpp` | Shared input validation, analytical history/dispatch, and FSR2 callback routing |
-| `fsr/runtime.hpp` | FSR2 D3D11 resources, pass graph, method lifetime, history, resets, and copy-back |
-| `fsr/shaders/` | FSR2 SM5 entry points, fixed native-resolution specializations, and MGSV color/motion/output adapters |
-| `fsr/vendor/FidelityFX/` | Locally pinned AMD FSR2 2.3.4 GPU source; no external SDK link required |
+| `runtime/resolve.hpp` | Shared input validation, analytical history/dispatch, and FSR3 callback routing |
+| `fsr3/runtime.hpp` | FSR3 context lifetime, MGSV boundary dispatch, resets, and copy-back |
+| `fsr3/backend_dx11.*` | Custom FidelityFX 2.3.0 D3D11 backend with Feature Level 11_0 support |
+| `fsr3/shader_blobs.cpp` | Static host pipeline metadata and fixed SM5 bytecode provider |
+| `fsr3/shaders/` | FSR3 3.1.5 SM5 wrappers plus MGSV color/motion/output adapters |
+| `fsr3/ffx/` | Locally pinned AMD FSR SDK v2.3.0 source subset; no external SDK link required |
+| `fsr3/README.md` | Exact AMD/MapleHinata provenance and version-layer explanation |
 | `shaders/mgsv_taa.cs_5_0.hlsl` | Temporal resolve |
 | `shaders/GBufferVelocity_0x9815404F.ps_5_0.hlsl` | Minimal standard object-velocity replacement with optional unclamping |
 | `shaders/GBufferMaskedVelocity_0x58C10658.ps_5_0.hlsl` | Minimal alpha-tested object-velocity replacement with optional unclamping |
@@ -238,20 +250,22 @@ replaces the interactive **TAA runtime enabled** transition line.
 - Decoding history texels before Catmull-Rom reconstruction improved temporal quality over encoded interpolation.
 - Selecting the largest raw reverse-Z depth preserves thin foreground lines that disappeared with the previous
   smallest-absolute-depth rule.
+- Runtime testing confirms that FSR3 creates and dispatches on D3D11 Feature Level 11_0 using MGSV's
+  `R32_FLOAT_X8X24_TYPELESS` depth plane and native-resolution inputs.
 
 ## Known limitations
 
-- The FSR2 path has compiled successfully but still requires in-game validation. Its reactive and
-  transparency/composition inputs are currently zero; its optimized depth pass still preserves motion/depth divergence.
-  A full-mask shader is retained for deferred `TppFxRain` raindrop reactivity.
-- FSR2 uses a clip-space discontinuity heuristic for camera-cut reset until a proven native MGSV camera-cut signal is
+- FSR3 receives no game-provided reactive or transparency/composition mask yet. Material-derived mask integration,
+  beginning with proven paths such as `TppFxRain`, remains planned; the AMD host's internal reactivity analysis is active.
+- FSR3 uses a clip-space discontinuity heuristic for camera-cut reset until a proven native MGSV camera-cut signal is
   available. The fallback tests mid-depth center/corner reprojection for large lateral, FOV, and roll changes without
   treating normal nonlinear near/far depth motion as a cut, and uses homogeneous-W change for large forward/backward
   discontinuities.
-- FSR2 history reprojection uses AMD's approximate polynomial Lanczos instead of the reference trigonometric kernel; this
-  performance/quality choice requires in-game comparison on thin detail, moving silhouettes, ringing, and disocclusions.
-- RCAS source remains vendored for possible later use, but no RCAS pipeline is created or dispatched and FSR2 output is
-  currently unsharpened.
+- The custom D3D11 backend and fixed FXC `cs_5_0` permutations are a local source adaptation, not an AMD-supported D3D11
+  integration. They require continued runtime comparison on thin detail, moving silhouettes, ringing, and disocclusions.
+- The AMD host creates its RCAS and optional generate-reactive pipelines, but current MGSV dispatch enables neither
+  sharpening nor the separate generate-mask API. Output is unsharpened.
+- No game exposure resource is supplied. The current path uses `preExposure = 1`.
 
 The following resolve limitations apply to the analytical method:
 
@@ -268,9 +282,10 @@ The following resolve limitations apply to the analytical method:
 ## Build and manual verification
 
 Build the `mgsv` target with the configured CMake Tools profile. Inspect the addon plus generated `mgsv_taa`,
-`fsr2_prepare_inputs`, `fsr2_luminance_pyramid`, `fsr2_reconstruct_previous_depth`, `fsr2_depth_clip`,
-`fsr2_depth_clip_zero_masks`, `fsr2_lock`, `fsr2_accumulate`, `0x9815404F`, `0x58C10658`, and `0xA13321B6` artifacts;
-`0x200DBED9` must no longer be embedded.
+`fsr3_prepare_game_inputs`, `fsr3_encode_game_output`, all eleven `fsr3sdk_*` pass artifacts, `0x9815404F`,
+`0x58C10658`, and `0xA13321B6` artifacts. The eleven SDK passes are prepare inputs, luma pyramid, shading-change pyramid,
+shading change, prepare reactivity, luma instability, accumulate, accumulate-sharpen, RCAS, generate reactive, and debug
+view.
 
 Analytical TAA verification:
 
@@ -291,18 +306,21 @@ Analytical TAA verification:
   running long enough to verify one-epoch camera captures remain accepted.
 9. Disable TAA and confirm a **TAA runtime disabled** line, exact projection restoration, and no stale-history frame.
 
-Default FSR2 verification:
+Default FSR3 verification:
 
-1. Enable TAA with no persisted reconstruction-method key and confirm **AMD FSR 2.3.4** is selected and the jitter-pattern
-  control is hidden; FSR2 still uses the eight-phase Halton sequence internally.
-2. Confirm one pipeline/resource creation pair and one **AMD FSR2 accumulation started** line, with no recurring setup,
-  format, or camera-matrix warnings.
+1. Enable TAA with no persisted reconstruction-method key and confirm **AMD FSR 3.1.5** is selected and the jitter-pattern
+  control is hidden; FSR3 uses the eight-phase Halton sequence internally.
+2. Confirm one **FSR3.1 D3D11 context probe succeeded** line with `host_version=3.1.5` and
+  `backend_interface=2.3.0`, followed by one **AMD FSR3.1 accumulation started** line and no recurring setup, format, or
+  camera-matrix warnings.
 3. Compare static detail, camera and character motion, thin wires, aiming/FOV transitions, camera cuts, DoF, motion blur,
   rain, menus, and resolution/device resets against analytical TAA.
 4. Confirm the image remains in MGSV's expected encoded scene domain and downstream alpha-driven DoF/highlights remain
   unchanged apart from temporal reconstruction.
-5. Confirm logs report `history_kernel=approximate input_masks=zero output_encode=fused`; rain reactivity remains deferred
-  until the full-mask path is wired to a proven `TppFxRain` mask.
+5. Pay particular attention to rain, particles, reflections, emissive transparency, and animated textures while external
+  masks are null. Repeat those scenes when each planned game-derived mask is connected.
+6. Confirm switching to Analytical TAA releases the FSR3 context, exposes the jitter selector, and seeds analytical
+  history once; switching back recreates FSR3 and restores its enforced Halton sequence.
 
 For a stationary high-frequency grating, isolate the resolve parameters rather than changing several simultaneously:
 
