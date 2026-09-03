@@ -76,19 +76,18 @@ using FsrResolveCallback = bool (*)(
     reshade::api::resource_usage,
     const projection_jitter::AppliedJitter&,
     const char*);
-using FsrReleaseCallback = void (*)(reshade::api::device*);
 
 struct alignas(16) ResolveConstants {
-  float diagnostic_view = 0.f;
-  float velocity_visualization_range = 8.f;
+  float diagnostic_view = state::DEFAULT_DIAGNOSTIC_VIEW;
+  float velocity_visualization_range = state::DEFAULT_VELOCITY_VISUALIZATION_RANGE;
   float camera_reprojection_valid = 0.f;
   float object_motion_mode = 0.f;
   std::array<float, 2> current_jitter_uv = {0.f, 0.f};
   std::array<float, 2> previous_jitter_uv = {0.f, 0.f};
   float velocity_projection_jitter_scale = 0.f;
-  float clip_tightness = 0.5f;
-  float history_clip_strength = 1.f;
-  float current_frame_blend = 0.15f;
+  float clip_tightness = state::DEFAULT_CLIP_TIGHTNESS;
+  float history_clip_strength = state::DEFAULT_HISTORY_CLIP_STRENGTH;
+  float current_frame_blend = state::DEFAULT_CURRENT_FRAME_BLEND;
   std::array<float, 16> current_to_previous_clip = {};
 };
 
@@ -96,9 +95,7 @@ static_assert(sizeof(ResolveConstants) == 112u, "TAA resolve constants must occu
 
 inline Resources resources;
 inline FsrResolveCallback fsr3_resolve = nullptr;
-inline FsrReleaseCallback fsr3_release = nullptr;
 inline std::atomic_flag execution_lock = ATOMIC_FLAG_INIT;
-inline thread_local bool execution_locked_on_thread = false;
 inline constexpr size_t DESTROYED_VIEW_MAILBOX_SIZE = 64u;
 inline std::array<std::atomic<uint64_t>, DESTROYED_VIEW_MAILBOX_SIZE> destroyed_view_mailbox = {};
 inline std::atomic<bool> destroyed_view_mailbox_overflow = false;
@@ -117,51 +114,21 @@ inline bool LogEvery(uint64_t& last_frame, uint64_t interval = 120u) {
   return logging::ShouldLogFrame(state::frame_state.frame_index, last_frame, interval);
 }
 
-inline void LockExecution() {
-  while (execution_lock.test_and_set(std::memory_order_acquire)) {
-    _mm_pause();
-  }
-  execution_locked_on_thread = true;
-}
-
-inline void UnlockExecution() {
-  execution_locked_on_thread = false;
-  execution_lock.clear(std::memory_order_release);
-}
-
-inline bool IsExecutionLockedOnThisThread() {
-  return execution_locked_on_thread;
-}
-
-inline void SetFsr3Callbacks(FsrResolveCallback resolve_callback, FsrReleaseCallback release_callback) {
+inline void SetFsr3ResolveCallback(FsrResolveCallback resolve_callback) {
   fsr3_resolve = resolve_callback;
-  fsr3_release = release_callback;
 }
 
 struct ExecutionGuard {
-  ExecutionGuard() { LockExecution(); }
+  ExecutionGuard() {
+    while (execution_lock.test_and_set(std::memory_order_acquire)) {
+      _mm_pause();
+    }
+  }
   ExecutionGuard(const ExecutionGuard&) = delete;
   ExecutionGuard& operator=(const ExecutionGuard&) = delete;
   ExecutionGuard(ExecutionGuard&&) = delete;
   ExecutionGuard& operator=(ExecutionGuard&&) = delete;
-  ~ExecutionGuard() { UnlockExecution(); }
-};
-
-struct OptionalExecutionGuard {
-  bool acquired = false;
-
-  OptionalExecutionGuard() : acquired(!IsExecutionLockedOnThisThread()) {
-    if (acquired) LockExecution();
-  }
-
-  OptionalExecutionGuard(const OptionalExecutionGuard&) = delete;
-  OptionalExecutionGuard& operator=(const OptionalExecutionGuard&) = delete;
-  OptionalExecutionGuard(OptionalExecutionGuard&&) = delete;
-  OptionalExecutionGuard& operator=(OptionalExecutionGuard&&) = delete;
-
-  ~OptionalExecutionGuard() {
-    if (acquired) UnlockExecution();
-  }
+  ~ExecutionGuard() { execution_lock.clear(std::memory_order_release); }
 };
 
 inline void ApplyDestroyedResourceViewLocked(uint64_t handle) {
@@ -455,7 +422,7 @@ inline bool EnsureComputePipeline(reshade::api::command_list* cmd_list) {
 
   std::array<reshade::api::pipeline_layout_param, 4> params = {};
   params[0].type = reshade::api::pipeline_layout_param_type::push_descriptors;
-  params[0].push_descriptors.count = 2;
+  params[0].push_descriptors.count = static_cast<uint32_t>(resources.samplers.size());
   params[0].push_descriptors.type = reshade::api::descriptor_type::sampler;
   params[0].push_descriptors.dx_register_index = 0;
   params[0].push_descriptors.dx_register_space = 0;
@@ -644,12 +611,12 @@ inline bool EnsureHistory(
   reshade::api::resource_desc desc = {};
   desc.type = reshade::api::resource_type::texture_2d;
   desc.texture = {
-      color_desc.texture.width,
-      color_desc.texture.height,
-      1,
-      1,
-      resource_format,
-      1,
+      .width = color_desc.texture.width,
+      .height = color_desc.texture.height,
+      .depth_or_layers = 1,
+      .levels = 1,
+      .format = resource_format,
+      .samples = 1,
   };
   desc.heap = reshade::api::memory_heap::gpu_only;
   desc.usage = reshade::api::resource_usage::shader_resource
@@ -757,11 +724,10 @@ inline bool EnsureVelocitySrv(reshade::api::command_list* cmd_list, reshade::api
   return true;
 }
 
-inline void CaptureCameraMotion(
+inline void CaptureCameraMotionLocked(
     reshade::api::command_list* cmd_list,
     const descriptor_tracker::CommandListData& command_data,
     reshade::api::resource_view velocity_rtv) {
-  OptionalExecutionGuard execution_guard;
   ProcessDestroyedResourceViewsLocked();
   if (velocity_rtv.handle == 0u) {
     if (LogEvery(last_capture_missing_log)) logging::Warn("camera velocity pass has no RTV0");
@@ -795,7 +761,7 @@ inline void CaptureCameraMotion(
   resources.capture_sample_index = state::CurrentSampleIndex();
 }
 
-inline bool DispatchCompute(
+inline void DispatchCompute(
     reshade::api::command_list* cmd_list,
     reshade::api::resource_view color_srv,
     reshade::api::resource color_resource,
@@ -871,7 +837,6 @@ inline bool DispatchCompute(
   cmd_list->barrier(resources.velocity_resource, reshade::api::resource_usage::shader_resource, reshade::api::resource_usage::render_target);
 
   RestoreComputeState(cmd_list, previous_compute_state);
-  return true;
 }
 
 inline bool ColorMatchesCapturedInputs(
@@ -1010,7 +975,6 @@ inline bool MaybeRunFromColorSrvLocked(
         native_jitter,
         insertion_name);
   }
-  if (fsr3_release != nullptr) fsr3_release(cmd_list->get_device());
   if (resources.initialized && !native_jitter.camera_reprojection_valid) {
     InvalidateHistory("native camera matrix history unavailable");
   }
@@ -1062,17 +1026,15 @@ inline bool MaybeRunFromColorSrvLocked(
       .current_frame_blend = state::GetCurrentFrameBlend(),
       .current_to_previous_clip = native_jitter.current_to_previous_clip,
   };
-  if (!DispatchCompute(
-          cmd_list,
-          color_srv,
-          color_resource,
-          color_initial_usage,
-          color_final_usage,
-          current,
-          previous,
-          resolve_constants)) {
-    return false;
-  }
+  DispatchCompute(
+      cmd_list,
+      color_srv,
+      color_resource,
+      color_initial_usage,
+      color_final_usage,
+      current,
+      previous,
+      resolve_constants);
 
   if (history_seeded) {
     logging::Info("TAA accumulation started insertion=", insertion_name,
@@ -1093,12 +1055,11 @@ inline bool MaybeRunFromColorSrvLocked(
   return true;
 }
 
-inline bool MaybeRun(
+inline bool MaybeRunLocked(
     reshade::api::command_list* cmd_list,
     const descriptor_tracker::CommandListData& command_data,
     const char* insertion_name = "SRV") {
   if (!state::IsEnabled()) return false;
-  OptionalExecutionGuard execution_guard;
   const auto color_srv = NormalizeColorSrv(command_data.pixel_srv_t0);
   return MaybeRunFromColorSrvLocked(
       cmd_list,
