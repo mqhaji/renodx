@@ -126,8 +126,8 @@ inline void Restore(reshade::api::command_list* cmd_list, const State& state) {
     class_instances[index] = state.class_instances[index].Get();
   }
 
-    constexpr std::array<ID3D11ShaderResourceView*, 16> null_shader_resources = {};
-    constexpr std::array<ID3D11UnorderedAccessView*, 8> null_unordered_access_views = {};
+  constexpr std::array<ID3D11ShaderResourceView*, 16> null_shader_resources = {};
+  constexpr std::array<ID3D11UnorderedAccessView*, 8> null_unordered_access_views = {};
   context->CSSetShaderResources(
       0u,
       static_cast<UINT>(null_shader_resources.size()),

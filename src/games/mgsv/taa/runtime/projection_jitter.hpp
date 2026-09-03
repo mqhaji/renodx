@@ -401,19 +401,18 @@ inline bool GetPublishedJitterForViewport(
   return true;
 }
 
-inline bool ApplyPublishedJitterToActiveProjection(
+inline void ApplyPublishedJitterToActiveProjection(
     const uint8_t* viewport,
     state::ProjectionJitterPath jitter_path) {
   std::array<float, 2> jitter_uv = {};
   void* shader_manager = shader_manager_global != nullptr ? *shader_manager_global : nullptr;
-  if (shader_manager == nullptr || !GetPublishedJitterForViewport(viewport, jitter_path, jitter_uv)) return false;
+  if (shader_manager == nullptr || !GetPublishedJitterForViewport(viewport, jitter_path, jitter_uv)) return;
 
   const auto* projection = reinterpret_cast<const float*>(viewport + 0x280u);
   auto* active_projection = reinterpret_cast<float*>(static_cast<uint8_t*>(shader_manager) + 0x680u);
-  if (std::memcmp(projection, active_projection, 16u * sizeof(float)) != 0) return false;
+  if (std::memcmp(projection, active_projection, 16u * sizeof(float)) != 0) return;
 
   ApplyProjectionJitter(active_projection, shader_manager, jitter_uv[0], jitter_uv[1]);
-  return true;
 }
 
 inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
@@ -443,8 +442,8 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   }
 
   const bool taa_enabled = state::IsEnabled();
-  // The hook stays installed for the process lifetime, but default-Off work
-  // stops here unless a short exact-restoration check is still pending.
+  // The hook stays installed for the process lifetime, but Off-mode work stops
+  // here unless a short exact-restoration check is still pending.
   if (!taa_enabled && !production_awaiting_restoration.load(std::memory_order_acquire)) {
     return;
   }
@@ -499,13 +498,13 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   const uint32_t sample_index = state::CurrentSampleIndex();
   const auto jitter_uv = state::JitterForSample(sample_index, width, height);
   ApplyProjectionJitter(active_projection, shader_manager, jitter_uv[0], jitter_uv[1]);
-    camera_state::staged_current_view_projection = current_view_projection;
-    camera_state::staged_current_view_projection_valid = current_camera_matrix_valid;
+  camera_state::staged_current_view_projection = current_view_projection;
+  camera_state::staged_current_view_projection_valid = current_camera_matrix_valid;
   const bool camera_reprojection_valid = current_camera_matrix_valid
-                   && camera_state::committed_previous_view_projection_valid;
+                                         && camera_state::committed_previous_view_projection_valid;
   const auto current_to_previous_clip = camera_reprojection_valid
-                  ? camera_state::ToRowMajorFloatArray(camera_state::Multiply(
-                    camera_state::committed_previous_view_projection,
+                                            ? camera_state::ToRowMajorFloatArray(camera_state::Multiply(
+                                                  camera_state::committed_previous_view_projection,
                                                   current_inverse_view_projection))
                                             : std::array<float, 16>{};
   const float projection_w_scale = projection[11];
@@ -660,7 +659,7 @@ inline void Detach(bool wait_for_hook_calls = true, bool transition_runtime = tr
 
   if (transition_runtime) {
     camera_state::PublicationWriterGuard publication_guard;
-    state::SetEnabled(false);
+    state::SetTemporalMode(state::TemporalMode::OFF);
     camera_state::InvalidateLocked();
   }
 

@@ -277,7 +277,7 @@ inline bool BuildValidatedFrameInputsLocked(
     }
     return false;
   }
-  state::MarkFullResolutionCandidate();
+  state::frame_state.full_resolution_candidate_seen = true;
 
   const uint64_t frame_token = state::CurrentFrameToken();
   const uint32_t sample_index = state::CurrentSampleIndex();

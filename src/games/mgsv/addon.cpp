@@ -1015,6 +1015,7 @@ renodx::utils::settings::Settings settings = {
             if (!setting->can_reset) continue;
             renodx::utils::settings::UpdateSetting(setting->key, setting->default_value);
           }
+          taa::settings::ApplySettingsSnapshot();
         },
     },
     new renodx::utils::settings::Setting{
@@ -1163,6 +1164,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       if (!initialized) {
         renodx::mods::swapchain::force_borderless = true;
         renodx::mods::swapchain::prevent_full_screen = true;
+        renodx::utils::settings::on_preset_changed_callbacks.emplace_back(
+            taa::settings::ApplySettingsSnapshot);
 
         // renodx::mods::shader::force_pipeline_cloning = true;
 
@@ -1206,14 +1209,14 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       reshade::unregister_addon(h_module);
       break;
   }
-  // The persistent TAA toggle registers the native-jitter/resolve path and
-  // remains default-off.
+  // Load the persisted temporal mode before the runtime reads it so shaders
+  // and native reconstruction cannot disagree during the first frame.
+  renodx::utils::settings::Use(fdw_reason, &settings, &OnPresetOff);
+
   taa::prepare_velocity_target = PrepareTaaVelocityTarget;
-  taa::Use(fdw_reason, &shader_injection);
+  taa::Use(fdw_reason);
 
   renodx::utils::random::Use(fdw_reason, {&shader_injection.custom_random});
-
-  renodx::utils::settings::Use(fdw_reason, &settings, &OnPresetOff);
 
   renodx::mods::swapchain::Use(fdw_reason, &shader_injection);
 
