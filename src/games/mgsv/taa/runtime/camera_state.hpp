@@ -28,7 +28,7 @@ struct CameraFrame {
 };
 
 struct Matrix4d {
-  double m[4][4] = {};
+  std::array<std::array<double, 4>, 4> m = {};
 };
 
 inline std::atomic<uint64_t> published_sequence = 0u;
@@ -79,7 +79,7 @@ inline Matrix4d Multiply(const Matrix4d& left, const Matrix4d& right) {
 }
 
 inline bool Invert(const Matrix4d& input, Matrix4d& output) {
-  double augmented[4][8] = {};
+  std::array<std::array<double, 8>, 4> augmented = {};
   for (uint32_t row = 0u; row < 4u; ++row) {
     for (uint32_t column = 0u; column < 4u; ++column) {
       augmented[row][column] = input.m[row][column];
@@ -220,11 +220,6 @@ inline CameraFrame Get() {
     if (before == after) break;
   }
   return result;
-}
-
-inline void ResetMatrixHistory() {
-  PublicationWriterGuard guard;
-  ResetMatrixHistoryLocked();
 }
 
 inline bool Commit(uint64_t frame_token, uint32_t sample_index) {

@@ -29,9 +29,8 @@ struct ShaderInjectData {
   float custom_random;
   float custom_grain_strength;
 
+  // TemporalMode: 0 = Off, 1 = Analytical TAA, 2 = AMD FSR3.
   float custom_taa;
-  float taa_jitter_uv_x;
-  float taa_jitter_uv_y;
   float unclamp_motion_vectors;
 };
 
@@ -66,7 +65,6 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_GRAIN_STRENGTH shader_injection.custom_grain_strength
 
 #define CUSTOM_TAA                    shader_injection.custom_taa
-#define TAA_JITTER_UV                 float2(shader_injection.taa_jitter_uv_x, shader_injection.taa_jitter_uv_y)
 #define CUSTOM_UNCLAMP_MOTION_VECTORS shader_injection.unclamp_motion_vectors
 
 #include "../../shaders/renodx.hlsl"

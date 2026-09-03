@@ -38,7 +38,7 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 - Installs a narrowly validated native projection hook during device initialization
 - Captures the final camera/object velocity target and routes validated inputs to FSR3 or analytical history
 - Requires exact frame, sample, and render-dimension agreement between the native jitter and resolve
-- Leaves TAA disabled by default and preserves the original FXAA path while disabled
+- Exposes a top-level Off/Analytical/FSR3 dropdown, defaulting new profiles to FSR3 while preserving vanilla FXAA in Off
 
 ---
 
@@ -217,13 +217,13 @@ The native `copy_resource` callback is separately armed from a proven scene-tone
 
 ---
 
-## Temporal Anti-Aliasing (Default Off)
+## Temporal Anti-Aliasing
 
-The addon includes optional native-resolution temporal reconstruction under **Temporal Anti-Aliasing**. It defaults to
-**Off**. While disabled, MGSV keeps its original FXAA path and the native projection remains unmodified. Enabled users
-can select **AMD FSR 3.1.5** or the established analytical TAA. FSR3 is the default reconstruction method when no method
-key is persisted. The former FSR2 implementation has been removed; both legacy AMD selector values migrate to FSR3, while
-an explicitly persisted Analytical TAA value remains analytical.
+The **Temporal Anti-Aliasing** section is the first addon settings section. Its single **Temporal Reconstruction**
+dropdown selects **Off (Vanilla FXAA)**, **Analytical TAA**, or **AMD FSR 3.1.5**. New profiles default to FSR3. Off keeps
+MGSV's original FXAA path and leaves the native projection unmodified. Existing split enable/method settings migrate to
+the unified mode while preserving their prior Off state or selected implementation. The former FSR2 implementation has
+been removed; both legacy AMD selector values migrate to FSR3.
 
 When enabled, the TAA path:
 
@@ -261,13 +261,13 @@ The coordinator fails closed: a missing camera publication, stale capture, devic
 that insertion candidate instead of blending unrelated inputs. Camera, depth, final velocity, and object velocity are
 snapshotted together and validated once before method dispatch. MGSV callbacks may trail `Present` by one epoch only when
 their Halton sample still matches. Presents without a new full-resolution insertion candidate preserve history; history
-resets only after a matching candidate is seen but cannot resolve. Enable/disable transitions also reset temporal state,
-and disabling verifies exact restoration of the vanilla projection copy. A former scoped
+resets only after a matching candidate is seen but cannot resolve. Mode transitions also reset temporal state, and
+selecting Off verifies exact restoration of the vanilla projection copy. A former scoped
 replacement for VS `0x200DBED9` previously proved the missing light jitter and has been removed. Brief runtime testing indicates that the native
 alpha-model correction controls the affected lights; the separate guarded local-light callback remains an additional
 known-path correction pending isolated runtime classification.
 
-Default builds log explicit TAA enable/disable transitions. FSR3 logs **FSR3.1 D3D11 context probe succeeded** when its
+Default builds log explicit temporal mode transitions. FSR3 logs **FSR3.1 D3D11 context probe succeeded** when its
 context is created and **AMD FSR3.1 accumulation started** after each reset; analytical TAA logs **TAA accumulation
 started**. Repeated
 accumulation-start lines while settings and resolution are unchanged indicate that history is still being reset.
@@ -403,8 +403,8 @@ copy build\Release\renodx-mgsv.addon64 "C:\Program Files (x86)\Steam\steamapps\c
 
 ### Manual TAA Verification
 
-1. Start with **Temporal Anti-Aliasing** disabled and confirm the original FXAA presentation is stable.
-2. Enable TAA with the default **AMD FSR 3.1.5** method. Confirm the jitter-pattern control is hidden, one **FSR3.1 D3D11
+1. Select **Off (Vanilla FXAA)** and confirm the original FXAA presentation and native projection are stable.
+2. Select the default **AMD FSR 3.1.5** mode. Confirm the jitter-pattern control is hidden, one **FSR3.1 D3D11
    context probe succeeded** line appears, and one **AMD FSR3.1 accumulation started** line is logged. Standing still
    should not restart it.
 3. Inspect static edges, thin wires, foliage, slow and fast camera pans, aiming, binoculars, menus, camera cuts, DoF, and
@@ -416,9 +416,9 @@ copy build\Release\renodx-mgsv.addon64 "C:\Program Files (x86)\Steam\steamapps\c
    motion blur, then return it to its default **Off** state.
 6. With `ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS=1`, exercise all diagnostic views and per-path controls; otherwise verify
    the production defaults and confirm the log has no recurring publication, capture, setup, or dispatch warnings.
-7. Disable TAA and confirm a **TAA runtime disabled** line, then verify that the scene returns without a persistent
-   subpixel shift, stale-history frame, or freeze.
-8. Repeat an enable/disable cycle after a resolution or display-mode change to verify history is recreated at the new size.
+7. Select Off and confirm a **temporal reconstruction disabled** line, then verify that the scene returns without a
+   persistent subpixel shift, stale-history frame, or freeze.
+8. Repeat an Off/FSR3 cycle after a resolution or display-mode change to verify history is recreated at the new size.
 
 ---
 

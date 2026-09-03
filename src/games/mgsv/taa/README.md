@@ -1,11 +1,10 @@
 # MGSV Temporal Anti-Aliasing
 
-Technical reference for MGSV's optional native-resolution temporal anti-aliasing path. The implementation is deliberately
-default-Off and keeps the game's original FXAA and projection behavior whenever TAA is disabled. Enabled users can select
-AMD FSR3 Upscaler 3.1.5 or the established analytical resolve. FSR3 is the default enabled method. The former FSR2 path
-has been removed; legacy selector values for either AMD method normalize to FSR3, while persisted Analytical TAA remains
-analytical. The versioned `FxTemporalReconstructionMethod` key migrates old `FxTaaReconstructionMethod` values so the
-legacy FSR2/FSR3 value `2` cannot later be reinterpreted as another method.
+Technical reference for MGSV's native-resolution temporal anti-aliasing path. One top-level **Temporal Reconstruction**
+dropdown selects **Off (Vanilla FXAA)**, **Analytical TAA**, or **AMD FSR 3.1.5**. New profiles default to FSR3; Off keeps
+the game's original FXAA and projection behavior. Existing profiles migrate their former `FxTaa` enable state plus
+`FxTemporalReconstructionMethod` or `FxTaaReconstructionMethod` selection into the versioned
+`FxTemporalReconstructionMode` key, so disabled profiles remain Off and old AMD values continue to mean FSR3.
 
 Future quality work and the native-resolution DLAA plan are tracked in [ROADMAP.md](ROADMAP.md).
 
@@ -15,8 +14,7 @@ All TAA controls are under **Temporal Anti-Aliasing**; extended motion/jitter vi
 
 | Control | Behavior |
 |---|---|
-| **Temporal Anti-Aliasing** | Enables TAA. Defaults to **Off**. |
-| **Temporal Reconstruction Method** | Selects **Analytical TAA** or **AMD FSR 3.1.5**. Defaults to FSR3. |
+| **Temporal Reconstruction** | Selects **Off (Vanilla FXAA)**, **Analytical TAA**, or **AMD FSR 3.1.5**. New profiles default to FSR3. |
 | **TAA Jitter Pattern** | Analytical-only control. **Halton (2,3) — 8 Phase** is the production sequence; **Off** is a zero-jitter diagnostic. Hidden for FSR3, which always enforces Halton. |
 | **TAA Diagnostic View** | Gated diagnostic-build control selecting Temporal Resolve, current color, masks, or motion views. |
 | **TAA Velocity View Range** | Gated diagnostic-build control setting the pixel-motion range represented by full intensity. |
@@ -43,9 +41,13 @@ outside `[0,1]` for motion above approximately 64 pixels. The native clamp remai
 Off. Because MGSV's motion-blur passes consume the same signal, the option can also increase native motion blur and is
 diagnostic by default.
 
-Changing the jitter pattern, resolve tuning, motion-vector clamp, diagnostic view, object-motion mode, or per-path jitter
-scale invalidates history. The velocity visualization range does not affect accumulation. Preset Off disables TAA and
-restores the vanilla projection path.
+Changing the reconstruction mode, jitter pattern, resolve tuning, motion-vector clamp, diagnostic view, object-motion
+mode, or per-path jitter scale invalidates history. The velocity visualization range does not affect accumulation.
+Preset Off selects **Off (Vanilla FXAA)** and restores the vanilla projection path.
+
+The dropdown owns per-option availability rather than disabling the whole control. Future SDK-backed methods can provide
+a runtime availability probe; an unavailable entry remains visible but cannot be selected, and hovering it shows its
+DLL, GPU-support, or combined failure reason in red. Persisted unavailable methods must also fail closed to Off at runtime.
 
 ## Frame pipeline
 
@@ -190,7 +192,7 @@ invalidates history only if a full-resolution candidate was observed since the p
 Missing previous matrix history also invalidates and reseeds accumulation before using the valid current frame. No
 temporal output is produced from mismatched frame data.
 
-Method and jitter changes serialize through the coordinator/publication locks and reset method and camera history as one
+Mode and jitter changes serialize through the coordinator/publication locks and reset method and camera history as one
 transaction. FSR3 forces only the effective runtime pattern to Halton; it does not overwrite the saved analytical jitter
 preference. One common completion path restores D3D11 compute state, copies the encoded method output, commits camera
 history, and advances the sample.
@@ -199,8 +201,8 @@ history, and advances the sample.
 
 `MGSV_TAA_LOGGING` defaults to `1`. The normal lifecycle is intentionally concise:
 
-- **initial runtime state** reports whether a persisted TAA setting was already enabled when the addon attached.
-- **TAA runtime enabled** records the transition reason, frame, and active jitter pattern.
+- **initial temporal state** reports the active persisted mode and jitter pattern when the addon attaches.
+- **temporal reconstruction selected** records a non-Off mode transition, frame, and active jitter pattern.
 - **waiting for first native camera publication** is emitted once while startup rendering has not yet reached the proven
   native gameplay projection path.
 - **TAA accumulation started** records the accepted insertion, callback frame, native-publication frame, sample, and
@@ -208,22 +210,21 @@ history, and advances the sample.
 - **FSR3.1 D3D11 context probe succeeded** reports feature level, dimensions, host version 3.1.5, and backend interface
   version 2.3.0 whenever the FSR3 context is created.
 - **AMD FSR3.1 accumulation started** records the accepted insertion and dimensions after each FSR3 reset/seed.
-- **TAA runtime disabled** records the reason, frame, and number of completed temporal samples.
+- **temporal reconstruction disabled** records the reason, frame, and number of completed temporal samples.
 - **skipping non-full-resolution TAA insertion candidate** is expected at mixed-resolution DoF passes and is emitted only
   once per device lifetime.
 
-One accumulation-start line after enabling, resizing, or intentionally changing a history-affecting setting is expected.
-Repeated accumulation-start lines while standing still with unchanged settings prove that history is being invalidated and
-should be paired with the preceding invalidation or warning. Recurring warnings remain actionable; successful dispatches
-are not logged every frame. When TAA was restored from persisted configuration, **initial runtime state enabled=true**
-replaces the interactive **TAA runtime enabled** transition line.
+One accumulation-start line after selecting a temporal method, resizing, or intentionally changing a history-affecting
+setting is expected. Repeated accumulation-start lines while standing still with unchanged settings prove that history is
+being invalidated and should be paired with the preceding invalidation or warning. Recurring warnings remain actionable;
+successful dispatches are not logged every frame.
 
 ## Source layout
 
 | File | Role |
 |---|---|
 | `taa.hpp` | Callback lifecycle, draw routing, and insertion cascade |
-| `settings.hpp` | RenoDX controls, versioned method migration, and coherent settings snapshots |
+| `settings.hpp` | Top-level mode dropdown, split-setting migration, availability UI, and coherent settings snapshots |
 | `analytical/runtime.hpp` | Analytical history, pipeline, tuning constants, and method dispatch |
 | `runtime/state.hpp` | Frame/sample state and Off/Halton jitter generation |
 | `runtime/descriptor_tracker.hpp` | Per-command-list pixel SRV tracking |
@@ -298,9 +299,9 @@ view.
 
 Analytical TAA verification:
 
-1. Launch with TAA disabled and confirm vanilla FXAA and projection behavior.
-2. Enable TAA, select **Analytical TAA**, set jitter **Off**, and confirm one **TAA runtime enabled** line followed by one
-  **TAA accumulation started** line; standing still must not repeatedly restart accumulation.
+1. Select **Off (Vanilla FXAA)** and confirm vanilla FXAA and projection behavior.
+2. Select **Analytical TAA**, set jitter **Off**, and confirm one **temporal reconstruction selected** line followed by
+  one **TAA accumulation started** line; standing still must not repeatedly restart accumulation.
 3. Switch analytical TAA to **Halton**. With `ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS=1`, test each additional jitter slider independently
    at `0x`, `1x`, and `-1x`; isolate Alpha Model versus Local Light on the formerly affected lights.
 4. In that diagnostic build, confirm Velocity `1x` removes whole-model Raw Object Mask phase flicker while default native
@@ -313,12 +314,13 @@ Analytical TAA verification:
 8. At 4K with DoF enabled, confirm lower-resolution DoF candidates do not reset accumulation and that there are no
   recurring stale-publication, missing-resolve, capture, setup, or dispatch warnings. Also leave a static menu camera
   running long enough to verify one-epoch camera captures remain accepted.
-9. Disable TAA and confirm a **TAA runtime disabled** line, exact projection restoration, and no stale-history frame.
+9. Select Off and confirm a **temporal reconstruction disabled** line, exact projection restoration, and no
+  stale-history frame.
 
 Default FSR3 verification:
 
-1. Enable TAA with no persisted reconstruction-method key and confirm **AMD FSR 3.1.5** is selected and the jitter-pattern
-  control is hidden; FSR3 uses the eight-phase Halton sequence internally.
+1. Launch with no persisted temporal-mode or legacy temporal keys and confirm **AMD FSR 3.1.5** is selected and the
+  jitter-pattern control is hidden; FSR3 uses the eight-phase Halton sequence internally.
 2. Confirm one **FSR3.1 D3D11 context probe succeeded** line with `host_version=3.1.5` and
   `backend_interface=2.3.0`, followed by one **AMD FSR3.1 accumulation started** line and no recurring setup, format, or
   camera-matrix warnings.
