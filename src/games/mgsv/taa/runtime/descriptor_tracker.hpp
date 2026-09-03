@@ -74,29 +74,6 @@ inline bool ResolveRegister(
   }
 }
 
-inline void StoreViewByStage(
-    CommandListData* data,
-    reshade::api::shader_stage stages,
-    const RegisterSlot& slot,
-    reshade::api::resource_view view) {
-  if (!renodx::utils::bitwise::HasFlag(stages, reshade::api::shader_stage::pixel)) return;
-  if (slot.second != 0u) return;
-
-  switch (slot.first) {
-    case 0:
-      data->pixel_srv_t0 = view;
-      break;
-    case 2:
-      data->pixel_srv_t2 = view;
-      break;
-    case 3:
-      data->pixel_srv_t3 = view;
-      break;
-    default:
-      break;
-  }
-}
-
 inline void OnInitCommandList(reshade::api::command_list* cmd_list) {
   cmd_list->create_private_data<CommandListData>();
 }
@@ -134,9 +111,15 @@ inline void OnPushDescriptors(
   for (uint32_t i = 0u; i < update.count; ++i) {
     RegisterSlot slot = {};
     if (!ResolveRegister(layout, layout_param, update, i, slot)) continue;
+    if (slot.second != 0u || (slot.first != 0u && slot.first != 2u && slot.first != 3u)) continue;
 
     const auto view = renodx::utils::descriptor::GetResourceViewFromDescriptorUpdate(update, i);
-    StoreViewByStage(data, stages, slot, view);
+    switch (slot.first) {
+      case 0u: data->pixel_srv_t0 = view; break;
+      case 2u: data->pixel_srv_t2 = view; break;
+      case 3u: data->pixel_srv_t3 = view; break;
+      default: break;
+    }
   }
 }
 
