@@ -204,7 +204,7 @@ inline void CaptureCameraMotionLocked(
 
   resources.depth_srv = command_data.pixel_srv_t2;
   resources.object_velocity_srv = object_velocity_srv;
-  resources.camera = camera_state::Get();
+  resources.camera = camera_state::GetForCapture();
   resources.capture_frame = state::CurrentFrameToken();
   resources.capture_sample_index = state::CurrentSampleIndex();
 }

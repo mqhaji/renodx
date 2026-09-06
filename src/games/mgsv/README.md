@@ -220,8 +220,8 @@ The native `copy_resource` callback is separately armed from a proven scene-tone
 ## Temporal Anti-Aliasing
 
 The **Temporal Anti-Aliasing** section is the first addon settings section. Its single **Temporal Reconstruction**
-dropdown selects **Off (Vanilla FXAA)**, **Analytical TAA**, or **AMD FSR 3.1.5**. New profiles default to FSR3. Off keeps
-MGSV's original FXAA path and leaves the native projection unmodified. Existing split enable/method settings migrate to
+dropdown selects **Off (Vanilla FXAA)**, **Analytical TAA**, **AMD FSR 3.1.5**, or **NVIDIA DLSS**. New profiles default
+to FSR3. Off keeps MGSV's original FXAA path and leaves the native projection unmodified. Existing split enable/method settings migrate to
 the unified mode while preserving their prior Off state or selected implementation. The former FSR2 implementation has
 been removed; both legacy AMD selector values migrate to FSR3.
 
@@ -245,10 +245,11 @@ When enabled, the TAA path:
 
 **TAA Jitter Pattern** is visible only with Analytical TAA and exposes the production eight-phase Halton sequence plus an
 **Off** diagnostic that leaves the analytical resolve active with zero projection jitter. FSR3 always uses eight-phase
-Halton and hides the selector. The default build hides the extended diagnostic view, velocity range, object-motion selector, and per-path jitter controls behind
-`ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS=0`; their runtime values are pinned to production defaults. Analytical resolve-tuning
-controls are hidden while FSR3 is selected. The default-Off **Unclamp Motion Vectors** experiment remains shared. Relevant
-changes invalidate and reseed history.
+Halton and hides the selector. The extended diagnostic view, velocity range, and object-motion selector are temporarily
+enabled by `ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS=1` during the night-vision investigation. The six known-path jitter sliders are temporarily enabled by
+`ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS=1`, appear only for Analytical TAA, and remain pinned to `1x` for FSR3 and DLSS.
+Analytical resolve-tuning controls are hidden while an SDK method is selected. The default-Off **Unclamp Motion Vectors**
+experiment remains shared. Relevant changes invalidate and reseed history.
 FSR3 forces only the effective runtime pattern, so switching back to Analytical TAA restores its persisted Off/Halton
 preference.
 
@@ -262,10 +263,14 @@ that insertion candidate instead of blending unrelated inputs. Camera, depth, fi
 snapshotted together and validated once before method dispatch. MGSV callbacks may trail `Present` by one epoch only when
 their Halton sample still matches. Presents without a new full-resolution insertion candidate preserve history; history
 resets only after a matching candidate is seen but cannot resolve. Mode transitions also reset temporal state, and
-selecting Off verifies exact restoration of the vanilla projection copy. A former scoped
-replacement for VS `0x200DBED9` previously proved the missing light jitter and has been removed. Brief runtime testing indicates that the native
-alpha-model correction controls the affected lights; the separate guarded local-light callback remains an additional
-known-path correction pending isolated runtime classification.
+selecting Off verifies exact restoration of the vanilla projection copy. The later experimental `0x200DBED9` replacement
+has been removed; the original light VS and the existing native projection hooks are used for the current regression test.
+The temporary FSR-only **FSR Legacy Compute State** checkbox compares the old compute-only preservation calls (On)
+against extended graphics/OM preservation (Off), without changing jitter or reconstruction math. The user's revised A/B
+confirmed less light flicker with Legacy **On**, now the default for new/reset settings. A small residual is unresolved;
+the existing FSR tuning remains unchanged. Normal DLSS availability is restored for the matched follow-up, while DLSS
+itself still uses extended preservation. Hold FSR Legacy On fixed for the
+[cold-start comparison](taa/README.md#cold-start-dlss-runtime-isolation).
 
 Default builds log explicit temporal mode transitions. FSR3 logs **FSR3.1 D3D11 context probe succeeded** when its
 context is created and **AMD FSR3.1 accumulation started** after each reset; analytical TAA logs **TAA accumulation
@@ -275,7 +280,7 @@ Persisted startup state and waiting for the first native publication are logged 
 candidate is also logged only once per device lifetime.
 
 See [`taa/README.md`](taa/README.md) for the current implementation and validation contract. Future temporal quality and
-native-resolution DLAA work is tracked in [`taa/ROADMAP.md`](taa/ROADMAP.md).
+DLSS validation work is tracked in [`taa/ROADMAP.md`](taa/ROADMAP.md).
 
 ---
 
@@ -414,7 +419,8 @@ copy build\Release\renodx-mgsv.addon64 "C:\Program Files (x86)\Steam\steamapps\c
    FSR3. Analytical jitter **Off** remains diagnostic; FSR3 always enforces the eight-phase Halton sequence.
 5. Compare **Unclamp Motion Vectors** Off/On during motion above approximately 64 pixels; verify object motion and native
    motion blur, then return it to its default **Off** state.
-6. With `ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS=1`, exercise all diagnostic views and per-path controls; otherwise verify
+6. With `ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS=1`, exercise all per-path controls; with
+   `ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS=1`, also exercise the diagnostic views; otherwise verify
    the production defaults and confirm the log has no recurring publication, capture, setup, or dispatch warnings.
 7. Select Off and confirm a **temporal reconstruction disabled** line, then verify that the scene returns without a
    persistent subpixel shift, stale-history frame, or freeze.
