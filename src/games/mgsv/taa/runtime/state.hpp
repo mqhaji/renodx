@@ -21,11 +21,19 @@
 #include <cstdint>
 
 #ifndef ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
-#define ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS 0
+#define ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS 1
+#endif
+
+#ifndef ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
+#define ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS 1
 #endif
 
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS != 0 && ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS != 1
 #error ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS must be 0 or 1
+#endif
+
+#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS != 0 && ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS != 1
+#error ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS must be 0 or 1
 #endif
 
 namespace taa::state {
@@ -36,6 +44,7 @@ enum class TemporalMode : std::uint8_t {
   OFF = 0u,
   ANALYTICAL_TAA = 1u,
   AMD_FSR3 = 2u,
+  NVIDIA_DLSS = 3u,
 };
 
 inline constexpr TemporalMode DEFAULT_TEMPORAL_MODE = TemporalMode::AMD_FSR3;
@@ -43,6 +52,7 @@ inline constexpr TemporalMode DEFAULT_TEMPORAL_MODE = TemporalMode::AMD_FSR3;
 inline TemporalMode NormalizeTemporalMode(float value) {
   if (value == static_cast<float>(TemporalMode::OFF)) return TemporalMode::OFF;
   if (value == static_cast<float>(TemporalMode::ANALYTICAL_TAA)) return TemporalMode::ANALYTICAL_TAA;
+  if (value == static_cast<float>(TemporalMode::NVIDIA_DLSS)) return TemporalMode::NVIDIA_DLSS;
   return TemporalMode::AMD_FSR3;
 }
 
@@ -65,10 +75,13 @@ inline constexpr uint32_t DEFAULT_JITTER_PATTERN = 1u;
 inline constexpr float DEFAULT_CLIP_TIGHTNESS = 0.5f;
 inline constexpr float DEFAULT_HISTORY_CLIP_STRENGTH = 1.f;
 inline constexpr float DEFAULT_CURRENT_FRAME_BLEND = 0.15f;
+inline constexpr bool DEFAULT_FSR_LEGACY_COMPUTE_STATE = true;
 
 struct FrameState {
   uint32_t sample_index = 0u;
   uint64_t frame_index = 0u;
+  uint64_t temporal_generation = 0u;
+  bool reconstruction_scheduled = false;
   bool reconstruction_completed = false;
   bool full_resolution_candidate_seen = false;
 
@@ -88,6 +101,8 @@ inline float jitter_pattern = static_cast<float>(DEFAULT_JITTER_PATTERN);
 inline float diagnostic_view = DEFAULT_DIAGNOSTIC_VIEW;
 inline float velocity_visualization_range = DEFAULT_VELOCITY_VISUALIZATION_RANGE;
 inline float object_motion_mode = static_cast<float>(DEFAULT_OBJECT_MOTION_MODE);
+#endif
+#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
 inline std::array<float, PROJECTION_JITTER_PATH_COUNT> projection_jitter_scales = {
     DEFAULT_PROJECTION_JITTER_SCALE,
     DEFAULT_PROJECTION_JITTER_SCALE,
@@ -100,12 +115,18 @@ inline std::array<float, PROJECTION_JITTER_PATH_COUNT> projection_jitter_scales 
 inline float clip_tightness = DEFAULT_CLIP_TIGHTNESS;
 inline float history_clip_strength = DEFAULT_HISTORY_CLIP_STRENGTH;
 inline float current_frame_blend = DEFAULT_CURRENT_FRAME_BLEND;
+// Legacy calls reduce FSR light flicker in the user's A/B. Keep Off available
+// for isolation; this preference never selects NGX's preservation profile.
+inline float fsr_legacy_compute_state = static_cast<float>(DEFAULT_FSR_LEGACY_COMPUTE_STATE);
+inline std::atomic<bool> runtime_fsr_legacy_compute_state = DEFAULT_FSR_LEGACY_COMPUTE_STATE;
 inline std::atomic<TemporalMode> runtime_temporal_mode = TemporalMode::OFF;
 inline std::atomic<uint32_t> runtime_jitter_pattern = DEFAULT_JITTER_PATTERN;
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
 inline std::atomic<float> runtime_diagnostic_view = DEFAULT_DIAGNOSTIC_VIEW;
 inline std::atomic<float> runtime_velocity_visualization_range = DEFAULT_VELOCITY_VISUALIZATION_RANGE;
 inline std::atomic<uint32_t> runtime_object_motion_mode = DEFAULT_OBJECT_MOTION_MODE;
+#endif
+#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
 inline std::array<std::atomic<float>, PROJECTION_JITTER_PATH_COUNT> runtime_projection_jitter_scales = {
     std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
     std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
@@ -219,7 +240,7 @@ inline float GetCurrentFrameBlend() {
   return runtime_current_frame_blend.load(std::memory_order_acquire);
 }
 
-#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
+#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
 inline void SetProjectionJitterScale(ProjectionJitterPath path, float value) {
   value = std::clamp(value, -2.f, 2.f);
   const std::size_t index = static_cast<std::size_t>(path);
@@ -228,8 +249,11 @@ inline void SetProjectionJitterScale(ProjectionJitterPath path, float value) {
 #endif
 
 inline float GetProjectionJitterScale(ProjectionJitterPath path) {
-#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
-  return runtime_projection_jitter_scales[static_cast<std::size_t>(path)].load(std::memory_order_acquire);
+#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
+  if (GetTemporalMode() == TemporalMode::ANALYTICAL_TAA) {
+    return runtime_projection_jitter_scales[static_cast<std::size_t>(path)].load(std::memory_order_acquire);
+  }
+  return DEFAULT_PROJECTION_JITTER_SCALE;
 #else
   (void)path;
   return DEFAULT_PROJECTION_JITTER_SCALE;
@@ -284,7 +308,9 @@ inline std::array<float, 2> JitterForSample(uint32_t sample_index, uint32_t widt
 }
 
 inline void ResetTemporalState() {
+  ++frame_state.temporal_generation;
   frame_state.sample_index = 0u;
+  frame_state.reconstruction_scheduled = false;
   frame_state.reconstruction_completed = false;
   frame_state.full_resolution_candidate_seen = false;
   current_sample_index.store(0u, std::memory_order_release);
@@ -301,6 +327,7 @@ inline void BeginFrame() {
 
 // Called only after a successful compute dispatch and copy-back.
 inline void CommitTemporalFrame() {
+  frame_state.reconstruction_scheduled = false;
   frame_state.reconstruction_completed = true;
   ++frame_state.sample_index;
   current_sample_index.store(frame_state.sample_index, std::memory_order_release);

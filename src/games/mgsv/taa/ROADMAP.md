@@ -1,7 +1,7 @@
 # MGSV Temporal Reconstruction Roadmap
 
-Future work for improving the analytical TAA and FSR3 paths, adding game-derived reactive masks, and preparing reusable
-native-resolution DLAA inputs. [README.md](README.md) describes the current implementation.
+Future work for improving the analytical TAA, FSR3, and DLSS paths and adding game-derived reactive masks.
+[README.md](README.md) describes the current implementation.
 
 ## Scope
 
@@ -12,7 +12,7 @@ native-resolution DLAA inputs. [README.md](README.md) describes the current impl
 - Do not restore broad mapped-constant-buffer mutation.
 - Keep the FSR3 3.1.5 source, custom D3D11 backend, and fixed SM5 permutations local to MGSV. AMD's host must continue
   to own the pass schedule; this is a source adaptation, not an AMD-supported D3D11 integration.
-- Target DLAA specifically, not DLSS Super Resolution.
+- Target native-resolution DLSS, not internal resolution scaling.
 
 ## Priority 1: signal correctness
 
@@ -21,7 +21,7 @@ native-resolution DLAA inputs. [README.md](README.md) describes the current impl
    - Store analytical history in linear RGBA16F to recover optimized Catmull-Rom sampling, then encode only the copy
      written back into MGSV's scene domain.
 2. **Camera-cut reset**
-   - Replace or supplement the current clip-space discontinuity heuristic with a proven native game signal if one exists.
+   - Add a proven native game signal; do not restore the removed clip-space heuristic that reset SDK history every frame.
    - Cover aiming, binocular transitions, cutscenes, teleportation, pause/resume, and display-mode changes.
 
 ## Priority 2: modern analytical history validation
@@ -56,7 +56,7 @@ Locks should selectively protect depth-consistent thin detail. They should not b
 The CPU now produces one immutable, device-checked `ValidatedFrameInputs` value shared by Analytical TAA and FSR3. It
 snapshots color, depth, final velocity, object velocity, and camera publication together, then centralizes method
 selection, copy-back, camera commit, and sample advancement. Its resources remain explicitly game-native; continue toward
-the following canonical contracts before sharing converted resources with DLAA:
+the following canonical contracts before sharing converted resources with DLSS:
 
 | Input | Target contract |
 |---|---|
@@ -94,23 +94,20 @@ logic remains active. Add game-derived masks without replacing those mechanisms:
    match the accepted color/depth/motion inputs.
 5. Validate reduced ghosting without destabilizing foliage, thin geometry, opaque character motion, or exposure changes.
 
-## Priority 5: native-resolution DLAA
+## Priority 5: native-resolution DLSS validation
 
-After the canonical inputs are stable:
+The D3D11 NGX implementation and shared canonical boundary are now present. Complete runtime validation:
 
-1. Add an isolated `dlss/module_hooks.hpp` for `nvngx_dlss.dll` discovery/export hooks and `dlss/runtime.hpp` for NGX
-   parameters, feature ownership, evaluation, reset, and release. Do not mix NGX hooks with projection Detours.
-2. Supply row-major no-jitter camera matrices and jitter separately in the SDK's documented units.
+1. Validate the deferred command-list split and immediate-context NGX bridge across all insertion fallbacks, restore-state
+   flags, one-epoch submission lag, query spans, resolution changes, and device teardown.
+2. Validate DLL discovery and red disabled-option reasons on missing DLL, non-NVIDIA GPU, unsupported adapter, and old driver.
 3. Validate motion direction, Y convention, scale, reverse-Z, reset, and frame-token lifetime with SDK diagnostics.
 4. Establish a valid HUDless input and reintegration point before evaluating image quality.
-5. Use auto exposure initially unless a proven MGSV exposure resource is available.
-6. Add DLAA as one direct coordinator switch case; do not introduce a virtual method registry or another callback seam.
-7. Compare analytical TAA, FSR3, and DLAA against the same validated inputs.
+5. Continue using auto exposure until a proven MGSV exposure resource is available.
+6. Compare presets A-F and J-M across the DLL versions that expose them, including fallback when E is unavailable.
+7. Compare Analytical TAA, FSR3, and DLSS against the same validated inputs.
 
-Add DLAA to the existing mode dropdown only when both `nvngx_dlss.dll` discovery and NVIDIA adapter capability are
-probed. Keep the option visible but disabled when unavailable, with red hover text that distinguishes a missing DLL from
-an unsupported GPU and can report both failures. Runtime selection must independently fail closed to Off. XeSS can use
-the same option-level availability contract if it is integrated later.
+XeSS can use the same option-level availability contract if it is integrated later.
 
 No internal resolution changes, DLSS Super Resolution modes, or game viewport/culling modifications are planned.
 
