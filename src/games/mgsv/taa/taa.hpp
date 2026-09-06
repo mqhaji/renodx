@@ -251,11 +251,16 @@ inline bool OnDrawOrDispatchIndirect(
 }
 
 inline void OnDestroyDevice(reshade::api::device* device) {
+  {
+    coordinator::ExecutionGuard execution_guard;
+    if (coordinator::IsForeignDevice(device)) return;
+  }
   settings::TransitionTemporalMode(
       static_cast<float>(state::TemporalMode::OFF),
       "device destroyed",
       true,
       false);
+  coordinator::UninstallDeferredDlssBridge();
   coordinator::ExecutionGuard execution_guard;
   logging::Info("destroy device");
   projection_jitter::Detach();
@@ -274,13 +279,56 @@ inline void OnPresent(
   (void)dest_rect;
   (void)dirty_rect_count;
   (void)dirty_rects;
-  settings::ApplySettingsSnapshot();
-  coordinator::ExecutionGuard execution_guard;
   auto* device = queue != nullptr ? queue->get_device() : nullptr;
+  {
+    coordinator::ExecutionGuard execution_guard;
+    if (!coordinator::BindRuntimeDevice(device)) return;
+    dlss::CheckAdapter(device);
+  }
+  if (dlss::ConsumeFatalFailure()
+      && state::GetTemporalMode() == state::TemporalMode::NVIDIA_DLSS) {
+    renodx::utils::settings::UpdateSetting(
+        "FxTemporalReconstructionMode",
+        static_cast<float>(state::TemporalMode::OFF));
+    settings::TransitionTemporalMode(
+        static_cast<float>(state::TemporalMode::OFF),
+        "DLSS runtime failure",
+        true);
+  }
+  settings::ApplySettingsSnapshot();
+  bool activation_serviced = false;
+  {
+    coordinator::ExecutionGuard execution_guard;
+    if (dlss::activation_requested.load(std::memory_order_acquire) && dlss::ActivationPending()) {
+      activation_serviced = true;
+      logging::Info("servicing requested NVIDIA DLSS activation");
+      if (dlss::ProbeDevice(device)) {
+        // A selection may be canceled while the probe runs. Never install
+        // hooks for an already-canceled request. Once installed, retain them
+        // until teardown so query scopes and pending game prefixes stay owned.
+        if (dlss::activation_requested.load(std::memory_order_acquire)) {
+          if (coordinator::EnsureDeferredDlssBridge(device)) {
+            dlss::runtime_ready.store(true, std::memory_order_release);
+            logging::Info("NVIDIA DLSS runtime ready; waiting for tracked deferred recording boundaries");
+          } else {
+            logging::Warn("failed to install requested D3D11 deferred DLSS execution bridge");
+            dlss::QueueFatalFailure();
+          }
+        }
+      } else if (const char* reason = dlss::UnavailableReason(); reason != nullptr) {
+        logging::Warn("requested NVIDIA DLSS activation unavailable: ", reason);
+      }
+    }
+  }
+  // Read the latest persisted choice, not the request from before the probe.
+  if (activation_serviced) settings::ApplySettingsSnapshot();
+  coordinator::ExecutionGuard execution_guard;
   const auto mode = state::GetTemporalMode();
   coordinator::ReleaseInactiveResources(device, mode);
+  projection_jitter::LogPathDiagnostics();
   if (mode != state::TemporalMode::OFF
       && state::frame_state.full_resolution_candidate_seen
+      && !state::frame_state.reconstruction_scheduled
       && !state::frame_state.reconstruction_completed) {
     // Candidate insertion draws may be lower-resolution DoF work. Preserve
     // history when no new full-resolution scene was submitted, and reset only
@@ -305,11 +353,19 @@ inline void Use(DWORD fdw_reason) {
       logging::Info("initial temporal state enabled=", logging::Bool{state::IsEnabled()},
                     " mode=", option == nullptr ? "unknown" : option->label,
                     " jitter_pattern=", state::GetJitterPattern() == 0u ? "off" : "halton_8");
+      logging::Info("light-flicker isolation: original light VS; FSR state=",
+                    state::runtime_fsr_legacy_compute_state.load(std::memory_order_acquire) ? "legacy-compute" : "extended");
+      logging::Info("DLSS startup=vendor-only; DLL inspection, NGX and hooks are selection-driven");
       projection_jitter::Use(fdw_reason);
 
       reshade::register_event<reshade::addon_event::init_command_list>(descriptor_tracker::OnInitCommandList);
       reshade::register_event<reshade::addon_event::destroy_command_list>(descriptor_tracker::OnDestroyCommandList);
       reshade::register_event<reshade::addon_event::reset_command_list>(descriptor_tracker::OnResetCommandList);
+        // These return before QI/locks until the requested bridge is installed.
+        reshade::register_event<reshade::addon_event::init_command_list>(coordinator::OnInitCommandList);
+        reshade::register_event<reshade::addon_event::destroy_command_list>(coordinator::OnDestroyCommandList);
+        reshade::register_event<reshade::addon_event::execute_secondary_command_list>(
+          coordinator::OnExecuteSecondaryCommandList);
       reshade::register_event<reshade::addon_event::push_descriptors>(descriptor_tracker::OnPushDescriptors);
       reshade::register_event<reshade::addon_event::draw>(OnDraw);
       reshade::register_event<reshade::addon_event::draw_indexed>(OnDrawIndexed);
@@ -331,6 +387,10 @@ inline void Use(DWORD fdw_reason) {
       reshade::unregister_event<reshade::addon_event::init_command_list>(descriptor_tracker::OnInitCommandList);
       reshade::unregister_event<reshade::addon_event::destroy_command_list>(descriptor_tracker::OnDestroyCommandList);
       reshade::unregister_event<reshade::addon_event::reset_command_list>(descriptor_tracker::OnResetCommandList);
+        reshade::unregister_event<reshade::addon_event::init_command_list>(coordinator::OnInitCommandList);
+        reshade::unregister_event<reshade::addon_event::destroy_command_list>(coordinator::OnDestroyCommandList);
+        reshade::unregister_event<reshade::addon_event::execute_secondary_command_list>(
+          coordinator::OnExecuteSecondaryCommandList);
       reshade::unregister_event<reshade::addon_event::push_descriptors>(descriptor_tracker::OnPushDescriptors);
       reshade::unregister_event<reshade::addon_event::draw>(OnDraw);
       reshade::unregister_event<reshade::addon_event::draw_indexed>(OnDrawIndexed);

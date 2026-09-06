@@ -206,6 +206,34 @@ inline std::atomic<uint32_t> hook_calls_in_flight = 0u;
 inline std::atomic_flag local_light_projection_lock = ATOMIC_FLAG_INIT;
 inline thread_local bool local_light_projection_active = false;
 
+struct PathDiagnostics {
+  std::atomic<uint64_t> requests = 0u;
+  std::atomic<uint64_t> applied = 0u;
+  std::atomic<uint64_t> sample_advanced = 0u;
+  std::atomic<uint64_t> invalid_viewport = 0u;
+  std::atomic<uint64_t> invalid_publication = 0u;
+  std::atomic<uint64_t> stale_frame = 0u;
+  std::atomic<uint64_t> wrong_dimensions = 0u;
+  std::atomic<uint64_t> missing_shader_manager = 0u;
+  std::atomic<uint64_t> projection_mismatch = 0u;
+};
+
+inline std::array<PathDiagnostics, state::PROJECTION_JITTER_PATH_COUNT> path_diagnostics = {};
+inline uint64_t last_path_diagnostics_frame = 0u;
+
+inline constexpr std::array<const char*, state::PROJECTION_JITTER_PATH_COUNT> PATH_NAMES = {
+    "velocity",
+    "forward",
+    "model",
+    "alpha_model",
+    "overlay_model",
+    "local_light",
+};
+
+inline PathDiagnostics& DiagnosticsFor(state::ProjectionJitterPath path) {
+  return path_diagnostics[static_cast<std::size_t>(path)];
+}
+
 inline bool IsInstalled() {
   return installed.load(std::memory_order_acquire);
 }
@@ -379,18 +407,34 @@ inline bool GetPublishedJitterForViewport(
   const float scale = state::GetProjectionJitterScale(path);
   if (scale == 0.f) return false;
 
+  auto& diagnostics = DiagnosticsFor(path);
+  diagnostics.requests.fetch_add(1u, std::memory_order_relaxed);
+
   const auto* projection = reinterpret_cast<const float*>(viewport + 0x280u);
   const uint32_t width = *reinterpret_cast<const uint32_t*>(viewport + 0x5D8u);
   const uint32_t height = *reinterpret_cast<const uint32_t*>(viewport + 0x5DCu);
   const uint8_t flags = *(viewport + 0x6E2u);
   void* camera = *reinterpret_cast<void* const*>(viewport + 0x570u);
   const camera_state::CameraFrame published = camera_state::Get();
-  if (!LooksLikeGameplayProjection(projection, width, height, flags, camera)
-      || !published.valid
-      || published.frame_token != state::CurrentFrameToken()
-      || published.sample_index != state::CurrentSampleIndex()
-      || published.width != width
-      || published.height != height) {
+  if (!LooksLikeGameplayProjection(projection, width, height, flags, camera)) {
+    diagnostics.invalid_viewport.fetch_add(1u, std::memory_order_relaxed);
+    return false;
+  }
+  if (!published.valid) {
+    diagnostics.invalid_publication.fetch_add(1u, std::memory_order_relaxed);
+    return false;
+  }
+  if (published.frame_token != state::CurrentFrameToken()) {
+    diagnostics.stale_frame.fetch_add(1u, std::memory_order_relaxed);
+    return false;
+  }
+  if (published.width != width || published.height != height) {
+    diagnostics.wrong_dimensions.fetch_add(1u, std::memory_order_relaxed);
+    return false;
+  }
+
+  if (published.sample_index != state::CurrentSampleIndex()) {
+    diagnostics.sample_advanced.fetch_add(1u, std::memory_order_relaxed);
     return false;
   }
 
@@ -406,13 +450,56 @@ inline void ApplyPublishedJitterToActiveProjection(
     state::ProjectionJitterPath jitter_path) {
   std::array<float, 2> jitter_uv = {};
   void* shader_manager = shader_manager_global != nullptr ? *shader_manager_global : nullptr;
-  if (shader_manager == nullptr || !GetPublishedJitterForViewport(viewport, jitter_path, jitter_uv)) return;
+  if (shader_manager == nullptr) {
+    DiagnosticsFor(jitter_path).missing_shader_manager.fetch_add(1u, std::memory_order_relaxed);
+    return;
+  }
+  if (!GetPublishedJitterForViewport(viewport, jitter_path, jitter_uv)) return;
 
   const auto* projection = reinterpret_cast<const float*>(viewport + 0x280u);
   auto* active_projection = reinterpret_cast<float*>(static_cast<uint8_t*>(shader_manager) + 0x680u);
-  if (std::memcmp(projection, active_projection, 16u * sizeof(float)) != 0) return;
+  if (std::memcmp(projection, active_projection, 16u * sizeof(float)) != 0) {
+    DiagnosticsFor(jitter_path).projection_mismatch.fetch_add(1u, std::memory_order_relaxed);
+    return;
+  }
 
   ApplyProjectionJitter(active_projection, shader_manager, jitter_uv[0], jitter_uv[1]);
+  DiagnosticsFor(jitter_path).applied.fetch_add(1u, std::memory_order_relaxed);
+}
+
+inline void LogPathDiagnostics() {
+  const uint64_t frame = state::CurrentFrameToken();
+  if (frame < last_path_diagnostics_frame + 300u) return;
+  last_path_diagnostics_frame = frame;
+
+  for (std::size_t index = 0u; index < path_diagnostics.size(); ++index) {
+    auto& diagnostics = path_diagnostics[index];
+    const uint64_t requests = diagnostics.requests.exchange(0u, std::memory_order_relaxed);
+    const uint64_t applied = diagnostics.applied.exchange(0u, std::memory_order_relaxed);
+    const uint64_t sample_advanced = diagnostics.sample_advanced.exchange(0u, std::memory_order_relaxed);
+    const uint64_t invalid_viewport = diagnostics.invalid_viewport.exchange(0u, std::memory_order_relaxed);
+    const uint64_t invalid_publication = diagnostics.invalid_publication.exchange(0u, std::memory_order_relaxed);
+    const uint64_t stale_frame = diagnostics.stale_frame.exchange(0u, std::memory_order_relaxed);
+    const uint64_t wrong_dimensions = diagnostics.wrong_dimensions.exchange(0u, std::memory_order_relaxed);
+    const uint64_t missing_shader_manager = diagnostics.missing_shader_manager.exchange(0u, std::memory_order_relaxed);
+    const uint64_t projection_mismatch = diagnostics.projection_mismatch.exchange(0u, std::memory_order_relaxed);
+    if (requests == 0u && missing_shader_manager == 0u) continue;
+
+    logging::Info("projection jitter path=", PATH_NAMES[index],
+            " mode=", static_cast<uint32_t>(state::GetTemporalMode()),
+            " fsr_legacy_compute=", logging::Bool{
+              state::GetTemporalMode() == state::TemporalMode::AMD_FSR3
+              && state::runtime_fsr_legacy_compute_state.load(std::memory_order_acquire)},
+                  " requests=", requests,
+                  " applied=", applied,
+                  " sample_advanced=", sample_advanced,
+                  " invalid_viewport=", invalid_viewport,
+                  " invalid_publication=", invalid_publication,
+                  " stale_frame=", stale_frame,
+                  " wrong_dimensions=", wrong_dimensions,
+                  " missing_shader_manager=", missing_shader_manager,
+                  " projection_mismatch=", projection_mismatch);
+  }
 }
 
 inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
@@ -581,6 +668,7 @@ inline void __fastcall HookLocalLightMainExec(void* plugin, void* render, void* 
       }
     } restore_guard(projection);
     ApplyProjectionJitter(projection, jitter_uv[0], jitter_uv[1]);
+    DiagnosticsFor(state::ProjectionJitterPath::LOCAL_LIGHT).applied.fetch_add(1u, std::memory_order_relaxed);
     original(plugin, render, viewport_pointer);
   }
 }
