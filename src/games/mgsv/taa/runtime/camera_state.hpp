@@ -11,6 +11,10 @@
 
 namespace taa::camera_state {
 
+struct Matrix4d {
+  std::array<std::array<double, 4>, 4> m = {};
+};
+
 struct CameraFrame {
   bool valid = false;
   bool camera_matrix_valid = false;
@@ -25,10 +29,7 @@ struct CameraFrame {
   float previous_jitter_uv_y = 0.f;
   std::array<float, 4> device_to_view_depth = {};
   std::array<float, 16> current_to_previous_clip = {};
-};
-
-struct Matrix4d {
-  std::array<std::array<double, 4>, 4> m = {};
+  Matrix4d current_view_projection = {};
 };
 
 inline std::atomic<uint64_t> published_sequence = 0u;
@@ -222,22 +223,29 @@ inline CameraFrame Get() {
   return result;
 }
 
-inline bool Commit(uint64_t frame_token, uint32_t sample_index) {
+inline CameraFrame GetForCapture() {
   PublicationWriterGuard guard;
-  const bool matches = published_valid.load(std::memory_order_relaxed)
-                       && published_camera_matrix_valid.load(std::memory_order_relaxed)
-                       && published_frame_token.load(std::memory_order_relaxed) == frame_token
-                       && published_sample_index.load(std::memory_order_relaxed) == sample_index
-                       && staged_current_view_projection_valid;
-  if (matches) {
-    committed_previous_view_projection = staged_current_view_projection;
+  CameraFrame result = Get();
+  if (result.valid && result.camera_matrix_valid && staged_current_view_projection_valid) {
+    result.current_view_projection = staged_current_view_projection;
+  } else {
+    result.camera_matrix_valid = false;
+  }
+  return result;
+}
+
+inline bool Commit(const CameraFrame& frame) {
+  PublicationWriterGuard guard;
+  const bool valid = frame.valid && frame.camera_matrix_valid;
+  if (valid) {
+    committed_previous_view_projection = frame.current_view_projection;
     committed_previous_jitter_uv = {
-        published_jitter_uv_x.load(std::memory_order_relaxed),
-        published_jitter_uv_y.load(std::memory_order_relaxed),
+        frame.jitter_uv_x,
+        frame.jitter_uv_y,
     };
     committed_previous_view_projection_valid = true;
   }
-  return matches;
+  return valid;
 }
 
 }  // namespace taa::camera_state

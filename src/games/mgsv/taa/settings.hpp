@@ -21,6 +21,8 @@ namespace taa::settings {
 
 inline std::atomic_flag runtime_transition_lock = ATOMIC_FLAG_INIT;
 inline renodx::utils::settings::Setting* temporal_mode_setting = nullptr;
+inline renodx::utils::settings::Setting* dlss_model_setting = nullptr;
+inline float dlss_model = static_cast<float>(dlss::DEFAULT_MODEL);
 
 using UnavailableReason = const char* (*)();
 
@@ -36,6 +38,7 @@ inline constexpr std::array TEMPORAL_MODE_OPTIONS = {
     TemporalModeOption{state::TemporalMode::OFF, "Off (Vanilla FXAA)"},
     TemporalModeOption{state::TemporalMode::ANALYTICAL_TAA, "Analytical TAA"},
     TemporalModeOption{state::TemporalMode::AMD_FSR3, "AMD FSR 3.1.5"},
+    TemporalModeOption{state::TemporalMode::NVIDIA_DLSS, "NVIDIA DLSS", dlss::UnavailableReason},
 };
 
 inline const TemporalModeOption* FindTemporalModeOption(state::TemporalMode mode) {
@@ -68,7 +71,12 @@ inline void TransitionTemporalMode(
     const char* reason,
     bool force_reset = false,
     bool verify_restoration = true) {
+  const std::unique_lock settings_lock(renodx::utils::mutex::global_mutex);
+  // A snapshot taken before a newer user choice must not revive its request.
+  if (!force_reset && temporal_mode_setting != nullptr && temporal_mode_setting->GetValue() != value) return;
   auto mode = state::NormalizeTemporalMode(value);
+  const bool requested_dlss = mode == state::TemporalMode::NVIDIA_DLSS;
+  const bool activation_pending = requested_dlss && dlss::ActivationPending();
   const auto* option = FindTemporalModeOption(mode);
   const char* unavailable_reason = "Unknown temporal reconstruction method.";
   if (option != nullptr) {
@@ -76,24 +84,28 @@ inline void TransitionTemporalMode(
                              ? nullptr
                              : option->unavailable_reason();
   }
-  if (unavailable_reason != nullptr) {
-    logging::Warn("temporal mode unavailable mode=", static_cast<uint32_t>(mode), " reason=", unavailable_reason);
+  if (unavailable_reason != nullptr || activation_pending) {
+    if (!activation_pending) {
+      logging::Warn("temporal mode unavailable mode=", static_cast<uint32_t>(mode), " reason=", unavailable_reason);
+    }
     mode = state::TemporalMode::OFF;
     option = FindTemporalModeOption(mode);
+    if (activation_pending) unavailable_reason = nullptr;
   }
 
-  const std::unique_lock settings_lock(renodx::utils::mutex::global_mutex);
   if (unavailable_reason != nullptr && temporal_mode_setting != nullptr) {
     temporal_mode_setting->Set(static_cast<float>(state::TemporalMode::OFF))->Write();
-  }
-  if (temporal_mode_setting != nullptr && temporal_mode_setting->binding != nullptr) {
-    *temporal_mode_setting->binding = static_cast<float>(mode);
   }
   const float jitter_pattern = state::jitter_pattern;
 
   RuntimeTransitionGuard transition_guard;
+  // Cancellation is visible even while waiting for in-flight addon work.
+  // Pending DLSS keeps its stored value, but renders as Off until ready.
+  dlss::activation_requested.store(requested_dlss && unavailable_reason == nullptr, std::memory_order_release);
   const bool enabled = mode != state::TemporalMode::OFF;
-  const uint32_t effective_jitter_pattern = mode == state::TemporalMode::AMD_FSR3
+  const bool sdk_reconstruction = mode == state::TemporalMode::AMD_FSR3
+                                  || mode == state::TemporalMode::NVIDIA_DLSS;
+  const uint32_t effective_jitter_pattern = sdk_reconstruction
                                                 ? 1u
                                                 : static_cast<uint32_t>(std::clamp(jitter_pattern, 0.f, 1.f));
   const auto previous_mode = state::GetTemporalMode();
@@ -122,6 +134,7 @@ inline void TransitionTemporalMode(
   }
 
   coordinator::ExecutionGuard execution_guard;
+  if (mode == state::TemporalMode::NVIDIA_DLSS && !dlss::runtime_ready.load(std::memory_order_acquire)) return;
   camera_state::PublicationWriterGuard publication_guard;
   if (enabled) {
     state::SetJitterPattern(effective_jitter_pattern);
@@ -130,6 +143,9 @@ inline void TransitionTemporalMode(
   if (enabled) {
     projection_jitter::CancelProductionRestorationCheck();
     state::SetTemporalMode(mode);
+  }
+  if (temporal_mode_setting != nullptr && temporal_mode_setting->binding != nullptr) {
+    *temporal_mode_setting->binding = static_cast<float>(mode);
   }
 
   if (enabled) {
@@ -148,7 +164,10 @@ inline void TransitionJitterPattern(float value) {
   RuntimeTransitionGuard transition_guard;
 
   const uint32_t preference = static_cast<uint32_t>(std::clamp(value, 0.f, 1.f));
-  const uint32_t effective_pattern = state::GetTemporalMode() == state::TemporalMode::AMD_FSR3
+  const auto mode = state::GetTemporalMode();
+  const bool sdk_reconstruction = mode == state::TemporalMode::AMD_FSR3
+                                  || mode == state::TemporalMode::NVIDIA_DLSS;
+  const uint32_t effective_pattern = sdk_reconstruction
                                          ? 1u
                                          : preference;
   if (effective_pattern == state::GetJitterPattern()) return;
@@ -164,12 +183,26 @@ inline void TransitionJitterPattern(float value) {
   logging::Info("TAA jitter pattern changed pattern=", effective_pattern);
 }
 
+inline void TransitionDlssModel(float value, const char* reason) {
+  const dlss::Model model = dlss::NormalizeModel(value);
+  RuntimeTransitionGuard transition_guard;
+  if (dlss::GetModel() == model) return;
+  dlss::SetModel(model);
+  if (state::GetTemporalMode() == state::TemporalMode::NVIDIA_DLSS) {
+    coordinator::ExecutionGuard execution_guard;
+    camera_state::PublicationWriterGuard publication_guard;
+    coordinator::ResetTemporalStateWithPublicationLocked(reason);
+  }
+  const auto* option = dlss::FindModelOption(model);
+  logging::Info("NVIDIA DLSS model changed model=", option == nullptr ? "unknown" : option->label);
+}
+
 inline void InvalidateHistoryForSetting(const char* reason) {
   coordinator::ExecutionGuard execution_guard;
   coordinator::ResetTemporalState(reason);
 }
 
-#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
+#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
 inline void SetProjectionJitterScale(
     state::ProjectionJitterPath path,
     float value,
@@ -179,9 +212,26 @@ inline void SetProjectionJitterScale(
 }
 #endif
 
+inline void TransitionFsrLegacyComputeState(float value) {
+  RuntimeTransitionGuard transition_guard;
+  const bool legacy_compute_state = value > 0.f;
+  if (legacy_compute_state == state::runtime_fsr_legacy_compute_state.load(std::memory_order_acquire)) return;
+
+  coordinator::ExecutionGuard execution_guard;
+  camera_state::PublicationWriterGuard publication_guard;
+  state::runtime_fsr_legacy_compute_state.store(legacy_compute_state, std::memory_order_release);
+  if (state::GetTemporalMode() == state::TemporalMode::AMD_FSR3) {
+    coordinator::ResetTemporalStateWithPublicationLocked("FSR state-preservation diagnostic changed");
+  }
+  logging::Info("FSR state preservation selected mode=", legacy_compute_state ? "legacy-compute" : "extended",
+                " frame=", state::CurrentFrameToken());
+}
+
 struct BindingSnapshot {
   float temporal_mode = static_cast<float>(state::DEFAULT_TEMPORAL_MODE);
+  float dlss_model = static_cast<float>(dlss::DEFAULT_MODEL);
   float jitter_pattern = static_cast<float>(state::DEFAULT_JITTER_PATTERN);
+  float fsr_legacy_compute_state = static_cast<float>(state::DEFAULT_FSR_LEGACY_COMPUTE_STATE);
   float clip_tightness = state::DEFAULT_CLIP_TIGHTNESS;
   float history_clip_strength = state::DEFAULT_HISTORY_CLIP_STRENGTH;
   float current_frame_blend = state::DEFAULT_CURRENT_FRAME_BLEND;
@@ -189,6 +239,8 @@ struct BindingSnapshot {
   float diagnostic_view = state::DEFAULT_DIAGNOSTIC_VIEW;
   float velocity_visualization_range = state::DEFAULT_VELOCITY_VISUALIZATION_RANGE;
   float object_motion_mode = static_cast<float>(state::DEFAULT_OBJECT_MOTION_MODE);
+#endif
+#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
   std::array<float, state::PROJECTION_JITTER_PATH_COUNT> projection_jitter_scales = {};
 #endif
 };
@@ -200,7 +252,9 @@ inline void ApplySettingsSnapshot() {
     snapshot.temporal_mode = temporal_mode_setting == nullptr
                                  ? static_cast<float>(state::TemporalMode::OFF)
                                  : temporal_mode_setting->GetValue();
+    snapshot.dlss_model = dlss_model;
     snapshot.jitter_pattern = state::jitter_pattern;
+    snapshot.fsr_legacy_compute_state = state::fsr_legacy_compute_state;
     snapshot.clip_tightness = state::clip_tightness;
     snapshot.history_clip_strength = state::history_clip_strength;
     snapshot.current_frame_blend = state::current_frame_blend;
@@ -208,12 +262,16 @@ inline void ApplySettingsSnapshot() {
     snapshot.diagnostic_view = state::diagnostic_view;
     snapshot.velocity_visualization_range = state::velocity_visualization_range;
     snapshot.object_motion_mode = state::object_motion_mode;
+#endif
+#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
     snapshot.projection_jitter_scales = state::projection_jitter_scales;
 #endif
   }
 
+  TransitionDlssModel(snapshot.dlss_model, "DLSS model synchronized");
   TransitionTemporalMode(snapshot.temporal_mode, "temporal mode synchronized");
   TransitionJitterPattern(snapshot.jitter_pattern);
+  TransitionFsrLegacyComputeState(snapshot.fsr_legacy_compute_state);
   bool history_settings_changed = state::GetClipTightness() != std::clamp(snapshot.clip_tightness, 0.f, 1.f)
                                   || state::GetHistoryClipStrength()
                                          != std::clamp(snapshot.history_clip_strength, 0.f, 1.f)
@@ -227,11 +285,15 @@ inline void ApplySettingsSnapshot() {
                              || state::GetObjectMotionMode()
                                     != static_cast<uint32_t>(
                                         std::clamp(snapshot.object_motion_mode, 0.f, 5.f));
-  for (std::size_t index = 0u; index < snapshot.projection_jitter_scales.size(); ++index) {
-    history_settings_changed = history_settings_changed
-                               || state::GetProjectionJitterScale(
-                                      static_cast<state::ProjectionJitterPath>(index))
-                                      != std::clamp(snapshot.projection_jitter_scales[index], -2.f, 2.f);
+#endif
+#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
+  if (state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA) {
+    for (std::size_t index = 0u; index < snapshot.projection_jitter_scales.size(); ++index) {
+      history_settings_changed = history_settings_changed
+                                 || state::GetProjectionJitterScale(
+                                        static_cast<state::ProjectionJitterPath>(index))
+                                        != std::clamp(snapshot.projection_jitter_scales[index], -2.f, 2.f);
+    }
   }
 #endif
   state::SetClipTightness(snapshot.clip_tightness);
@@ -241,6 +303,8 @@ inline void ApplySettingsSnapshot() {
   state::SetDiagnosticView(snapshot.diagnostic_view);
   state::SetVelocityVisualizationRange(snapshot.velocity_visualization_range);
   state::SetObjectMotionMode(snapshot.object_motion_mode);
+#endif
+#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
   for (std::size_t index = 0u; index < snapshot.projection_jitter_scales.size(); ++index) {
     state::SetProjectionJitterScale(
         static_cast<state::ProjectionJitterPath>(index),
@@ -311,10 +375,15 @@ inline bool DrawTemporalModeSelector() {
   const auto current_mode = state::NormalizeTemporalMode(temporal_mode_setting->GetValue());
   const auto* current_option = FindTemporalModeOption(current_mode);
   const char* preview = current_option == nullptr ? "Unknown" : current_option->label;
+  if (current_mode == state::TemporalMode::NVIDIA_DLSS && dlss::ActivationPending()) {
+    preview = "NVIDIA DLSS (pending; rendering Off)";
+  }
   const bool combo_open = ImGui::BeginCombo("Temporal Reconstruction", preview);
   if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
     ImGui::SetTooltip(
-        "Selects vanilla FXAA, analytical TAA, or AMD FSR 3.1.5. Changing modes resets temporal state.");
+        "Selects vanilla FXAA, analytical TAA, AMD FSR 3.1.5, or NVIDIA DLSS. "
+        "Changing modes resets temporal state. The first DLSS selection checks the DLL and driver "
+        "and installs its runtime hooks; NVIDIA vendor eligibility alone does not guarantee DLSS support.");
   }
   if (!combo_open) return false;
 
@@ -332,9 +401,11 @@ inline bool DrawTemporalModeSelector() {
     if (!available
         && ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled)) {
       ImGui::BeginTooltip();
+      ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.f);
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 0.2f, 0.2f, 1.f));
-      ImGui::TextWrapped("%s", unavailable_reason);
+      ImGui::TextUnformatted(unavailable_reason);
       ImGui::PopStyleColor();
+      ImGui::PopTextWrapPos();
       ImGui::EndTooltip();
     }
     if (chosen && available && !selected) {
@@ -344,6 +415,38 @@ inline bool DrawTemporalModeSelector() {
       if (changed) {
         TransitionTemporalMode(static_cast<float>(option.mode), "temporal mode changed");
       }
+    }
+    if (selected) ImGui::SetItemDefaultFocus();
+  }
+  ImGui::EndCombo();
+  return changed;
+}
+
+inline bool DrawDlssModelSelector() {
+  if (dlss_model_setting == nullptr) return false;
+
+  const dlss::Model current_model = dlss::NormalizeModel(dlss_model_setting->GetValue());
+  const auto* current_option = dlss::FindModelOption(current_model);
+  const char* preview = current_option == nullptr ? "Unknown" : current_option->label;
+  if (current_model == dlss::Model::DEFAULT) preview = "DLL Default (selected model unavailable)";
+  const bool combo_open = ImGui::BeginCombo("DLSS Model", preview);
+  if (!combo_open) return false;
+
+  bool changed = false;
+  for (const auto& option : dlss::MODEL_OPTIONS) {
+    if (option.model == dlss::Model::DEFAULT) continue;
+    if (!dlss::IsModelAvailable(option.model)) continue;
+    const bool selected = option.model == current_model;
+    if (ImGui::Selectable(option.label, selected) && !selected) {
+      changed = renodx::utils::settings::UpdateSetting(
+          "FxDlssModel",
+          static_cast<float>(option.model));
+      if (changed) {
+        TransitionDlssModel(static_cast<float>(option.model), "DLSS model changed");
+      }
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
+      ImGui::SetTooltip("%s", option.description);
     }
     if (selected) ImGui::SetItemDefaultFocus();
   }
@@ -365,6 +468,20 @@ inline void AppendSettings(
       .label = "Temporal Reconstruction Mode",
       .section = "Temporal Anti-Aliasing",
       .max = static_cast<float>(TEMPORAL_MODE_OPTIONS.size()) - 1.f,
+      // Setting::Write must not expose requested DLSS to shaders before the
+      // coordinator has activated it. TransitionTemporalMode publishes the
+      // effective binding after readiness and history are synchronized.
+      .parse = [](float) { return static_cast<float>(state::GetTemporalMode()); },
+      .is_visible = [] { return false; },
+  };
+  dlss_model_setting = new renodx::utils::settings::Setting{
+      .key = "FxDlssModel",
+      .binding = &dlss_model,
+      .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+      .default_value = static_cast<float>(dlss::DEFAULT_MODEL),
+      .label = "DLSS Model",
+      .section = "Temporal Anti-Aliasing",
+      .max = static_cast<float>(dlss::Model::M),
       .is_visible = [] { return false; },
   };
 
@@ -377,6 +494,30 @@ inline void AppendSettings(
           .section = "Temporal Anti-Aliasing",
           .on_draw = DrawTemporalModeSelector,
       },
+      new renodx::utils::settings::Setting{
+          .key = "FxFsrLegacyComputeState",
+          .binding = &state::fsr_legacy_compute_state,
+          .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+          .default_value = static_cast<float>(state::DEFAULT_FSR_LEGACY_COMPUTE_STATE),
+          .label = "FSR Legacy Compute State",
+          .section = "Temporal Anti-Aliasing",
+          .tooltip = "On (default) uses mgsv-old compute-only state slots, which reduced light flicker in testing. "
+                     "Off retains extended graphics/OM save/restore for comparison. "
+                     "No jitter, camera, or algorithm changes. Changing this resets FSR history; DLSS is unaffected.",
+          .on_change_value = [](float previous, float current) {
+            (void)previous;
+            TransitionFsrLegacyComputeState(current); },
+          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::AMD_FSR3; },
+      },
+          dlss_model_setting,
+          new renodx::utils::settings::Setting{
+            .value_type = renodx::utils::settings::SettingValueType::CUSTOM,
+            .can_reset = false,
+            .label = "DLSS Model",
+            .section = "Temporal Anti-Aliasing",
+            .on_draw = DrawDlssModelSelector,
+            .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::NVIDIA_DLSS; },
+          },
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
       new renodx::utils::settings::Setting{
           .key = "FxTaaDiagnosticView",
@@ -414,8 +555,8 @@ inline void AppendSettings(
           .label = "TAA Jitter Pattern",
           .section = "Temporal Anti-Aliasing",
           .tooltip = "Diagnostic projection sampling pattern. Off keeps analytical TAA active with zero projection jitter. "
-                     "FSR3 enforces the eight-phase Halton sequence. Changing modes resets temporal history and the "
-                     "sample sequence.",
+                     "FSR3 and DLSS enforce the eight-phase Halton sequence. Changing modes resets temporal history "
+                     "and the sample sequence.",
           .labels = {"Off", "Halton (2,3) - 8 Phase"},
           .on_change_value = [](float previous, float current) {
             if (static_cast<uint32_t>(previous) == static_cast<uint32_t>(current)) return;
@@ -433,7 +574,7 @@ inline void AppendSettings(
           .on_change_value = [](float previous, float current) {
             if ((previous > 0.f) == (current > 0.f)) return;
             InvalidateHistoryForSetting("motion-vector clamp changed"); },
-          .is_visible = [] { return state::IsEnabled(); },
+          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
       },
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
       new renodx::utils::settings::Setting{
@@ -452,7 +593,7 @@ inline void AppendSettings(
             state::SetVelocityVisualizationRange(current); },
           .is_visible = [] {
             const float view = state::GetDiagnosticView();
-            return state::IsEnabled()
+            return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA
                    && ((view >= 3.f && view < 5.f) || view >= 7.f); },
           .is_logarithmic = true,
       },
@@ -476,7 +617,7 @@ inline void AppendSettings(
             (void)previous;
             state::SetObjectMotionMode(current);
             InvalidateHistoryForSetting("object motion mode changed"); },
-          .is_visible = [] { return state::IsEnabled(); },
+          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
       },
 #endif
       new renodx::utils::settings::Setting{
@@ -530,7 +671,7 @@ inline void AppendSettings(
             InvalidateHistoryForSetting("current frame blend changed"); },
           .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
       },
-#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
+#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
       new renodx::utils::settings::Setting{
           .key = "FxTaaVelocityProjectionJitterScale",
           .binding = &state::projection_jitter_scales[static_cast<std::size_t>(state::ProjectionJitterPath::VELOCITY)],
@@ -548,7 +689,7 @@ inline void AppendSettings(
               state::ProjectionJitterPath::VELOCITY,
               current,
               "velocity projection jitter changed"); },
-          .is_visible = [] { return state::IsEnabled(); },
+          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxTaaForwardProjectionJitterScale",
@@ -567,7 +708,7 @@ inline void AppendSettings(
               state::ProjectionJitterPath::FORWARD,
               current,
               "forward projection jitter changed"); },
-          .is_visible = [] { return state::IsEnabled(); },
+          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxTaaModelProjectionJitterScale",
@@ -586,7 +727,7 @@ inline void AppendSettings(
               state::ProjectionJitterPath::MODEL,
               current,
               "model projection jitter changed"); },
-          .is_visible = [] { return state::IsEnabled(); },
+          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxTaaAlphaProjectionJitterScale",
@@ -605,7 +746,7 @@ inline void AppendSettings(
               state::ProjectionJitterPath::ALPHA_MODEL,
               current,
               "alpha-model projection jitter changed"); },
-          .is_visible = [] { return state::IsEnabled(); },
+          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxTaaOverlayProjectionJitterScale",
@@ -624,7 +765,7 @@ inline void AppendSettings(
               state::ProjectionJitterPath::OVERLAY_MODEL,
               current,
               "overlay-model projection jitter changed"); },
-          .is_visible = [] { return state::IsEnabled(); },
+          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxTaaLocalLightProjectionJitterScale",
@@ -643,7 +784,7 @@ inline void AppendSettings(
               state::ProjectionJitterPath::LOCAL_LIGHT,
               current,
               "local-light projection jitter changed"); },
-          .is_visible = [] { return state::IsEnabled(); },
+          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
       },
 #endif
   };
