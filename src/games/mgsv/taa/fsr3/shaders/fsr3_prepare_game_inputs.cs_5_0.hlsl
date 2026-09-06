@@ -61,7 +61,9 @@ void main(uint3 dispatch_thread_id : SV_DispatchThreadID) {
 	const float2 native_velocity = DecodeNativeVelocity(pixel);
 	float2 camera_velocity = native_velocity;
 	if (camera_reprojection_valid > 0.f) {
-		ComputeMatrixCameraVelocity(uv, depth_texture.Load(int3(pixel, 0)), camera_velocity);
+		if (!ComputeMatrixCameraVelocity(uv, depth_texture.Load(int3(pixel, 0)), camera_velocity)) {
+			camera_velocity = native_velocity;
+		}
 	}
 
 	const float object_mask = object_velocity_texture.Load(int3(pixel, 0)).r;

@@ -94,39 +94,6 @@ inline bool LogEvery(uint64_t interval = 120u) {
   return logging::ShouldLogFrame(state::CurrentFrameToken(), last_failure_log, interval);
 }
 
-inline bool IsCameraDiscontinuity(const camera_state::CameraFrame& native_jitter) {
-  if (!native_jitter.camera_reprojection_valid) return true;
-
-  // A valid matrix pair can still span a cut. Mid-depth center/corners catch
-  // large lateral, FOV, and roll discontinuities without treating ordinary
-  // nonlinear near/far depth motion as a cut.
-  constexpr std::array<std::array<float, 3>, 5> clip_samples = {{
-      {0.f, 0.f, 0.5f},
-      {-1.f, -1.f, 0.5f},
-      {1.f, -1.f, 0.5f},
-      {-1.f, 1.f, 0.5f},
-      {1.f, 1.f, 0.5f},
-  }};
-  const auto is_discontinuous = [&](const std::array<float, 3>& sample) {
-    const auto& matrix = native_jitter.current_to_previous_clip;
-    const float previous_x = (matrix[0] * sample[0]) + (matrix[1] * sample[1])
-                             + (matrix[2] * sample[2]) + matrix[3];
-    const float previous_y = (matrix[4] * sample[0]) + (matrix[5] * sample[1])
-                             + (matrix[6] * sample[2]) + matrix[7];
-    const float previous_w = (matrix[12] * sample[0]) + (matrix[13] * sample[1])
-                             + (matrix[14] * sample[2]) + matrix[15];
-    if (!std::isfinite(previous_w) || previous_w <= 1e-6f) return true;
-    const float previous_x_ndc = previous_x / previous_w;
-    const float previous_y_ndc = previous_y / previous_w;
-    return !std::isfinite(previous_x_ndc)
-           || !std::isfinite(previous_y_ndc)
-           || std::abs(previous_w - 1.f) > 0.5f
-           || std::abs(previous_x_ndc - sample[0]) > 0.75f
-           || std::abs(previous_y_ndc - sample[1]) > 0.75f;
-  };
-  return std::any_of(clip_samples.begin(), clip_samples.end(), is_discontinuous);
-}
-
 inline DXGI_FORMAT ToDxgiFormat(FfxApiSurfaceFormat format) {
   switch (format) {
     case FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -565,8 +532,7 @@ inline bool Dispatch(const ValidatedFrameInputs& inputs, MethodOutput& output) {
     return false;
   }
 
-  const bool reset = !resources.initialized
-                     || IsCameraDiscontinuity(inputs.camera);
+  const bool reset = !resources.initialized;
   if (!DispatchHost(inputs, reset)) {
     resources.initialized = false;
     if (LogEvery(30u)) logging::Warn("AMD FSR3.1 host dispatch failed insertion=", inputs.insertion_name);
