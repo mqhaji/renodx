@@ -459,6 +459,8 @@ inline bool Dispatch(const ValidatedFrameInputs& inputs, MethodOutput& output) {
                   " frame=", inputs.frame_token,
                   " native_frame=", inputs.camera.frame_token,
                   " sample=", inputs.sample_index,
+                  " object_motion_mode=", constants.object_motion_mode,
+                  " jitter_uv=", constants.current_jitter_uv[0], ",", constants.current_jitter_uv[1],
                   " size=", resources.width, "x", resources.height);
   }
   resources.accum_index = previous;

@@ -77,15 +77,16 @@ inline constexpr std::array MODEL_OPTIONS = {
     ModelOption{Model::B, "Preset B", "CNN tuned for extremely low input resolution."},
     ModelOption{Model::C, "Preset C", "Current-frame-biased CNN; sharper motion with more shimmer."},
     ModelOption{Model::D, "Preset D", "History-heavy CNN; stable but more prone to ghosting."},
-    ModelOption{Model::E, "Preset E", "Balanced CNN model and the default selection."},
-    ModelOption{Model::F, "Preset F", "Conservative, consistent CNN; typically the softest good CNN model."},
+    ModelOption{Model::E, "Preset E", "Balanced CNN model."},
+    ModelOption{Model::F, "Preset F", "Conservative, consistent CNN; the default selection."},
     ModelOption{Model::J, "Preset J", "Sharp first-generation transformer with more flicker than K."},
     ModelOption{Model::K, "Preset K", "Stable first-generation transformer and general native-resolution model."},
     ModelOption{Model::L, "Preset L", "Second-generation transformer optimized for very small inputs."},
     ModelOption{Model::M, "Preset M", "Aggressive second-generation transformer with strong detail recovery."},
 };
 
-inline constexpr Model DEFAULT_MODEL = Model::E;
+inline constexpr Model DEFAULT_MODEL = Model::F;
+static_assert(static_cast<uint8_t>(DEFAULT_MODEL) == 6u);
 
 enum class Availability : uint8_t {
   UNCHECKED,
@@ -350,8 +351,7 @@ inline bool ReleaseFeatureResources() {
   const HRESULT wait_result = WaitForGpu();
   if (FAILED(wait_result)) {
     logging::Warn("NVIDIA DLSS GPU completion not proven; retaining resources result=", static_cast<uint32_t>(wait_result),
-                  " device_status=", static_cast<uint32_t>(
-                      resources.device != nullptr ? resources.device->GetDeviceRemovedReason() : E_UNEXPECTED));
+                  " device_status=", static_cast<uint32_t>(resources.device != nullptr ? resources.device->GetDeviceRemovedReason() : E_UNEXPECTED));
     availability.store(Availability::INITIALIZATION_FAILED, std::memory_order_release);
     QueueFatalFailure();
     return false;
@@ -505,9 +505,7 @@ inline bool ProbeDevice(reshade::api::device* device) {
       availability.store(Availability::DRIVER_OUTDATED, std::memory_order_release);
       return false;
     }
-    if ((unsupported & (NVSDK_NGX_FeatureSupportResult_AdapterUnsupported
-                        | NVSDK_NGX_FeatureSupportResult_OSVersionBelowMinimumSupported
-                        | NVSDK_NGX_FeatureSupportResult_NotImplemented))
+    if ((unsupported & (NVSDK_NGX_FeatureSupportResult_AdapterUnsupported | NVSDK_NGX_FeatureSupportResult_OSVersionBelowMinimumSupported | NVSDK_NGX_FeatureSupportResult_NotImplemented))
         != 0u) {
       availability.store(Availability::GPU_UNSUPPORTED, std::memory_order_release);
       return false;

@@ -30,7 +30,7 @@
 
 namespace taa::coordinator {
 
-inline std::atomic_flag execution_lock = ATOMIC_FLAG_INIT;
+inline auto& execution_lock = state::execution_lock;
 inline reshade::api::device* runtime_device = nullptr;
 
 using BeginQuery = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Asynchronous*);
@@ -172,10 +172,7 @@ inline void ReleaseInactiveResources(
 }
 
 inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
-  const auto previous_compute_state = d3d11_compute_state::Capture(
-      inputs.cmd_list,
-      state::GetTemporalMode() == state::TemporalMode::AMD_FSR3
-          && state::runtime_fsr_legacy_compute_state.load(std::memory_order_acquire));
+  const auto previous_compute_state = d3d11_compute_state::Capture(inputs.cmd_list);
   inputs.cmd_list->barrier(
       inputs.velocity_resource,
       reshade::api::resource_usage::render_target,
@@ -227,7 +224,6 @@ inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
     state::frame_state.reconstruction_completed = true;
     return true;
   }
-  state::CommitTemporalFrame();
   return true;
 }
 
@@ -287,7 +283,7 @@ inline void STDMETHODCALLTYPE HookBeginQuery(
     if (found != active_queries.end()) found->second.insert(asynchronous);
   }
   const auto begin = context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED
-                         && deferred_begin_query != nullptr
+                             && deferred_begin_query != nullptr
                          ? deferred_begin_query
                          : begin_query;
   begin(context, asynchronous);
@@ -298,7 +294,7 @@ inline void STDMETHODCALLTYPE HookEndQuery(
     ID3D11Asynchronous* asynchronous) {
   ExecutionHookCallGuard hook_call_guard;
   const auto end = context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED
-                       && deferred_end_query != nullptr
+                           && deferred_end_query != nullptr
                        ? deferred_end_query
                        : end_query;
   end(context, asynchronous);
@@ -338,10 +334,10 @@ inline bool InstallDeferredDlssBridge(ID3D11DeviceContext* immediate_context) {
   if (!EnlistProcessThreads(thread_handles)
       || DetourAttach(reinterpret_cast<void**>(&begin_query), reinterpret_cast<void*>(HookBeginQuery)) != NO_ERROR
       || (deferred_begin_query != nullptr
-        && DetourAttach(reinterpret_cast<void**>(&deferred_begin_query), reinterpret_cast<void*>(HookBeginQuery)) != NO_ERROR)
+          && DetourAttach(reinterpret_cast<void**>(&deferred_begin_query), reinterpret_cast<void*>(HookBeginQuery)) != NO_ERROR)
       || DetourAttach(reinterpret_cast<void**>(&end_query), reinterpret_cast<void*>(HookEndQuery)) != NO_ERROR
       || (deferred_end_query != nullptr
-        && DetourAttach(reinterpret_cast<void**>(&deferred_end_query), reinterpret_cast<void*>(HookEndQuery)) != NO_ERROR)
+          && DetourAttach(reinterpret_cast<void**>(&deferred_end_query), reinterpret_cast<void*>(HookEndQuery)) != NO_ERROR)
       || DetourTransactionCommit() != NO_ERROR) {
     DetourTransactionAbort();
     CloseThreadHandles(thread_handles);
@@ -364,10 +360,10 @@ inline void UninstallDeferredDlssBridge() {
   if (!EnlistProcessThreads(thread_handles)
       || DetourDetach(reinterpret_cast<void**>(&begin_query), reinterpret_cast<void*>(HookBeginQuery)) != NO_ERROR
       || (deferred_begin_query != nullptr
-        && DetourDetach(reinterpret_cast<void**>(&deferred_begin_query), reinterpret_cast<void*>(HookBeginQuery)) != NO_ERROR)
+          && DetourDetach(reinterpret_cast<void**>(&deferred_begin_query), reinterpret_cast<void*>(HookBeginQuery)) != NO_ERROR)
       || DetourDetach(reinterpret_cast<void**>(&end_query), reinterpret_cast<void*>(HookEndQuery)) != NO_ERROR
       || (deferred_end_query != nullptr
-        && DetourDetach(reinterpret_cast<void**>(&deferred_end_query), reinterpret_cast<void*>(HookEndQuery)) != NO_ERROR)
+          && DetourDetach(reinterpret_cast<void**>(&deferred_end_query), reinterpret_cast<void*>(HookEndQuery)) != NO_ERROR)
       || DetourTransactionCommit() != NO_ERROR) {
     DetourTransactionAbort();
     CloseThreadHandles(thread_handles);
@@ -456,12 +452,12 @@ inline DeferredScheduleResult ScheduleDeferredDlssLocked(ValidatedFrameInputs& i
 
   DeferredDlssDispatch pending = {
       .deferred_context = inputs.cmd_list,
-      .color_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.color_srv.handle),              // NOLINT(performance-no-int-to-ptr)
-      .velocity_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.velocity_srv.handle),        // NOLINT(performance-no-int-to-ptr)
-      .depth_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.depth_srv.handle),              // NOLINT(performance-no-int-to-ptr)
+      .color_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.color_srv.handle),                      // NOLINT(performance-no-int-to-ptr)
+      .velocity_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.velocity_srv.handle),                // NOLINT(performance-no-int-to-ptr)
+      .depth_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.depth_srv.handle),                      // NOLINT(performance-no-int-to-ptr)
       .object_velocity_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.object_velocity_srv.handle),  // NOLINT(performance-no-int-to-ptr)
       .inputs = inputs,
-        .temporal_generation = state::frame_state.temporal_generation,
+      .temporal_generation = state::frame_state.temporal_generation,
   };
   ID3D11CommandList* prefix = nullptr;
   const HRESULT finish_result = deferred_context->FinishCommandList(TRUE, &prefix);
@@ -596,7 +592,7 @@ inline void OnDestroyCommandList(reshade::api::command_list* command_list) {
   const auto* device = dlss_bridge_device.load(std::memory_order_acquire);
   if (device == nullptr || command_list == nullptr || command_list->get_device() != device) return;
   auto* native_command_list = reinterpret_cast<ID3D11CommandList*>(command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
-  auto* native_context = reinterpret_cast<ID3D11DeviceContext*>(command_list->get_native());      // NOLINT(performance-no-int-to-ptr)
+  auto* native_context = reinterpret_cast<ID3D11DeviceContext*>(command_list->get_native());     // NOLINT(performance-no-int-to-ptr)
   bool abandoned = false;
   uint64_t abandoned_generation = 0u;
   {

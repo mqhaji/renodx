@@ -132,9 +132,8 @@ Neighborhood BuildCurrentNeighborhood(float2 uv, float2 inv_screen_size, float3 
 }
 
 // Decodes MGSV's camera-velocity buffer (.ba = encoded velocity) into
-// a UV-space delta. The velocity does not contain native projection jitter,
-// which is what fixed-output-grid temporal accumulation requires: each frame
-// contributes a different subpixel sample to the same output pixel.
+// a current-minus-previous UV delta. Object contributions can contain current
+// projection jitter; the object-source selection below removes that separately.
 //
 // MGSV's MotionBlurCameraVelocity_ps writes:
 //   o0.b = 0.5 + 0.5 * (vNDC.x * m_renderInfo.x / 128)
@@ -171,6 +170,10 @@ VelocitySelection SelectNearestVelocity(
   selection.object_mask = object_velocity_texture.SampleLevel(point_sampler, uv, 0).r;
   selection.uv = uv;
   selection.depth = depth_texture.SampleLevel(point_sampler, uv, 0).x;
+
+  // Mode 7 isolates spatial selection only: keep Auto's composite motion,
+  // but take its velocity, mask and camera depth/UV from the output pixel.
+  if (object_motion_mode >= 6.5f) return selection;
 
   [unroll]
   for (uint i = 1u; i < 5u; ++i) {
@@ -307,7 +310,15 @@ void main(uint3 dispatch_thread_id: SV_DispatchThreadID) {
   }
 
   float2 object_velocity = native_velocity;
-  if (object_motion_mode < 0.5f) {
+  if (object_motion_mode >= 6.5f) {
+    object_velocity -= current_jitter_uv * velocity_projection_jitter_scale;
+  } else if (object_motion_mode >= 5.5f) {
+    // Same selected texel/mask/depth as Auto, but before A13321B6's linear
+    // sampling and fractional-mask camera blend. Native radial clamp remains.
+    const float2 encoded = object_velocity_texture.SampleLevel(point_sampler, velocity_selection.uv, 0).ba;
+    object_velocity = (encoded * 2.f - 1.f) * 64.f / screen_size;
+    object_velocity -= current_jitter_uv * velocity_projection_jitter_scale;
+  } else if (object_motion_mode < 0.5f) {
     object_velocity -= current_jitter_uv * velocity_projection_jitter_scale;
   } else if (object_motion_mode >= 1.5f && object_motion_mode < 2.5f) {
     object_velocity -= current_jitter_uv;
