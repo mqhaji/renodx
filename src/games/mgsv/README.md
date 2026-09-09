@@ -36,9 +36,9 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 
 **4. Temporal Anti-Aliasing**
 - Installs a narrowly validated native projection hook during device initialization
-- Captures the final camera/object velocity target and routes validated inputs to FSR3 or analytical history
+- Captures the final camera/object velocity target and routes validated inputs to Analytical TAA, FSR3, or DLSS
 - Requires exact frame, sample, and render-dimension agreement between the native jitter and resolve
-- Exposes a top-level Off/Analytical/FSR3 dropdown, defaulting new profiles to FSR3 while preserving vanilla FXAA in Off
+- Defaults new profiles to FSR3 while preserving vanilla FXAA and unjittered projection in Off
 
 ---
 
@@ -221,66 +221,30 @@ The native `copy_resource` callback is separately armed from a proven scene-tone
 
 The **Temporal Anti-Aliasing** section is the first addon settings section. Its single **Temporal Reconstruction**
 dropdown selects **Off (Vanilla FXAA)**, **Analytical TAA**, **AMD FSR 3.1.5**, or **NVIDIA DLSS**. New profiles default
-to FSR3. Off keeps MGSV's original FXAA path and leaves the native projection unmodified. Existing split enable/method settings migrate to
-the unified mode while preserving their prior Off state or selected implementation. The former FSR2 implementation has
-been removed; both legacy AMD selector values migrate to FSR3.
+to FSR3. Off keeps original FXAA and unjittered projection. Settings remain preset-local; existing saved values and
+migrated Off states are preserved.
 
-When enabled, the TAA path:
+- **DLSS Model** defaults/resets to F (6), subject to feature-DLL support. DLSS performs only a vendor check at startup;
+  DLL/NGX/query-hook work waits for explicit or restored DLSS selection.
+- Both diagnostic UI macros remain enabled. All eleven Analytical projection sliders default/reset to `1x`; FSR3/DLSS
+  use `1x` on the original six and `0x` on the five experimental paths. Those five paths still need visual validation.
+- Analytical exposes Halton/Off jitter and resolve tuning. FSR3/DLSS enforce eight-phase Halton without changing the
+  saved Analytical preference. **Unclamp Motion Vectors** remains a shared default-Off diagnostic.
+- The legacy FSR compute-only path and toggle are removed after successful user validation with Legacy Off. All methods
+  use extended compute/graphics/OM preservation, including depth-stencil state; old saved legacy keys are ignored.
+- Temporary pose/jitter-link readbacks, dumps, and per-path telemetry are absent. Normal camera/input ownership,
+  DLSS query tracking, original command-list preservation, and SDK cleanup remain.
 
-1. Applies an eight-sample base-(2,3) Halton sequence first to the proven gameplay projection copy at
-   `ShaderManager+0x680`.
-2. Publishes the exact applied jitter together with its frame token, sample index, and render dimensions.
-3. Reuses that publication at guarded velocity, forward/model/alpha/overlay, and local-light native boundaries that
-   otherwise recopy persistent unjittered viewport projection.
-4. Captures vanilla no-jitter projection/view matrices at the main boundary, computes the current inverse and
-   previous VP relation in double precision, and promotes current VP only after a successful temporal dispatch.
-5. Captures the final `MotionBlurCameraVelocity` target, depth, object velocity, and matching camera publication into one
-   validated game-native frame.
-6. Builds linear color and signed RG16F motion, then runs AMD's FSR3 3.1.5 host schedule through the custom D3D11/SM5
-   backend or the optional analytical history resolve. Both retain exact matrix camera motion for background pixels and
-   MGSV's deformation-aware object motion.
-7. Resolves at the first `DOF_ScatterBakeFirst` invocation whose scene color matches the full-resolution depth and motion
-   inputs. Lower-resolution DoF invocations are skipped so the fallback cascade can continue.
-8. Bypasses the original FXAA filter while TAA is enabled.
+Temporal reconstruction preserves native resolution, bone-aware object motion, and current scene alpha. Invalid or
+mismatched inputs fail closed; lower-resolution DoF candidates are skipped. **Character warble and rapid night-vision
+skinned-mesh flicker remain unresolved.** Neither diagnostic defaults nor successful builds establish a visual fix.
+FSR external reactive/transparency masks and a proven native camera-cut signal remain pending.
 
-**TAA Jitter Pattern** is visible only with Analytical TAA and exposes the production eight-phase Halton sequence plus an
-**Off** diagnostic that leaves the analytical resolve active with zero projection jitter. FSR3 always uses eight-phase
-Halton and hides the selector. The extended diagnostic view, velocity range, and object-motion selector are temporarily
-enabled by `ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS=1` during the night-vision investigation. The six known-path jitter sliders are temporarily enabled by
-`ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS=1`, appear only for Analytical TAA, and remain pinned to `1x` for FSR3 and DLSS.
-Analytical resolve-tuning controls are hidden while an SDK method is selected. The default-Off **Unclamp Motion Vectors**
-experiment remains shared. Relevant changes invalidate and reseed history.
-FSR3 forces only the effective runtime pattern, so switching back to Analytical TAA restores its persisted Off/Halton
-preference.
+**Restart MGSV to replace or remove the addon.** Native projection hooks and the module are pinned for process lifetime;
+device destruction stops admission rather than unpatching/freeing trampolines. Live native-hook unloading is unsupported.
 
-The current FSR3 dispatch does not provide external reactive or transparency/composition masks. AMD's internal
-shading-change, prepare-reactivity, disocclusion, motion-divergence, and luma-instability passes remain active. Planned
-game-derived mask integration, beginning with proven material paths such as `TppFxRain`, is tracked in
-[`taa/ROADMAP.md`](taa/ROADMAP.md). Sharpening is disabled even though the host creates its RCAS pipeline.
-
-The coordinator fails closed: a missing camera publication, stale capture, device mismatch, or resource mismatch skips
-that insertion candidate instead of blending unrelated inputs. Camera, depth, final velocity, and object velocity are
-snapshotted together and validated once before method dispatch. MGSV callbacks may trail `Present` by one epoch only when
-their Halton sample still matches. Presents without a new full-resolution insertion candidate preserve history; history
-resets only after a matching candidate is seen but cannot resolve. Mode transitions also reset temporal state, and
-selecting Off verifies exact restoration of the vanilla projection copy. The later experimental `0x200DBED9` replacement
-has been removed; the original light VS and the existing native projection hooks are used for the current regression test.
-The temporary FSR-only **FSR Legacy Compute State** checkbox compares the old compute-only preservation calls (On)
-against extended graphics/OM preservation (Off), without changing jitter or reconstruction math. The user's revised A/B
-confirmed less light flicker with Legacy **On**, now the default for new/reset settings. A small residual is unresolved;
-the existing FSR tuning remains unchanged. Normal DLSS availability is restored for the matched follow-up, while DLSS
-itself still uses extended preservation. Hold FSR Legacy On fixed for the
-[cold-start comparison](taa/README.md#cold-start-dlss-runtime-isolation).
-
-Default builds log explicit temporal mode transitions. FSR3 logs **FSR3.1 D3D11 context probe succeeded** when its
-context is created and **AMD FSR3.1 accumulation started** after each reset; analytical TAA logs **TAA accumulation
-started**. Repeated
-accumulation-start lines while settings and resolution are unchanged indicate that history is still being reset.
-Persisted startup state and waiting for the first native publication are logged once. The expected lower-resolution DoF
-candidate is also logged only once per device lifetime.
-
-See [`taa/README.md`](taa/README.md) for the current implementation and validation contract. Future temporal quality and
-DLSS validation work is tracked in [`taa/ROADMAP.md`](taa/ROADMAP.md).
+See the [temporal reference](taa/README.md) for controls, motion/jitter ownership, SDK lifecycle, and limitations;
+the [roadmap](taa/ROADMAP.md) contains only outstanding work.
 
 ---
 
@@ -379,12 +343,15 @@ The `custom_shaders` array defines the shader interception pipeline. **Order mat
 
 ### Build
 
-Use CMake Tools in VS Code, select the desired configuration, and build the `mgsv` target. Inspect these outputs:
+With MGSV fully stopped, use CMake Tools in VS Code and build only `mgsv`. Use the repository's Clang debug profile for
+development; the preceding gameplay cleanup used the approved MSVC/Ninja Release comparison profile and passed, but was
+not deployed or newly gameplay-tested. Inspect these outputs for the chosen configuration:
 
 - `build/Release/renodx-mgsv.addon64` (or the matching configuration directory)
 - `build/mgsv.include/embed/mgsv_taa.cso`
 - `build/mgsv.include/embed/mgsv_taa.h`
 - `build/mgsv.include/embed/fsr3_prepare_game_inputs.cso` and `fsr3_encode_game_output.cso`
+- `build/mgsv.include/embed/dlss_prepare_game_inputs.cso` and `dlss_encode_game_output.cso`
 - `build/mgsv.include/embed/fsr3sdk_prepare_inputs.cso`, `fsr3sdk_luma_pyramid.cso`,
   `fsr3sdk_shading_change_pyramid.cso`, `fsr3sdk_shading_change.cso`, `fsr3sdk_prepare_reactivity.cso`,
   `fsr3sdk_luma_instability.cso`, `fsr3sdk_accumulate.cso`, `fsr3sdk_accumulate_sharpen.cso`, `fsr3sdk_rcas.cso`,
@@ -393,10 +360,10 @@ Use CMake Tools in VS Code, select the desired configuration, and build the `mgs
 
 ### Deploy
 
-Copy the built addon to the game folder:
-```
-copy build\Release\renodx-mgsv.addon64 "C:\Program Files (x86)\Steam\steamapps\common\MGS_TPP\"
-```
+With MGSV still stopped, copy the matching `renodx-mgsv.addon64` beside `mgsvtpp.exe`, then restart the game.
+The usual Steam folder is `C:\Program Files (x86)\Steam\steamapps\common\MGS_TPP`.
+Use one game addon and disable live shader overrides for validation. DLSS additionally needs a compatible
+`nvngx_dlss.dll` beside the executable; it is not bundled by the addon. Replace either DLL only while the game is stopped.
 
 ### Enable in ReShade
 
@@ -408,23 +375,13 @@ copy build\Release\renodx-mgsv.addon64 "C:\Program Files (x86)\Steam\steamapps\c
 
 ### Manual TAA Verification
 
-1. Select **Off (Vanilla FXAA)** and confirm the original FXAA presentation and native projection are stable.
-2. Select the default **AMD FSR 3.1.5** mode. Confirm the jitter-pattern control is hidden, one **FSR3.1 D3D11
-   context probe succeeded** line appears, and one **AMD FSR3.1 accumulation started** line is logged. Standing still
-   should not restart it.
-3. Inspect static edges, thin wires, foliage, slow and fast camera pans, aiming, binoculars, menus, camera cuts, DoF, and
-   motion blur. Pay particular attention to moving silhouettes, disocclusions, rain, particles, and transparency while
-   external reactive masks are not yet connected.
-4. Switch to **Analytical TAA**, verify one reset and that **TAA Jitter Pattern** becomes visible, then compare it with
-   FSR3. Analytical jitter **Off** remains diagnostic; FSR3 always enforces the eight-phase Halton sequence.
-5. Compare **Unclamp Motion Vectors** Off/On during motion above approximately 64 pixels; verify object motion and native
-   motion blur, then return it to its default **Off** state.
-6. With `ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS=1`, exercise all per-path controls; with
-   `ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS=1`, also exercise the diagnostic views; otherwise verify
-   the production defaults and confirm the log has no recurring publication, capture, setup, or dispatch warnings.
-7. Select Off and confirm a **temporal reconstruction disabled** line, then verify that the scene returns without a
-   persistent subpixel shift, stale-history frame, or freeze.
-8. Repeat an Off/FSR3 cycle after a resolution or display-mode change to verify history is recreated at the new size.
+1. Confirm the addon loads and settings match the selected preset. Check Off for vanilla FXAA and no residual shift.
+2. Check FSR3/Analytical accumulation seeds once per intended reset, not repeatedly in a static scene. Validate DLSS
+   request-time activation and suspension/resume separately from model/resize recreation.
+3. Inspect static and moving detail, skinned characters, menus, DoF/motion blur, rain/transparency, night vision, camera
+   transitions, and resolution changes. Keep known warble/ghosting distinct from startup or history-reset failures.
+4. Follow the [detailed temporal validation matrix](taa/README.md#manual-validation) for coverage and lifecycle checks.
+   No automatic diagnostic capture is present, and this documentation cleanup adds no runtime test result.
 
 ---
 

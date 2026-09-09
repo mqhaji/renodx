@@ -207,31 +207,20 @@ inline void SetProjectionJitterScale(
     state::ProjectionJitterPath path,
     float value,
     const char* reason) {
-  state::SetProjectionJitterScale(path, value);
-  InvalidateHistoryForSetting(reason);
-}
-#endif
-
-inline void TransitionFsrLegacyComputeState(float value) {
   RuntimeTransitionGuard transition_guard;
-  const bool legacy_compute_state = value > 0.f;
-  if (legacy_compute_state == state::runtime_fsr_legacy_compute_state.load(std::memory_order_acquire)) return;
-
   coordinator::ExecutionGuard execution_guard;
   camera_state::PublicationWriterGuard publication_guard;
-  state::runtime_fsr_legacy_compute_state.store(legacy_compute_state, std::memory_order_release);
-  if (state::GetTemporalMode() == state::TemporalMode::AMD_FSR3) {
-    coordinator::ResetTemporalStateWithPublicationLocked("FSR state-preservation diagnostic changed");
-  }
-  logging::Info("FSR state preservation selected mode=", legacy_compute_state ? "legacy-compute" : "extended",
-                " frame=", state::CurrentFrameToken());
+  if (state::runtime_projection_jitter_scales[static_cast<std::size_t>(path)].load(std::memory_order_acquire)
+      == std::clamp(value, -2.f, 2.f)) return;
+  state::SetProjectionJitterScale(path, value);
+  coordinator::ResetTemporalStateWithPublicationLocked(reason);
 }
+#endif
 
 struct BindingSnapshot {
   float temporal_mode = static_cast<float>(state::DEFAULT_TEMPORAL_MODE);
   float dlss_model = static_cast<float>(dlss::DEFAULT_MODEL);
   float jitter_pattern = static_cast<float>(state::DEFAULT_JITTER_PATTERN);
-  float fsr_legacy_compute_state = static_cast<float>(state::DEFAULT_FSR_LEGACY_COMPUTE_STATE);
   float clip_tightness = state::DEFAULT_CLIP_TIGHTNESS;
   float history_clip_strength = state::DEFAULT_HISTORY_CLIP_STRENGTH;
   float current_frame_blend = state::DEFAULT_CURRENT_FRAME_BLEND;
@@ -241,7 +230,7 @@ struct BindingSnapshot {
   float object_motion_mode = static_cast<float>(state::DEFAULT_OBJECT_MOTION_MODE);
 #endif
 #if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
-  std::array<float, state::PROJECTION_JITTER_PATH_COUNT> projection_jitter_scales = {};
+  std::array<float, state::PROJECTION_JITTER_PATH_COUNT> projection_jitter_scales = state::DEFAULT_PROJECTION_JITTER_SCALES;
 #endif
 };
 
@@ -254,7 +243,6 @@ inline void ApplySettingsSnapshot() {
                                  : temporal_mode_setting->GetValue();
     snapshot.dlss_model = dlss_model;
     snapshot.jitter_pattern = state::jitter_pattern;
-    snapshot.fsr_legacy_compute_state = state::fsr_legacy_compute_state;
     snapshot.clip_tightness = state::clip_tightness;
     snapshot.history_clip_strength = state::history_clip_strength;
     snapshot.current_frame_blend = state::current_frame_blend;
@@ -271,7 +259,15 @@ inline void ApplySettingsSnapshot() {
   TransitionDlssModel(snapshot.dlss_model, "DLSS model synchronized");
   TransitionTemporalMode(snapshot.temporal_mode, "temporal mode synchronized");
   TransitionJitterPattern(snapshot.jitter_pattern);
-  TransitionFsrLegacyComputeState(snapshot.fsr_legacy_compute_state);
+  // Re-read preset-local scales while holding the settings lock: a callback
+  // may have superseded the earlier snapshot during the mode transitions.
+  const std::unique_lock settings_lock(renodx::utils::mutex::global_mutex);
+#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
+  snapshot.projection_jitter_scales = state::projection_jitter_scales;
+#endif
+  RuntimeTransitionGuard transition_guard;
+  coordinator::ExecutionGuard execution_guard;
+  camera_state::PublicationWriterGuard publication_guard;
   bool history_settings_changed = state::GetClipTightness() != std::clamp(snapshot.clip_tightness, 0.f, 1.f)
                                   || state::GetHistoryClipStrength()
                                          != std::clamp(snapshot.history_clip_strength, 0.f, 1.f)
@@ -284,7 +280,7 @@ inline void ApplySettingsSnapshot() {
                                         std::clamp(snapshot.diagnostic_view, 0.f, 10.f)))
                              || state::GetObjectMotionMode()
                                     != static_cast<uint32_t>(
-                                        std::clamp(snapshot.object_motion_mode, 0.f, 5.f));
+                                        std::clamp(snapshot.object_motion_mode, 0.f, 7.f));
 #endif
 #if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
   if (state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA) {
@@ -312,7 +308,7 @@ inline void ApplySettingsSnapshot() {
   }
 #endif
   if (history_settings_changed) {
-    InvalidateHistoryForSetting("settings synchronized");
+    coordinator::ResetTemporalStateWithPublicationLocked("settings synchronized");
   }
 }
 
@@ -494,30 +490,15 @@ inline void AppendSettings(
           .section = "Temporal Anti-Aliasing",
           .on_draw = DrawTemporalModeSelector,
       },
+      dlss_model_setting,
       new renodx::utils::settings::Setting{
-          .key = "FxFsrLegacyComputeState",
-          .binding = &state::fsr_legacy_compute_state,
-          .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
-          .default_value = static_cast<float>(state::DEFAULT_FSR_LEGACY_COMPUTE_STATE),
-          .label = "FSR Legacy Compute State",
+          .value_type = renodx::utils::settings::SettingValueType::CUSTOM,
+          .can_reset = false,
+          .label = "DLSS Model",
           .section = "Temporal Anti-Aliasing",
-          .tooltip = "On (default) uses mgsv-old compute-only state slots, which reduced light flicker in testing. "
-                     "Off retains extended graphics/OM save/restore for comparison. "
-                     "No jitter, camera, or algorithm changes. Changing this resets FSR history; DLSS is unaffected.",
-          .on_change_value = [](float previous, float current) {
-            (void)previous;
-            TransitionFsrLegacyComputeState(current); },
-          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::AMD_FSR3; },
+          .on_draw = DrawDlssModelSelector,
+          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::NVIDIA_DLSS; },
       },
-          dlss_model_setting,
-          new renodx::utils::settings::Setting{
-            .value_type = renodx::utils::settings::SettingValueType::CUSTOM,
-            .can_reset = false,
-            .label = "DLSS Model",
-            .section = "Temporal Anti-Aliasing",
-            .on_draw = DrawDlssModelSelector,
-            .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::NVIDIA_DLSS; },
-          },
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
       new renodx::utils::settings::Setting{
           .key = "FxTaaDiagnosticView",
@@ -604,7 +585,7 @@ inline void AppendSettings(
           .default_value = static_cast<float>(state::DEFAULT_OBJECT_MOTION_MODE),
           .label = "TAA Object Motion Source",
           .section = "Temporal Anti-Aliasing",
-          .tooltip = "Tests whether native skinned motion contains projection jitter. Matrix Camera Everywhere intentionally removes animation motion. Add modes are sign checks. Changing modes resets history.",
+          .tooltip = "Auto Center Pixel changes only Auto's spatial selection: center velocity, mask and camera depth instead of nearest-depth dilation. Compare Auto vs Auto Center with Jitter Pattern Off. Direct Object instead bypasses the composite at the same dilated pixel. Matrix Camera Everywhere removes animation motion. Changing modes resets history.",
           .labels = {
               "Auto-Corrected Native Object Velocity",
               "Matrix Camera Everywhere",
@@ -612,6 +593,8 @@ inline void AppendSettings(
               "Native + Current Jitter",
               "Native - Jitter Delta",
               "Native + Jitter Delta",
+              "Direct Object Velocity (Bypass Composite)",
+              "Auto Center Pixel (No Dilation)",
           },
           .on_change_value = [](float previous, float current) {
             (void)previous;
@@ -784,6 +767,76 @@ inline void AppendSettings(
               state::ProjectionJitterPath::LOCAL_LIGHT,
               current,
               "local-light projection jitter changed"); },
+          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
+      },
+      new renodx::utils::settings::Setting{
+          .key = "FxTaaSunVolumeJitterScale",
+          .binding = &state::projection_jitter_scales[static_cast<std::size_t>(state::ProjectionJitterPath::SUN_VOLUME)],
+          .value_type = renodx::utils::settings::SettingValueType::FLOAT,
+          .default_value = state::DEFAULT_PROJECTION_JITTER_SCALE,
+          .label = "Sun Volume Projection Jitter",
+          .section = "Temporal Anti-Aliasing",
+          .tooltip = "Experimental: translates a private VP copy for CPU-projected sunlight volumes. Default 1; test independently.",
+          .min = -2.f,
+          .max = 2.f,
+          .format = "%.2fx",
+          .on_change_value = [](float, float current) { SetProjectionJitterScale(state::ProjectionJitterPath::SUN_VOLUME, current, "sun volume jitter changed"); },
+          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
+      },
+      new renodx::utils::settings::Setting{
+          .key = "FxTaaShFallbackJitterScale",
+          .binding = &state::projection_jitter_scales[static_cast<std::size_t>(state::ProjectionJitterPath::SH_FALLBACK)],
+          .value_type = renodx::utils::settings::SettingValueType::FLOAT,
+          .default_value = state::DEFAULT_PROJECTION_JITTER_SCALE,
+          .label = "SH Fallback Projection Jitter",
+          .section = "Temporal Anti-Aliasing",
+          .tooltip = "Experimental: translates successful SH fallback clip vertices, preserving visibility, Z/W and depth bounds. Not the deferred SH packet route.",
+          .min = -2.f,
+          .max = 2.f,
+          .format = "%.2fx",
+          .on_change_value = [](float, float current) { SetProjectionJitterScale(state::ProjectionJitterPath::SH_FALLBACK, current, "SH fallback jitter changed"); },
+          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
+      },
+      new renodx::utils::settings::Setting{
+          .key = "FxTaaTerrainDecalJitterScale",
+          .binding = &state::projection_jitter_scales[static_cast<std::size_t>(state::ProjectionJitterPath::TERRAIN_DECAL)],
+          .value_type = renodx::utils::settings::SettingValueType::FLOAT,
+          .default_value = state::DEFAULT_PROJECTION_JITTER_SCALE,
+          .label = "Terrain Decal Projection Jitter",
+          .section = "Temporal Anti-Aliasing",
+          .tooltip = "Experimental: corrects the owned decal packet's copied P before publication. Affects inverse-plane reconstruction, not the separately captured raster P. Default 1.",
+          .min = -2.f,
+          .max = 2.f,
+          .format = "%.2fx",
+          .on_change_value = [](float, float current) { SetProjectionJitterScale(state::ProjectionJitterPath::TERRAIN_DECAL, current, "terrain decal jitter changed"); },
+          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
+      },
+      new renodx::utils::settings::Setting{
+          .key = "FxTaaLightPacketJitterScale",
+          .binding = &state::projection_jitter_scales[static_cast<std::size_t>(state::ProjectionJitterPath::LIGHT_PACKET)],
+          .value_type = renodx::utils::settings::SettingValueType::FLOAT,
+          .default_value = state::DEFAULT_PROJECTION_JITTER_SCALE,
+          .label = "General Light Packet Jitter",
+          .section = "Temporal Anti-Aliasing",
+          .tooltip = "Experimental: translates owned light-packet VP before publication, leaving clip-W and selection data unchanged. Final consumer coverage is not yet visually verified.",
+          .min = -2.f,
+          .max = 2.f,
+          .format = "%.2fx",
+          .on_change_value = [](float, float current) { SetProjectionJitterScale(state::ProjectionJitterPath::LIGHT_PACKET, current, "light packet jitter changed"); },
+          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
+      },
+      new renodx::utils::settings::Setting{
+          .key = "FxTaaAlternateCameraJitterScale",
+          .binding = &state::projection_jitter_scales[static_cast<std::size_t>(state::ProjectionJitterPath::ALTERNATE_CAMERA)],
+          .value_type = renodx::utils::settings::SettingValueType::FLOAT,
+          .default_value = state::DEFAULT_PROJECTION_JITTER_SCALE,
+          .label = "Alternate Stream Projection Jitter",
+          .section = "Temporal Anti-Aliasing",
+          .tooltip = "Experimental: translates a private VP copy at engine constant 0x47 staging only for an exact main-camera/P/V/grid match. Never changes context P or null-camera state.",
+          .min = -2.f,
+          .max = 2.f,
+          .format = "%.2fx",
+          .on_change_value = [](float, float current) { SetProjectionJitterScale(state::ProjectionJitterPath::ALTERNATE_CAMERA, current, "alternate stream jitter changed"); },
           .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
       },
 #endif
