@@ -133,8 +133,8 @@ object pixels retain native bone-aware motion with the configured current projec
 sign/swizzle/scale, subtract a global jitter delta, or gate correction on a last-success counter without pixel evidence.
 
 Analytical selects center plus four diagonal depth taps using maximum raw reverse-Z (`>=` makes the last equal-depth
-tap win), moving mask/motion/depth/UV together. FSR3/DLSS adapters load center pixels; Analytical's dilation alone cannot
-explain all DLSS symptoms. Analytical decodes current filtering and all sixteen Catmull-Rom history taps before
+tap win), moving mask/motion/depth/UV together. FSR3/DLSS adapters load center pixels; this difference alone does not
+establish the cause of warble in any method. Analytical decodes current filtering and all sixteen Catmull-Rom history taps before
 linear-light reconstruction, then stores history in MGSV's encoded domain. It has no previous-depth rejection or locks.
 
 The Object Motion Source modes retain Auto, Matrix Camera Everywhere, current-jitter and jitter-delta sign diagnostics,
@@ -179,11 +179,14 @@ are released; DLSS suspension is a transition-crash mitigation, not identificati
 
 ## Known limitations and validation status
 
-- **Character warble remains unresolved.** Jitter Off did not help, and repeated Auto/Direct comparisons showed no visible
-  difference. Matrix Camera Everywhere reduced warble but produced severe animation ghosting. The narrow velocity
-  ownership correction did not visually fix it; successful hook application is not a proof of full pose ownership.
+- **Character warble root cause remains unidentified.** Latest user clarification (2026-09-09): Analytical Jitter Off
+  did not improve it, and repeated Auto/Direct comparisons showed no noticeable difference. Matrix Camera Everywhere
+  was **inconclusive** because heavy animation ghosting prevented judging warble; it is not evidence that bypassing
+  native object motion helped. The narrow velocity ownership correction did not visually fix the observed warble.
+  The user tentatively thinks DLSS may not warble while Analytical TAA/FSR are noticeable; this is not confirmed.
 - Prior repaired readbacks completed but did not establish same-character color/velocity geometry and contributing
   history correspondence. Native previous bones/object transforms versus the last accumulated frame remain unproved.
+  These are coverage gaps, not evidence of a native-pose root cause or grounds to prioritize it from the camera-only test.
   Current source has no automatic capture machinery; no repeated generic capture or old A/B run is requested.
 - Rapid night-vision skinned-mesh flicker remains separate and unfixed. Thermography target/depth ownership is unproven.
 - Five experimental projection paths still need runtime coverage/transition validation. There is no proven native
