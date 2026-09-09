@@ -261,10 +261,14 @@ inline void OnDestroyDevice(reshade::api::device* device) {
       true,
       false);
   coordinator::UninstallDeferredDlssBridge();
-  coordinator::ExecutionGuard execution_guard;
   logging::Info("destroy device");
-  projection_jitter::Detach();
-  coordinator::Destroy(device);
+  // Native hooks and pinned addon code survive device recreation. No unsafe
+  // trampoline reclamation or in-flight wait occurs at device destruction.
+  projection_jitter::StopAdmission();
+  {
+    coordinator::ExecutionGuard execution_guard;
+    coordinator::Destroy(device);
+  }
 }
 
 inline void OnPresent(
@@ -325,7 +329,6 @@ inline void OnPresent(
   coordinator::ExecutionGuard execution_guard;
   const auto mode = state::GetTemporalMode();
   coordinator::ReleaseInactiveResources(device, mode);
-  projection_jitter::LogPathDiagnostics();
   if (mode != state::TemporalMode::OFF
       && state::frame_state.full_resolution_candidate_seen
       && !state::frame_state.reconstruction_scheduled
@@ -353,18 +356,16 @@ inline void Use(DWORD fdw_reason) {
       logging::Info("initial temporal state enabled=", logging::Bool{state::IsEnabled()},
                     " mode=", option == nullptr ? "unknown" : option->label,
                     " jitter_pattern=", state::GetJitterPattern() == 0u ? "off" : "halton_8");
-      logging::Info("light-flicker isolation: original light VS; FSR state=",
-                    state::runtime_fsr_legacy_compute_state.load(std::memory_order_acquire) ? "legacy-compute" : "extended");
       logging::Info("DLSS startup=vendor-only; DLL inspection, NGX and hooks are selection-driven");
       projection_jitter::Use(fdw_reason);
 
       reshade::register_event<reshade::addon_event::init_command_list>(descriptor_tracker::OnInitCommandList);
       reshade::register_event<reshade::addon_event::destroy_command_list>(descriptor_tracker::OnDestroyCommandList);
       reshade::register_event<reshade::addon_event::reset_command_list>(descriptor_tracker::OnResetCommandList);
-        // These return before QI/locks until the requested bridge is installed.
-        reshade::register_event<reshade::addon_event::init_command_list>(coordinator::OnInitCommandList);
-        reshade::register_event<reshade::addon_event::destroy_command_list>(coordinator::OnDestroyCommandList);
-        reshade::register_event<reshade::addon_event::execute_secondary_command_list>(
+      // These return before QI/locks until the requested bridge is installed.
+      reshade::register_event<reshade::addon_event::init_command_list>(coordinator::OnInitCommandList);
+      reshade::register_event<reshade::addon_event::destroy_command_list>(coordinator::OnDestroyCommandList);
+      reshade::register_event<reshade::addon_event::execute_secondary_command_list>(
           coordinator::OnExecuteSecondaryCommandList);
       reshade::register_event<reshade::addon_event::push_descriptors>(descriptor_tracker::OnPushDescriptors);
       reshade::register_event<reshade::addon_event::draw>(OnDraw);
@@ -387,9 +388,9 @@ inline void Use(DWORD fdw_reason) {
       reshade::unregister_event<reshade::addon_event::init_command_list>(descriptor_tracker::OnInitCommandList);
       reshade::unregister_event<reshade::addon_event::destroy_command_list>(descriptor_tracker::OnDestroyCommandList);
       reshade::unregister_event<reshade::addon_event::reset_command_list>(descriptor_tracker::OnResetCommandList);
-        reshade::unregister_event<reshade::addon_event::init_command_list>(coordinator::OnInitCommandList);
-        reshade::unregister_event<reshade::addon_event::destroy_command_list>(coordinator::OnDestroyCommandList);
-        reshade::unregister_event<reshade::addon_event::execute_secondary_command_list>(
+      reshade::unregister_event<reshade::addon_event::init_command_list>(coordinator::OnInitCommandList);
+      reshade::unregister_event<reshade::addon_event::destroy_command_list>(coordinator::OnDestroyCommandList);
+      reshade::unregister_event<reshade::addon_event::execute_secondary_command_list>(
           coordinator::OnExecuteSecondaryCommandList);
       reshade::unregister_event<reshade::addon_event::push_descriptors>(descriptor_tracker::OnPushDescriptors);
       reshade::unregister_event<reshade::addon_event::draw>(OnDraw);

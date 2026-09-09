@@ -63,6 +63,11 @@ enum class ProjectionJitterPath : std::uint8_t {
   ALPHA_MODEL,
   OVERLAY_MODEL,
   LOCAL_LIGHT,
+  SUN_VOLUME,
+  SH_FALLBACK,
+  TERRAIN_DECAL,
+  LIGHT_PACKET,
+  ALTERNATE_CAMERA,
   COUNT,
 };
 
@@ -71,11 +76,11 @@ inline constexpr float DEFAULT_DIAGNOSTIC_VIEW = 0.f;
 inline constexpr float DEFAULT_VELOCITY_VISUALIZATION_RANGE = 8.f;
 inline constexpr uint32_t DEFAULT_OBJECT_MOTION_MODE = 0u;
 inline constexpr float DEFAULT_PROJECTION_JITTER_SCALE = 1.f;
+inline std::atomic_flag execution_lock = ATOMIC_FLAG_INIT;
 inline constexpr uint32_t DEFAULT_JITTER_PATTERN = 1u;
 inline constexpr float DEFAULT_CLIP_TIGHTNESS = 0.5f;
 inline constexpr float DEFAULT_HISTORY_CLIP_STRENGTH = 1.f;
 inline constexpr float DEFAULT_CURRENT_FRAME_BLEND = 0.15f;
-inline constexpr bool DEFAULT_FSR_LEGACY_COMPUTE_STATE = true;
 
 struct FrameState {
   uint32_t sample_index = 0u;
@@ -103,7 +108,12 @@ inline float velocity_visualization_range = DEFAULT_VELOCITY_VISUALIZATION_RANGE
 inline float object_motion_mode = static_cast<float>(DEFAULT_OBJECT_MOTION_MODE);
 #endif
 #if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
-inline std::array<float, PROJECTION_JITTER_PATH_COUNT> projection_jitter_scales = {
+inline constexpr std::array DEFAULT_PROJECTION_JITTER_SCALES = {
+    DEFAULT_PROJECTION_JITTER_SCALE,
+    DEFAULT_PROJECTION_JITTER_SCALE,
+    DEFAULT_PROJECTION_JITTER_SCALE,
+    DEFAULT_PROJECTION_JITTER_SCALE,
+    DEFAULT_PROJECTION_JITTER_SCALE,
     DEFAULT_PROJECTION_JITTER_SCALE,
     DEFAULT_PROJECTION_JITTER_SCALE,
     DEFAULT_PROJECTION_JITTER_SCALE,
@@ -111,14 +121,12 @@ inline std::array<float, PROJECTION_JITTER_PATH_COUNT> projection_jitter_scales 
     DEFAULT_PROJECTION_JITTER_SCALE,
     DEFAULT_PROJECTION_JITTER_SCALE,
 };
+static_assert(DEFAULT_PROJECTION_JITTER_SCALES.size() == PROJECTION_JITTER_PATH_COUNT);
+inline auto projection_jitter_scales = DEFAULT_PROJECTION_JITTER_SCALES;
 #endif
 inline float clip_tightness = DEFAULT_CLIP_TIGHTNESS;
 inline float history_clip_strength = DEFAULT_HISTORY_CLIP_STRENGTH;
 inline float current_frame_blend = DEFAULT_CURRENT_FRAME_BLEND;
-// Legacy calls reduce FSR light flicker in the user's A/B. Keep Off available
-// for isolation; this preference never selects NGX's preservation profile.
-inline float fsr_legacy_compute_state = static_cast<float>(DEFAULT_FSR_LEGACY_COMPUTE_STATE);
-inline std::atomic<bool> runtime_fsr_legacy_compute_state = DEFAULT_FSR_LEGACY_COMPUTE_STATE;
 inline std::atomic<TemporalMode> runtime_temporal_mode = TemporalMode::OFF;
 inline std::atomic<uint32_t> runtime_jitter_pattern = DEFAULT_JITTER_PATTERN;
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
@@ -134,7 +142,13 @@ inline std::array<std::atomic<float>, PROJECTION_JITTER_PATH_COUNT> runtime_proj
     std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
     std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
     std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
+    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
+    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
+    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
+    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
+    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
 };
+static_assert(PROJECTION_JITTER_PATH_COUNT == 11u, "Initialize every runtime jitter scale when adding paths");
 #endif
 inline std::atomic<float> runtime_clip_tightness = DEFAULT_CLIP_TIGHTNESS;
 inline std::atomic<float> runtime_history_clip_strength = DEFAULT_HISTORY_CLIP_STRENGTH;
@@ -196,7 +210,7 @@ inline float GetVelocityVisualizationRange() {
 
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
 inline void SetObjectMotionMode(float value) {
-  const uint32_t mode = static_cast<uint32_t>(std::clamp(value, 0.f, 5.f));
+  const uint32_t mode = static_cast<uint32_t>(std::clamp(value, 0.f, 7.f));
   runtime_object_motion_mode.store(mode, std::memory_order_release);
 }
 #endif
@@ -253,10 +267,9 @@ inline float GetProjectionJitterScale(ProjectionJitterPath path) {
   if (GetTemporalMode() == TemporalMode::ANALYTICAL_TAA) {
     return runtime_projection_jitter_scales[static_cast<std::size_t>(path)].load(std::memory_order_acquire);
   }
-  return DEFAULT_PROJECTION_JITTER_SCALE;
+  return path >= ProjectionJitterPath::SUN_VOLUME ? 0.f : DEFAULT_PROJECTION_JITTER_SCALE;
 #else
-  (void)path;
-  return DEFAULT_PROJECTION_JITTER_SCALE;
+  return path >= ProjectionJitterPath::SUN_VOLUME ? 0.f : DEFAULT_PROJECTION_JITTER_SCALE;
 #endif
 }
 
