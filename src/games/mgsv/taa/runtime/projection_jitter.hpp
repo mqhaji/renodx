@@ -23,6 +23,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
+#include <optional>
 
 #include <detours.h>
 
@@ -199,40 +201,14 @@ inline void* alpha_model_return_address = nullptr;
 inline void* overlay_model_return_address = nullptr;
 inline void** shader_manager_global = nullptr;
 inline std::atomic<bool> installed = false;
+// Only lifecycle callbacks take this mutex; native hooks must never need it
+// to drain. Own installation before changing any target/trampoline pointer.
+inline std::mutex lifecycle_mutex;
 
 inline std::atomic<uint32_t> production_restoration_hits = 0u;
 inline std::atomic<bool> production_awaiting_restoration = false;
-inline std::atomic<uint32_t> hook_calls_in_flight = 0u;
 inline std::atomic_flag local_light_projection_lock = ATOMIC_FLAG_INIT;
 inline thread_local bool local_light_projection_active = false;
-
-struct PathDiagnostics {
-  std::atomic<uint64_t> requests = 0u;
-  std::atomic<uint64_t> applied = 0u;
-  std::atomic<uint64_t> sample_advanced = 0u;
-  std::atomic<uint64_t> invalid_viewport = 0u;
-  std::atomic<uint64_t> invalid_publication = 0u;
-  std::atomic<uint64_t> stale_frame = 0u;
-  std::atomic<uint64_t> wrong_dimensions = 0u;
-  std::atomic<uint64_t> missing_shader_manager = 0u;
-  std::atomic<uint64_t> projection_mismatch = 0u;
-};
-
-inline std::array<PathDiagnostics, state::PROJECTION_JITTER_PATH_COUNT> path_diagnostics = {};
-inline uint64_t last_path_diagnostics_frame = 0u;
-
-inline constexpr std::array<const char*, state::PROJECTION_JITTER_PATH_COUNT> PATH_NAMES = {
-    "velocity",
-    "forward",
-    "model",
-    "alpha_model",
-    "overlay_model",
-    "local_light",
-};
-
-inline PathDiagnostics& DiagnosticsFor(state::ProjectionJitterPath path) {
-  return path_diagnostics[static_cast<std::size_t>(path)];
-}
 
 inline bool IsInstalled() {
   return installed.load(std::memory_order_acquire);
@@ -389,15 +365,6 @@ inline void ApplyProjectionJitter(float* projection, float jitter_uv_x, float ji
   projection[9] -= 2.f * jitter_uv_y;
 }
 
-struct HookCallGuard {
-  HookCallGuard() { hook_calls_in_flight.fetch_add(1u, std::memory_order_acq_rel); }
-  HookCallGuard(const HookCallGuard&) = delete;
-  HookCallGuard& operator=(const HookCallGuard&) = delete;
-  HookCallGuard(HookCallGuard&&) = delete;
-  HookCallGuard& operator=(HookCallGuard&&) = delete;
-  ~HookCallGuard() { hook_calls_in_flight.fetch_sub(1u, std::memory_order_acq_rel); }
-};
-
 inline bool GetPublishedJitterForViewport(
     const uint8_t* viewport,
     state::ProjectionJitterPath path,
@@ -407,9 +374,6 @@ inline bool GetPublishedJitterForViewport(
   const float scale = state::GetProjectionJitterScale(path);
   if (scale == 0.f) return false;
 
-  auto& diagnostics = DiagnosticsFor(path);
-  diagnostics.requests.fetch_add(1u, std::memory_order_relaxed);
-
   const auto* projection = reinterpret_cast<const float*>(viewport + 0x280u);
   const uint32_t width = *reinterpret_cast<const uint32_t*>(viewport + 0x5D8u);
   const uint32_t height = *reinterpret_cast<const uint32_t*>(viewport + 0x5DCu);
@@ -417,24 +381,35 @@ inline bool GetPublishedJitterForViewport(
   void* camera = *reinterpret_cast<void* const*>(viewport + 0x570u);
   const camera_state::CameraFrame published = camera_state::Get();
   if (!LooksLikeGameplayProjection(projection, width, height, flags, camera)) {
-    diagnostics.invalid_viewport.fetch_add(1u, std::memory_order_relaxed);
     return false;
   }
   if (!published.valid) {
-    diagnostics.invalid_publication.fetch_add(1u, std::memory_order_relaxed);
     return false;
   }
-  if (published.frame_token != state::CurrentFrameToken()) {
-    diagnostics.stale_frame.fetch_add(1u, std::memory_order_relaxed);
+  const uint64_t epoch = state::CurrentFrameToken();
+  // VELOCITY's caller holds the publication writer lock through the native
+  // write. Present is not a camera/sample boundary: the temporal consumer can
+  // consume this exact camera in the next epoch, but never another sample.
+  const bool velocity = path == state::ProjectionJitterPath::VELOCITY;
+  if (published.frame_token != epoch
+      && (!velocity || epoch == 0u || published.frame_token != epoch - 1u)) {
     return false;
   }
   if (published.width != width || published.height != height) {
-    diagnostics.wrong_dimensions.fetch_add(1u, std::memory_order_relaxed);
     return false;
   }
 
   if (published.sample_index != state::CurrentSampleIndex()) {
-    diagnostics.sample_advanced.fetch_add(1u, std::memory_order_relaxed);
+    return false;
+  }
+
+  if (velocity
+      && (!published.camera_matrix_valid
+          || published.reset_generation != camera_state::reset_generation.load(std::memory_order_relaxed)
+          || published.viewport_identity != reinterpret_cast<uintptr_t>(viewport)
+          || published.camera_identity != reinterpret_cast<uintptr_t>(camera)
+          || std::memcmp(projection, camera_state::staged_projection.data(), 64u) != 0
+          || std::memcmp(viewport + 0x2C0u, camera_state::staged_view.data(), 64u) != 0)) {
     return false;
   }
 
@@ -448,63 +423,28 @@ inline bool GetPublishedJitterForViewport(
 inline void ApplyPublishedJitterToActiveProjection(
     const uint8_t* viewport,
     state::ProjectionJitterPath jitter_path) {
+  // No execution gate here: native callbacks may run under it already. The
+  // writer lock excludes reset, camera replacement, scale changes and the
+  // camera+sample commit; no native calls or logging occur while it is held.
+  std::optional<camera_state::PublicationWriterGuard> velocity_guard;
+  if (jitter_path == state::ProjectionJitterPath::VELOCITY) velocity_guard.emplace();
   std::array<float, 2> jitter_uv = {};
   void* shader_manager = shader_manager_global != nullptr ? *shader_manager_global : nullptr;
   if (shader_manager == nullptr) {
-    DiagnosticsFor(jitter_path).missing_shader_manager.fetch_add(1u, std::memory_order_relaxed);
     return;
   }
+  auto* active_projection = reinterpret_cast<float*>(static_cast<uint8_t*>(shader_manager) + 0x680u);
   if (!GetPublishedJitterForViewport(viewport, jitter_path, jitter_uv)) return;
 
   const auto* projection = reinterpret_cast<const float*>(viewport + 0x280u);
-  auto* active_projection = reinterpret_cast<float*>(static_cast<uint8_t*>(shader_manager) + 0x680u);
   if (std::memcmp(projection, active_projection, 16u * sizeof(float)) != 0) {
-    DiagnosticsFor(jitter_path).projection_mismatch.fetch_add(1u, std::memory_order_relaxed);
     return;
   }
 
   ApplyProjectionJitter(active_projection, shader_manager, jitter_uv[0], jitter_uv[1]);
-  DiagnosticsFor(jitter_path).applied.fetch_add(1u, std::memory_order_relaxed);
-}
-
-inline void LogPathDiagnostics() {
-  const uint64_t frame = state::CurrentFrameToken();
-  if (frame < last_path_diagnostics_frame + 300u) return;
-  last_path_diagnostics_frame = frame;
-
-  for (std::size_t index = 0u; index < path_diagnostics.size(); ++index) {
-    auto& diagnostics = path_diagnostics[index];
-    const uint64_t requests = diagnostics.requests.exchange(0u, std::memory_order_relaxed);
-    const uint64_t applied = diagnostics.applied.exchange(0u, std::memory_order_relaxed);
-    const uint64_t sample_advanced = diagnostics.sample_advanced.exchange(0u, std::memory_order_relaxed);
-    const uint64_t invalid_viewport = diagnostics.invalid_viewport.exchange(0u, std::memory_order_relaxed);
-    const uint64_t invalid_publication = diagnostics.invalid_publication.exchange(0u, std::memory_order_relaxed);
-    const uint64_t stale_frame = diagnostics.stale_frame.exchange(0u, std::memory_order_relaxed);
-    const uint64_t wrong_dimensions = diagnostics.wrong_dimensions.exchange(0u, std::memory_order_relaxed);
-    const uint64_t missing_shader_manager = diagnostics.missing_shader_manager.exchange(0u, std::memory_order_relaxed);
-    const uint64_t projection_mismatch = diagnostics.projection_mismatch.exchange(0u, std::memory_order_relaxed);
-    if (requests == 0u && missing_shader_manager == 0u) continue;
-
-    logging::Info("projection jitter path=", PATH_NAMES[index],
-            " mode=", static_cast<uint32_t>(state::GetTemporalMode()),
-            " fsr_legacy_compute=", logging::Bool{
-              state::GetTemporalMode() == state::TemporalMode::AMD_FSR3
-              && state::runtime_fsr_legacy_compute_state.load(std::memory_order_acquire)},
-                  " requests=", requests,
-                  " applied=", applied,
-                  " sample_advanced=", sample_advanced,
-                  " invalid_viewport=", invalid_viewport,
-                  " invalid_publication=", invalid_publication,
-                  " stale_frame=", stale_frame,
-                  " wrong_dimensions=", wrong_dimensions,
-                  " missing_shader_manager=", missing_shader_manager,
-                  " projection_mismatch=", projection_mismatch);
-  }
 }
 
 inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
-  HookCallGuard hook_call_guard;
-
   void* return_address = _ReturnAddress();
   const auto original = set_view_matrix_state;
   if (original == nullptr) return;
@@ -586,6 +526,10 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   const auto jitter_uv = state::JitterForSample(sample_index, width, height);
   ApplyProjectionJitter(active_projection, shader_manager, jitter_uv[0], jitter_uv[1]);
   camera_state::staged_current_view_projection = current_view_projection;
+  camera_state::staged_viewport = viewport;
+  camera_state::staged_camera = camera;
+  std::memcpy(camera_state::staged_projection.data(), projection, 64u);
+  std::memcpy(camera_state::staged_view.data(), view_matrix, 64u);
   camera_state::staged_current_view_projection_valid = current_camera_matrix_valid;
   const bool camera_reprojection_valid = current_camera_matrix_valid
                                          && camera_state::committed_previous_view_projection_valid;
@@ -619,7 +563,6 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
 }
 
 inline void __fastcall HookForwardRendering(void* plugin, void* render, void* viewport_pointer) {
-  HookCallGuard hook_call_guard;
   const auto original = forward_rendering;
   if (original == nullptr) return;
   original(plugin, render, viewport_pointer);
@@ -630,7 +573,6 @@ inline void __fastcall HookForwardRendering(void* plugin, void* render, void* vi
 }
 
 inline void __fastcall HookLocalLightMainExec(void* plugin, void* render, void* viewport_pointer) {
-  HookCallGuard hook_call_guard;
   const auto original = local_light_main_exec;
   if (original == nullptr) return;
 
@@ -668,12 +610,291 @@ inline void __fastcall HookLocalLightMainExec(void* plugin, void* render, void* 
       }
     } restore_guard(projection);
     ApplyProjectionJitter(projection, jitter_uv[0], jitter_uv[1]);
-    DiagnosticsFor(state::ProjectionJitterPath::LOCAL_LIGHT).applied.fetch_add(1u, std::memory_order_relaxed);
     original(plugin, render, viewport_pointer);
   }
 }
 
+#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
+using SunPass = void(__fastcall*)(void*, void*, uint32_t, uint32_t, uint8_t, uint8_t);
+using SunVolume = void(__fastcall*)(void*, const float*, const void*, const void*, void*, void*);
+using ShFallback = uint32_t(__fastcall*)(void*, uint32_t, float*, float*, float*, void*, void*);
+using TerrainProducer = void(__fastcall*)(void*, void*, void*, void*, uint64_t);
+using LightProducer = void*(__fastcall*)(void*, void*, void*, void*, uint8_t, uint8_t, uint8_t, uint64_t);
+using AttachPacket = void(__fastcall*)(void*, void*, uint64_t, uint64_t);
+using AlternateProjection = void(__fastcall*)(void*);
+using AlternateCommand = void*(__fastcall*)(void*, void*);
+using StageMatrix = void(__fastcall*)(void*, uint32_t, const float*);
+inline SunPass sun_pass = nullptr;
+inline SunVolume sun_volume = nullptr;
+inline ShFallback sh_fallback = nullptr;
+inline TerrainProducer terrain_producer = nullptr;
+inline LightProducer light_producer = nullptr;
+inline AttachPacket terrain_attach = nullptr;
+inline AttachPacket light_attach = nullptr;
+inline AlternateProjection alternate_projection = nullptr;
+inline AlternateCommand alternate_command = nullptr;
+inline StageMatrix stage_matrix = nullptr;
+inline uint8_t* native_base = nullptr;
+inline constexpr std::array<uint32_t, 4> SH_VERTEX_COUNTS = {8u, 6u, 18u, 8u};
+
+// Never wait on a rendering callback that already owns the execution gate.
+// A rejected admission calls native code unchanged, with no lock held.
+struct NativeCommitGuard {
+  bool acquired = !state::execution_lock.test_and_set(std::memory_order_acquire);
+  NativeCommitGuard() = default;
+  NativeCommitGuard(const NativeCommitGuard&) = delete;
+  NativeCommitGuard& operator=(const NativeCommitGuard&) = delete;
+  ~NativeCommitGuard() {
+    if (acquired) state::execution_lock.clear(std::memory_order_release);
+  }
+};
+
+struct NativeProjectionScope;
+inline thread_local const NativeProjectionScope* native_scope = nullptr;
+
+// Own every matrix/sample value; only the TLS link is borrowed, and only by
+// synchronous children. Even a rejected nested parent shadows its predecessor.
+struct NativeProjectionScope {
+  const NativeProjectionScope* previous = native_scope;
+  state::ProjectionJitterPath path;
+  camera_state::CameraFrame frame = {};
+  uint64_t sequence = 0u;
+  uint64_t generation = 0u;
+  alignas(16) std::array<float, 16> projection = {};
+  alignas(16) std::array<float, 16> view = {};
+  std::array<float, 2> jitter = {};
+  bool valid = false;
+
+  NativeProjectionScope(state::ProjectionJitterPath selected, const void* source, bool alternate = false)
+      : path(selected) {
+    native_scope = this;
+    if (source == nullptr || state::GetProjectionJitterScale(path) == 0.f) return;
+    NativeCommitGuard execution_guard;
+    if (!execution_guard.acquired) return;
+    camera_state::PublicationWriterGuard publication_guard;
+    frame = camera_state::Get();
+    if (!frame.valid || !frame.camera_matrix_valid
+        || state::GetTemporalMode() != state::TemporalMode::ANALYTICAL_TAA
+        || frame.frame_token != state::CurrentFrameToken()
+        || frame.sample_index != state::CurrentSampleIndex()) return;
+    const auto* bytes = static_cast<const uint8_t*>(source);
+    const auto* p = reinterpret_cast<const float*>(bytes + (alternate ? 0x1C0u : 0x280u));
+    const auto* v = reinterpret_cast<const float*>(bytes + (alternate ? 0x200u : 0x2C0u));
+    const void* camera = *reinterpret_cast<void* const*>(bytes + (alternate ? 0x308u : 0x570u));
+    if (camera == nullptr || camera != camera_state::staged_camera) return;
+    uint32_t width = 0u;
+    uint32_t height = 0u;
+    if (alternate) {
+      const auto* descriptor = *reinterpret_cast<const uint8_t* const*>(bytes + 0x2F0u);
+      if (descriptor == nullptr) return;
+      width = *reinterpret_cast<const uint32_t*>(descriptor + 0x48u);
+      height = *reinterpret_cast<const uint32_t*>(descriptor + 0x4Cu);
+    } else {
+      if (source != camera_state::staged_viewport || (bytes[0x6E2u] & 1u) == 0u) return;
+      width = *reinterpret_cast<const uint32_t*>(bytes + 0x5D8u);
+      height = *reinterpret_cast<const uint32_t*>(bytes + 0x5DCu);
+    }
+    if (width != frame.width || height != frame.height
+        || !LooksLikeGameplayProjection(p, width, height, 1u, camera)
+        || std::memcmp(p, camera_state::staged_projection.data(), 64u) != 0
+        || std::memcmp(v, camera_state::staged_view.data(), 64u) != 0) {
+      return;
+    }
+    for (uint32_t i = 0u; i < 16u; ++i) {
+      if (!std::isfinite(p[i]) || !std::isfinite(v[i])) return;
+    }
+    std::memcpy(projection.data(), p, 64u);
+    std::memcpy(view.data(), v, 64u);
+    const float scale = state::GetProjectionJitterScale(path);
+    jitter = {frame.jitter_uv_x * scale, frame.jitter_uv_y * scale};
+    sequence = camera_state::published_sequence.load(std::memory_order_relaxed);
+    generation = state::frame_state.temporal_generation;
+    valid = std::isfinite(jitter[0]) && std::isfinite(jitter[1]) && (jitter[0] != 0.f || jitter[1] != 0.f);
+  }
+  NativeProjectionScope(const NativeProjectionScope&) = delete;
+  NativeProjectionScope& operator=(const NativeProjectionScope&) = delete;
+  ~NativeProjectionScope() { native_scope = previous; }
+
+  bool CurrentLocked() const {
+    return valid && state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA
+           && state::GetProjectionJitterScale(path) != 0.f
+           && sequence == camera_state::published_sequence.load(std::memory_order_relaxed)
+           && generation == state::frame_state.temporal_generation
+           && frame.frame_token == state::CurrentFrameToken()
+           && frame.sample_index == state::CurrentSampleIndex();
+  }
+};
+
+// Shared clip translation: native column-major matrices are four float4s;
+// SH outputs are up to eighteen float4s. Validate ALL results before any write.
+inline bool TranslateClip(float* values, uint32_t count, const std::array<float, 2>& jitter) {
+  if (values == nullptr || count > 18u) return false;
+  std::array<float, 72> corrected = {};
+  for (uint32_t i = 0u; i < count * 4u; ++i) {
+    if (!std::isfinite(values[i])) return false;
+    corrected[i] = values[i];
+  }
+  for (uint32_t i = 0u; i < count * 4u; i += 4u) {
+    corrected[i] += 2.f * jitter[0] * values[i + 3u];
+    corrected[i + 1u] -= 2.f * jitter[1] * values[i + 3u];
+    if (!std::isfinite(corrected[i]) || !std::isfinite(corrected[i + 1u])) return false;
+  }
+  for (uint32_t i = 0u; i < count * 4u; i += 4u) {
+    values[i] = corrected[i];
+    values[i + 1u] = corrected[i + 1u];
+  }
+  return true;
+}
+
+inline bool CorrectNativeMatrix(float* matrix, const NativeProjectionScope& scope, bool projection_only = false) {
+  if (!scope.valid || matrix == nullptr) return false;
+  NativeCommitGuard execution_guard;
+  if (!execution_guard.acquired) return false;
+  camera_state::PublicationWriterGuard publication_guard;
+  if (!scope.CurrentLocked()) return false;
+  alignas(16) std::array<float, 16> expected = scope.projection;
+  if (!projection_only) {
+    // Match native SSE's pairwise sum, without a world-coordinate-relative
+    // epsilon that could swallow an entire subpixel offset.
+    for (uint32_t c = 0u; c < 4u; ++c) {
+      for (uint32_t r = 0u; r < 4u; ++r) {
+        expected[(c * 4u) + r] =
+            ((scope.projection[r] * scope.view[c * 4u])
+             + (scope.projection[4u + r] * scope.view[(c * 4u) + 1u]))
+            + ((scope.projection[8u + r] * scope.view[(c * 4u) + 2u])
+               + (scope.projection[12u + r] * scope.view[(c * 4u) + 3u]));
+      }
+    }
+  }
+  auto jittered = expected;
+  if (!TranslateClip(jittered.data(), 4u, {scope.frame.jitter_uv_x, scope.frame.jitter_uv_y})) return false;
+  float canonical_error = 0.f;
+  float jittered_error = 0.f;
+  for (uint32_t i = 0u; i < 16u; ++i) {
+    if (!std::isfinite(matrix[i]) || !std::isfinite(expected[i])) return false;
+    canonical_error = std::max(canonical_error, std::abs(matrix[i] - expected[i]));
+    jittered_error = std::max(jittered_error, std::abs(matrix[i] - jittered[i]));
+  }
+  if (canonical_error > 0.00001f || jittered_error <= canonical_error) {
+    return false;
+  }
+  if (!TranslateClip(matrix, 4u, scope.jitter)) return false;
+  return true;
+}
+
+inline void __fastcall HookSunPass(void* renderer, void* viewport, uint32_t a, uint32_t b, uint8_t c, uint8_t d) {
+  NativeProjectionScope scope(state::ProjectionJitterPath::SUN_VOLUME, viewport);
+  sun_pass(renderer, viewport, a, b, c, d);
+}
+
+inline void __fastcall HookSunVolume(void* context, const float* vp, const void* volume, const void* color,
+                                     void* vertices, void* indices) {
+  alignas(16) std::array<float, 16> copy = {};
+  if (_ReturnAddress() == native_base + 0x30B07Du && native_scope != nullptr
+      && native_scope->path == state::ProjectionJitterPath::SUN_VOLUME && vp != nullptr) {
+    std::memcpy(copy.data(), vp, 64u);
+    if (CorrectNativeMatrix(copy.data(), *native_scope)) vp = copy.data();
+  }
+  // The native helper finishes the upload and draw before this copy dies.
+  sun_volume(context, vp, volume, color, vertices, indices);
+}
+
+inline uint32_t __fastcall HookShFallback(void* renderer, uint32_t kind, float* output, float* min_w,
+                                          float* max_w, void* shape, void* viewport) {
+  const bool qualified = _ReturnAddress() == native_base + 0x1F2529u && kind < SH_VERTEX_COUNTS.size();
+  NativeProjectionScope scope(state::ProjectionJitterPath::SH_FALLBACK, qualified ? viewport : nullptr);
+  const uint32_t success = sh_fallback(renderer, kind, output, min_w, max_w, shape, viewport);
+  if (success != 0u && scope.valid) {
+    NativeCommitGuard execution_guard;
+    if (execution_guard.acquired) {
+      camera_state::PublicationWriterGuard publication_guard;
+      if (scope.CurrentLocked()) {
+        TranslateClip(output, SH_VERTEX_COUNTS[kind], scope.jitter);
+      }
+    }
+  }
+  return success;  // EAX is success, NOT a vertex count. Bounds/Z/W untouched.
+}
+
+inline void __fastcall HookTerrainProducer(void* a, void* b, void* scene, void* viewport, uint64_t e) {
+  NativeProjectionScope scope(state::ProjectionJitterPath::TERRAIN_DECAL, viewport);
+  terrain_producer(a, b, scene, viewport, e);
+}
+
+inline void* __fastcall HookLightProducer(void* a, void* output, void* c, void* viewport,
+                                          uint8_t e, uint8_t f, uint8_t g, uint64_t h) {
+  NativeProjectionScope scope(state::ProjectionJitterPath::LIGHT_PACKET, viewport);
+  return light_producer(a, output, c, viewport, e, f, g, h);
+}
+
+inline void __fastcall HookTerrainAttach(void* command, void* packet, uint64_t c, uint64_t d) {
+  if (_ReturnAddress() == native_base + 0x2755CAu && packet != nullptr && native_scope != nullptr
+      && native_scope->path == state::ProjectionJitterPath::TERRAIN_DECAL) {
+    CorrectNativeMatrix(reinterpret_cast<float*>(static_cast<uint8_t*>(packet) + 0x160u), *native_scope, true);
+  }
+  // Original native object/header is retained; no borrowed/stack packet escapes.
+  terrain_attach(command, packet, c, d);
+}
+
+inline void __fastcall HookLightAttach(void* command, void* packet, uint64_t c, uint64_t d) {
+  if (_ReturnAddress() == native_base + 0x2A5342u && packet != nullptr && native_scope != nullptr
+      && native_scope->path == state::ProjectionJitterPath::LIGHT_PACKET) {
+    CorrectNativeMatrix(reinterpret_cast<float*>(static_cast<uint8_t*>(packet) + 0x130u), *native_scope);
+  }
+  light_attach(command, packet, c, d);
+}
+
+inline void __fastcall HookAlternateProjection(void* context) {
+  NativeProjectionScope scope(state::ProjectionJitterPath::ALTERNATE_CAMERA, context, true);
+  alternate_projection(context);
+}
+
+inline void* __fastcall HookAlternateCommand(void* context, void* command) {
+  NativeProjectionScope scope(state::ProjectionJitterPath::ALTERNATE_CAMERA, context, true);
+  return alternate_command(context, command);
+}
+
+inline void __fastcall HookStageMatrix(void* context, uint32_t id, const float* matrix) {
+  const void* caller = _ReturnAddress();
+  alignas(16) std::array<float, 16> copy = {};
+  if ((caller == native_base + 0x2E7484u || caller == native_base + 0x2E4DD7u)
+      && id == 0x47u && matrix != nullptr && native_scope != nullptr
+      && native_scope->path == state::ProjectionJitterPath::ALTERNATE_CAMERA) {
+    std::memcpy(copy.data(), matrix, 64u);
+    if (CorrectNativeMatrix(copy.data(), *native_scope)) matrix = copy.data();
+  }
+  // Only the synchronous staging source changes. Context P/V never change,
+  // including null-camera updates, nested streams and every early return.
+  stage_matrix(context, id, matrix);
+}
+
+inline bool InitializeNativeDiagnosticAddresses(HMODULE module) {
+  auto* base = reinterpret_cast<uint8_t*>(module);
+  const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+  const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+  if (nt->OptionalHeader.SizeOfImage != 0xA01D000u) return false;
+  // All checked RVAs (including the four-entry table) are below SizeOfImage.
+  // Exact prologues include RIP displacements: other EXE builds fail closed.
+  if (!MatchesBytes(base + 0x30AC50u, std::array<uint8_t, 16>{
+                                          0x48, 0x89, 0x5C, 0x24, 0x08, 0x44, 0x89, 0x4C, 0x24, 0x20, 0x44, 0x89, 0x44, 0x24, 0x18, 0x48})
+      || !MatchesBytes(base + 0x30B680u, std::array<uint8_t, 16>{0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x10, 0x48, 0x89, 0x70, 0x18, 0x48, 0x89, 0x78, 0x20, 0x55}) || !MatchesBytes(base + 0x27EF80u, std::array<uint8_t, 16>{0x48, 0x89, 0x5C, 0x24, 0x08, 0x55, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x81, 0xEC, 0x80}) || !MatchesBytes(base + 0x275280u, std::array<uint8_t, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x81, 0xEC}) || !MatchesBytes(base + 0x2A4C00u, LOCAL_LIGHT_MAIN_EXEC_PROLOGUE) || !MatchesBytes(base + 0x2D18D0u, std::array<uint8_t, 16>{0x40, 0x57, 0x48, 0x83, 0xEC, 0x30, 0x48, 0xC7, 0x44, 0x24, 0x20, 0xFE, 0xFF, 0xFF, 0xFF, 0x48}) || !MatchesBytes(base + 0x2D3380u, std::array<uint8_t, 16>{0x40, 0x57, 0x48, 0x83, 0xEC, 0x30, 0x48, 0xC7, 0x44, 0x24, 0x20, 0xFE, 0xFF, 0xFF, 0xFF, 0x48}) || !MatchesBytes(base + 0x2E7330u, std::array<uint8_t, 16>{0x4C, 0x8B, 0xDC, 0x48, 0x81, 0xEC, 0xA8, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x05, 0xEF, 0x1F, 0x86}) || !MatchesBytes(base + 0x2E4C70u, std::array<uint8_t, 16>{0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x10, 0x57, 0x48, 0x81, 0xEC, 0xC0, 0x00, 0x00, 0x00, 0x0F}) || !MatchesBytes(base + 0x2D7AA0u, std::array<uint8_t, 16>{0x48, 0x81, 0xEC, 0x88, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x05, 0x82, 0x18, 0x87, 0x02, 0x48, 0x33}) || DecodeRelativeCall(base + 0x30B078u) != base + 0x30B680u || DecodeRelativeCall(base + 0x1F2524u) != base + 0x27EF80u || DecodeRelativeCall(base + 0x2755C5u) != base + 0x2D18D0u || DecodeRelativeCall(base + 0x2A533Du) != base + 0x2D3380u || DecodeRelativeCall(base + 0x2E747Fu) != base + 0x2D7AA0u || DecodeRelativeCall(base + 0x2E4DD2u) != base + 0x2D7AA0u || std::memcmp(base + 0x21102B8u, SH_VERTEX_COUNTS.data(), sizeof(SH_VERTEX_COUNTS)) != 0) return false;
+  native_base = base;
+  sun_pass = reinterpret_cast<SunPass>(base + 0x30AC50u);
+  sun_volume = reinterpret_cast<SunVolume>(base + 0x30B680u);
+  sh_fallback = reinterpret_cast<ShFallback>(base + 0x27EF80u);
+  terrain_producer = reinterpret_cast<TerrainProducer>(base + 0x275280u);
+  light_producer = reinterpret_cast<LightProducer>(base + 0x2A4C00u);
+  terrain_attach = reinterpret_cast<AttachPacket>(base + 0x2D18D0u);
+  light_attach = reinterpret_cast<AttachPacket>(base + 0x2D3380u);
+  alternate_projection = reinterpret_cast<AlternateProjection>(base + 0x2E7330u);
+  alternate_command = reinterpret_cast<AlternateCommand>(base + 0x2E4C70u);
+  stage_matrix = reinterpret_cast<StageMatrix>(base + 0x2D7AA0u);
+  return true;
+}
+#endif
+
 inline bool Attach() {
+  const std::lock_guard lifecycle_guard(lifecycle_mutex);
   if (installed.load(std::memory_order_acquire)) return true;
 
   camera_state::Invalidate();
@@ -697,6 +918,19 @@ inline bool Attach() {
     return false;
   }
 
+#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
+  if (!InitializeNativeDiagnosticAddresses(module)) {
+    logging::Warn("native projection diagnostic executable validation failed");
+    return false;
+  }
+#endif
+  // Never reclaim trampolines while native callers can still enter. Pin the
+  // addon as well: device destruction/FreeLibrary is not native quiescence.
+  // Installation remains at initial device creation, before scene rendering.
+  HMODULE pinned_module = nullptr;
+  if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                         reinterpret_cast<LPCWSTR>(&HookSetViewMatrixState), &pinned_module)
+      == FALSE) return false;
   if (DetourTransactionBegin() != NO_ERROR) return false;
   if (DetourUpdateThread(GetCurrentThread()) != NO_ERROR) {
     DetourTransactionAbort();
@@ -723,6 +957,21 @@ inline bool Attach() {
     DetourTransactionAbort();
     return false;
   }
+#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
+  if (DetourAttach(reinterpret_cast<void**>(&sun_pass), reinterpret_cast<void*>(HookSunPass)) != NO_ERROR
+      || DetourAttach(reinterpret_cast<void**>(&sun_volume), reinterpret_cast<void*>(HookSunVolume)) != NO_ERROR
+      || DetourAttach(reinterpret_cast<void**>(&sh_fallback), reinterpret_cast<void*>(HookShFallback)) != NO_ERROR
+      || DetourAttach(reinterpret_cast<void**>(&terrain_producer), reinterpret_cast<void*>(HookTerrainProducer)) != NO_ERROR
+      || DetourAttach(reinterpret_cast<void**>(&light_producer), reinterpret_cast<void*>(HookLightProducer)) != NO_ERROR
+      || DetourAttach(reinterpret_cast<void**>(&terrain_attach), reinterpret_cast<void*>(HookTerrainAttach)) != NO_ERROR
+      || DetourAttach(reinterpret_cast<void**>(&light_attach), reinterpret_cast<void*>(HookLightAttach)) != NO_ERROR
+      || DetourAttach(reinterpret_cast<void**>(&alternate_projection), reinterpret_cast<void*>(HookAlternateProjection)) != NO_ERROR
+      || DetourAttach(reinterpret_cast<void**>(&alternate_command), reinterpret_cast<void*>(HookAlternateCommand)) != NO_ERROR
+      || DetourAttach(reinterpret_cast<void**>(&stage_matrix), reinterpret_cast<void*>(HookStageMatrix)) != NO_ERROR) {
+    DetourTransactionAbort();
+    return false;
+  }
+#endif
   if (DetourTransactionCommit() != NO_ERROR) {
     DetourTransactionAbort();
     set_view_matrix_state = nullptr;
@@ -742,7 +991,14 @@ inline bool Attach() {
   return true;
 }
 
-inline void Detach(bool wait_for_hook_calls = true, bool transition_runtime = true) {
+inline void StopAdmission(bool wait_for_lifecycle_owner = true, bool transition_runtime = true) {
+  std::unique_lock lifecycle_guard(lifecycle_mutex, std::defer_lock);
+  if (wait_for_lifecycle_owner) {
+    lifecycle_guard.lock();
+  } else if (!lifecycle_guard.try_lock()) {
+    // Process teardown holds the loader lock; never wait for an installer.
+    return;
+  }
   if (!installed.load(std::memory_order_acquire) || set_view_matrix_state == nullptr) return;
 
   if (transition_runtime) {
@@ -751,49 +1007,9 @@ inline void Detach(bool wait_for_hook_calls = true, bool transition_runtime = tr
     camera_state::InvalidateLocked();
   }
 
-  if (DetourTransactionBegin() != NO_ERROR) return;
-  if (DetourUpdateThread(GetCurrentThread()) != NO_ERROR) {
-    DetourTransactionAbort();
-    return;
-  }
-  if (DetourDetach(
-          reinterpret_cast<void**>(&set_view_matrix_state),
-          reinterpret_cast<void*>(HookSetViewMatrixState))
-      != NO_ERROR) {
-    DetourTransactionAbort();
-    return;
-  }
-  if (DetourDetach(
-          reinterpret_cast<void**>(&forward_rendering),
-          reinterpret_cast<void*>(HookForwardRendering))
-      != NO_ERROR) {
-    DetourTransactionAbort();
-    return;
-  }
-  if (DetourDetach(
-          reinterpret_cast<void**>(&local_light_main_exec),
-          reinterpret_cast<void*>(HookLocalLightMainExec))
-      != NO_ERROR) {
-    DetourTransactionAbort();
-    return;
-  }
-  if (DetourTransactionCommit() != NO_ERROR) {
-    DetourTransactionAbort();
-    return;
-  }
-
-  installed.store(false, std::memory_order_release);
-  if (wait_for_hook_calls) {
-    while (hook_calls_in_flight.load(std::memory_order_acquire) != 0u) {
-      _mm_pause();
-    }
-  }
-  logging::Info("detached native projection hook");
-  if (hook_calls_in_flight.load(std::memory_order_acquire) == 0u) {
-    set_view_matrix_state = nullptr;
-    forward_rendering = nullptr;
-    local_light_main_exec = nullptr;
-  }
+  // Intentionally retain installed code and trampolines until process exit.
+  // A counter reaching zero is NOT a barrier against a subsequent native call.
+  // No wait, unpatch, pointer clearing or trampoline free occurs here.
 }
 
 inline void OnInitDevice(reshade::api::device* device) {
@@ -806,9 +1022,9 @@ inline void Use(DWORD reason) {
     reshade::register_event<reshade::addon_event::init_device>(OnInitDevice);
   } else if (reason == DLL_PROCESS_DETACH) {
     reshade::unregister_event<reshade::addon_event::init_device>(OnInitDevice);
-    // DllMain holds the loader lock. Do not wait for another game thread here;
-    // normal destroy_device teardown already performs a quiescent detach.
-    Detach(false, false);
+    // DllMain holds the loader lock. Process termination reclaims pinned code;
+    // never run a Detours transaction or wait for native work here.
+    StopAdmission(false, false);
   }
 }
 

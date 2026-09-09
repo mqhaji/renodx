@@ -9,6 +9,8 @@
 #include <cmath>
 #include <cstdint>
 
+#include "./state.hpp"
+
 namespace taa::camera_state {
 
 struct Matrix4d {
@@ -30,10 +32,19 @@ struct CameraFrame {
   std::array<float, 4> device_to_view_depth = {};
   std::array<float, 16> current_to_previous_clip = {};
   Matrix4d current_view_projection = {};
+  uint64_t publication_sequence = 0u;
+  uint64_t reset_generation = 0u;
+  uintptr_t viewport_identity = 0u;
+  uintptr_t camera_identity = 0u;
 };
+
+inline std::atomic<uint64_t> reset_generation = 0u;
 
 inline std::atomic<uint64_t> published_sequence = 0u;
 inline std::atomic<bool> published_valid = false;
+inline std::atomic<uint64_t> published_reset_generation = 0u;
+inline std::atomic<uintptr_t> published_viewport_identity = 0u;
+inline std::atomic<uintptr_t> published_camera_identity = 0u;
 inline std::atomic<uint64_t> published_frame_token = 0u;
 inline std::atomic<uint32_t> published_sample_index = 0u;
 inline std::atomic<uint32_t> published_width = 0u;
@@ -55,6 +66,12 @@ inline Matrix4d committed_previous_view_projection = {};
 inline std::array<float, 2> committed_previous_jitter_uv = {0.f, 0.f};
 inline bool staged_current_view_projection_valid = false;
 inline bool committed_previous_view_projection_valid = false;
+// Native camera provenance, read only while holding publication_write_lock.
+// Addresses are identities, never retained for later dereference.
+inline const void* staged_viewport = nullptr;
+inline const void* staged_camera = nullptr;
+inline std::array<float, 16> staged_projection = {};
+inline std::array<float, 16> staged_view = {};
 
 inline Matrix4d LoadColumnMajorMatrix(const float* values) {
   Matrix4d result = {};
@@ -140,6 +157,7 @@ inline std::array<float, 16> ToRowMajorFloatArray(const Matrix4d& matrix) {
 }
 
 inline void ResetMatrixHistoryLocked() {
+  reset_generation.fetch_add(1u, std::memory_order_relaxed);
   committed_previous_view_projection = {};
   committed_previous_jitter_uv = {0.f, 0.f};
   committed_previous_view_projection_valid = false;
@@ -173,6 +191,9 @@ inline void Invalidate() {
 
 inline void PublishLocked(const CameraFrame& frame) {
   published_sequence.fetch_add(1u, std::memory_order_acq_rel);
+  published_reset_generation.store(reset_generation.load(std::memory_order_relaxed), std::memory_order_relaxed);
+  published_viewport_identity.store(reinterpret_cast<uintptr_t>(staged_viewport), std::memory_order_relaxed);
+  published_camera_identity.store(reinterpret_cast<uintptr_t>(staged_camera), std::memory_order_relaxed);
   published_frame_token.store(frame.frame_token, std::memory_order_relaxed);
   published_sample_index.store(frame.sample_index, std::memory_order_relaxed);
   published_width.store(frame.width, std::memory_order_relaxed);
@@ -199,6 +220,10 @@ inline CameraFrame Get() {
     const uint64_t before = published_sequence.load(std::memory_order_acquire);
     if ((before & 1u) != 0u) continue;
 
+    result.publication_sequence = before;
+    result.reset_generation = published_reset_generation.load(std::memory_order_relaxed);
+    result.viewport_identity = published_viewport_identity.load(std::memory_order_relaxed);
+    result.camera_identity = published_camera_identity.load(std::memory_order_relaxed);
     result.frame_token = published_frame_token.load(std::memory_order_relaxed);
     result.sample_index = published_sample_index.load(std::memory_order_relaxed);
     result.width = published_width.load(std::memory_order_relaxed);
@@ -236,7 +261,9 @@ inline CameraFrame GetForCapture() {
 
 inline bool Commit(const CameraFrame& frame) {
   PublicationWriterGuard guard;
-  const bool valid = frame.valid && frame.camera_matrix_valid;
+  const bool valid = frame.valid && frame.camera_matrix_valid
+                     && frame.reset_generation == reset_generation.load(std::memory_order_relaxed)
+                     && frame.sample_index == state::CurrentSampleIndex();
   if (valid) {
     committed_previous_view_projection = frame.current_view_projection;
     committed_previous_jitter_uv = {
@@ -244,6 +271,9 @@ inline bool Commit(const CameraFrame& frame) {
         frame.jitter_uv_y,
     };
     committed_previous_view_projection_valid = true;
+    // Linearize sample advancement with native publication/correction. Releasing
+    // this lock before advancing allowed an old-sample correction after commit.
+    state::CommitTemporalFrame();
   }
   return valid;
 }

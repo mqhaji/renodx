@@ -24,15 +24,15 @@ struct State {
   std::array<Microsoft::WRL::ComPtr<ID3D11SamplerState>, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT> samplers;
   std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT>
       shader_resources;
-    std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT>
+  std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT>
       vertex_shader_resources;
-    std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT>
+  std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT>
       hull_shader_resources;
-    std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT>
+  std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT>
       domain_shader_resources;
-    std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT>
+  std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT>
       geometry_shader_resources;
-    std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT>
+  std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT>
       pixel_shader_resources;
   std::array<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>, 8> unordered_access_views;
   std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT> constant_buffers;
@@ -49,12 +49,10 @@ struct State {
   Microsoft::WRL::ComPtr<ID3D11ComputeShader> compute_shader;
   std::vector<Microsoft::WRL::ComPtr<ID3D11ClassInstance>> class_instances;
   bool native_descriptors_captured = false;
-  bool legacy_compute_only = false;
 };
 
-inline State Capture(reshade::api::command_list* cmd_list, bool legacy_compute_only = false) {
+inline State Capture(reshade::api::command_list* cmd_list) {
   State result = {};
-  result.legacy_compute_only = legacy_compute_only;
   const auto* tracked_state = renodx::utils::state::GetCurrentState(cmd_list);
   if (tracked_state != nullptr) {
     for (const auto& [stage, pipeline] : tracked_state->pipelines) {
@@ -89,58 +87,48 @@ inline State Capture(reshade::api::command_list* cmd_list, bool legacy_compute_o
   std::array<ID3D11ClassInstance*, 256> class_instances = {};
   ID3D11ComputeShader* compute_shader = nullptr;
   UINT class_instance_count = static_cast<UINT>(class_instances.size());
-  // These are the exact native call ranges used by mgsv-old. Only the FSR
-  // diagnostic selects them; the extended path and NGX remain unchanged.
-  const UINT sampler_count = legacy_compute_only ? 2u : static_cast<UINT>(samplers.size());
-  const UINT shader_resource_count = legacy_compute_only ? 16u : static_cast<UINT>(shader_resources.size());
-  const UINT constant_buffer_count = legacy_compute_only ? 3u : static_cast<UINT>(constant_buffers.size());
   context->CSGetShader(&compute_shader, class_instances.data(), &class_instance_count);
-  context->CSGetSamplers(0u, sampler_count, samplers.data());
-  context->CSGetShaderResources(0u, shader_resource_count, shader_resources.data());
-  if (!legacy_compute_only) {
-    context->VSGetShaderResources(0u, static_cast<UINT>(vertex_shader_resources.size()), vertex_shader_resources.data());
-    context->HSGetShaderResources(0u, static_cast<UINT>(hull_shader_resources.size()), hull_shader_resources.data());
-    context->DSGetShaderResources(0u, static_cast<UINT>(domain_shader_resources.size()), domain_shader_resources.data());
-    context->GSGetShaderResources(0u, static_cast<UINT>(geometry_shader_resources.size()), geometry_shader_resources.data());
-    context->PSGetShaderResources(0u, static_cast<UINT>(pixel_shader_resources.size()), pixel_shader_resources.data());
-  }
+  context->CSGetSamplers(0u, static_cast<UINT>(samplers.size()), samplers.data());
+  context->CSGetShaderResources(0u, static_cast<UINT>(shader_resources.size()), shader_resources.data());
+  context->VSGetShaderResources(0u, static_cast<UINT>(vertex_shader_resources.size()), vertex_shader_resources.data());
+  context->HSGetShaderResources(0u, static_cast<UINT>(hull_shader_resources.size()), hull_shader_resources.data());
+  context->DSGetShaderResources(0u, static_cast<UINT>(domain_shader_resources.size()), domain_shader_resources.data());
+  context->GSGetShaderResources(0u, static_cast<UINT>(geometry_shader_resources.size()), geometry_shader_resources.data());
+  context->PSGetShaderResources(0u, static_cast<UINT>(pixel_shader_resources.size()), pixel_shader_resources.data());
   context->CSGetUnorderedAccessViews(
       0u,
       static_cast<UINT>(unordered_access_views.size()),
       unordered_access_views.data());
-  context->CSGetConstantBuffers(0u, constant_buffer_count, constant_buffers.data());
-  if (!legacy_compute_only) {
-    context->OMGetRenderTargets(
-        static_cast<UINT>(render_targets.size()),
-        render_targets.data(),
-        &depth_stencil);
-    context->OMGetRenderTargetsAndUnorderedAccessViews(
-        0u,
-        nullptr,
-        nullptr,
-        0u,
-        static_cast<UINT>(output_merger_unordered_access_views.size()),
-        output_merger_unordered_access_views.data());
-    context->OMGetBlendState(&blend_state, result.blend_factor.data(), &result.sample_mask);
-    context->OMGetDepthStencilState(&depth_stencil_state, &result.stencil_reference);
-  }
-  for (size_t index = 0u; index < sampler_count; ++index) {
+  context->CSGetConstantBuffers(0u, static_cast<UINT>(constant_buffers.size()), constant_buffers.data());
+  // Preserve graphics bindings that temporal compute work can displace.
+  context->OMGetRenderTargets(
+      static_cast<UINT>(render_targets.size()),
+      render_targets.data(),
+      &depth_stencil);
+  context->OMGetRenderTargetsAndUnorderedAccessViews(
+      0u,
+      nullptr,
+      nullptr,
+      0u,
+      static_cast<UINT>(output_merger_unordered_access_views.size()),
+      output_merger_unordered_access_views.data());
+  context->OMGetBlendState(&blend_state, result.blend_factor.data(), &result.sample_mask);
+  context->OMGetDepthStencilState(&depth_stencil_state, &result.stencil_reference);
+  for (size_t index = 0u; index < samplers.size(); ++index) {
     result.samplers[index].Attach(samplers[index]);
   }
-  for (size_t index = 0u; index < shader_resource_count; ++index) {
+  for (size_t index = 0u; index < shader_resources.size(); ++index) {
     result.shader_resources[index].Attach(shader_resources[index]);
-    if (!legacy_compute_only) {
-      result.vertex_shader_resources[index].Attach(vertex_shader_resources[index]);
-      result.hull_shader_resources[index].Attach(hull_shader_resources[index]);
-      result.domain_shader_resources[index].Attach(domain_shader_resources[index]);
-      result.geometry_shader_resources[index].Attach(geometry_shader_resources[index]);
-      result.pixel_shader_resources[index].Attach(pixel_shader_resources[index]);
-    }
+    result.vertex_shader_resources[index].Attach(vertex_shader_resources[index]);
+    result.hull_shader_resources[index].Attach(hull_shader_resources[index]);
+    result.domain_shader_resources[index].Attach(domain_shader_resources[index]);
+    result.geometry_shader_resources[index].Attach(geometry_shader_resources[index]);
+    result.pixel_shader_resources[index].Attach(pixel_shader_resources[index]);
   }
   for (size_t index = 0u; index < unordered_access_views.size(); ++index) {
     result.unordered_access_views[index].Attach(unordered_access_views[index]);
   }
-  for (size_t index = 0u; index < constant_buffer_count; ++index) {
+  for (size_t index = 0u; index < constant_buffers.size(); ++index) {
     result.constant_buffers[index].Attach(constant_buffers[index]);
   }
   for (size_t index = 0u; index < render_targets.size(); ++index) {
@@ -159,7 +147,6 @@ inline State Capture(reshade::api::command_list* cmd_list, bool legacy_compute_o
     result.class_instances[index].Attach(class_instances[index]);
   }
   result.native_descriptors_captured = true;
-  if (legacy_compute_only) return result;
 
   constexpr std::array<ID3D11UnorderedAccessView*, D3D11_PS_CS_UAV_REGISTER_COUNT>
       null_output_merger_unordered_access_views = {};
@@ -205,26 +192,21 @@ inline void Restore(reshade::api::command_list* cmd_list, const State& state) {
   std::array<ID3D11Buffer*, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT> constant_buffers = {};
   std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> render_targets = {};
   std::array<ID3D11UnorderedAccessView*, D3D11_PS_CS_UAV_REGISTER_COUNT> output_merger_unordered_access_views = {};
-  const UINT sampler_count = state.legacy_compute_only ? 2u : static_cast<UINT>(samplers.size());
-  const UINT shader_resource_count = state.legacy_compute_only ? 16u : static_cast<UINT>(shader_resources.size());
-  const UINT constant_buffer_count = state.legacy_compute_only ? 3u : static_cast<UINT>(constant_buffers.size());
-  for (size_t index = 0u; index < sampler_count; ++index) {
+  for (size_t index = 0u; index < samplers.size(); ++index) {
     samplers[index] = state.samplers[index].Get();
   }
-  for (size_t index = 0u; index < shader_resource_count; ++index) {
+  for (size_t index = 0u; index < shader_resources.size(); ++index) {
     shader_resources[index] = state.shader_resources[index].Get();
-    if (!state.legacy_compute_only) {
-      vertex_shader_resources[index] = state.vertex_shader_resources[index].Get();
-      hull_shader_resources[index] = state.hull_shader_resources[index].Get();
-      domain_shader_resources[index] = state.domain_shader_resources[index].Get();
-      geometry_shader_resources[index] = state.geometry_shader_resources[index].Get();
-      pixel_shader_resources[index] = state.pixel_shader_resources[index].Get();
-    }
+    vertex_shader_resources[index] = state.vertex_shader_resources[index].Get();
+    hull_shader_resources[index] = state.hull_shader_resources[index].Get();
+    domain_shader_resources[index] = state.domain_shader_resources[index].Get();
+    geometry_shader_resources[index] = state.geometry_shader_resources[index].Get();
+    pixel_shader_resources[index] = state.pixel_shader_resources[index].Get();
   }
   for (size_t index = 0u; index < unordered_access_views.size(); ++index) {
     unordered_access_views[index] = state.unordered_access_views[index].Get();
   }
-  for (size_t index = 0u; index < constant_buffer_count; ++index) {
+  for (size_t index = 0u; index < constant_buffers.size(); ++index) {
     constant_buffers[index] = state.constant_buffers[index].Get();
   }
   for (size_t index = 0u; index < render_targets.size(); ++index) {
@@ -243,40 +225,38 @@ inline void Restore(reshade::api::command_list* cmd_list, const State& state) {
   constexpr std::array<ID3D11UnorderedAccessView*, 8> null_unordered_access_views = {};
   context->CSSetShaderResources(
       0u,
-      shader_resource_count,
+      static_cast<UINT>(shader_resources.size()),
       null_shader_resources.data());
   context->CSSetUnorderedAccessViews(
       0u,
       static_cast<UINT>(null_unordered_access_views.size()),
       null_unordered_access_views.data(),
       nullptr);
-  context->CSSetSamplers(0u, sampler_count, samplers.data());
+  context->CSSetSamplers(0u, static_cast<UINT>(samplers.size()), samplers.data());
   context->CSSetShaderResources(
       0u,
-      shader_resource_count,
+      static_cast<UINT>(shader_resources.size()),
       shader_resources.data());
-  if (!state.legacy_compute_only) {
-    context->VSSetShaderResources(
+  context->VSSetShaderResources(
       0u,
       static_cast<UINT>(vertex_shader_resources.size()),
       vertex_shader_resources.data());
-    context->HSSetShaderResources(
+  context->HSSetShaderResources(
       0u,
       static_cast<UINT>(hull_shader_resources.size()),
       hull_shader_resources.data());
-    context->DSSetShaderResources(
+  context->DSSetShaderResources(
       0u,
       static_cast<UINT>(domain_shader_resources.size()),
       domain_shader_resources.data());
-    context->GSSetShaderResources(
+  context->GSSetShaderResources(
       0u,
       static_cast<UINT>(geometry_shader_resources.size()),
       geometry_shader_resources.data());
-    context->PSSetShaderResources(
+  context->PSSetShaderResources(
       0u,
       static_cast<UINT>(pixel_shader_resources.size()),
       pixel_shader_resources.data());
-  }
   context->CSSetUnorderedAccessViews(
       0u,
       static_cast<UINT>(unordered_access_views.size()),
@@ -284,13 +264,12 @@ inline void Restore(reshade::api::command_list* cmd_list, const State& state) {
       nullptr);
   context->CSSetConstantBuffers(
       0u,
-      constant_buffer_count,
+      static_cast<UINT>(constant_buffers.size()),
       constant_buffers.data());
   context->CSSetShader(
       state.compute_shader.Get(),
       class_instances.empty() ? nullptr : class_instances.data(),
       static_cast<UINT>(class_instances.size()));
-  if (state.legacy_compute_only) return;
 
   context->OMSetRenderTargetsAndUnorderedAccessViews(
       state.render_target_count,
