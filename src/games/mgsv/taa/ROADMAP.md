@@ -1,138 +1,62 @@
 # MGSV Temporal Reconstruction Roadmap
 
-Future work for improving the analytical TAA, FSR3, and DLSS paths and adding game-derived reactive masks.
-[README.md](README.md) describes the current implementation.
+Outstanding work only. [README.md](README.md) owns current defaults, architecture, safety contracts, and manual validation.
+Keep native resolution, exact Off/vanilla behavior, bone-aware motion, current scene alpha, and preset-local settings.
+No viewport/culling changes, broad constant-buffer mutation, or camera-only production motion replacement.
 
-## Scope
+## 1. Unresolved character warble and pose ownership
 
-- Keep **Off (Vanilla FXAA)** exact even though new profiles currently default to FSR3; migrated profiles preserve their
-   previous enabled/disabled state.
-- Preserve native render/output resolution. Game resolution scaling and dynamic resolution are out of scope.
-- Keep MGSV's bone-aware object motion rather than replacing it with depth-only camera motion.
-- Do not restore broad mapped-constant-buffer mutation.
-- Keep the FSR3 3.1.5 source, custom D3D11 backend, and fixed SM5 permutations local to MGSV. AMD's host must continue
-  to own the pass schedule; this is a source adaptation, not an AMD-supported D3D11 integration.
-- Target native-resolution DLSS, not internal resolution scaling.
+- Root cause remains unidentified. Latest user clarification (2026-09-09): Analytical Jitter Off gave no improvement;
+  repeated Auto/Direct comparisons showed no noticeable difference. Matrix Camera Everywhere was **inconclusive**:
+  heavy ghosting prevented judging warble, so it is not evidence that bypassing native object motion helped.
+  The velocity ownership correction did not visually fix the observed warble. Do not repeat those sweeps or claim a fix.
+- The user tentatively thinks DLSS may not warble while Analytical TAA/FSR are noticeable; this is not confirmed.
+  The native-pose coverage gaps below remain open, not presumed causal or prioritized by the camera-only test.
+- For any native-pose investigation, establish same-character color/velocity correspondence using
+  semantic IA elements, referenced VB/IB/index/skin data, object/instance identity, and contributing history.
+  Shader input registers are not IA slots; neither all-32-binding equality nor POSITION-only matching is sufficient.
+- Match current color to current velocity pose, and previous velocity pose to the prior actually accumulated color.
+  Account for deferred execution, replays, skipped updates, and intervening resource writes through composite/Prepare.
+  Successful readback, matching SRVs, first-bone values, and CPU commit order are not pixel-provenance proof.
+- Native previous viewport matrices advance independently of addon history. The concrete external velocity dispatcher
+  at plugin `+0x68` / virtual `+0x30` and per-object inclusion remain unresolved; the descriptor pool is not a bone uploader.
+  Resolve that route or prove a usable same-character pair before requesting another generic diagnostic run.
+- Direct Object (6) and Auto Center Pixel (7) stay diagnostics. Center-pixel selection has no established visual fix;
+  selection differences alone do not establish causality. Do not change motion sign/scale or loosen epoch guards blindly.
 
-## Priority 1: signal correctness
+## 2. Native projection coverage and transitions
 
-1. **Linear analytical history**
-   - Per-texel decode before 16-tap Catmull-Rom is validated and preserves correct linear-light reconstruction.
-   - Store analytical history in linear RGBA16F to recover optimized Catmull-Rom sampling, then encode only the copy
-     written back into MGSV's scene domain.
-2. **Camera-cut reset**
-   - Add a proven native game signal; do not restore the removed clip-space heuristic that reset SDK history every frame.
-   - Cover aiming, binocular transitions, cutscenes, teleportation, pause/resume, and display-mode changes.
+- Validate the five implemented Analytical-only paths independently before any SDK promotion: sunlight/SH live draw
+  counts and target grid, terrain inverse-plane versus raster consistency, general-light final consumers, and alternate
+  world/UI/glyph separation. Their `1x` defaults do not constitute runtime validation.
+- **Deferred SH packet remains blocked:** prove producer generation/sample through consumption at `0x27F450`.
+  Latest-camera VP equality is insufficient; preserve inverse-lighting math and avoid guessed packet fields/pointer caches.
+- **Thermography/night vision remains unidentified:** qualify target/depth ownership at setter returns `0x214531` and
+  `0x214AC3` before adding a whitelist entry. Rapid skinned-mesh flicker is not proof of missing projection jitter.
+- Check signed/fractional scales, all SH kinds, rejected/nested scopes, null/foreign cameras, device recreation, normal
+  exit, and rapid preset/method/Off/reset transitions. Prove admitted old work cannot contaminate new history.
+  Hooks remain process-lifetime pinned; restart for replacement/removal, never introduce unsafe live detach/reclamation.
 
-## Priority 2: modern analytical history validation
+## 3. SDK lifecycle and gameplay validation
 
-1. Store or reconstruct previous-frame depth.
-2. Compare reprojected expected depth against observed previous depth.
-3. Produce a disocclusion confidence value rather than relying exclusively on color bounds.
-4. Reject history at true surface changes while preserving it on depth-consistent geometry.
-5. Move rectification from raw RGB toward a luminance/chroma representation once linear history is established.
+- Run the [manual validation matrix](README.md#manual-validation) on the cleanup binary when deployment is authorized.
+  The preceding `mgsv` build passed; it was not deployed or newly visually tested. No performance improvement is measured.
+- Validate lazy DLSS cold/saved activation, cancellation, missing DLL/unsupported device reasons, and F-default support
+  fallback. Exercise query spans, natural recording boundaries, insertion fallbacks, restore-state flags, and epoch lag.
+- Validate DLSS suspension/resume across FSR/Analytical/Off, then model/resize recreation and device teardown separately.
+  Preserve original command-list prefixes and cleanup ownership. One successful switch does not prove crash resolution.
+- Compare all methods on identical qualified inputs, including HUDless insertion/reintegration, reverse-Z disocclusion,
+  motion direction/scale, current alpha, and downstream effects. Retain auto exposure until an MGSV resource is proven.
 
-Do not globally weaken the current AABB. Without depth validation, relaxed clipping is expected to reintroduce character
-ghosting.
+## 4. Temporal quality after input correctness
 
-## Priority 3: optional thin-feature stability
-
-Selecting the largest raw reverse-Z depth fixed the observed disappearing-wire failure by keeping nearest-surface motion
-at thin foreground geometry. Add an analytical temporal lock only if other thin features still fail under intermittent
-jitter coverage.
-
-A native-resolution lock should track:
-
-- Thin-feature detection from a local luminance neighborhood.
-- Reprojected lock lifetime.
-- Luminance recorded when the lock is created.
-- Trust based on current shading stability.
-- Immediate or accelerated unlock on disocclusion, camera reset, or material instability.
-
-Locks should selectively protect depth-consistent thin detail. They should not become a global increase in history weight.
-
-## Priority 4: canonical temporal inputs
-
-The CPU now produces one immutable, device-checked `ValidatedFrameInputs` value shared by Analytical TAA and FSR3. It
-snapshots color, depth, final velocity, object velocity, and camera publication together, then centralizes method
-selection, copy-back, camera commit, and sample advancement. Its resources remain explicitly game-native; continue toward
-the following canonical contracts before sharing converted resources with DLSS:
-
-| Input | Target contract |
-|---|---|
-| Color | Full-resolution linear HDR, HUDless, before final output encoding |
-| Depth | Full-resolution reverse-Z with explicit metadata |
-| Motion | Signed RG16F current-to-previous motion, camera motion included, jitter excluded |
-| Matrices | Current/previous no-jitter view, projection, VP, inverse VP, and clip transforms |
-| Jitter | Exact applied offset in pixel and UV units |
-| Frame state | Token, dimensions, previous-frame validity, camera-cut/reset state |
-
-### Motion plan
-
-- Derive background camera motion exactly from depth and no-jitter matrices.
-- Preserve native current/previous bones and object transforms for object motion.
-- Continue validating the scoped `MakeVelocityBuffer` correction now that its viewport-projection reset and setter
-  boundary have been identified and jittered.
-- Use the default-Off shared-signal **Unclamp Motion Vectors** option only as a diagnostic. A production implementation
-  should remove the native packed-motion bias and approximately 64-pixel clamp on an owned temporal path instead.
-- Keep native motion blur as a separate compatibility consumer until expanded vectors are proven safe.
-
-### Reactive and transparency masks
-
-FSR3 currently receives null external reactive and transparency/composition resources, which the AMD host maps to its
-internal zero resource. Internal shading-change, prepare-reactivity, disocclusion, motion-divergence, and luma-instability
-logic remains active. Add game-derived masks without replacing those mechanisms:
-
-1. Identify material-stage signals for rain, particles, alpha blending, animated textures, reflections, and emissive
-   transparency. Prefer proven material membership over final-image differences.
-2. Start with the known `TppFxRain` raindrop path and confirm that its mask aligns with the native-resolution scene at the
-   FSR3 insertion point.
-3. Accumulate a bounded reactive mask and, where appropriate, a transparency/composition mask in owned full-resolution
-   resources without modifying MGSV's original material targets.
-4. Bind those resources through `FfxFsr3UpscalerDispatchDescription::reactive` and
-   `FfxFsr3UpscalerDispatchDescription::transparencyAndComposition` only when their frame token, sample, and dimensions
-   match the accepted color/depth/motion inputs.
-5. Validate reduced ghosting without destabilizing foliage, thin geometry, opaque character motion, or exposure changes.
-
-## Priority 5: native-resolution DLSS validation
-
-The D3D11 NGX implementation and shared canonical boundary are now present. Complete runtime validation:
-
-1. Validate the deferred command-list split and immediate-context NGX bridge across all insertion fallbacks, restore-state
-   flags, one-epoch submission lag, query spans, resolution changes, and device teardown.
-2. Validate DLL discovery and red disabled-option reasons on missing DLL, non-NVIDIA GPU, unsupported adapter, and old driver.
-3. Validate motion direction, Y convention, scale, reverse-Z, reset, and frame-token lifetime with SDK diagnostics.
-4. Establish a valid HUDless input and reintegration point before evaluating image quality.
-5. Continue using auto exposure until a proven MGSV exposure resource is available.
-6. Compare presets A-F and J-M across the DLL versions that expose them, including fallback when E is unavailable.
-7. Compare Analytical TAA, FSR3, and DLSS against the same validated inputs.
-
-XeSS can use the same option-level availability contract if it is integrated later.
-
-No internal resolution changes, DLSS Super Resolution modes, or game viewport/culling modifications are planned.
-
-## Optional finishing work
-
-- Add luminance stability history for analytical shading changes and exposure transitions.
-- Evaluate optional FSR3 RCAS only after wire stability, disocclusion, camera reset, and mask integration are working. The
-  host creates the RCAS pipeline, but current MGSV dispatch sets `enableSharpening = false` and remains unsharpened.
-- Continue comparing native-resolution FSR3 3.1.5 against the analytical resolve across the full validation matrix.
-
-## Validation matrix
-
-Every temporal-input or mask revision should cover:
-
-- Static camera and geometry.
-- Slow and fast camera pans.
-- Slow character motion, idle animation, hair, clothing, and equipment.
-- Rigid moving objects, foliage, fences, and thin wires.
-- Aiming, first-person aim, binoculars, and abrupt FOV transitions.
-- Pause/resume, cutscenes, camera cuts, and teleportation.
-- DoF and motion blur enabled and disabled.
-- Presents without a new full-resolution scene and render callbacks that straddle `Present`.
-- Rain, particles, transparency, NoIR, sonar, reflections, and emissive effects.
-- Resolution/display-mode changes.
-- First frame after enable, resize, reset, camera cut, and failed input capture.
-
-Required diagnostics should eventually include camera-only and object-only signed motion, motion validity, selected depth,
-reverse-Z visualization, external mask coverage, disocclusion confidence, lock state, current jitter, and reset state.
+- Find a proven native camera-cut signal for aim/binocular/FOV changes, cuts, teleportation, pause/resume, and display
+  changes. Do not restore the removed clip-space heuristic that caused continuous SDK resets.
+- Move Analytical history to linear RGBA16F for optimized reconstruction; preserve encoded game output and current alpha.
+  Add previous-depth/disocclusion confidence before relaxing RGB clipping or adding depth-consistent thin-feature locks.
+- Build owned frame/sample/dimension-matched reactive and transparency masks from proven material membership, starting
+  with `TppFxRain`; extend to particles, animated textures, reflections, and emissive transparency. Preserve AMD's internal
+  reactivity analysis and original material targets; verify reduced trails without destabilizing opaque motion or foliage.
+- For production unclamped motion, use an owned temporal-only path; keep native motion blur a separate compatibility
+  consumer. The shared Unclamp option remains default-Off diagnostic behavior.
+- Consider luminance stability and optional sharpening only after motion, cuts, disocclusion, and masks are validated.
