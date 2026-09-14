@@ -57,8 +57,12 @@ void main(
     if (RENODX_GAMMA_CORRECTION) {
       r0.rgb = renodx::color::correct::GammaSafe(r0.rgb);
     }
-    o0.rgb = renodx::color::bt709::clamp::BT2020(r0.rgb);
-    o0.rgb *= RENODX_GRAPHICS_WHITE_NITS / 80.f;
+    if (RENODX_SWAP_CHAIN_OUTPUT_PRESET == renodx::draw::SWAP_CHAIN_OUTPUT_PRESET_SDR) {
+      o0.rgb = renodx::color::gamma::EncodeSafe(r0.rgb, 2.2f);
+    } else {
+      r0.rgb = renodx::color::bt2020::from::BT709(r0.rgb);
+      o0.rgb = renodx::color::pq::EncodeSafe(r0.rgb, RENODX_GRAPHICS_WHITE_NITS);
+    }
 
     return;
   } else {
@@ -85,7 +89,13 @@ void main(
   if (RENODX_GAMMA_CORRECTION) {
     o0.rgb = renodx::color::correct::GammaSafe(o0.rgb);
   }
-  o0.rgb *= RENODX_GRAPHICS_WHITE_NITS / 80.f;
+
+  if (RENODX_SWAP_CHAIN_OUTPUT_PRESET == renodx::draw::SWAP_CHAIN_OUTPUT_PRESET_SDR) {
+    o0.rgb = renodx::color::gamma::EncodeSafe(o0.rgb, 2.2f);
+  } else {
+    o0.rgb = renodx::color::bt2020::from::BT709(o0.rgb);
+    o0.rgb = renodx::color::pq::EncodeSafe(o0.rgb, RENODX_GRAPHICS_WHITE_NITS);
+  }
 
   return;
 }

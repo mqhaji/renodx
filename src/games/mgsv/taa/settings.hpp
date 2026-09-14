@@ -840,17 +840,20 @@ inline void AppendSettings(
           .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
       },
 #endif
+      new renodx::utils::settings::Setting{
+          .value_type = renodx::utils::settings::SettingValueType::CUSTOM,
+          .can_reset = false,
+          .label = "Presets",
+          .section = "Presets",
+          .on_draw = [] { return false; },
+      },
   };
 
+  for (auto* setting : taa_settings) {
+    setting->is_global = true;
+    setting->is_sticky = true;
+  }
   settings.insert(settings.begin(), taa_settings.begin(), taa_settings.end());
-}
-
-inline void OnPresetOff() {
-  // Programmatic setting updates do not invoke on_change_value.
-  renodx::utils::settings::UpdateSetting(
-      "FxTemporalReconstructionMode",
-      static_cast<float>(state::TemporalMode::OFF));
-  TransitionTemporalMode(static_cast<float>(state::TemporalMode::OFF), "preset off", true);
 }
 
 }  // namespace taa::settings

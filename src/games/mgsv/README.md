@@ -221,8 +221,8 @@ The native `copy_resource` callback is separately armed from a proven scene-tone
 
 The **Temporal Anti-Aliasing** section is the first addon settings section. Its single **Temporal Reconstruction**
 dropdown selects **Off (Vanilla FXAA)**, **Analytical TAA**, **AMD FSR 3.1.5**, or **NVIDIA DLSS**. New profiles default
-to FSR3. Off keeps original FXAA and unjittered projection. Settings remain preset-local; existing saved values and
-migrated Off states are preserved.
+to FSR3. Off keeps original FXAA and unjittered projection. These controls are global, appear above the preset slider,
+and are not changed by RenoDX preset selection.
 
 - **DLSS Model** defaults/resets to F (6), subject to feature-DLL support. DLSS performs only a vendor check at startup;
   DLL/NGX/query-hook work waits for explicit or restored DLSS selection.
