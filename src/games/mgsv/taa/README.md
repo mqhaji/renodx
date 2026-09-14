@@ -20,9 +20,8 @@ The **Temporal Anti-Aliasing** section in the ReShade addon overlay contains the
 | **Projection Jitter Path sliders** | Eleven Analytical-only controls, range `-2x..2x`, all default/reset to `1x`. |
 | **TAA Diagnostic View / Velocity View Range / Object Motion Source** | Analytical diagnostics; default Temporal Resolve, `8 px`, Auto-Corrected Native Object Velocity. |
 
-Method, model, tuning, and projection scales remain preset-local. Existing saved values are preserved; old split
-enable/method keys migrate to `FxTemporalReconstructionMode` without enabling a previously disabled profile.
-Preset Off selects **Off (Vanilla FXAA)**, restoring vanilla FXAA and the unjittered projection path.
+Method, model, tuning, and projection scales are global, appear above the preset slider, and are not changed by RenoDX
+preset selection. **Off (Vanilla FXAA)** restores vanilla FXAA and the unjittered projection path.
 Changing history-affecting controls resets accumulation; visualization range alone does not.
 Relaxing analytical clipping or current-frame blending can reduce shimmer at the cost of ghosting.
 
@@ -205,8 +204,8 @@ Build/deploy only with MGSV fully stopped; use one matching addon and no live sh
 [addon build instructions](../README.md#building--deployment). Inspect generated Analytical, FSR3, DLSS boundary, and
 native velocity shader artifacts. Restart for addon/DLL replacement; do not attempt live native-hook unloading.
 
-1. Check fresh/reset settings: FSR3 method, DLSS F hint, eleven scales `1x`, debug UI enabled. Separately confirm saved
-   preset values remain intact. Off must restore vanilla FXAA/projection without persistent shift or stale history.
+1. Check fresh/reset settings: FSR3 method, DLSS F hint, eleven scales `1x`, debug UI enabled. Confirm preset changes do
+  not alter temporal settings. Off must restore vanilla FXAA/projection without persistent shift or stale history.
 2. Check FSR3/Analytical selection, hidden SDK tuning/jitter controls, and one accumulation seed per intended reset.
    Lower-resolution DoF candidates and static menus straddling Present must not cause recurring resets/warnings.
 3. Cover static detail, idle/skinned motion, hair, wires, foliage, pans, aiming/binoculars, cuts, menus, pause/resume,

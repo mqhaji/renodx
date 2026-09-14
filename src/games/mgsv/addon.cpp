@@ -747,6 +747,26 @@ bool OnUpgradeRTVReplaceShaderDraw(reshade::api::command_list* cmd_list) {
   }
 
 ShaderInjectData shader_injection;
+float output_mode = 1.f;
+renodx::utils::settings::Setting* tone_map_peak_nits_setting = nullptr;
+renodx::utils::settings::Setting* tone_map_game_nits_setting = nullptr;
+renodx::utils::settings::Setting* tone_map_ui_nits_setting = nullptr;
+
+bool IsHDROutputSelected() { return output_mode != 0.f; }
+
+void SyncOutputMode() {
+  if (IsHDROutputSelected()) {
+    shader_injection.peak_white_nits = tone_map_peak_nits_setting->GetValue();
+    shader_injection.diffuse_white_nits = tone_map_game_nits_setting->GetValue();
+    shader_injection.graphics_white_nits = tone_map_ui_nits_setting->GetValue();
+    shader_injection.swap_chain_output_preset = 1.f;
+  } else {
+    shader_injection.peak_white_nits = 80.f;
+    shader_injection.diffuse_white_nits = 80.f;
+    shader_injection.graphics_white_nits = 80.f;
+    shader_injection.swap_chain_output_preset = 0.f;
+  }
+}
 
 renodx::mods::shader::CustomShaders custom_shaders = []() {
   renodx::mods::shader::CustomShaders shaders = {
@@ -794,6 +814,62 @@ renodx::mods::shader::CustomShaders custom_shaders = []() {
 
 renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
+        .key = "OutputMode",
+        .binding = &output_mode,
+        .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+        .default_value = 1.f,
+        .can_reset = false,
+        .label = "Output Mode",
+        .section = "Output",
+        .tooltip = "Selects SDR gamma 2.2 or HDR10 PQ output.",
+        .labels = {"SDR", "HDR"},
+        .on_change_value = [](float, float) { SyncOutputMode(); },
+    },
+    tone_map_peak_nits_setting = new renodx::utils::settings::Setting{
+        .key = "ToneMapPeakNits",
+        .binding = &shader_injection.peak_white_nits,
+        .default_value = 1000.f,
+        .can_reset = false,
+        .label = "Peak Brightness",
+        .section = "Output",
+        .tooltip = "Sets the value of peak white in nits",
+        .min = 48.f,
+        .max = 4000.f,
+        .is_enabled = []() { return IsHDROutputSelected() && shader_injection.tone_map_type != 0.f; },
+    },
+    tone_map_game_nits_setting = new renodx::utils::settings::Setting{
+        .key = "ToneMapGameNits",
+        .binding = &shader_injection.diffuse_white_nits,
+        .default_value = 203.f,
+        .label = "Game Brightness",
+        .section = "Output",
+        .tooltip = "Sets the value of 100% white in nits",
+        .min = 48.f,
+        .max = 500.f,
+        .is_enabled = &IsHDROutputSelected,
+    },
+    tone_map_ui_nits_setting = new renodx::utils::settings::Setting{
+        .key = "ToneMapUINits",
+        .binding = &shader_injection.graphics_white_nits,
+        .default_value = 203.f,
+        .label = "UI Brightness",
+        .section = "Output",
+        .tooltip = "Sets the brightness of UI and HUD elements in nits",
+        .min = 48.f,
+        .max = 500.f,
+        .is_enabled = &IsHDROutputSelected,
+    },
+    new renodx::utils::settings::Setting{
+        .key = "GammaCorrection",
+        .binding = &shader_injection.gamma_correction,
+        .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+        .default_value = 1.f,
+        .label = "SDR EOTF Emulation",
+        .section = "Output",
+        .tooltip = "Emulates a 2.2 EOTF (use with HDR or sRGB)",
+        .labels = {"Off", "2.2"},
+    },
+    new renodx::utils::settings::Setting{
         .key = "ToneMapType",
         .binding = &shader_injection.tone_map_type,
         .value_type = renodx::utils::settings::SettingValueType::INTEGER,
@@ -802,48 +878,6 @@ renodx::utils::settings::Settings settings = {
         .section = "Tone Mapping",
         .tooltip = "Sets the tone mapper type",
         .labels = {"Vanilla", "RenoDX"},
-    },
-    new renodx::utils::settings::Setting{
-        .key = "ToneMapPeakNits",
-        .binding = &shader_injection.peak_white_nits,
-        .default_value = 1000.f,
-        .can_reset = false,
-        .label = "Peak Brightness",
-        .section = "Tone Mapping",
-        .tooltip = "Sets the value of peak white in nits",
-        .min = 48.f,
-        .max = 4000.f,
-        .is_enabled = []() { return shader_injection.tone_map_type != 0.f; },
-    },
-    new renodx::utils::settings::Setting{
-        .key = "ToneMapGameNits",
-        .binding = &shader_injection.diffuse_white_nits,
-        .default_value = 203.f,
-        .label = "Game Brightness",
-        .section = "Tone Mapping",
-        .tooltip = "Sets the value of 100% white in nits",
-        .min = 48.f,
-        .max = 500.f,
-    },
-    new renodx::utils::settings::Setting{
-        .key = "ToneMapUINits",
-        .binding = &shader_injection.graphics_white_nits,
-        .default_value = 203.f,
-        .label = "UI Brightness",
-        .section = "Tone Mapping",
-        .tooltip = "Sets the brightness of UI and HUD elements in nits",
-        .min = 48.f,
-        .max = 500.f,
-    },
-    new renodx::utils::settings::Setting{
-        .key = "GammaCorrection",
-        .binding = &shader_injection.gamma_correction,
-        .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-        .default_value = 1.f,
-        .label = "SDR EOTF Emulation",
-        .section = "Tone Mapping",
-        .tooltip = "Emulates a 2.2 EOTF (use with HDR or sRGB)",
-        .labels = {"Off", "2.2"},
     },
     new renodx::utils::settings::Setting{
         .key = "ColorGradeExposure",
@@ -1012,10 +1046,11 @@ renodx::utils::settings::Settings settings = {
         .on_change = []() {
           for (auto* setting : settings) {
             if (setting->key.empty()) continue;
+            if (setting->is_global) continue;
             if (!setting->can_reset) continue;
             renodx::utils::settings::UpdateSetting(setting->key, setting->default_value);
           }
-          taa::settings::ApplySettingsSnapshot();
+          SyncOutputMode();
         },
     },
     new renodx::utils::settings::Setting{
@@ -1088,6 +1123,7 @@ renodx::utils::settings::Settings settings = {
 
 void OnPresetOff() {
   renodx::utils::settings::UpdateSettings({
+      {"OutputMode", 0.f},
       {"ToneMapType", 0.f},
       {"ToneMapPeakNits", 203.f},
       {"ToneMapGameNits", 203.f},
@@ -1110,7 +1146,7 @@ void OnPresetOff() {
       {"FxBoostSun", 0.f},
       {"FxFilmGrain", 0.f},
   });
-  taa::settings::OnPresetOff();
+  SyncOutputMode();
 }
 
 bool fired_on_init_swapchain = false;
@@ -1120,12 +1156,12 @@ void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
   fired_on_init_swapchain = true;
   auto peak = renodx::utils::swapchain::GetPeakNits(swapchain);
   if (peak.has_value()) {
-    settings[1]->default_value = peak.value();
-    settings[1]->can_reset = true;
+    tone_map_peak_nits_setting->default_value = peak.value();
+    tone_map_peak_nits_setting->can_reset = true;
   }
   bool was_upgraded = renodx::mods::swapchain::IsUpgraded(swapchain);
   if (was_upgraded) {
-    settings[1]->default_value = 100.f;
+    tone_map_peak_nits_setting->default_value = 100.f;
   }
 }
 
@@ -1137,11 +1173,18 @@ void OnPresent(
     uint32_t dirty_rect_count,
     const reshade::api::rect* dirty_rects) {
   (void)queue;
-  (void)swapchain;
   (void)source_rect;
   (void)dest_rect;
   (void)dirty_rect_count;
   (void)dirty_rects;
+
+  SyncOutputMode();
+  const auto output_color_space = IsHDROutputSelected()
+                                      ? reshade::api::color_space::hdr10_st2084
+                                      : reshade::api::color_space::srgb_nonlinear;
+  if (swapchain->get_color_space() != output_color_space) {
+    renodx::utils::swapchain::ChangeColorSpace(swapchain, output_color_space);
+  }
 
   DeactivateDofFinalCopyRenderBufferTarget();
   ResetTonemapCopyTracking();
@@ -1164,6 +1207,10 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       if (!initialized) {
         renodx::mods::swapchain::force_borderless = true;
         renodx::mods::swapchain::prevent_full_screen = true;
+
+        renodx::mods::swapchain::v2::SetUseHDR10();
+        renodx::mods::swapchain::v2::set_color_space = false;
+
         renodx::utils::settings::on_preset_changed_callbacks.emplace_back(
             taa::settings::ApplySettingsSnapshot);
 
@@ -1206,12 +1253,14 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       reshade::unregister_event<reshade::addon_event::copy_resource>(OnCopyTonemapOutputResource);
       reshade::unregister_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);  // auto detect peak and paper white
       reshade::unregister_event<reshade::addon_event::present>(OnPresent);
+      renodx::mods::swapchain::v2::set_color_space = true;
       reshade::unregister_addon(h_module);
       break;
   }
   // Load the persisted temporal mode before the runtime reads it so shaders
   // and native reconstruction cannot disagree during the first frame.
   renodx::utils::settings::Use(fdw_reason, &settings, &OnPresetOff);
+  if (fdw_reason == DLL_PROCESS_ATTACH) SyncOutputMode();
 
   taa::prepare_velocity_target = PrepareTaaVelocityTarget;
   taa::Use(fdw_reason);
