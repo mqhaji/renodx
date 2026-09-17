@@ -832,11 +832,17 @@ inline bool Dispatch(const ValidatedFrameInputs& inputs, MethodOutput& output) {
     QueueFatalFailure();
     return false;
   }
-  if (inputs.color_format != reshade::api::format::r16g16b16a16_float
-      || (inputs.depth_format != reshade::api::format::r32_float
-          && inputs.depth_format != reshade::api::format::r32_float_x8_uint)) {
-    if (LogEvery(30u)) logging::Warn("rejecting NVIDIA DLSS dispatch with incompatible resources");
-    QueueFatalFailure();
+
+  
+  const bool compatible = inputs.color_format == reshade::api::format::r16g16b16a16_float
+                          && (inputs.depth_format == reshade::api::format::r32_float
+                              || inputs.depth_format == reshade::api::format::r32_float_x8_uint);
+  if (!compatible) {
+    if (LogEvery(30u)) {
+      logging::Warn("rejecting Nvidia DLSS dispatch with incompatible resources insertion=", inputs.insertion_name,
+                    " color_format=", static_cast<uint32_t>(inputs.color_format),
+                    " depth_format=", static_cast<uint32_t>(inputs.depth_format));
+    }
     return false;
   }
 
