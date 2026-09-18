@@ -1,10 +1,9 @@
 #include "../common.hlsli"
-#include "./customtest30.hlsli"
+#include "./customtest31.hlsli"
 #include "./uncharted2extended.hlsli"
 
-#define LMS_D65_WHITE renodx::color::lms::from::BT709(1.f)
-
 float3 ApplyUnchartedFilmicTonemap(float3 untonemapped, float A, float B, float C, float D, float E, float F, float W) {
+  [branch]
   if (RENODX_TONE_MAP_TYPE != 0.f) {
     float coeffs[6] = { A, B, C, D, E, F };
     float white_precompute = 1.f / renodx::tonemap::ApplyCurve(W, A, B, C, D, E, F);
@@ -17,6 +16,7 @@ float3 ApplyUnchartedFilmicTonemap(float3 untonemapped, float A, float B, float 
 }
 
 float3 ApplyTppTonemap(float3 untonemapped, float3 params) {
+  [branch]
   if (RENODX_TONE_MAP_TYPE != 0.f) return untonemapped;
 
   float shoulder_start = params.y, shoulder_offset = params.z, shoulder_scale = params.x;
@@ -57,15 +57,20 @@ float3 ApplyFinalTonemap(float3 untonemapped) {
 
   r0.rgb = renodx::color::srgb::DecodeSafe(r0.rgb);
 
+  [branch]
   if (RENODX_TONE_MAP_TYPE != 0.f) {
-    r0.rgb = renodx::tonemap::psychov::psychotm_custom_test30(
+    r0.rgb = renodx::tonemap::psychov::custom_psychotm_test31(
         r0.rgb, RENODX_PEAK_WHITE_NITS / RENODX_DIFFUSE_WHITE_NITS, RENODX_TONE_MAP_EXPOSURE, RENODX_TONE_MAP_HIGHLIGHTS, RENODX_TONE_MAP_SHADOWS,
         RENODX_TONE_MAP_CONTRAST, 0.10f * pow(RENODX_TONE_MAP_FLARE, 10.f), RENODX_TONE_MAP_CONTRAST_HIGHLIGHTS, RENODX_TONE_MAP_CONTRAST_SHADOWS,
         RENODX_TONE_MAP_SATURATION, RENODX_TONE_MAP_HIGHLIGHT_SATURATION, RENODX_TONE_MAP_DECHROMA,
         0.1f, 0.1f, RENODX_GAMMA_CORRECTION, 1.f,
-        RENODX_SWAP_CHAIN_OUTPUT_PRESET == renodx::draw::SWAP_CHAIN_OUTPUT_PRESET_SDR ? renodx::tonemap::psychov::PSYCHO30_TARGET_GAMUT_BT709 : renodx::tonemap::psychov::PSYCHO30_TARGET_GAMUT_BT2020, 1.5f);
+        RENODX_SWAP_CHAIN_OUTPUT_PRESET == renodx::draw::SWAP_CHAIN_OUTPUT_PRESET_SDR
+            ? renodx::tonemap::psychov::CUSTOM_PSYCHO31_TARGET_GAMUT_BT709
+            : renodx::tonemap::psychov::CUSTOM_PSYCHO31_TARGET_GAMUT_BT2020,
+        1.5f, 1.f, renodx::tonemap::psychov::PSYCHO30_SOURCE_BOUNDARY_NONE, 0.f);
 
   } else {
+    [branch]
     if (RENODX_GAMMA_CORRECTION != 0.f) {
       r0.rgb = renodx::color::correct::GammaSafe(r0.rgb);
     }
@@ -74,6 +79,7 @@ float3 ApplyFinalTonemap(float3 untonemapped) {
 
   r0.rgb *= RENODX_DIFFUSE_WHITE_NITS / RENODX_GRAPHICS_WHITE_NITS;
 
+  [branch]
   if (RENODX_GAMMA_CORRECTION != 0.f) {
     r0.rgb = renodx::color::gamma::EncodeSafe(r0.rgb);
   } else {
@@ -121,18 +127,36 @@ float3 Sample2DLUT(float3 color, Texture2D<float4> inColorLUT, SamplerState g_sa
   return r0.rgb;
 }
 
-float3 Unclamp(float3 original_gamma, float3 black_gamma, float3 mid_gray_gamma, float3 neutral_gamma) {
-  const float3 added_gamma = black_gamma;
+float3 CompensateGradingZeroInputOffset(
+    float3 graded,
+    float3 source,
+    float3 grading_zero_output,
+    float half_weight_stops) {
+  // Split the grading output at zero into a shared RGB offset and its unequal-channel residual.
+  const float common_offset = max(renodx::math::Min(grading_zero_output), 0.f);
+  const float3 channel_residual = grading_zero_output - common_offset;
 
-  const float mid_gray_average = renodx::math::Average(mid_gray_gamma);
+  // Express the relative linear-light RMS source level in units of the chosen half-weight level.
+  const float source_magnitude = sqrt(dot(source, source) / 3.f);
+  const float source_to_common_offset = renodx::math::DivideSafe(source_magnitude, common_offset, 0.f);
+  const float source_half_weight_units = source_to_common_offset * exp2(half_weight_stops);
+  // Approximate exp2(-x), matching x = 0, 1, and 2 exactly at weights 1, 1/2, and 1/4.
+  const float source_release_denominator = 1.f + 0.5f * source_half_weight_units * (1.f + source_half_weight_units);
 
-  // Remove from 0 to mid-gray
-  const float shadow_length = mid_gray_average;
-  const float shadow_stop = renodx::math::Max(neutral_gamma);
-  const float3 floor_remove = added_gamma * max(0, shadow_length - shadow_stop) / shadow_length;
+  // Reduce compensation when the zero-input output contains unequal-channel structure; never subtract that residual.
+  const float common_offset_squared_magnitude = 3.f * common_offset * common_offset;
+  // Combine source release and the relative squared RGB residual weight into one division.
+  const float compensation_weight = renodx::math::DivideSafe(
+      common_offset_squared_magnitude,
+      source_release_denominator
+          * (common_offset_squared_magnitude + dot(channel_residual, channel_residual)),
+      0.f);
 
-  const float3 unclamped_gamma = max(0, original_gamma - floor_remove);
-  return unclamped_gamma;
+  // Subtract one bounded scalar, preserving channel differences and keeping every channel at or above its source.
+  const float removable_common_offset = max(renodx::math::Min(graded - source), 0.f);
+  const float offset_compensation = min(common_offset * compensation_weight, removable_common_offset);
+
+  return graded - offset_compensation;
 }
 
 float3 Sample2DLUTWithScaling(float3 color, Texture2D<float4> inColorLUT, SamplerState g_samplerLinear_Clamp_s) {
@@ -140,29 +164,21 @@ float3 Sample2DLUTWithScaling(float3 color, Texture2D<float4> inColorLUT, Sample
 
   float3 input_gamma = renodx::math::SqrtSafe(color);
 
+  [branch]
   if (RENODX_COLOR_GRADE_SCALING != 0.f) {
-    float3 input_linear = renodx::color::srgb::DecodeSafe(input_gamma);
-
     float3 lut_black_gamma = Sample2DLUT(0, inColorLUT, g_samplerLinear_Clamp_s);
     float3 lut_black_linear = renodx::color::srgb::DecodeSafe(lut_black_gamma);
-    float lut_black_y = max(0, renodx::color::yf::from::BT709(lut_black_linear));
 
-    if (lut_black_y > 0.f) {
-      float3 lut_mid_gamma = Sample2DLUT(lut_black_y * lut_black_y, inColorLUT, g_samplerLinear_Clamp_s);
-
-      float3 unclamped_gamma = Unclamp(
-          output_gamma,
-          lut_black_gamma,
-          lut_mid_gamma,
-          input_gamma);
-      float3 unclamped_linear = renodx::color::srgb::DecodeSafe(unclamped_gamma);
-
+    [branch]
+    if (renodx::math::Min(lut_black_linear) > 0.f) {
+      float3 input_linear = renodx::color::srgb::DecodeSafe(input_gamma);
       float3 output_linear = renodx::color::srgb::DecodeSafe(output_gamma);
 
-      float3 recolored = output_linear * lerp(1.f, renodx::math::DivideSafe(renodx::color::yf::from::BT709(unclamped_linear), renodx::color::yf::from::BT709(output_linear), 1.f), RENODX_COLOR_GRADE_SCALING * 0.95);
-
-      recolored = max(0, recolored);
-      output_gamma = renodx::color::srgb::EncodeSafe(recolored);
+      output_linear = lerp(
+          output_linear,
+          CompensateGradingZeroInputOffset(output_linear, input_linear, lut_black_linear, 1.f),
+          RENODX_COLOR_GRADE_SCALING);
+      output_gamma = renodx::color::srgb::EncodeSafe(output_linear);
     }
   }
 
