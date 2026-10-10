@@ -1039,6 +1039,17 @@ renodx::utils::settings::Settings settings = {
         .parse = [](float value) { return value * 0.02f; },
     },
     new renodx::utils::settings::Setting{
+        .key = "FxHideMotionBlur",
+        .binding = &shader_injection.hide_motion_blur,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 0.f,
+        .label = "Hide Motion Blur",
+        .section = "Effects",
+        .tooltip = "Hides the game's motion blur while keeping its velocity buffers for DLSS/TAA. Keep Motion Blur enabled in the game's graphics options.",
+        .is_global = true,
+        .is_sticky = true,
+    },
+    new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
         .label = "Reset All",
         .section = "Options",
