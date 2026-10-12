@@ -263,6 +263,12 @@ inline void SetProjectionJitterScale(ProjectionJitterPath path, float value) {
 #endif
 
 inline float GetProjectionJitterScale(ProjectionJitterPath path) {
+  // The NVG/thermal thermography overlay is an overlay model (GrPluginOverlayModel).
+  // It is hard-edged: its discard threshold and its depth test are binary decisions
+  // that a sub-pixel projection jitter flips every frame, so the overlay's own
+  // pixels change before any temporal resolve sees them. MGSV_DLAA leaves its
+  // overlay views un-jittered for exactly this reason. Keep this path canonical.
+  if (path == ProjectionJitterPath::OVERLAY_MODEL) return 0.f;
 #if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
   if (GetTemporalMode() == TemporalMode::ANALYTICAL_TAA) {
     return runtime_projection_jitter_scales[static_cast<std::size_t>(path)].load(std::memory_order_acquire);

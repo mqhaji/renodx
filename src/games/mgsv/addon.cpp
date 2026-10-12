@@ -768,8 +768,58 @@ void SyncOutputMode() {
   }
 }
 
+// The NVG/thermal thermography overlay is drawn coplanar with the body and
+// depth-tested with GREATER_EQUAL, so the comparison sits exactly on the
+// equality boundary. Sub-pixel projection jitter shifts the scene depth buffer
+// under it and flips that test every frame — that flip is the flicker. Bias the
+// overlay toward the camera (reverse-Z: positive) so the test has a
+// slope-proportional margin instead of depending on exact equality. The game's
+// shader and every other rasterizer field are preserved.
+//
+// D3D11.1's OMSetDepthBias is unavailable here (MGSV creates a D3D11.0 device),
+// so the bias goes through a rasterizer state cloned from the game's own.
+ID3D11RasterizerState* thermography_biased_state = nullptr;
+ID3D11RasterizerState* thermography_saved_state = nullptr;
+
+renodx::mods::shader::CustomShader ThermographyDepthBiasShader() {
+  renodx::mods::shader::CustomShader shader = {};
+  shader.crc32 = 0x2A3B907Au;  // TppThermography_ps, the player highlight
+  shader.on_draw = [](reshade::api::command_list* cmd_list) {
+    auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
+    auto* device = reinterpret_cast<ID3D11Device*>(cmd_list->get_device()->get_native());  // NOLINT(performance-no-int-to-ptr)
+    if (context == nullptr || device == nullptr) return true;
+    context->RSGetState(&thermography_saved_state);
+    if (thermography_saved_state == nullptr) return true;
+    if (thermography_biased_state == nullptr) {
+      D3D11_RASTERIZER_DESC desc = {};
+      thermography_saved_state->GetDesc(&desc);
+      desc.DepthBias = 0;
+      desc.DepthBiasClamp = 0.f;
+      desc.SlopeScaledDepthBias = 2.f;
+      if (FAILED(device->CreateRasterizerState(&desc, &thermography_biased_state))) {
+        thermography_biased_state = nullptr;
+        return true;
+      }
+    }
+    context->RSSetState(thermography_biased_state);
+    return true;
+  };
+  // Never replace the draw; only the rasterizer bias changes.
+  shader.on_replace = [](reshade::api::command_list*) { return false; };
+  shader.on_drawn = [](reshade::api::command_list* cmd_list) {
+    auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
+    if (context != nullptr) context->RSSetState(thermography_saved_state);
+    if (thermography_saved_state != nullptr) {
+      thermography_saved_state->Release();
+      thermography_saved_state = nullptr;
+    }
+  };
+  return shader;
+}
+
 renodx::mods::shader::CustomShaders custom_shaders = []() {
   renodx::mods::shader::CustomShaders shaders = {
+      {0x2A3B907A, ThermographyDepthBiasShader()},
       UpgradeRTVReplaceShaderCallback(0xE2D609B1, ArmDofFinalCopyRenderBufferWindow),            // DOF_ScatterCompositeNear
       UpgradeRTVReplaceShaderCallback(0x7C017264, ArmDofFinalCopyRenderBufferWindow),            // DOF_ScatterCompositeFar
       UpgradeRTVReplaceShaderCallback(0xFC5542BB, DisarmDofFinalCopyRenderBufferAfterDofFinal),  // DOF_ScatterCompositeFinal
