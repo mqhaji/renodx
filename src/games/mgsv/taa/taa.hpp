@@ -260,7 +260,7 @@ inline void OnDestroyDevice(reshade::api::device* device) {
       "device destroyed",
       true,
       false);
-  coordinator::UninstallDeferredDlssBridge();
+  coordinator::UninstallTemporalSubmissionBridge();
   logging::Info("destroy device");
   // Native hooks and pinned addon code survive device recreation. No unsafe
   // trampoline reclamation or in-flight wait occurs at device destruction.
@@ -300,22 +300,37 @@ inline void OnPresent(
         true);
   }
   settings::ApplySettingsSnapshot();
+  if (coordinator::submission_failure_pending.exchange(false, std::memory_order_acq_rel)
+      && state::IsEnabled()) {
+    renodx::utils::settings::UpdateSetting(
+        "FxTemporalReconstructionMode",
+        static_cast<float>(state::TemporalMode::OFF));
+    settings::TransitionTemporalMode(
+        static_cast<float>(state::TemporalMode::OFF),
+        "temporal submission failure",
+        true);
+  }
   bool activation_serviced = false;
   {
     coordinator::ExecutionGuard execution_guard;
+    const bool bridge_required = state::IsEnabled()
+                                 || (dlss::activation_requested.load(std::memory_order_acquire)
+                                     && dlss::ActivationPending());
+    const bool bridge_ready = !bridge_required || coordinator::EnsureTemporalSubmissionBridge(device);
+    if (!bridge_ready) {
+      logging::Warn("failed to install temporal submission bridge");
+      coordinator::submission_failure_pending.store(true, std::memory_order_release);
+    }
     if (dlss::activation_requested.load(std::memory_order_acquire) && dlss::ActivationPending()) {
       activation_serviced = true;
       logging::Info("servicing requested NVIDIA DLSS activation");
       if (dlss::ProbeDevice(device)) {
-        // A selection may be canceled while the probe runs. Never install
-        // hooks for an already-canceled request. Once installed, retain them
-        // until teardown so query scopes and pending game prefixes stay owned.
+        // NGX activation remains selection-driven; submission tracking is shared by all methods.
         if (dlss::activation_requested.load(std::memory_order_acquire)) {
-          if (coordinator::EnsureDeferredDlssBridge(device)) {
+          if (bridge_ready) {
             dlss::runtime_ready.store(true, std::memory_order_release);
             logging::Info("NVIDIA DLSS runtime ready; waiting for tracked deferred recording boundaries");
           } else {
-            logging::Warn("failed to install requested D3D11 deferred DLSS execution bridge");
             dlss::QueueFatalFailure();
           }
         }
@@ -366,7 +381,7 @@ inline void Use(DWORD fdw_reason) {
       reshade::register_event<reshade::addon_event::init_command_list>(descriptor_tracker::OnInitCommandList);
       reshade::register_event<reshade::addon_event::destroy_command_list>(descriptor_tracker::OnDestroyCommandList);
       reshade::register_event<reshade::addon_event::reset_command_list>(descriptor_tracker::OnResetCommandList);
-      // These return before QI/locks until the requested bridge is installed.
+      // These return before QI/locks until a temporal method installs the shared bridge.
       reshade::register_event<reshade::addon_event::init_command_list>(coordinator::OnInitCommandList);
       reshade::register_event<reshade::addon_event::destroy_command_list>(coordinator::OnDestroyCommandList);
       reshade::register_event<reshade::addon_event::execute_secondary_command_list>(

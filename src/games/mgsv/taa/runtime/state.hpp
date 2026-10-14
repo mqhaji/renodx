@@ -68,10 +68,12 @@ enum class ProjectionJitterPath : std::uint8_t {
   TERRAIN_DECAL,
   LIGHT_PACKET,
   ALTERNATE_CAMERA,
+  THERMOGRAPHY,
   COUNT,
 };
 
-inline constexpr std::size_t PROJECTION_JITTER_PATH_COUNT = static_cast<std::size_t>(ProjectionJitterPath::COUNT);
+// Only the paths preceding thermography have diagnostic sliders.
+inline constexpr std::size_t PROJECTION_JITTER_SLIDER_COUNT = static_cast<std::size_t>(ProjectionJitterPath::THERMOGRAPHY);
 inline constexpr float DEFAULT_DIAGNOSTIC_VIEW = 0.f;
 inline constexpr float DEFAULT_VELOCITY_VISUALIZATION_RANGE = 8.f;
 inline constexpr uint32_t DEFAULT_OBJECT_MOTION_MODE = 0u;
@@ -121,7 +123,7 @@ inline constexpr std::array DEFAULT_PROJECTION_JITTER_SCALES = {
     DEFAULT_PROJECTION_JITTER_SCALE,
     DEFAULT_PROJECTION_JITTER_SCALE,
 };
-static_assert(DEFAULT_PROJECTION_JITTER_SCALES.size() == PROJECTION_JITTER_PATH_COUNT);
+static_assert(DEFAULT_PROJECTION_JITTER_SCALES.size() == PROJECTION_JITTER_SLIDER_COUNT);
 inline auto projection_jitter_scales = DEFAULT_PROJECTION_JITTER_SCALES;
 #endif
 inline float clip_tightness = DEFAULT_CLIP_TIGHTNESS;
@@ -135,7 +137,7 @@ inline std::atomic<float> runtime_velocity_visualization_range = DEFAULT_VELOCIT
 inline std::atomic<uint32_t> runtime_object_motion_mode = DEFAULT_OBJECT_MOTION_MODE;
 #endif
 #if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
-inline std::array<std::atomic<float>, PROJECTION_JITTER_PATH_COUNT> runtime_projection_jitter_scales = {
+inline std::array<std::atomic<float>, PROJECTION_JITTER_SLIDER_COUNT> runtime_projection_jitter_scales = {
     std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
     std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
     std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
@@ -148,7 +150,7 @@ inline std::array<std::atomic<float>, PROJECTION_JITTER_PATH_COUNT> runtime_proj
     std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
     std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
 };
-static_assert(PROJECTION_JITTER_PATH_COUNT == 11u, "Initialize every runtime jitter scale when adding paths");
+static_assert(PROJECTION_JITTER_SLIDER_COUNT == 11u, "Initialize every runtime jitter scale when adding paths");
 #endif
 inline std::atomic<float> runtime_clip_tightness = DEFAULT_CLIP_TIGHTNESS;
 inline std::atomic<float> runtime_history_clip_strength = DEFAULT_HISTORY_CLIP_STRENGTH;
@@ -224,22 +226,22 @@ inline uint32_t GetObjectMotionMode() {
 }
 
 inline void SetResolveTuningValue(
-    std::atomic<float>& runtime_value,
+    std::atomic<float>* runtime_value,
     float value) {
   value = std::clamp(value, 0.f, 1.f);
-  runtime_value.store(value, std::memory_order_release);
+  runtime_value->store(value, std::memory_order_release);
 }
 
 inline void SetClipTightness(float value) {
-  SetResolveTuningValue(runtime_clip_tightness, value);
+  SetResolveTuningValue(&runtime_clip_tightness, value);
 }
 
 inline void SetHistoryClipStrength(float value) {
-  SetResolveTuningValue(runtime_history_clip_strength, value);
+  SetResolveTuningValue(&runtime_history_clip_strength, value);
 }
 
 inline void SetCurrentFrameBlend(float value) {
-  SetResolveTuningValue(runtime_current_frame_blend, value);
+  SetResolveTuningValue(&runtime_current_frame_blend, value);
 }
 
 inline float GetClipTightness() {
@@ -256,20 +258,23 @@ inline float GetCurrentFrameBlend() {
 
 #if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
 inline void SetProjectionJitterScale(ProjectionJitterPath path, float value) {
-  value = std::clamp(value, -2.f, 2.f);
   const std::size_t index = static_cast<std::size_t>(path);
+  if (index >= PROJECTION_JITTER_SLIDER_COUNT) return;
+  value = std::clamp(value, -2.f, 2.f);
   runtime_projection_jitter_scales[index].store(value, std::memory_order_release);
 }
 #endif
 
 inline float GetProjectionJitterScale(ProjectionJitterPath path) {
+  // Thermography must match scene depth rather than a user-adjustable diagnostic scale.
+  if (static_cast<std::size_t>(path) >= PROJECTION_JITTER_SLIDER_COUNT) return DEFAULT_PROJECTION_JITTER_SCALE;
 #if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
   if (GetTemporalMode() == TemporalMode::ANALYTICAL_TAA) {
     return runtime_projection_jitter_scales[static_cast<std::size_t>(path)].load(std::memory_order_acquire);
   }
-  return path >= ProjectionJitterPath::SUN_VOLUME ? 0.f : DEFAULT_PROJECTION_JITTER_SCALE;
+  return DEFAULT_PROJECTION_JITTER_SCALE;
 #else
-  return path >= ProjectionJitterPath::SUN_VOLUME ? 0.f : DEFAULT_PROJECTION_JITTER_SCALE;
+  return DEFAULT_PROJECTION_JITTER_SCALE;
 #endif
 }
 
@@ -281,43 +286,36 @@ inline uint32_t CurrentSampleIndex() {
   return current_sample_index.load(std::memory_order_acquire);
 }
 
-inline float HaltonSample(uint32_t index, uint32_t base) {
-  const float inverse_base = 1.f / static_cast<float>(base);
-  float fraction = inverse_base;
-  float result = 0.f;
-  while (index != 0u) {
-    result += static_cast<float>(index % base) * fraction;
-    index /= base;
-    fraction *= inverse_base;
-  }
-  return result;
-}
-
-inline std::array<float, 2> JitterPixelsForSample(uint32_t sample_index) {
+inline std::array<float, 2> JitterForSample(uint32_t sample_index, uint32_t width, uint32_t height) {
+  if (width == 0u || height == 0u) return {0.f, 0.f};
   switch (GetJitterPattern()) {
     case 0u:
       return {0.f, 0.f};
     default: {
+      const auto halton_sample = [](uint32_t index, uint32_t base) {
+        const float inverse_base = 1.f / static_cast<float>(base);
+        float fraction = inverse_base;
+        float result = 0.f;
+        while (index != 0u) {
+          result += static_cast<float>(index % base) * fraction;
+          index /= base;
+          fraction *= inverse_base;
+        }
+        return result;
+      };
       // Native-resolution TAA uses ceil(8 * 1^2) = 8 phases. Skip Halton index
       // zero because it is the unit-square origin rather than a distributed tap.
       const uint32_t halton_index = (sample_index % HALTON_SEQUENCE_LENGTH) + 1u;
-      return {
-          HaltonSample(halton_index, 2u) - 0.5f,
-          HaltonSample(halton_index, 3u) - 0.5f,
+        std::array<float, 2> result = {
+          halton_sample(halton_index, 2u) - 0.5f,
+          halton_sample(halton_index, 3u) - 0.5f,
       };
+        // Matrix patching converts UV jitter to projection space by multiplying by two.
+        result[0] /= static_cast<float>(width);
+        result[1] /= static_cast<float>(height);
+        return result;
     }
   }
-}
-
-inline std::array<float, 2> JitterForSample(uint32_t sample_index, uint32_t width, uint32_t height) {
-  if (width == 0u || height == 0u) return {0.f, 0.f};
-
-  auto result = JitterPixelsForSample(sample_index);
-  // Keep the shared value in UV/pixel space. Matrix patching converts this to
-  // projection/NDC space by multiplying by two.
-  result[0] /= static_cast<float>(width);
-  result[1] /= static_cast<float>(height);
-  return result;
 }
 
 inline void ResetTemporalState() {
