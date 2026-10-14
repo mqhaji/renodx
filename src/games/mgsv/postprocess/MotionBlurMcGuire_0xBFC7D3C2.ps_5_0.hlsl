@@ -1,5 +1,7 @@
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:32 2026
 
+#include "../shared.h"
+
 cbuffer cPSObject : register(b5)
 {
 
@@ -53,7 +55,8 @@ void main(
   r0.xy = g_psSystem.m_renderInfo.xy * r0.xy;
   r0.xy = g_psSystem.m_renderBuffer.zw * r0.xy;
   r1.zw = g_psObject.m_localParam[1].zw;
-  r0.w = g_psObject.m_localParam[0].w;
+  // Scale only this pass's blur radius; temporal motion-vector inputs remain unchanged.
+  r0.w = g_psObject.m_localParam[0].w * CUSTOM_MOTION_BLUR;
   r2.x = g_psObject.m_localParam[0].z;
   r2.yz = float2(64,64) * r0.ww;
   r2.yz = g_psObject.m_localParam[0].xy * r2.yz;

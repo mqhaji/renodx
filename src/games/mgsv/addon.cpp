@@ -1030,6 +1030,16 @@ renodx::utils::settings::Settings settings = {
         .tooltip = "Boosts the brightness of the sun.",
     },
     new renodx::utils::settings::Setting{
+        .key = "FxMotionBlur",
+        .binding = &shader_injection.custom_motion_blur,
+        .default_value = 100.f,
+        .label = "Motion Blur",
+        .section = "Effects",
+        .min = 0.f,
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
         .key = "FxFilmGrain",
         .binding = &shader_injection.custom_grain_strength,
         .default_value = 0.f,
@@ -1145,6 +1155,7 @@ void OnPresetOff() {
       {"FxBloom", 100.f},
       {"FxBoostSun", 0.f},
       {"FxFilmGrain", 0.f},
+      {"FxMotionBlur", 100.f},
   });
   SyncOutputMode();
 }
