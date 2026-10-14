@@ -34,6 +34,7 @@ struct ShaderInjectData {
   float unclamp_motion_vectors;
 
   float swap_chain_output_preset;
+  float custom_motion_blur;
 };
 
 #ifndef __cplusplus
@@ -66,6 +67,7 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_BOOST_SUN      shader_injection.custom_boost_sun
 #define CUSTOM_RANDOM         shader_injection.custom_random
 #define CUSTOM_GRAIN_STRENGTH shader_injection.custom_grain_strength
+#define CUSTOM_MOTION_BLUR    shader_injection.custom_motion_blur
 
 #define CUSTOM_TAA                    shader_injection.custom_taa
 #define CUSTOM_UNCLAMP_MOTION_VECTORS shader_injection.unclamp_motion_vectors
