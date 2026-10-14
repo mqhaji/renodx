@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <mutex>
+#include <shared_mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -36,7 +37,7 @@ inline reshade::api::device* runtime_device = nullptr;
 using BeginQuery = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Asynchronous*);
 using EndQuery = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Asynchronous*);
 
-struct DeferredDlssDispatch {
+struct PendingTemporalDispatch {
   reshade::api::command_list* deferred_context = nullptr;
   Microsoft::WRL::ComPtr<ID3D11CommandList> prefix;
   Microsoft::WRL::ComPtr<ID3D11CommandList> post;
@@ -46,24 +47,30 @@ struct DeferredDlssDispatch {
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> object_velocity_srv;
   ValidatedFrameInputs inputs;
   uint64_t temporal_generation = 0u;
+  state::TemporalMode mode = state::TemporalMode::OFF;
   bool dispatch_consumed = false;
 };
+
+// The lock owns query/list transactions; hook pointers use lifecycle serialization instead.
+struct SubmissionState {
+  std::shared_mutex mutex;
+  std::vector<PendingTemporalDispatch> pending_dispatches;
+  std::unordered_map<ID3D11DeviceContext*, std::unordered_set<ID3D11Asynchronous*>> active_queries;
+};
+inline SubmissionState submission;
 
 inline BeginQuery begin_query = nullptr;
 inline BeginQuery deferred_begin_query = nullptr;
 inline EndQuery end_query = nullptr;
 inline EndQuery deferred_end_query = nullptr;
-inline bool deferred_dlss_bridge_installed = false;
-inline std::atomic<reshade::api::device*> dlss_bridge_device = nullptr;
+inline bool submission_bridge_installed = false;
+inline std::atomic<reshade::api::device*> submission_bridge_device = nullptr;
 inline std::atomic<uint32_t> execution_hook_calls_in_flight = 0u;
-inline std::atomic<bool> logged_deferred_dlss_executed = false;
-inline std::mutex deferred_dlss_mutex;
-inline std::vector<DeferredDlssDispatch> deferred_dlss_dispatches;
-inline std::unordered_map<ID3D11DeviceContext*, std::unordered_set<ID3D11Asynchronous*>> active_queries;
+inline std::atomic<bool> logged_immediate_dispatch = false;
+inline std::atomic<bool> submission_failure_pending = false;
 
-inline void UninstallDeferredDlssBridge();
 
-inline bool EnlistProcessThreads(std::vector<HANDLE>& handles) {
+inline bool EnlistProcessThreads(std::vector<HANDLE>* handles) {
   const DWORD current_process = GetCurrentProcessId();
   const DWORD current_thread = GetCurrentThreadId();
   HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0u);
@@ -83,7 +90,7 @@ inline bool EnlistProcessThreads(std::vector<HANDLE>& handles) {
           return false;
         }
       } else {
-        handles.push_back(thread);
+        handles->push_back(thread);
       }
     }
     has_entry = Thread32Next(snapshot, &entry);
@@ -92,15 +99,16 @@ inline bool EnlistProcessThreads(std::vector<HANDLE>& handles) {
   // DetourUpdateThread suspends immediately. Finish enumeration/allocation
   // before suspending threads that may own allocator or loader locks.
   if (DetourUpdateThread(GetCurrentThread()) != NO_ERROR) return false;
-  for (HANDLE thread : handles) {
-    if (DetourUpdateThread(thread) != NO_ERROR) return false;
-  }
-  return true;
+  return std::ranges::all_of(*handles, [](HANDLE thread) {
+    return DetourUpdateThread(thread) == NO_ERROR;
+  });
 }
 
-inline void CloseThreadHandles(std::vector<HANDLE>& handles) {
-  for (HANDLE thread : handles) CloseHandle(thread);
-  handles.clear();
+inline void CloseThreadHandles(std::vector<HANDLE>* handles) {
+  for (HANDLE thread : *handles) {
+    CloseHandle(thread);
+  }
+  handles->clear();
 }
 
 struct ExecutionHookCallGuard {
@@ -154,6 +162,7 @@ inline void Destroy(reshade::api::device* device) {
   analytical::Destroy(device);
   dlss::Destroy(device);
   fsr3::Destroy();
+  submission_failure_pending.store(false, std::memory_order_release);
   runtime_device = nullptr;
 }
 
@@ -222,7 +231,6 @@ inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
     ResetTemporalState("native camera matrix commit failed");
     logging::Warn("temporal native camera matrix commit failed");
     state::frame_state.reconstruction_completed = true;
-    return true;
   }
   return true;
 }
@@ -278,9 +286,9 @@ inline void STDMETHODCALLTYPE HookBeginQuery(
     ID3D11Asynchronous* asynchronous) {
   ExecutionHookCallGuard hook_call_guard;
   {
-    const std::unique_lock lock(deferred_dlss_mutex);
-    const auto found = active_queries.find(context);
-    if (found != active_queries.end()) found->second.insert(asynchronous);
+    const std::unique_lock lock(submission.mutex);
+    const auto found = submission.active_queries.find(context);
+    if (found != submission.active_queries.end()) found->second.insert(asynchronous);
   }
   const auto begin = context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED
                              && deferred_begin_query != nullptr
@@ -298,24 +306,29 @@ inline void STDMETHODCALLTYPE HookEndQuery(
                        ? deferred_end_query
                        : end_query;
   end(context, asynchronous);
-  const std::unique_lock lock(deferred_dlss_mutex);
-  const auto found = active_queries.find(context);
-  if (found != active_queries.end()) {
+  const std::unique_lock lock(submission.mutex);
+  const auto found = submission.active_queries.find(context);
+  if (found != submission.active_queries.end()) {
     found->second.erase(asynchronous);
   }
 }
 
-inline bool InstallDeferredDlssBridge(ID3D11DeviceContext* immediate_context) {
-  if (deferred_dlss_bridge_installed) return true;
+inline bool EnsureTemporalSubmissionBridge(reshade::api::device* device) {
+  if (submission_bridge_installed) return submission_bridge_device.load(std::memory_order_acquire) == device;
+  if (device == nullptr || device->get_api() != reshade::api::device_api::d3d11) return false;
+  auto* native_device = reinterpret_cast<ID3D11Device*>(device->get_native());  // NOLINT(performance-no-int-to-ptr)
+  if (native_device == nullptr) return false;
+  Microsoft::WRL::ComPtr<ID3D11DeviceContext> immediate_context;
+  native_device->GetImmediateContext(&immediate_context);
   if (immediate_context == nullptr) return false;
 
   constexpr size_t begin_query_vtable_index = 27u;
   constexpr size_t end_query_vtable_index = 28u;
-  auto** vtable = *reinterpret_cast<void***>(immediate_context);  // NOLINT(performance-no-int-to-ptr)
-  Microsoft::WRL::ComPtr<ID3D11Device> device;
+  auto** vtable = *reinterpret_cast<void***>(immediate_context.Get());  // NOLINT(performance-no-int-to-ptr)
+  Microsoft::WRL::ComPtr<ID3D11Device> context_device;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> deferred_context;
-  immediate_context->GetDevice(&device);
-  if (device == nullptr || FAILED(device->CreateDeferredContext(0u, &deferred_context))) return false;
+  immediate_context->GetDevice(&context_device);
+  if (context_device == nullptr || FAILED(context_device->CreateDeferredContext(0u, &deferred_context))) return false;
   auto** deferred_vtable = *reinterpret_cast<void***>(deferred_context.Get());  // NOLINT(performance-no-int-to-ptr)
   begin_query = reinterpret_cast<BeginQuery>(vtable[begin_query_vtable_index]);
   end_query = reinterpret_cast<EndQuery>(vtable[end_query_vtable_index]);
@@ -331,7 +344,7 @@ inline bool InstallDeferredDlssBridge(ID3D11DeviceContext* immediate_context) {
     return false;
   }
   std::vector<HANDLE> thread_handles;
-  if (!EnlistProcessThreads(thread_handles)
+  if (!EnlistProcessThreads(&thread_handles)
       || DetourAttach(reinterpret_cast<void**>(&begin_query), reinterpret_cast<void*>(HookBeginQuery)) != NO_ERROR
       || (deferred_begin_query != nullptr
           && DetourAttach(reinterpret_cast<void**>(&deferred_begin_query), reinterpret_cast<void*>(HookBeginQuery)) != NO_ERROR)
@@ -340,24 +353,25 @@ inline bool InstallDeferredDlssBridge(ID3D11DeviceContext* immediate_context) {
           && DetourAttach(reinterpret_cast<void**>(&deferred_end_query), reinterpret_cast<void*>(HookEndQuery)) != NO_ERROR)
       || DetourTransactionCommit() != NO_ERROR) {
     DetourTransactionAbort();
-    CloseThreadHandles(thread_handles);
+    CloseThreadHandles(&thread_handles);
     begin_query = nullptr;
     deferred_begin_query = nullptr;
     end_query = nullptr;
     deferred_end_query = nullptr;
     return false;
   }
-  CloseThreadHandles(thread_handles);
-  deferred_dlss_bridge_installed = true;
-  logging::Info("installed D3D11 deferred DLSS execution bridge");
+  CloseThreadHandles(&thread_handles);
+  submission_bridge_installed = true;
+  logging::Info("installed D3D11 temporal submission bridge");
+  submission_bridge_device.store(device, std::memory_order_release);
   return true;
 }
 
-inline void UninstallDeferredDlssBridge() {
-  if (!deferred_dlss_bridge_installed) return;
+inline void UninstallTemporalSubmissionBridge() {
+  if (!submission_bridge_installed) return;
   if (DetourTransactionBegin() != NO_ERROR) return;
   std::vector<HANDLE> thread_handles;
-  if (!EnlistProcessThreads(thread_handles)
+  if (!EnlistProcessThreads(&thread_handles)
       || DetourDetach(reinterpret_cast<void**>(&begin_query), reinterpret_cast<void*>(HookBeginQuery)) != NO_ERROR
       || (deferred_begin_query != nullptr
           && DetourDetach(reinterpret_cast<void**>(&deferred_begin_query), reinterpret_cast<void*>(HookBeginQuery)) != NO_ERROR)
@@ -366,120 +380,44 @@ inline void UninstallDeferredDlssBridge() {
           && DetourDetach(reinterpret_cast<void**>(&deferred_end_query), reinterpret_cast<void*>(HookEndQuery)) != NO_ERROR)
       || DetourTransactionCommit() != NO_ERROR) {
     DetourTransactionAbort();
-    CloseThreadHandles(thread_handles);
-    logging::Warn("failed to uninstall D3D11 deferred DLSS execution bridge");
+    CloseThreadHandles(&thread_handles);
+    logging::Warn("failed to uninstall D3D11 temporal submission bridge");
     return;
   }
-  CloseThreadHandles(thread_handles);
+  CloseThreadHandles(&thread_handles);
   while (execution_hook_calls_in_flight.load(std::memory_order_acquire) != 0u) {
     _mm_pause();
   }
-  dlss_bridge_device.store(nullptr, std::memory_order_release);
-  std::vector<DeferredDlssDispatch> retired_dispatches;
+  submission_bridge_device.store(nullptr, std::memory_order_release);
+  std::vector<PendingTemporalDispatch> retired_dispatches;
   {
-    const std::unique_lock lock(deferred_dlss_mutex);
-    retired_dispatches.swap(deferred_dlss_dispatches);
-    active_queries.clear();
+    const std::unique_lock lock(submission.mutex);
+    retired_dispatches.swap(submission.pending_dispatches);
+    submission.active_queries.clear();
   }
-  deferred_dlss_bridge_installed = false;
+  submission_bridge_installed = false;
   begin_query = nullptr;
   deferred_begin_query = nullptr;
   end_query = nullptr;
   deferred_end_query = nullptr;
-  logging::Info("uninstalled D3D11 deferred DLSS execution bridge");
-}
-
-inline bool EnsureDeferredDlssBridge(reshade::api::device* device) {
-  if (deferred_dlss_bridge_installed) return dlss_bridge_device.load(std::memory_order_acquire) == device;
-  if (device == nullptr || device->get_api() != reshade::api::device_api::d3d11) return false;
-  auto* native_device = reinterpret_cast<ID3D11Device*>(device->get_native());  // NOLINT(performance-no-int-to-ptr)
-  if (native_device == nullptr) return false;
-  Microsoft::WRL::ComPtr<ID3D11DeviceContext> immediate_context;
-  native_device->GetImmediateContext(&immediate_context);
-  if (!InstallDeferredDlssBridge(immediate_context.Get())) return false;
-  dlss_bridge_device.store(device, std::memory_order_release);
-  return true;
+  logging::Info("uninstalled D3D11 temporal submission bridge");
 }
 
 inline void OnInitCommandList(reshade::api::command_list* command_list) {
-  const auto* device = dlss_bridge_device.load(std::memory_order_acquire);
+  const auto* device = submission_bridge_device.load(std::memory_order_acquire);
   if (device == nullptr || command_list == nullptr || command_list->get_device() != device) return;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
   auto* native = reinterpret_cast<IUnknown*>(command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   if (native == nullptr || FAILED(native->QueryInterface(IID_PPV_ARGS(&context)))
       || context->GetType() != D3D11_DEVICE_CONTEXT_DEFERRED) return;
-  const std::unique_lock lock(deferred_dlss_mutex);
-  active_queries.try_emplace(context.Get());
-}
-
-enum class DeferredScheduleResult : uint8_t {
-  SCHEDULED,
-  RETRYABLE_SKIP,
-  FATAL,
-};
-
-inline DeferredScheduleResult ScheduleDeferredDlssLocked(ValidatedFrameInputs& inputs) {
-  auto* deferred_context = reinterpret_cast<ID3D11DeviceContext*>(inputs.cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
-  auto* native_device = reinterpret_cast<ID3D11Device*>(inputs.device->get_native());              // NOLINT(performance-no-int-to-ptr)
-  if (deferred_context == nullptr
-      || deferred_context->GetType() != D3D11_DEVICE_CONTEXT_DEFERRED
-      || native_device == nullptr) {
-    return DeferredScheduleResult::FATAL;
-  }
-
-  Microsoft::WRL::ComPtr<ID3D11DeviceContext> immediate_context;
-  native_device->GetImmediateContext(&immediate_context);
-  if (!deferred_dlss_bridge_installed || immediate_context == nullptr) return DeferredScheduleResult::FATAL;
-
-  {
-    const std::unique_lock lock(deferred_dlss_mutex);
-    if (deferred_dlss_dispatches.size() >= 64u) return DeferredScheduleResult::RETRYABLE_SKIP;
-    const auto queries = active_queries.find(deferred_context);
-    // A context already recording when hooks were installed may contain an
-    // unseen Begin. Absence means unknown, NOT query-free. Wait for natural
-    // successful FinishCommandList (or a fresh context) before splitting it.
-    if (queries == active_queries.end() || !queries->second.empty()) {
-      return DeferredScheduleResult::RETRYABLE_SKIP;
-    }
-    const bool duplicate = std::any_of(
-        deferred_dlss_dispatches.begin(),
-        deferred_dlss_dispatches.end(),
-        [&inputs](const DeferredDlssDispatch& candidate) {
-          return candidate.deferred_context == inputs.cmd_list && candidate.post == nullptr;
-        });
-    if (duplicate) return DeferredScheduleResult::RETRYABLE_SKIP;
-  }
-
-  DeferredDlssDispatch pending = {
-      .deferred_context = inputs.cmd_list,
-      .color_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.color_srv.handle),                      // NOLINT(performance-no-int-to-ptr)
-      .velocity_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.velocity_srv.handle),                // NOLINT(performance-no-int-to-ptr)
-      .depth_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.depth_srv.handle),                      // NOLINT(performance-no-int-to-ptr)
-      .object_velocity_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.object_velocity_srv.handle),  // NOLINT(performance-no-int-to-ptr)
-      .inputs = inputs,
-      .temporal_generation = state::frame_state.temporal_generation,
-  };
-  ID3D11CommandList* prefix = nullptr;
-  const HRESULT finish_result = deferred_context->FinishCommandList(TRUE, &prefix);
-  if (FAILED(finish_result) || prefix == nullptr) {
-    if (finish_result == DXGI_ERROR_INVALID_CALL) return DeferredScheduleResult::RETRYABLE_SKIP;
-    return DeferredScheduleResult::FATAL;
-  }
-  pending.prefix.Attach(prefix);
-
-  const std::unique_lock lock(deferred_dlss_mutex);
-  deferred_dlss_dispatches.emplace_back(std::move(pending));
-  state::frame_state.reconstruction_scheduled = true;
-  if (!logged_deferred_dlss_executed.load(std::memory_order_relaxed)) {
-    logging::Info("scheduled deferred NVIDIA DLSS dispatch frame=", inputs.frame_token);
-  }
-  return DeferredScheduleResult::SCHEDULED;
+  const std::unique_lock lock(submission.mutex);
+  submission.active_queries.try_emplace(context.Get());
 }
 
 inline void OnExecuteSecondaryCommandList(
     reshade::api::command_list* command_list,
     reshade::api::command_list* secondary_command_list) {
-  const auto* device = dlss_bridge_device.load(std::memory_order_acquire);
+  const auto* device = submission_bridge_device.load(std::memory_order_acquire);
   if (device == nullptr || command_list == nullptr || secondary_command_list == nullptr
       || command_list->get_device() != device || secondary_command_list->get_device() != device) return;
 
@@ -491,36 +429,36 @@ inline void OnExecuteSecondaryCommandList(
   if (secondary_native == nullptr) return;
   if (SUCCEEDED(secondary_native->QueryInterface(IID_PPV_ARGS(&recording_context)))) {
     if (recording_context->GetType() != D3D11_DEVICE_CONTEXT_DEFERRED) return;
-    const std::unique_lock lock(deferred_dlss_mutex);
-    active_queries[recording_context.Get()].clear();
+    const std::unique_lock lock(submission.mutex);
+    submission.active_queries[recording_context.Get()].clear();
     const auto recorded = std::find_if(
-        deferred_dlss_dispatches.begin(),
-        deferred_dlss_dispatches.end(),
-        [secondary_command_list](const DeferredDlssDispatch& candidate) {
+        submission.pending_dispatches.begin(),
+        submission.pending_dispatches.end(),
+        [secondary_command_list](const PendingTemporalDispatch& candidate) {
           return candidate.deferred_context == secondary_command_list && candidate.post == nullptr;
         });
-    if (recorded != deferred_dlss_dispatches.end()) {
+    if (recorded != submission.pending_dispatches.end()) {
       recorded->deferred_context = nullptr;
       recorded->post = reinterpret_cast<ID3D11CommandList*>(command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
-      if (!logged_deferred_dlss_executed.load(std::memory_order_relaxed)) {
-        logging::Info("mapped deferred NVIDIA DLSS post command list frame=", recorded->inputs.frame_token);
+      if (!logged_immediate_dispatch.load(std::memory_order_relaxed)) {
+        logging::Info("mapped temporal post command list frame=", recorded->inputs.frame_token);
       }
     }
     return;
   }
 
   auto* post = reinterpret_cast<ID3D11CommandList*>(secondary_command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
-  DeferredDlssDispatch pending = {};
-  bool dispatch_dlss = false;
+  PendingTemporalDispatch pending = {};
+  bool dispatch_pending = false;
   {
-    const std::unique_lock lock(deferred_dlss_mutex);
+    const std::unique_lock lock(submission.mutex);
     const auto found = std::find_if(
-        deferred_dlss_dispatches.begin(),
-        deferred_dlss_dispatches.end(),
-        [post](const DeferredDlssDispatch& candidate) { return candidate.post.Get() == post; });
-    if (found == deferred_dlss_dispatches.end()) return;
+        submission.pending_dispatches.begin(),
+        submission.pending_dispatches.end(),
+        [post](const PendingTemporalDispatch& candidate) { return candidate.post.Get() == post; });
+    if (found == submission.pending_dispatches.end()) return;
     pending = *found;
-    dispatch_dlss = !found->dispatch_consumed;
+    dispatch_pending = !found->dispatch_consumed;
     found->dispatch_consumed = true;
   }
 
@@ -528,11 +466,12 @@ inline void OnExecuteSecondaryCommandList(
   if (context == nullptr) return;
   if (context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) {
     context->ExecuteCommandList(pending.prefix.Get(), TRUE);
-    if (dispatch_dlss && state::GetTemporalMode() == state::TemporalMode::NVIDIA_DLSS) {
+    if (dispatch_pending && state::GetTemporalMode() == pending.mode) {
       ExecutionGuard execution_guard;
+      if (pending.temporal_generation != state::frame_state.temporal_generation) return;
       state::frame_state.reconstruction_scheduled = false;
-      logging::Warn("deferred NVIDIA DLSS post list was merged into another deferred context");
-      dlss::QueueFatalFailure();
+      logging::Warn("temporal post list was merged into another deferred context");
+      submission_failure_pending.store(true, std::memory_order_release);
     }
     return;
   }
@@ -541,42 +480,42 @@ inline void OnExecuteSecondaryCommandList(
   ImmediateContextStateGuard state_guard(context);
   if (!state_guard.IsActive()) {
     context->ExecuteCommandList(pending.prefix.Get(), TRUE);
-    if (dispatch_dlss && state::GetTemporalMode() == state::TemporalMode::NVIDIA_DLSS) {
+    if (dispatch_pending && state::GetTemporalMode() == pending.mode
+        && pending.temporal_generation == state::frame_state.temporal_generation) {
       state::frame_state.reconstruction_scheduled = false;
-      logging::Warn("unable to preserve immediate D3D11 state for deferred NVIDIA DLSS");
-      dlss::QueueFatalFailure();
+      logging::Warn("unable to preserve immediate D3D11 state for temporal submission");
+      submission_failure_pending.store(true, std::memory_order_release);
     }
     return;
   }
 
   context->ExecuteCommandList(pending.prefix.Get(), FALSE);
-  if (!dispatch_dlss) {
-    if (state::GetTemporalMode() == state::TemporalMode::NVIDIA_DLSS) {
-      logging::Warn("repeated execution of a deferred NVIDIA DLSS command list is unsupported");
-      dlss::QueueFatalFailure();
-    }
+  // Prefix execution is unconditional: mode changes cancel reconstruction, never original game work.
+  if (pending.temporal_generation != state::frame_state.temporal_generation
+      || state::GetTemporalMode() != pending.mode) return;
+  if (!dispatch_pending) {
+    logging::Warn("repeated execution of a temporal command list is unsupported");
+    submission_failure_pending.store(true, std::memory_order_release);
     return;
   }
-  if (pending.temporal_generation != state::frame_state.temporal_generation) return;
-  if (state::GetTemporalMode() != state::TemporalMode::NVIDIA_DLSS) return;
 
   const uint64_t current_frame = state::CurrentFrameToken();
   const bool current_dispatch = pending.inputs.device == runtime_device
                                 && pending.inputs.sample_index == state::CurrentSampleIndex();
   if (!current_dispatch) {
     state::frame_state.reconstruction_scheduled = false;
-    logging::Warn("rejecting deferred NVIDIA DLSS execution pending_frame=", pending.inputs.frame_token,
+    logging::Warn("rejecting temporal execution pending_frame=", pending.inputs.frame_token,
                   " submission_frame=", current_frame,
                   " pending_sample=", pending.inputs.sample_index,
                   " current_sample=", state::CurrentSampleIndex(),
                   " device_match=", logging::Bool{pending.inputs.device == runtime_device});
-    dlss::QueueFatalFailure();
+    submission_failure_pending.store(true, std::memory_order_release);
     return;
   }
 
-  if (!logged_deferred_dlss_executed.exchange(true, std::memory_order_relaxed)) {
-    logging::Info("executing deferred NVIDIA DLSS dispatch on immediate context frame=",
-                  pending.inputs.frame_token,
+  if (!logged_immediate_dispatch.exchange(true, std::memory_order_relaxed)) {
+    logging::Info("executing temporal dispatch on immediate context mode=", static_cast<uint32_t>(pending.mode),
+                  " frame=", pending.inputs.frame_token,
                   " submission_frame=", current_frame);
   }
   pending.inputs.cmd_list = command_list;
@@ -589,32 +528,30 @@ inline void OnExecuteSecondaryCommandList(
 }
 
 inline void OnDestroyCommandList(reshade::api::command_list* command_list) {
-  const auto* device = dlss_bridge_device.load(std::memory_order_acquire);
+  const auto* device = submission_bridge_device.load(std::memory_order_acquire);
   if (device == nullptr || command_list == nullptr || command_list->get_device() != device) return;
   auto* native_command_list = reinterpret_cast<ID3D11CommandList*>(command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   auto* native_context = reinterpret_cast<ID3D11DeviceContext*>(command_list->get_native());     // NOLINT(performance-no-int-to-ptr)
   bool abandoned = false;
   uint64_t abandoned_generation = 0u;
   {
-    const std::unique_lock lock(deferred_dlss_mutex);
-    active_queries.erase(native_context);
-    for (const auto& pending : deferred_dlss_dispatches) {
-      if ((pending.deferred_context == command_list || pending.post.Get() == native_command_list)
-          && !pending.dispatch_consumed) {
+    const std::unique_lock lock(submission.mutex);
+    submission.active_queries.erase(native_context);
+    std::erase_if(submission.pending_dispatches, [&](const PendingTemporalDispatch& pending) {
+      const bool matches = pending.deferred_context == command_list || pending.post.Get() == native_command_list;
+      if (matches && !pending.dispatch_consumed) {
         abandoned = true;
         abandoned_generation = pending.temporal_generation;
       }
-    }
-    std::erase_if(deferred_dlss_dispatches, [command_list, native_command_list](const DeferredDlssDispatch& pending) {
-      return pending.deferred_context == command_list || pending.post.Get() == native_command_list;
+      return matches;
     });
   }
-  if (abandoned && state::GetTemporalMode() == state::TemporalMode::NVIDIA_DLSS) {
+  if (abandoned && state::IsEnabled()) {
     ExecutionGuard execution_guard;
     if (abandoned_generation == state::frame_state.temporal_generation
         && state::frame_state.reconstruction_scheduled) {
       state::frame_state.reconstruction_scheduled = false;
-      logging::Info("deferred NVIDIA DLSS command list abandoned; retrying a later candidate");
+      logging::Info("temporal command list abandoned; retrying a later candidate");
     }
   }
 }
@@ -642,26 +579,65 @@ inline void MaybeRunLocked(
     return;
   }
 
-  if (state::GetTemporalMode() == state::TemporalMode::NVIDIA_DLSS) {
-    if (!dlss::runtime_ready.load(std::memory_order_acquire)) return;
+  if (state::GetTemporalMode() == state::TemporalMode::NVIDIA_DLSS
+      && !dlss::runtime_ready.load(std::memory_order_acquire)) return;
+  if (!submission_bridge_installed) return;
 
-    auto* native_context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
-    if (native_context != nullptr && native_context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED) {
-      const auto schedule_result = ScheduleDeferredDlssLocked(inputs);
-      if (schedule_result == DeferredScheduleResult::FATAL) {
-        logging::Warn("failed to schedule deferred NVIDIA DLSS dispatch");
-        dlss::QueueFatalFailure();
-        state::frame_state.reconstruction_scheduled = true;
+  auto* native_context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
+  if (native_context != nullptr && native_context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED) {
+    const auto fail_submission = [] {
+      logging::Warn("failed to schedule temporal dispatch");
+      submission_failure_pending.store(true, std::memory_order_release);
+      state::frame_state.reconstruction_scheduled = true;
+    };
+    if (submission_bridge_device.load(std::memory_order_acquire) != inputs.device) {
+      fail_submission();
+      return;
+    }
+    {
+      const std::unique_lock lock(submission.mutex);
+      if (submission.pending_dispatches.size() >= 64u) return;
+      const auto queries = submission.active_queries.find(native_context);
+      // Existing recordings may contain an unseen Begin. Wait for a natural
+      // successful FinishCommandList or a fresh context before splitting them.
+      if (queries == submission.active_queries.end() || !queries->second.empty()) return;
+      if (std::any_of(
+              submission.pending_dispatches.begin(), submission.pending_dispatches.end(),
+              [&inputs](const PendingTemporalDispatch& candidate) {
+                return candidate.deferred_context == inputs.cmd_list && candidate.post == nullptr;
+              })) return;
+    }
+    PendingTemporalDispatch pending = {
+        .deferred_context = inputs.cmd_list,
+        .color_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.color_srv.handle),  // NOLINT(performance-no-int-to-ptr)
+        .velocity_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.velocity_srv.handle),  // NOLINT(performance-no-int-to-ptr)
+        .depth_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.depth_srv.handle),  // NOLINT(performance-no-int-to-ptr)
+        .object_velocity_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.object_velocity_srv.handle),  // NOLINT(performance-no-int-to-ptr)
+        .inputs = inputs,
+        .temporal_generation = state::frame_state.temporal_generation,
+        .mode = state::GetTemporalMode(),
+    };
+    ID3D11CommandList* prefix = nullptr;
+    const HRESULT finish_result = native_context->FinishCommandList(TRUE, &prefix);
+    if (FAILED(finish_result) || prefix == nullptr) {
+      if (finish_result != DXGI_ERROR_INVALID_CALL) {
+        fail_submission();
       }
       return;
     }
-    ImmediateContextStateGuard state_guard(native_context);
-    if (!state_guard.IsActive()) {
-      logging::Warn("unable to preserve immediate D3D11 state for NVIDIA DLSS");
-      dlss::QueueFatalFailure();
-      return;
+    pending.prefix.Attach(prefix);
+    const std::unique_lock lock(submission.mutex);
+    submission.pending_dispatches.emplace_back(std::move(pending));
+    state::frame_state.reconstruction_scheduled = true;
+    if (!logged_immediate_dispatch.load(std::memory_order_relaxed)) {
+      logging::Info("scheduled temporal dispatch frame=", inputs.frame_token);
     }
-    DispatchValidatedLocked(inputs);
+    return;
+  }
+  ImmediateContextStateGuard state_guard(native_context);
+  if (!state_guard.IsActive()) {
+    logging::Warn("unable to preserve immediate D3D11 state for temporal dispatch");
+    submission_failure_pending.store(true, std::memory_order_release);
     return;
   }
   DispatchValidatedLocked(inputs);

@@ -379,12 +379,10 @@ inline void ApplyProjectionJitter(float* projection, float jitter_uv_x, float ji
 inline bool GetPublishedJitterForViewport(
     const uint8_t* viewport,
     state::ProjectionJitterPath path,
-    std::array<float, 2>& jitter_uv,
-    bool thermography = false) {
+    std::array<float, 2>& jitter_uv) {
   if (!state::IsEnabled() || viewport == nullptr) return false;
 
-  // Thermography shares scene depth, independently of the Overlay Model diagnostic scale.
-  const float scale = (thermography ? 1.f : state::GetProjectionJitterScale(path));
+  const float scale = state::GetProjectionJitterScale(path);
   if (scale == 0.f) return false;
 
   const auto* projection = reinterpret_cast<const float*>(viewport + 0x280u);
@@ -403,7 +401,8 @@ inline bool GetPublishedJitterForViewport(
   // Velocity and thermography callers hold the publication writer lock through the native
   // write. Present is not a camera/sample boundary: the temporal consumer can
   // consume this exact camera in the next epoch, but never another sample.
-  const bool require_exact_camera = path == state::ProjectionJitterPath::VELOCITY || thermography;
+  const bool require_exact_camera = path == state::ProjectionJitterPath::VELOCITY
+                                    || path == state::ProjectionJitterPath::THERMOGRAPHY;
   if (published.frame_token != epoch
       && (!require_exact_camera || epoch == 0u || published.frame_token != epoch - 1u)) {
     return false;
@@ -435,20 +434,20 @@ inline bool GetPublishedJitterForViewport(
 
 inline void ApplyPublishedJitterToActiveProjection(
     const uint8_t* viewport,
-  state::ProjectionJitterPath jitter_path,
-  bool thermography = false) {
+  state::ProjectionJitterPath jitter_path) {
   // No execution gate here: native callbacks may run under it already. The
   // writer lock excludes reset, camera replacement, scale changes and the
   // camera+sample commit; no native calls or logging occur while it is held.
   std::optional<camera_state::PublicationWriterGuard> publication_guard;
-  if (jitter_path == state::ProjectionJitterPath::VELOCITY || thermography) publication_guard.emplace();
+  if (jitter_path == state::ProjectionJitterPath::VELOCITY
+      || jitter_path == state::ProjectionJitterPath::THERMOGRAPHY) publication_guard.emplace();
   std::array<float, 2> jitter_uv = {};
   void* shader_manager = shader_manager_global != nullptr ? *shader_manager_global : nullptr;
   if (shader_manager == nullptr) {
     return;
   }
   auto* active_projection = reinterpret_cast<float*>(static_cast<uint8_t*>(shader_manager) + 0x680u);
-  if (!GetPublishedJitterForViewport(viewport, jitter_path, jitter_uv, thermography)) return;
+  if (!GetPublishedJitterForViewport(viewport, jitter_path, jitter_uv)) return;
 
   const auto* projection = reinterpret_cast<const float*>(viewport + 0x280u);
   if (std::memcmp(projection, active_projection, 16u * sizeof(float)) != 0) {
@@ -465,14 +464,6 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   original(view_matrix);
 
   if (return_address != expected_return_address) {
-    if (return_address == new_thermography_return_address
-        || return_address == thermography_return_address) {
-      // Thermography tests against copied scene depth and must use the same jittered grid.
-      const auto* viewport = reinterpret_cast<const uint8_t*>(view_matrix) - 0x2C0u;
-      ApplyPublishedJitterToActiveProjection(
-          viewport, state::ProjectionJitterPath::OVERLAY_MODEL, true);
-      return;
-    }
     state::ProjectionJitterPath path;
     if (return_address == velocity_return_address) {
       path = state::ProjectionJitterPath::VELOCITY;
@@ -482,6 +473,9 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
       path = state::ProjectionJitterPath::ALPHA_MODEL;
     } else if (return_address == overlay_model_return_address) {
       path = state::ProjectionJitterPath::OVERLAY_MODEL;
+    } else if (return_address == new_thermography_return_address
+               || return_address == thermography_return_address) {
+      path = state::ProjectionJitterPath::THERMOGRAPHY;
     } else {
       return;
     }
@@ -696,7 +690,7 @@ struct NativeProjectionScope {
     camera_state::PublicationWriterGuard publication_guard;
     frame = camera_state::Get();
     if (!frame.valid || !frame.camera_matrix_valid
-        || state::GetTemporalMode() != state::TemporalMode::ANALYTICAL_TAA
+        || !state::IsEnabled()
         || frame.frame_token != state::CurrentFrameToken()
         || frame.sample_index != state::CurrentSampleIndex()) return;
     const auto* bytes = static_cast<const uint8_t*>(source);
@@ -738,7 +732,7 @@ struct NativeProjectionScope {
   ~NativeProjectionScope() { native_scope = previous; }
 
   bool CurrentLocked() const {
-    return valid && state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA
+    return valid && state::IsEnabled()
            && state::GetProjectionJitterScale(path) != 0.f
            && sequence == camera_state::published_sequence.load(std::memory_order_relaxed)
            && generation == state::frame_state.temporal_generation

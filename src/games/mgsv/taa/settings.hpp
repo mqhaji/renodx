@@ -230,7 +230,7 @@ struct BindingSnapshot {
   float object_motion_mode = static_cast<float>(state::DEFAULT_OBJECT_MOTION_MODE);
 #endif
 #if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
-  std::array<float, state::PROJECTION_JITTER_PATH_COUNT> projection_jitter_scales = state::DEFAULT_PROJECTION_JITTER_SCALES;
+  std::array<float, state::PROJECTION_JITTER_SLIDER_COUNT> projection_jitter_scales = state::DEFAULT_PROJECTION_JITTER_SCALES;
 #endif
 };
 
