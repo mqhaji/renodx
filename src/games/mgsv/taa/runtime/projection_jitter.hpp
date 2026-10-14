@@ -41,6 +41,9 @@ inline constexpr uintptr_t VELOCITY_SET_VIEW_RETURN_RVA = 0x1C57C8u;
 inline constexpr uintptr_t MODEL_SET_VIEW_RETURN_RVA = 0x1CD63Au;
 inline constexpr uintptr_t ALPHA_MODEL_SET_VIEW_RETURN_RVA = 0x1CFA0Du;
 inline constexpr uintptr_t OVERLAY_MODEL_SET_VIEW_RETURN_RVA = 0x208D9Cu;
+// "NewThermography" is the game's name for its mode-2 branch.
+inline constexpr uintptr_t NEW_THERMOGRAPHY_SET_VIEW_RETURN_RVA = 0x214531u;
+inline constexpr uintptr_t THERMOGRAPHY_SET_VIEW_RETURN_RVA = 0x214AC3u;
 inline constexpr uintptr_t FORWARD_RENDERING_RVA = 0x1CD460u;
 inline constexpr uintptr_t LOCAL_LIGHT_MAIN_EXEC_RVA = 0x20AA00u;
 inline constexpr uintptr_t LOCAL_LIGHT_VIEWPORT_280_COPY_RVA = 0x20B48Cu;
@@ -199,6 +202,8 @@ inline void* velocity_return_address = nullptr;
 inline void* model_return_address = nullptr;
 inline void* alpha_model_return_address = nullptr;
 inline void* overlay_model_return_address = nullptr;
+inline void* new_thermography_return_address = nullptr;
+inline void* thermography_return_address = nullptr;
 inline void** shader_manager_global = nullptr;
 inline std::atomic<bool> installed = false;
 // Only lifecycle callbacks take this mutex; native hooks must never need it
@@ -312,10 +317,14 @@ inline bool InitializeAdditionalHookAddresses(HMODULE module, const uint8_t* hel
   auto* model_return = base + MODEL_SET_VIEW_RETURN_RVA;
   auto* alpha_return = base + ALPHA_MODEL_SET_VIEW_RETURN_RVA;
   auto* overlay_return = base + OVERLAY_MODEL_SET_VIEW_RETURN_RVA;
+  auto* new_thermography_return = base + NEW_THERMOGRAPHY_SET_VIEW_RETURN_RVA;
+  auto* thermography_return = base + THERMOGRAPHY_SET_VIEW_RETURN_RVA;
   if (DecodeRelativeCall(velocity_return - 5u) != helper_entry_address
       || DecodeRelativeCall(model_return - 5u) != helper_entry_address
       || DecodeRelativeCall(alpha_return - 5u) != helper_entry_address
       || DecodeRelativeCall(overlay_return - 5u) != helper_entry_address
+      || DecodeRelativeCall(new_thermography_return - 5u) != helper_entry_address
+      || DecodeRelativeCall(thermography_return - 5u) != helper_entry_address
       || !MatchesBytes(base + FORWARD_RENDERING_RVA, FORWARD_RENDERING_PROLOGUE)
       || !MatchesBytes(base + LOCAL_LIGHT_MAIN_EXEC_RVA, LOCAL_LIGHT_MAIN_EXEC_PROLOGUE)
       || !MatchesBytes(base + LOCAL_LIGHT_VIEWPORT_280_COPY_RVA, LOCAL_LIGHT_VIEWPORT_280_COPY_PATTERN)) {
@@ -327,6 +336,8 @@ inline bool InitializeAdditionalHookAddresses(HMODULE module, const uint8_t* hel
   model_return_address = model_return;
   alpha_model_return_address = alpha_return;
   overlay_model_return_address = overlay_return;
+  new_thermography_return_address = new_thermography_return;
+  thermography_return_address = thermography_return;
   forward_rendering = reinterpret_cast<RenderPluginCallback>(base + FORWARD_RENDERING_RVA);
   local_light_main_exec = reinterpret_cast<RenderPluginCallback>(base + LOCAL_LIGHT_MAIN_EXEC_RVA);
   return true;
@@ -368,10 +379,12 @@ inline void ApplyProjectionJitter(float* projection, float jitter_uv_x, float ji
 inline bool GetPublishedJitterForViewport(
     const uint8_t* viewport,
     state::ProjectionJitterPath path,
-    std::array<float, 2>& jitter_uv) {
+    std::array<float, 2>& jitter_uv,
+    bool thermography = false) {
   if (!state::IsEnabled() || viewport == nullptr) return false;
 
-  const float scale = state::GetProjectionJitterScale(path);
+  // Thermography shares scene depth, independently of the Overlay Model diagnostic scale.
+  const float scale = (thermography ? 1.f : state::GetProjectionJitterScale(path));
   if (scale == 0.f) return false;
 
   const auto* projection = reinterpret_cast<const float*>(viewport + 0x280u);
@@ -387,12 +400,12 @@ inline bool GetPublishedJitterForViewport(
     return false;
   }
   const uint64_t epoch = state::CurrentFrameToken();
-  // VELOCITY's caller holds the publication writer lock through the native
+  // Velocity and thermography callers hold the publication writer lock through the native
   // write. Present is not a camera/sample boundary: the temporal consumer can
   // consume this exact camera in the next epoch, but never another sample.
-  const bool velocity = path == state::ProjectionJitterPath::VELOCITY;
+  const bool require_exact_camera = path == state::ProjectionJitterPath::VELOCITY || thermography;
   if (published.frame_token != epoch
-      && (!velocity || epoch == 0u || published.frame_token != epoch - 1u)) {
+      && (!require_exact_camera || epoch == 0u || published.frame_token != epoch - 1u)) {
     return false;
   }
   if (published.width != width || published.height != height) {
@@ -403,7 +416,7 @@ inline bool GetPublishedJitterForViewport(
     return false;
   }
 
-  if (velocity
+  if (require_exact_camera
       && (!published.camera_matrix_valid
           || published.reset_generation != camera_state::reset_generation.load(std::memory_order_relaxed)
           || published.viewport_identity != reinterpret_cast<uintptr_t>(viewport)
@@ -422,19 +435,20 @@ inline bool GetPublishedJitterForViewport(
 
 inline void ApplyPublishedJitterToActiveProjection(
     const uint8_t* viewport,
-    state::ProjectionJitterPath jitter_path) {
+  state::ProjectionJitterPath jitter_path,
+  bool thermography = false) {
   // No execution gate here: native callbacks may run under it already. The
   // writer lock excludes reset, camera replacement, scale changes and the
   // camera+sample commit; no native calls or logging occur while it is held.
-  std::optional<camera_state::PublicationWriterGuard> velocity_guard;
-  if (jitter_path == state::ProjectionJitterPath::VELOCITY) velocity_guard.emplace();
+  std::optional<camera_state::PublicationWriterGuard> publication_guard;
+  if (jitter_path == state::ProjectionJitterPath::VELOCITY || thermography) publication_guard.emplace();
   std::array<float, 2> jitter_uv = {};
   void* shader_manager = shader_manager_global != nullptr ? *shader_manager_global : nullptr;
   if (shader_manager == nullptr) {
     return;
   }
   auto* active_projection = reinterpret_cast<float*>(static_cast<uint8_t*>(shader_manager) + 0x680u);
-  if (!GetPublishedJitterForViewport(viewport, jitter_path, jitter_uv)) return;
+  if (!GetPublishedJitterForViewport(viewport, jitter_path, jitter_uv, thermography)) return;
 
   const auto* projection = reinterpret_cast<const float*>(viewport + 0x280u);
   if (std::memcmp(projection, active_projection, 16u * sizeof(float)) != 0) {
@@ -451,6 +465,14 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   original(view_matrix);
 
   if (return_address != expected_return_address) {
+    if (return_address == new_thermography_return_address
+        || return_address == thermography_return_address) {
+      // Thermography tests against copied scene depth and must use the same jittered grid.
+      const auto* viewport = reinterpret_cast<const uint8_t*>(view_matrix) - 0x2C0u;
+      ApplyPublishedJitterToActiveProjection(
+          viewport, state::ProjectionJitterPath::OVERLAY_MODEL, true);
+      return;
+    }
     state::ProjectionJitterPath path;
     if (return_address == velocity_return_address) {
       path = state::ProjectionJitterPath::VELOCITY;
