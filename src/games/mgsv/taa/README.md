@@ -187,7 +187,9 @@ are released; DLSS suspension is a transition-crash mitigation, not identificati
   history correspondence. Native previous bones/object transforms versus the last accumulated frame remain unproved.
   These are coverage gaps, not evidence of a native-pose root cause or grounds to prioritize it from the camera-only test.
   Current source has no automatic capture machinery; no repeated generic capture or old A/B run is requested.
-- Rapid night-vision skinned-mesh flicker remains separate and unfixed. Thermography target/depth ownership is unproven.
+- Thermography now receives scene jitter at its two native projection setters. Matched RenderDoc body/highlight
+  draws agree on clip positions after correction; the user reports clean NVG rendering with original shaders.
+  The native `NewThermography` branch was observed live; the alternate branch still needs gameplay coverage.
 - Five experimental projection paths still need runtime coverage/transition validation. There is no proven native
   camera-cut signal; do not restore the removed clip-space heuristic that falsely reset SDK history every frame.
 - FSR external masks/exposure and analytical previous-depth/disocclusion/lock history remain absent. Thin detail,

@@ -31,8 +31,9 @@ No viewport/culling changes, broad constant-buffer mutation, or camera-only prod
   world/UI/glyph separation. Their `1x` defaults do not constitute runtime validation.
 - **Deferred SH packet remains blocked:** prove producer generation/sample through consumption at `0x27F450`.
   Latest-camera VP equality is insufficient; preserve inverse-lighting math and avoid guessed packet fields/pointer caches.
-- **Thermography/night vision remains unidentified:** qualify target/depth ownership at setter returns `0x214531` and
-  `0x214AC3` before adding a whitelist entry. Rapid skinned-mesh flicker is not proof of missing projection jitter.
+- **Thermography:** scene-depth ownership and missing jitter were confirmed, and setter returns `0x214531` and
+  `0x214AC3` now receive guarded scene jitter. Verify the alternate branch and clean rendering without temporary
+  diagnostics; live validation so far exercised `NewThermography` with original game shaders.
 - Check signed/fractional scales, all SH kinds, rejected/nested scopes, null/foreign cameras, device recreation, normal
   exit, and rapid preset/method/Off/reset transitions. Prove admitted old work cannot contaminate new history.
   Hooks remain process-lifetime pinned; restart for replacement/removal, never introduce unsafe live detach/reclamation.
