@@ -342,6 +342,10 @@ inline void OnPresent(
 }
 
 inline void Use(DWORD fdw_reason) {
+  if (fdw_reason == DLL_PROCESS_ATTACH) {
+    // RTV capture and compute-state preservation use the snapshot-backed compatibility accessor.
+    renodx::utils::state::use_snapshot = true;
+  }
   renodx::utils::resource::Use(fdw_reason);
   renodx::utils::pipeline_layout::Use(fdw_reason);
   renodx::utils::shader::Use(fdw_reason);
