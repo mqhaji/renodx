@@ -112,18 +112,32 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
                                        // blur fills in the centimetre-scale gaps in a
                                        // canopy's dappling. That reads as a translucent
                                        // veil rather than a soft shadow.
-#define PCSS_PENUMBRA_MAX_WORLD  0.05  // penumbra at penumbra01 = 1, metres. Keep this
+#define PCSS_PENUMBRA_MIN_TEXELS_FOR_MAX 6.0
+                                       // Lower bound on the maximum penumbra, in
+                                       // texels. The maximum itself is the Sun
+                                       // Shadow Softness setting (metres); keep it
                                        // under half the width of the smallest shadow
                                        // you care about, or its dark core disappears
-                                       // and it reads as translucent rather than soft.
-                                       // It also sets the tap spacing: the radius in
-                                       // texels is this divided by the cascade texel
-                                       // size (3.2 mm in cascade 0), so 8 cm is ~25
-                                       // texels and needs the tap count below to
-                                       // resolve. Too few taps and the PCF result is
-                                       // a random sample of the shadow's coverage
-                                       // rather than its average, which reads as
-                                       // dithering - translucency, not a blur.
+                                       // and it reads as translucent rather than
+                                       // soft. It also sets the tap spacing: the
+                                       // radius in texels is that value divided by
+                                       // the cascade texel size (3.2 mm in cascade
+                                       // 0), so 8 cm is ~25 texels and needs the tap
+                                       // count below to resolve. Too few taps and
+                                       // the PCF is a random sample of the shadow's
+                                       // coverage rather than its average, which
+                                       // reads as dithering.
+                                       //
+                                       // A shadow-map mod can stretch the cascades
+                                       // (CascadeShadowRangeScale), so one texel
+                                       // covers several times the world space. A
+                                       // fixed metre value then falls to a few
+                                       // texels and the hardening stops being
+                                       // visible. This floor holds it up, and it
+                                       // binds only when the map is stretched - at
+                                       // the stock cascade range it changes nothing.
+                                       // Six texels is also about the most a 32 tap
+                                       // gather PCF resolves cleanly.
 #define PCSS_FILTER_MAX_TEXELS   128.0 // sampling guard, texels; rarely binds
 #define PCSS_FILTER_MIN_TEXELS   0.5   // never harder than vanilla's 0.5 texel PCF
 #define PCSS_PCF_TAPS            32
@@ -554,7 +568,13 @@ void main(
     // Scale the fixed max filter kernel. The floor keeps the result from getting
     // harder than vanilla's 0.5 texel PCF; the ceiling is only a sampling guard -
     // a small texel radius is trivially well sampled, so it rarely binds.
-    const float penumbraWorld = lerp(PCSS_PENUMBRA_MIN_WORLD, PCSS_PENUMBRA_MAX_WORLD, penumbra01);
+    //
+    // The maximum is floored in texels as well as metres, so that stretching the
+    // cascade range (a shadow-map mod) cannot shrink the effect out of sight. At
+    // the stock range the floor never binds and this is the setting's value alone.
+    const float penumbraMaxWorld = max(CUSTOM_SUN_SHADOW_SOFTNESS,
+                                       PCSS_PENUMBRA_MIN_TEXELS_FOR_MAX * texelWorld);
+    const float penumbraWorld = lerp(PCSS_PENUMBRA_MIN_WORLD, penumbraMaxWorld, penumbra01);
     const float penumbra = clamp(penumbraWorld / texelWorld, PCSS_FILTER_MIN_TEXELS, PCSS_FILTER_MAX_TEXELS);
 
     // Variable-radius PCF with the game's own comparison sampler.

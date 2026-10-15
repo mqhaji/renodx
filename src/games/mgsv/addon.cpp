@@ -1061,6 +1061,19 @@ renodx::utils::settings::Settings settings = {
                    "read, so it is off by default. Vanilla shadows are kept when off.",
     },
     new renodx::utils::settings::Setting{
+        .key = "FxSunShadowSoftness",
+        .binding = &shader_injection.sun_shadow_softness,
+        .default_value = 50.f,
+        .label = "Sun Shadow Softness",
+        .section = "Shadows",
+        .tooltip = "Widest penumbra a fully separated shadow gets, in millimetres. "
+                   "Raise it if a shadow-map mod stretches the cascade range: that "
+                   "makes each shadow-map texel cover more ground, which would "
+                   "otherwise shrink the softening out of sight.",
+        .max = 150.f,
+        .parse = [](float value) { return value * 0.001f; },
+    },
+    new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
         .label = "Reset All",
         .section = "Options",
