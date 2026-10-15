@@ -1049,6 +1049,18 @@ renodx::utils::settings::Settings settings = {
         .parse = [](float value) { return value * 0.02f; },
     },
     new renodx::utils::settings::Setting{
+        .key = "FxSunContactHardening",
+        .binding = &shader_injection.sun_contact_hardening,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 0.f,
+        .label = "Contact-Hardening Sun Shadows",
+        .section = "Shadows",
+        .tooltip = "Softens sun shadows with distance from whatever casts them: sharp "
+                   "where an object meets the ground, wider further away, in place of "
+                   "the game's fixed-radius filter. Changes how the scene's shadows "
+                   "read, so it is off by default. Vanilla shadows are kept when off.",
+    },
+    new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
         .label = "Reset All",
         .section = "Options",
