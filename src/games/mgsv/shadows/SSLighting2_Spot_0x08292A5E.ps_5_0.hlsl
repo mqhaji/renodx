@@ -363,6 +363,16 @@ void main(
     // resolution. The sun reads this off the cascade ladder instead.
     const float texelWorld = r9.w / max(abs(g_psScene.m_shadowProjection._m00), 1e-9) / shadowRes;
 
+    // The shadow map stores a non-linear depth. For a perspective projection
+    // z_norm = _m22 + _m32 / z_view, so z_view = _m32 / (z_norm - _m22). The
+    // sun does not need this - an orthographic cascade stores linear depth, and
+    // its ratio is a true distance ratio. Here the raw ratio blows up wherever
+    // the stored depth approaches zero, which is near the light, and the
+    // saturated penumbra smears across the whole surface.
+    const float projM22 = g_psScene.m_shadowProjection._m22;
+    const float projM32 = g_psScene.m_shadowProjection._m32;
+    const float viewDepthR = r9.w;
+
     const float angle = PcssInterleavedGradientNoise(v0.xy) * 6.28318530718;
     const float cs    = cos(angle);
     const float sn    = sin(angle);
@@ -386,7 +396,8 @@ void main(
       const float  zN      = refZ   + o.x * zStepX  + o.y * zStepY;
       const float  occN    = g_ShadowTexture.SampleCmpLevelZero(g_samplerComparisonLess_Linear_Clmap_s, uvN, zN).x;
       const float  casterN = g_ShadowTexture.SampleLevel(g_samplerPoint_Clamp_s, uvN, 0).x;
-      const float  relN    = (zN - casterN) / max(casterN, 1e-9);
+      const float  viewDepthN = projM32 / max(casterN - projM22, 1e-6);
+      const float  relN    = (viewDepthR - viewDepthN) / max(viewDepthN, 1e-9);
       penumbra01 += occN * saturate(SPOT_K * relN * relN);
     }
     penumbra01 /= 9.0;
