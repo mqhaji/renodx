@@ -173,13 +173,30 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
                                // with every iteration's registers live at once,
                                // which fails pipeline creation and crashes the
                                // device. The loop breaks on off-screen anyway.
-#define SS_MARCH_M      1.0    // metres the ray travels. A fixed world distance,
-                               // not a fraction of depth: scaling by depth made the
-                               // ray 2.5 m long at 4 m, which occluded everything
-                               // behind a nearby object and read as a giant halo.
-                               // Step length is this over the step count: 512 steps
-                               // gives 2 mm, finer than a grass blade, so blades
-                               // occlude as reliably as thick geometry.
+#define SS_MARCH_NDC    0.05   // length of the ray in screen space, in ndc.y units:
+                               // 0.05 is 2.5% of the screen height, about 54 px at
+                               // 2160p. A screen-space length, not a world one, and
+                               // that is the whole point. A fixed world reach covers
+                               // a screen distance that grows as the receiver comes
+                               // closer: 1 m at 2 m of depth is a quarter of the
+                               // screen width, so the ray sweeps a huge swath of the
+                               // frame and everything along it that happens to be
+                               // nearer than the ray registers as an occluder. That
+                               // is a shadow the size of the surrounding terrain
+                               // around a character standing near the camera, and it
+                               // is the likeliest reason the effect stayed oversized
+                               // at 1 m of world reach. A screen-space shadow can
+                               // only see casters within a small neighbourhood of the
+                               // pixel, so the reach belongs in screen space.
+                               //
+                               // This is proportional to depth, which was tried
+                               // before and rejected: it made the ray 2.5 m long at
+                               // 4 m of depth. The fault there was the constant, not
+                               // the proportionality. Constant screen length *is*
+                               // proportionality to depth, and the projection fixes
+                               // the constant: 2.5% of the screen height is 0.029 m
+                               // per metre of depth, so 12 cm at 4 m rather than
+                               // 2.5 m.
 #define SS_THICKNESS    0.005  // metres. A BIAS, not a minimum separation: any
                                // surface nearer than the ray by more than this
                                // occludes. It has to be smaller than the casters
@@ -188,8 +205,11 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
                                // objects were caught.
 #define SS_FADE_START   8.0    // metres; screen space is reliable close in
 #define SS_FADE_END     25.0   // metres; beyond this the cascade map takes over
-#define SS_STRENGTH     2.0    // attenuation per unit of occlusion. Above 1
-                               // darkens, so the effect is evident.
+#define SS_STRENGTH     1.0    // attenuation per unit of occlusion. One is full
+                               // occlusion where the march is fully occluded, which
+                               // is as much as a scale can mean. Above one only
+                               // saturates the ramp into a flat black core, and the
+                               // ramp is the entire point of a contact term.
 #define SS_SLOPE_BIAS   1.0    // multiples of the receiver's screen-space depth
                                // gradient added to the bias. A fixed bias cannot
                                // work: too small and a sloped surface occludes
@@ -1010,14 +1030,20 @@ void main(
     const float3 gbufN = g_NormalTexture.SampleLevel(g_samplerPoint_Clamp_s, uv, 0).xyz;
     const float3 normal = normalize(float3(gbufN.xy * 2.0 - 1.0, gbufN.z * gbufN.z * 2.0 - 1.0));
 
-    // Step length scales with depth so the march covers similar screen distance
-    // near and far. The thickness is floored against it, so a step can never be
-    // longer than the thickness and skip a caster.
+    // Reach is a screen-space length converted to metres at this pixel's depth.
+    // ndc.y = viewY * m11 / viewZ, so a world offset of d across the view plane
+    // moves ndc.y by d * m11 / viewZ, and the reach spanning SS_MARCH_NDC is
+    // SS_MARCH_NDC * viewZ / m11. See SS_MARCH_NDC for why that is proportional to
+    // depth and why the earlier depth-proportional reach failed anyway.
+    //
+    // The step is a fraction of the reach, so it stays far below the thickness at
+    // every distance the fade allows: 0.23 mm at 2 m and 2.3 mm at 20 m against a
+    // 5 mm thickness, so a step can never step over a caster.
     //
     // Self-occlusion at grazing angles is handled by a normal bias below, not by
     // scaling the thickness. Scaling by N.V made the thickness - and therefore
     // the occlusion - depend on the camera, which a shadow must never do.
-    const float marchStep = SS_MARCH_M / (float)SS_STEPS;
+    const float marchStep = (SS_MARCH_NDC * viewZ / abs(g_psScene.m_projection._m11)) / (float)SS_STEPS;
     // Slope-scaled bias: the receiver's own screen-space depth gradient, so a
     // steeply sloped surface gets a proportionally larger bias and does not
     // occlude itself, while a flat one keeps a bias small enough to catch grass.
@@ -1053,11 +1079,7 @@ void main(
     // *added*. Writing 1 - ssOcc added a full unit of light everywhere and
     // washed the frame out; what is wanted is to attenuate the light that this
     // pass contributes where the march found an occluder.
-    // ISOLATION: write the occlusion negative and nothing else. The blend is
-    // additive, so this subtracts where the march found a blocker and adds
-    // nothing anywhere else - the cascade and the sun's own light are removed
-    // from this pass, leaving only the screen-space term visible.
-    r2.xyz = -ssOcc * SS_STRENGTH;
+    r2.xyz *= saturate(1.0 - ssOcc * SS_STRENGTH);
   }
 
   o0.xyzw = r2.xyzw;
