@@ -168,20 +168,37 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
                                        // the stock cascade range it changes nothing.
                                        // Six texels is also about the most a 32 tap
                                        // gather PCF resolves cleanly.
-#define SS_STEPS        64     // depth-buffer march steps toward the light
-#define SS_STEP_SCALE   0.01   // step size, as a fraction of the receiver's depth,
-                               // so the march covers similar screen distance near
-                               // and far rather than collapsing at range
-#define SS_THICKNESS    0.02   // metres a surface must be in front of the ray to
-                               // count as occluding. Floored against the step so
-                               // the ray cannot skip a caster - but only at half a
-                               // step: a floor of one and a half steps at range
-                               // makes the thickness tens of centimetres, which
-                               // stops almost anything from occluding at all.
-#define SS_THICKNESS_FLOOR 0.5 // multiple of the step length the floor may reach
+#define SS_STEPS        256    // depth-buffer march steps toward the light. NOT
+                               // unrolled: 512 unrolled steps is ~8000 instructions
+                               // with every iteration's registers live at once,
+                               // which fails pipeline creation and crashes the
+                               // device. The loop breaks on off-screen anyway.
+#define SS_MARCH_M      1.0    // metres the ray travels. A fixed world distance,
+                               // not a fraction of depth: scaling by depth made the
+                               // ray 2.5 m long at 4 m, which occluded everything
+                               // behind a nearby object and read as a giant halo.
+                               // Step length is this over the step count: 512 steps
+                               // gives 2 mm, finer than a grass blade, so blades
+                               // occlude as reliably as thick geometry.
+#define SS_THICKNESS    0.005  // metres. A BIAS, not a minimum separation: any
+                               // surface nearer than the ray by more than this
+                               // occludes. It has to be smaller than the casters
+                               // being sought - at 2 cm it exceeded a grass blade,
+                               // so the ray flew over the grass and only tall
+                               // objects were caught.
 #define SS_FADE_START   8.0    // metres; screen space is reliable close in
 #define SS_FADE_END     25.0   // metres; beyond this the cascade map takes over
-#define SS_NORMAL_BIAS  0.02   // metres to offset the ray's start along the surface
+#define SS_STRENGTH     2.0    // attenuation per unit of occlusion. Above 1
+                               // darkens, so the effect is evident.
+#define SS_SLOPE_BIAS   1.0    // multiples of the receiver's screen-space depth
+                               // gradient added to the bias. A fixed bias cannot
+                               // work: too small and a sloped surface occludes
+                               // itself, too large and grass is missed.
+#define SS_NORMAL_BIAS  0.003  // metres to offset the ray's start along the surface
+                               // normal, which stops a surface occluding itself at
+                               // grazing angles. Must be smaller than the casters
+                               // being sought: at 2 cm the ray started above a grass
+                               // blade and never intersected it.
                                // normal, which stops a surface occluding itself at
                                // grazing angles. A bias, not a thickness scale:
                                // it must not depend on the camera.
@@ -1000,20 +1017,24 @@ void main(
     // Self-occlusion at grazing angles is handled by a normal bias below, not by
     // scaling the thickness. Scaling by N.V made the thickness - and therefore
     // the occlusion - depend on the camera, which a shadow must never do.
-    const float stepLen   = viewZ * SS_STEP_SCALE;
-    const float thickness = max(SS_THICKNESS, stepLen * SS_THICKNESS_FLOOR);
+    const float marchStep = SS_MARCH_M / (float)SS_STEPS;
+    // Slope-scaled bias: the receiver's own screen-space depth gradient, so a
+    // steeply sloped surface gets a proportionally larger bias and does not
+    // occlude itself, while a flat one keeps a bias small enough to catch grass.
+    const float slopeBias = (abs(ddx(viewZ)) + abs(ddy(viewZ))) * SS_SLOPE_BIAS;
+    const float thickness = SS_THICKNESS + slopeBias;
 
     // Per-pixel jitter of the start offset, so any residual banding reads as
     // noise rather than stripes.
     const float jitter = PcssInterleavedGradientNoise(v0.xy);
 
     float occ = 0.0;
-    [unroll] for (int s = 0; s < SS_STEPS; ++s) {
+    for (int s = 0; s < SS_STEPS; ++s) {
       // Bias the start along the normal. This is what keeps a surface from
       // occluding itself when the view is grazing: the ray begins above the
       // surface rather than on it, and unlike a thickness scale it does not
       // depend on the camera, which a shadow must never do.
-      const float3 p = viewPos + normal * SS_NORMAL_BIAS + lightDir * (stepLen * ((float)s + jitter));
+      const float3 p = viewPos + normal * SS_NORMAL_BIAS + lightDir * (marchStep * ((float)s + jitter));
       const float4 clip = mul(float4(p, 1.0), g_psScene.m_projection);
       const float2 suv  = clip.xy / clip.w * float2(0.5, -0.5) + 0.5;
       if (any(suv < 0.0) || any(suv > 1.0)) break;
@@ -1032,7 +1053,11 @@ void main(
     // *added*. Writing 1 - ssOcc added a full unit of light everywhere and
     // washed the frame out; what is wanted is to attenuate the light that this
     // pass contributes where the march found an occluder.
-    r2.xyz *= (1.0 - ssOcc);
+    // ISOLATION: write the occlusion negative and nothing else. The blend is
+    // additive, so this subtracts where the march found a blocker and adds
+    // nothing anywhere else - the cascade and the sun's own light are removed
+    // from this pass, leaving only the screen-space term visible.
+    r2.xyz = -ssOcc * SS_STRENGTH;
   }
 
   o0.xyzw = r2.xyzw;
