@@ -1087,7 +1087,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "FxSunShadowBlurPixels",
         .binding = &shader_injection.sun_shadow_blur_pixels,
-        .default_value = 9.f,
+        .default_value = 24.f,
         .label = "Penumbra Blur Radius",
         .section = "Shadows",
         .tooltip = "Spacing of the penumbra mask's neighbours, in screen pixels. "
