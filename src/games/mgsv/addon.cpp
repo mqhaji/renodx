@@ -1165,6 +1165,97 @@ renodx::utils::settings::Settings settings = {
         .parse = [](float value) { return value * 0.01f; },
     },
     new renodx::utils::settings::Setting{
+        .key = "FxScreenSpaceShadows",
+        .binding = &shader_injection.screen_space_shadows,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 0.f,
+        .label = "Screen-Space Shadows",
+        .section = "Shadows",
+        .tooltip = "Ray-marches the depth buffer toward the sun and darkens where "
+                   "the ray passes behind something nearer. Supplies the detail the "
+                   "cascade map cannot resolve at its texel size - grass, low bushes, "
+                   "the contact where a trunk meets the ground - out to the end of "
+                   "the cascade range. Off by default.",
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxScreenSpaceShadowStrength",
+        .binding = &shader_injection.ss_shadow_strength,
+        .default_value = 150.f,
+        .label = "Screen-Space Shadow Strength",
+        .section = "Shadows",
+        .tooltip = "Attenuation per unit of occlusion, so this is the main look "
+                   "dial. The march reports the fraction of its steps that found an "
+                   "occluder, and that fraction is usually well below one, so the "
+                   "setting's scale runs past its own value: 150 removes 60% of the "
+                   "light where 40% of the march was occluded. Around 200 the core "
+                   "of a strong contact flattens to black.",
+        .max = 400.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxScreenSpaceShadowReach",
+        .binding = &shader_injection.ss_shadow_reach,
+        .default_value = 2.5f,
+        .label = "Screen-Space Shadow Reach",
+        .section = "Shadows",
+        .tooltip = "How far the ray travels, as a percentage of screen height, so "
+                   "the world distance grows with depth: 2.5% is about 54 px at "
+                   "2160p, and reaches 29 cm at 10 m, 1.2 m at 40 m and 2.9 m at "
+                   "100 m. That growth is what lets a tree shade the ground under "
+                   "it at range. Raise it to catch more, at the cost of the ray "
+                   "crossing geometry that is merely nearby.",
+        .max = 10.f,
+        .parse = [](float value) { return value * 0.02f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxScreenSpaceShadowThickness",
+        .binding = &shader_injection.ss_shadow_thickness,
+        .default_value = 5.f,
+        .label = "Screen-Space Shadow Thickness",
+        .section = "Shadows",
+        .tooltip = "How far in front of the ray a surface must sit before it counts "
+                   "as an occluder. Too high and thin casters are missed - at 20 mm "
+                   "it exceeded a grass blade, so the ray passed beside the grass.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.001f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxScreenSpaceShadowMaterialMax",
+        .binding = &shader_injection.ss_shadow_material_max,
+        .default_value = 25.f,
+        .label = "Screen-Space Shadow Material Limit",
+        .section = "Shadows",
+        .tooltip = "The term runs only where the G-buffer's material index is below "
+                   "this. It exists because the depth test cannot tell a caster from "
+                   "the receiver's own surface on a solid object, which outlined "
+                   "characters; the material separates them. Grass, terrain and "
+                   "rocks all measure below 25, the character's body at 25-50. "
+                   "Lowering it risks cutting foliage; raising it lets characters "
+                   "shadow themselves and the ground again.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxScreenSpaceShadowFadeStart",
+        .binding = &shader_injection.ss_shadow_fade_start,
+        .default_value = 40.f,
+        .label = "Screen-Space Shadow Fade Start",
+        .section = "Shadows",
+        .tooltip = "Distance at which the term starts fading out, in metres. Full "
+                   "strength nearer than this.",
+        .max = 300.f,
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxScreenSpaceShadowFadeEnd",
+        .binding = &shader_injection.ss_shadow_fade_end,
+        .default_value = 110.f,
+        .label = "Screen-Space Shadow Fade End",
+        .section = "Shadows",
+        .tooltip = "Distance at which it is gone, in metres. The last cascade "
+                   "reaches 122.9 m, so past this the cascade map is on its own.",
+        .max = 500.f,
+    },
+    new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
         .label = "Reset All",
         .section = "Options",
