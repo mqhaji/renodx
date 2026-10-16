@@ -40,11 +40,8 @@ struct ShaderInjectData {
   // existing field so no established offset moves.
   float sun_contact_hardening;
   float sun_shadow_softness;
-  float sun_shadow_penumbra_quality;
-  float sun_shadow_filter_quality;
   float sun_shadow_k;
   float sun_shadow_blur_pixels;
-  float sun_shadow_skip_lit;
 };
 
 #ifndef __cplusplus
@@ -84,11 +81,8 @@ cbuffer cb13 : register(b13) {
 
 #define CUSTOM_SUN_CONTACT_HARDENING shader_injection.sun_contact_hardening
 #define CUSTOM_SUN_SHADOW_SOFTNESS   shader_injection.sun_shadow_softness
-#define CUSTOM_SUN_PENUMBRA_QUALITY  shader_injection.sun_shadow_penumbra_quality
-#define CUSTOM_SUN_FILTER_QUALITY    shader_injection.sun_shadow_filter_quality
 #define CUSTOM_SUN_SHADOW_K          shader_injection.sun_shadow_k
 #define CUSTOM_SUN_BLUR_PIXELS       shader_injection.sun_shadow_blur_pixels
-#define CUSTOM_SUN_SKIP_LIT          shader_injection.sun_shadow_skip_lit
 
 #include "../../shaders/renodx.hlsl"
 
