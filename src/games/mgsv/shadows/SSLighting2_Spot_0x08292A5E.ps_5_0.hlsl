@@ -18,14 +18,31 @@
 //
 // ---- Created with 3Dmigoto v1.3.16 on Fri Oct 16 16:41:57 2026
 
-// Tunables are pinned while iterating through the devkit: that path replaces the
+// The addon's injected settings, which carry the tunables below.
+#include "../shared.h"
+
+// Tunables come from the addon, through cb13; see ../shared.h. The spot's values
+// are separate from the sun's because the scales differ - a spot's cone is tens
+// of metres where the sun's cascade is hundreds, so the same caster separation
+// gives a far larger ratio.
+//
+// To iterate through the devkit instead, pin them here: that path replaces the
 // shader without supplying cb13, and D3D11 returns 0 for an unbound constant
-// buffer, so anything read from it - including a gate - comes back as 0 and the
-// effect disappears. Wire these to settings once the look is right.
-#define SPOT_PCSS_ENABLED  1.0
-#define SPOT_SOFTNESS_M    0.05  // widest penumbra, metres
-#define SPOT_K             24.0  // how fast separation reaches full softness
-#define SPOT_BLUR_PIXELS   24.0  // penumbra mask neighbour spacing, screen pixels
+// buffer, so anything read from it - including the gate - comes back as 0.
+//
+// #undef  CUSTOM_SPOT_CONTACT_HARDENING
+// #define CUSTOM_SPOT_CONTACT_HARDENING 1.0
+// #undef  CUSTOM_SPOT_SHADOW_SOFTNESS
+// #define CUSTOM_SPOT_SHADOW_SOFTNESS   0.08
+// #undef  CUSTOM_SPOT_SHADOW_K
+// #define CUSTOM_SPOT_SHADOW_K          4.0
+// #undef  CUSTOM_SPOT_BLUR_PIXELS
+// #define CUSTOM_SPOT_BLUR_PIXELS       24.0
+// #undef  CUSTOM_SPOT_SHADOW_DARKNESS
+// #define CUSTOM_SPOT_SHADOW_DARKNESS   1.0
+// #undef  CUSTOM_SPOT_CONE_FALLOFF
+// #define CUSTOM_SPOT_CONE_FALLOFF      1.0
+
 #define SPOT_MIN_TEXELS    6.0   // floor on the maximum, texels
 
 // Vogel disk, precomputed. Only the per-pixel rotation varies, so baking the
@@ -351,17 +368,21 @@ void main(
   // and depth come from dividing r9 by r9.w; and there are no cascades, so there
   // is no atlas tile and no clamp to keep taps inside one.
   // =========================================================================
-  if (SPOT_PCSS_ENABLED != 0.f) {
+  if (CUSTOM_SPOT_CONTACT_HARDENING != 0.f) {
     const float  shadowRes = max(g_psScene.m_shadowMapResolutions.y, 1.0);
     const float  texel     = 1.0 / shadowRes;
     const float2 baseUV    = r9.xy / r9.w;
     const float  refZ      = r9.z / r9.w;
 
-    // World size of one texel at this receiver's depth. m_shadowProjection is a
-    // perspective transform here, so its x scale converts clip units back to
-    // world: r9.w / |_m00| is one UV unit, and a texel is that over the map
-    // resolution. The sun reads this off the cascade ladder instead.
-    const float texelWorld = r9.w / max(abs(g_psScene.m_shadowProjection._m00), 1e-9) / shadowRes;
+    // World size of one texel at this receiver's depth. The map covers the spot
+    // cone, and the material's x component is cos(halfAngle) - the same value the
+    // vanilla uses as the cone's edge test at line 282. So the cone's width at
+    // this depth is 2 * depth * tan(halfAngle), and a texel is that over the map
+    // resolution. Deriving it from the light avoids assuming which element of
+    // m_shadowProjection carries the scale.
+    const float cosHalf = clamp(g_psMaterial.m_materials[6].x, 1e-3, 0.9999);
+    const float tanHalf = sqrt(max(1.0 - cosHalf * cosHalf, 0.0)) / cosHalf;
+    const float texelWorld = 2.0 * r9.w * tanHalf / shadowRes;
 
     // The shadow map stores a non-linear depth. For a perspective projection
     // z_norm = _m22 + _m32 / z_view, so z_view = _m32 / (z_norm - _m22). The
@@ -371,7 +392,6 @@ void main(
     // saturated penumbra smears across the whole surface.
     const float projM22 = g_psScene.m_shadowProjection._m22;
     const float projM32 = g_psScene.m_shadowProjection._m32;
-    const float viewDepthR = r9.w;
 
     const float angle = PcssInterleavedGradientNoise(v0.xy) * 6.28318530718;
     const float cs    = cos(angle);
@@ -389,24 +409,34 @@ void main(
     // depth. Its purpose is that a single-pixel penumbra jitters between zero and
     // maximum on adjacent pixels, and the eye reads the mixture as a translucent
     // veil rather than a soft edge.
+    // Nine taps. The mask is the low-frequency half of the effect, and each tap
+    // costs a linear-PCF fetch, four texels, plus a point read for the blocker
+    // depth. Its purpose is that a single-pixel penumbra jitters between zero and
+    // maximum on adjacent pixels, and the eye reads the mixture as a translucent
+    // veil rather than a soft edge.
     float penumbra01 = 0.0;
     [unroll] for (int k = 0; k < 9; ++k) {
-      const float2 o       = (float2(k % 3, k / 3) - 1.0) * SPOT_BLUR_PIXELS;
+      const float2 o       = (float2(k % 3, k / 3) - 1.0) * CUSTOM_SPOT_BLUR_PIXELS;
       const float2 uvN     = baseUV + o.x * uvStepX + o.y * uvStepY;
       const float  zN      = refZ   + o.x * zStepX  + o.y * zStepY;
       const float  occN    = g_ShadowTexture.SampleCmpLevelZero(g_samplerComparisonLess_Linear_Clmap_s, uvN, zN).x;
       const float  casterN = g_ShadowTexture.SampleLevel(g_samplerPoint_Clamp_s, uvN, 0).x;
-      const float  viewDepthN = projM32 / max(casterN - projM22, 1e-6);
-      const float  relN    = (viewDepthR - viewDepthN) / max(viewDepthN, 1e-9);
-      penumbra01 += occN * saturate(SPOT_K * relN * relN);
+      // Linearise both, and the receiver's is this neighbour's OWN depth - the
+      // extrapolated zN, exactly as the sun does. Using the centre's depth for
+      // every tap mixes one receiver with nine different casters, which saturates
+      // relN wherever the surface is sloped and pins the radius at maximum.
+      const float  zRecvN  = projM32 / max(zN - projM22, 1e-6);
+      const float  zCastN  = projM32 / max(casterN - projM22, 1e-6);
+      const float  relN    = (zRecvN - zCastN) / max(zCastN, 1e-9);
+      penumbra01 += occN * saturate(CUSTOM_SPOT_SHADOW_K * relN * relN);
     }
     penumbra01 /= 9.0;
 
     // Maximum penumbra, floored in texels so a coarse shadow map cannot shrink
     // the effect out of sight.
-    const float penumbraMaxWorld = max(SPOT_SOFTNESS_M, SPOT_MIN_TEXELS * texelWorld);
+    const float penumbraMaxWorld = max(CUSTOM_SPOT_SHADOW_SOFTNESS, SPOT_MIN_TEXELS * texelWorld);
     const float penumbraWorld    = penumbraMaxWorld * penumbra01;
-    const float penumbra         = clamp(penumbraWorld / max(texelWorld, 1e-9), 0.5, 128.0);
+    const float penumbra = clamp(penumbraWorld / max(texelWorld, 1e-9), 0.5, 128.0);
 
     // Only where there is a penumbra to resolve. penumbra01 is zero exactly when
     // none of those nine neighbours had a blocker: no separation, nothing to
@@ -420,6 +450,19 @@ void main(
         avg += dot(g_ShadowTexture.GatherCmp(g_samplerComparisonLess_Linear_Clmap_s, baseUV + v * radiusTexels, refZ), 0.25);
       }
       avg /= 32.0;
+
+      // r2.w is the cone's edge falloff: the vanilla scales its occlusion by it,
+      // so a shadow fades toward the cone's rim. That is why vanilla spot shadows
+      // are faint over most of the cone. How much of it to keep is a setting, but
+      // it cannot go to zero - at full strength right up to the rim the shadow
+      // reads as a stretch rather than a fade.
+      avg *= lerp(1.0, r2.w, CUSTOM_SPOT_CONE_FALLOFF);
+
+      // Darkness scales the occlusion, so higher is darker. Clamped at fully
+      // occluded: (1 - avg)^2 inverts once avg passes 1, which would make a more
+      // occluded pixel come out brighter. The vanilla never needs this because
+      // r2.w is clamped to [0,1] and its mean cannot exceed 1.
+      avg = min(avg * CUSTOM_SPOT_SHADOW_DARKNESS, 1.0);
 
       // Keep vanilla's squaring, as the sun does: it keeps the core of a shadow
       // dark and narrows the transition, rather than lightening partial occlusion.
