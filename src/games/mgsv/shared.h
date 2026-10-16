@@ -52,6 +52,16 @@ struct ShaderInjectData {
   float spot_shadow_blur_pixels;
   float spot_shadow_darkness;
   float spot_cone_falloff;
+
+  // Screen-space shadows. Appended after every existing field so no established
+  // offset moves.
+  float screen_space_shadows;
+  float ss_shadow_reach;
+  float ss_shadow_thickness;
+  float ss_shadow_strength;
+  float ss_shadow_fade_start;
+  float ss_shadow_fade_end;
+  float ss_shadow_material_max;
 };
 
 #ifndef __cplusplus
@@ -100,6 +110,14 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_SPOT_BLUR_PIXELS       shader_injection.spot_shadow_blur_pixels
 #define CUSTOM_SPOT_SHADOW_DARKNESS   shader_injection.spot_shadow_darkness
 #define CUSTOM_SPOT_CONE_FALLOFF      shader_injection.spot_cone_falloff
+
+#define CUSTOM_SS_SHADOWS      shader_injection.screen_space_shadows
+#define CUSTOM_SS_REACH        shader_injection.ss_shadow_reach
+#define CUSTOM_SS_THICKNESS    shader_injection.ss_shadow_thickness
+#define CUSTOM_SS_STRENGTH     shader_injection.ss_shadow_strength
+#define CUSTOM_SS_FADE_START   shader_injection.ss_shadow_fade_start
+#define CUSTOM_SS_FADE_END     shader_injection.ss_shadow_fade_end
+#define CUSTOM_SS_MATERIAL_MAX shader_injection.ss_shadow_material_max
 
 #include "../../shaders/renodx.hlsl"
 
