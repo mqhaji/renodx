@@ -1092,7 +1092,7 @@ renodx::utils::settings::Settings settings = {
         .section = "Shadows",
         .tooltip = "Spacing of the penumbra mask's neighbours, in screen pixels. "
                    "Larger smooths the penumbra over more of the screen.",
-        .max = 24.f,
+        .max = 50.f,
     },
     new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
