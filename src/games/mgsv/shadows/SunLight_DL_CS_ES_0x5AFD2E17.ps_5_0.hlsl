@@ -103,6 +103,22 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
                                        // the gradient - the hardening itself -
                                        // disappears. relDiff is ~0.12 for a caster
                                        // a metre up, so K near 32 leaves headroom.
+// Tunables come from the addon, through cb13.
+//
+//   CUSTOM_SUN_CONTACT_HARDENING  the on/off toggle (off by default)
+//   CUSTOM_SUN_SHADOW_SOFTNESS    the widest penumbra, metres
+//
+// Both are declared in ../shared.h and set from the Shadows section of the
+// overlay. To iterate through the devkit instead, pin them here: the devkit
+// live-shader path replaces the shader without supplying cb13, and D3D11 returns
+// 0 for an unbound constant buffer, so anything read from cb13 - including the
+// gate - comes back as 0 and the effect disappears.
+//
+// #undef  CUSTOM_SUN_CONTACT_HARDENING
+// #define CUSTOM_SUN_CONTACT_HARDENING 1.0
+// #undef  CUSTOM_SUN_SHADOW_SOFTNESS
+// #define CUSTOM_SUN_SHADOW_SOFTNESS   0.05
+
 #define PCSS_PENUMBRA_MIN_WORLD  0.0   // penumbra at penumbra01 = 0, metres. Zero, not a
                                        // centimetre. A caster with no separation has to
                                        // reproduce vanilla exactly, and vanilla's PCF
@@ -141,39 +157,80 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
 #define PCSS_FILTER_MAX_TEXELS   128.0 // sampling guard, texels; rarely binds
 #define PCSS_FILTER_MIN_TEXELS   0.5   // never harder than vanilla's 0.5 texel PCF
 #define PCSS_PCF_TAPS            32
-#define PCSS_PENUMBRA_TAPS        25    // neighbours averaged into the penumbra mask.
-                                        // A 5x5 grid, so the average is a true box
+#define PCSS_PENUMBRA_TAPS        9     // neighbours averaged into the penumbra mask.
+                                        // A 3x3 grid, so the average is a true box
                                         // blur of the mask rather than a random
                                         // sample of it: rotation noise is the thing
                                         // the mask exists to remove.
+                                        //
+                                        // The shader is bound by texel fetches, not
+                                        // instructions: each of these taps costs a
+                                        // linear-PCF fetch, four texels, plus a point
+                                        // read for the blocker depth. Nine taps is 45
+                                        // texels against 125 for the 5x5 it replaced,
+                                        // and the mask is the low-frequency half of
+                                        // the effect, so it does not need the
+                                        // density. This matches the paper's own
+                                        // quarter-resolution mask in effective
+                                        // sample count.
 #define PCSS_PENUMBRA_BLUR_PIXELS 9.0   // spacing of those neighbours, screen pixels.
                                         // The paper blurs its quarter-res mask with
                                         // a 7x7 Gaussian at sigma 3, about a 12 pixel
                                         // radius at full resolution.
+#define PCSS_PENUMBRA_GRID 3          // A fixed grid, not a rotated disk: the point
+                                       // is to average the mask, so any per-pixel
+                                       // variation in the sample positions would
+                                       // re-introduce the noise the averaging
+                                       // exists to remove.
 
-// Vogel disk: spreads samples evenly on a disk and, unlike a Poisson set, never
-// maps a sample onto another under rotation unless the rotation is a full turn.
-static const float kPcssGoldenAngle = 2.39996323;  // pi * (3 - sqrt(5))
-
-// Grid the penumbra is averaged over: PCSS_PENUMBRA_TAPS neighbours on a
-// PCSS_PENUMBRA_TAPS^0.5 square, in units of PCSS_PENUMBRA_BLUR_PIXELS. A fixed
-// grid, not a rotated disk - the point is to average the mask, so any per-pixel
-// variation in the sample positions would re-introduce the noise the averaging
-// exists to remove.
-#define PCSS_PENUMBRA_GRID 5
+// Vogel disk, precomputed.
+//
+// The samples are fixed - only the per-pixel rotation varies - so the golden
+// angle is baked into the table instead of evaluated per tap. Evaluating it at
+// runtime costs a sincos per tap, and phi is a runtime value, so the compiler
+// cannot fold them: that was 32 sincos per pixel for a rotation the table can
+// apply in four multiplies. The disk is spread evenly and, unlike a Poisson set,
+// never maps a sample onto another under rotation unless the rotation is a full
+// turn.
+static const float2 kPcssVogelDisk[32] = {
+  float2(0.125000000, 0.000000000),
+  float2(-0.159645045, 0.146247939),
+  float2(0.024436233, -0.278438271),
+  float2(0.201222239, 0.262458779),
+  float2(-0.369267557, -0.065318232),
+  float2(0.349802466, -0.222515695),
+  float2(-0.117002080, 0.435241902),
+  float2(-0.223135653, -0.429634124),
+  float2(0.484115115, 0.176798065),
+  float2(-0.503641109, 0.207895727),
+  float2(0.242788296, -0.518824482),
+  float2(0.179414372, 0.572001296),
+  float2(-0.540757005, -0.313379740),
+  float2(0.634369524, -0.139464358),
+  float2(-0.387145847, 0.550675125),
+  float2(-0.089439652, -0.690199644),
+  float2(0.549071755, 0.462758261),
+  float2(-0.738878471, 0.030554941),
+  float2(0.538955128, -0.536332332),
+  float2(-0.036058190, 0.779791515),
+  float2(-0.512817529, -0.614526796),
+  float2(0.812359593, 0.109301839),
+  float2(-0.688310643, 0.478908612),
+  float2(0.188086063, -0.836061381),
+  float2(0.435033261, 0.759191058),
+  float2(-0.850448409, -0.271316244),
+  float2(0.826102404, -0.381680257),
+  float2(-0.357888208, 0.855155559),
+  float2(-0.319407328, -0.888033760),
+  float2(0.849908632, 0.446688166),
+  float2(-0.944034648, 0.248844495),
+  float2(0.536595815, -0.834529766),
+};
 
 // Interleaved gradient noise (Jimenez), the paper's per-pixel rotation source.
 float PcssInterleavedGradientNoise(float2 position_screen) {
   const float3 magic = float3(0.06711056, 0.00583715, 52.9829189);
   return frac(magic.z * frac(dot(position_screen, magic.xy)));
-}
-
-float2 PcssVogelDisk(int sampleIndex, int samplesCount, float phi) {
-  const float r = sqrt((float)sampleIndex + 0.5) / sqrt((float)samplesCount);
-  const float theta = (float)sampleIndex * kPcssGoldenAngle + phi;
-  float sine, cosine;
-  sincos(theta, sine, cosine);
-  return float2(r * cosine, r * sine);
 }
 
 // 3Dmigoto declarations
@@ -474,6 +531,16 @@ void main(
     const float2 uvMin = tileOrigin + 0.5 * texel;
     const float2 uvMax = tileOrigin + 0.5 - 0.5 * texel;
 
+    // Distance from this pixel's UV to the nearest edge of its cascade tile, per
+    // axis. Both loops below keep their taps inside the tile, because a tap that
+    // crosses the edge reads the neighbouring cascade's depth and produces a
+    // wrong penumbra. They do it by shrinking their radius once, from this, rather
+    // than clamping every tap: a per-tap clamp is four instructions, and the two
+    // loops have 57 taps between them. Shrinking is exact and costs a few
+    // instructions, at the price of a slightly narrower blur within a disk radius
+    // of a tile boundary - which is where the alternative would be wrong anyway.
+    const float2 tileSlack = max(min(baseUV - uvMin, uvMax - baseUV), 0.0);
+
     // Per-pixel rotation. The paper uses interleaved gradient noise; the game's
     // own 32x32 noise texture (t12) would work too but IGN is free and matches
     // the reference.
@@ -537,10 +604,15 @@ void main(
     const float  zStepX  = ddx(refZ);
     const float  zStepY  = ddy(refZ);
 
+    // Blur radius shrunk so the whole grid stays inside the tile; see tileSlack.
+    const float2 maskSpanPerPixel = (PCSS_PENUMBRA_GRID - 1) * 0.5 * (abs(uvStepX) + abs(uvStepY));
+    const float maskBlur = min(PCSS_PENUMBRA_BLUR_PIXELS,
+                               min(tileSlack.x, tileSlack.y) / max(maskSpanPerPixel.x, maskSpanPerPixel.y));
+
     float penumbra01 = 0.0;
     [unroll] for (int k = 0; k < PCSS_PENUMBRA_TAPS; ++k) {
       const float2 o       = (float2(k % PCSS_PENUMBRA_GRID, k / PCSS_PENUMBRA_GRID)
-                              - (PCSS_PENUMBRA_GRID - 1) * 0.5) * PCSS_PENUMBRA_BLUR_PIXELS;
+                              - (PCSS_PENUMBRA_GRID - 1) * 0.5) * maskBlur;
       const float2 uvN     = baseUV + o.x * uvStepX + o.y * uvStepY;
       const float  zN      = refZ   + o.x * zStepX  + o.y * zStepY;
       const float  occN    = g_ShadowTexture.SampleCmpLevelZero(g_samplerComparisonLess_Linear_Clmap_s, uvN, zN).x;
@@ -577,6 +649,9 @@ void main(
     const float penumbraWorld = lerp(PCSS_PENUMBRA_MIN_WORLD, penumbraMaxWorld, penumbra01);
     const float penumbra = clamp(penumbraWorld / texelWorld, PCSS_FILTER_MIN_TEXELS, PCSS_FILTER_MAX_TEXELS);
 
+    // Radius shrunk so the whole disk stays inside the tile; see tileSlack.
+    const float penumbraTiled = min(penumbra, min(tileSlack.x, tileSlack.y) / texel);
+
     // Variable-radius PCF with the game's own comparison sampler.
     //
     // GatherCmp, not SampleCmp. A disk PCF's taps are spread over an area, so
@@ -589,25 +664,36 @@ void main(
     // count buys four times the density - 3.9 texels at that radius instead of
     // 7.8. This is the paper's section 1.1 speed trick used for the opposite
     // purpose: not to save samples, but to spend them.
-    float avg = 0.0;
-    [unroll] for (int j = 0; j < PCSS_PCF_TAPS; ++j) {
-      const float2 v  = PcssVogelDisk(j, PCSS_PCF_TAPS, angle);
-      const float2 uv = clamp(baseUV + v * (penumbra * texel), uvMin, uvMax);
-      const float4 g  = g_ShadowTexture.GatherCmp(g_samplerComparisonLess_Linear_Clmap_s, uv, refZ);
-      avg += dot(g, 0.25);
+    // Only where there is a penumbra to resolve.
+    //
+    // penumbra01 is the average over the mask above, so it is zero exactly when
+    // none of those nine neighbours had a blocker: no separation, nothing to
+    // soften, and the radius would sit at vanilla's 0.5 texels regardless. r0.x
+    // already holds the vanilla 4-tap result, so those pixels can keep it and
+    // skip 128 texels of gathers. The branch is spatially coherent - it is lit
+    // regions that take it - so it costs little in divergence.
+    if (penumbra01 > 0.0) {
+      float avg = 0.0;
+      [unroll] for (int j = 0; j < PCSS_PCF_TAPS; ++j) {
+        const float2 c  = kPcssVogelDisk[j];
+        const float2 v  = float2(c.x * cs - c.y * sn, c.x * sn + c.y * cs);
+        const float2 uv = baseUV + v * (penumbraTiled * texel);
+        const float4 g  = g_ShadowTexture.GatherCmp(g_samplerComparisonLess_Linear_Clmap_s, uv, refZ);
+        avg += dot(g, 0.25);
+      }
+      avg /= (float)PCSS_PCF_TAPS;
+
+      // Keep vanilla's squaring. Removing it was tried and is wrong: it widens the
+      // gradient only by *lightening* partial occlusion, and a tree canopy is
+      // almost entirely partial occlusion - thin branches over a wide area - so it
+      // drops toward mid grey and reads as translucent rather than soft. Squaring
+      // keeps the core dark and narrows the transition, which is what a soft shadow
+      // should look like.
+      float pcssLit = 1.0 - avg;
+      pcssLit *= pcssLit;
+
+      r0.x = lerp(r0.x, pcssLit, PCSS_STRENGTH);
     }
-    avg /= (float)PCSS_PCF_TAPS;
-
-    // Keep vanilla's squaring. Removing it was tried and is wrong: it widens the
-    // gradient only by *lightening* partial occlusion, and a tree canopy is
-    // almost entirely partial occlusion - thin branches over a wide area - so it
-    // drops toward mid grey and reads as translucent rather than soft. Squaring
-    // keeps the core dark and narrows the transition, which is what a soft shadow
-    // should look like.
-    float pcssLit = 1.0 - avg;
-    pcssLit *= pcssLit;
-
-    r0.x = lerp(r0.x, pcssLit, PCSS_STRENGTH);
   }
 
   r4.xy = float2(-0,-0);
