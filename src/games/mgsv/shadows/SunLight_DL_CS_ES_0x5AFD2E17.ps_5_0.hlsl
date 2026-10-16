@@ -203,13 +203,29 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
                                // being sought - at 2 cm it exceeded a grass blade,
                                // so the ray flew over the grass and only tall
                                // objects were caught.
-#define SS_FADE_START   8.0    // metres; screen space is reliable close in
-#define SS_FADE_END     25.0   // metres; beyond this the cascade map takes over
-#define SS_STRENGTH     1.0    // attenuation per unit of occlusion. One is full
-                               // occlusion where the march is fully occluded, which
-                               // is as much as a scale can mean. Above one only
-                               // saturates the ramp into a flat black core, and the
-                               // ramp is the entire point of a contact term.
+#define SS_FADE_START   40.0   // metres; screen space is reliable close in
+#define SS_FADE_END    110.0   // metres; beyond this the cascade map's own texel
+                               // size is the limit. The reach is a constant screen
+                               // length, so the world reach grows with depth - the
+                               // ray is 2.9 m at 100 m - which is what lets a tree
+                               // shade the ground under it at that range.
+#define SS_MATERIAL_MAX 0.25   // the G-buffer's specular.z below which the term
+                               // runs. That channel is the x coordinate of the
+                               // material lookup, i.e. the material's index, and
+                               // measuring it with three thresholds showed the
+                               // character's body at 0.25-0.5 and his hair at
+                               // 0.5-0.75, while grass, terrain and rocks all sit
+                               // below 0.25. The occlusion test cannot tell a
+                               // caster from the receiver's own surface on a solid
+                               // object, so it outlined the character; the material
+                               // is the discriminator the depth buffer lacks.
+#define SS_STRENGTH     1.5    // attenuation per unit of occlusion, a look dial.
+                               // The march reports a fraction of its steps, so a
+                               // real contact sits well below full occlusion and a
+                               // value above one deepens the gradient instead of
+                               // saturating it: at 1.5 a march that is 40% occluded
+                               // removes 60% of the light. Around two the core of a
+                               // strong contact flattens to black.
 #define SS_SLOPE_BIAS   1.0    // multiples of the receiver's screen-space depth
                                // gradient added to the bias. A fixed bias cannot
                                // work: too small and a sloped surface occludes
@@ -1066,13 +1082,23 @@ void main(
       if (any(suv < 0.0) || any(suv > 1.0)) break;
       const float  sd = g_DepthTexture.SampleLevel(g_samplerPoint_Clamp_s, suv, 0).x;
       const float  sz = g_psScene.m_projectionParam.z / max(sd - g_psScene.m_projectionParam.w, 1e-6);
-      occ += (sz < p.z - thickness) ? 1.0 : 0.0;
+      // The caster is gated as well as the receiver. Excluding a character as a
+      // receiver only stops his body shadowing itself; the ground is still a
+      // valid receiver below him, so he goes on casting onto it. The material at
+      // the ray's screen position is the caster's, and it is the only thing that
+      // can identify him: the cascade map already shadows characters, and this
+      // term exists for detail it cannot resolve.
+      const float  casterBand = g_SpecularTexture.SampleLevel(g_samplerPoint_Wrap_s, suv, 0).z;
+      occ += (sz < p.z - SS_THICKNESS && casterBand < SS_MATERIAL_MAX) ? 1.0 : 0.0;
     }
 
     // Fade out with distance: beyond this the cascade map is the right tool and
     // screen space has too little of the caster on screen to be reliable.
     const float fade  = 1.0 - saturate((viewZ - SS_FADE_START) / max(SS_FADE_END - SS_FADE_START, 1e-3));
-    const float ssOcc = (occ / (float)SS_STEPS) * fade;
+    // See SS_MATERIAL_MAX. Sampled the way the vanilla shader samples it, with the
+    // same wrap sampler, so the band matches the one that was measured.
+    const float band  = g_SpecularTexture.SampleLevel(g_samplerPoint_Wrap_s, uv, 0).z;
+    const float ssOcc = (occ / (float)SS_STEPS) * fade * (band < SS_MATERIAL_MAX ? 1.0 : 0.0);
 
     // Scale the light rather than replacing the output. The render target is a
     // light accumulation with a one/one blend, so anything written here is
