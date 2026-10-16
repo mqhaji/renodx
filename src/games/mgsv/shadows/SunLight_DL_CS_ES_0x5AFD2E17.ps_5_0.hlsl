@@ -97,12 +97,9 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
 // pinned to one of the two bounds instead of varying.
 // ---------------------------------------------------------------------------
 #define PCSS_STRENGTH            1.0   // 0 = vanilla 4-tap PCF, 1 = full effect
-#define PCSS_PENUMBRA_K          24.0  // sets how fast a given separation reaches the
-                                       // top of the range. Too high and every pixel
-                                       // saturates, the penumbra goes uniform, and
-                                       // the gradient - the hardening itself -
-                                       // disappears. relDiff is ~0.12 for a caster
-                                       // a metre up, so K near 32 leaves headroom.
+// K, the penumbra response, is the Sun Shadow Softness section's Penumbra
+// Response setting now - too high and every pixel saturates, the penumbra goes
+// uniform, and the gradient that the hardening is made of disappears.
 // Tunables come from the addon, through cb13.
 //
 //   CUSTOM_SUN_CONTACT_HARDENING  the on/off toggle (off by default)
@@ -156,32 +153,14 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
                                        // gather PCF resolves cleanly.
 #define PCSS_FILTER_MAX_TEXELS   128.0 // sampling guard, texels; rarely binds
 #define PCSS_FILTER_MIN_TEXELS   0.5   // never harder than vanilla's 0.5 texel PCF
-#define PCSS_PCF_TAPS            32
-#define PCSS_PENUMBRA_TAPS        9     // neighbours averaged into the penumbra mask.
-                                        // A 3x3 grid, so the average is a true box
-                                        // blur of the mask rather than a random
-                                        // sample of it: rotation noise is the thing
-                                        // the mask exists to remove.
-                                        //
-                                        // The shader is bound by texel fetches, not
-                                        // instructions: each of these taps costs a
-                                        // linear-PCF fetch, four texels, plus a point
-                                        // read for the blocker depth. Nine taps is 45
-                                        // texels against 125 for the 5x5 it replaced,
-                                        // and the mask is the low-frequency half of
-                                        // the effect, so it does not need the
-                                        // density. This matches the paper's own
-                                        // quarter-resolution mask in effective
-                                        // sample count.
-#define PCSS_PENUMBRA_BLUR_PIXELS 9.0   // spacing of those neighbours, screen pixels.
-                                        // The paper blurs its quarter-res mask with
-                                        // a 7x7 Gaussian at sigma 3, about a 12 pixel
-                                        // radius at full resolution.
-#define PCSS_PENUMBRA_GRID 3          // A fixed grid, not a rotated disk: the point
-                                       // is to average the mask, so any per-pixel
-                                       // variation in the sample positions would
-                                       // re-introduce the noise the averaging
-                                       // exists to remove.
+
+// Tap counts are not here: they have to be compile-time loop bounds, so the
+// quality settings select between unrolled loops rather than feeding a value in.
+// See PcssPenumbraTap and the filter branch in the body.
+//
+// The mask is the low-frequency half of the effect, which is why its cheapest
+// setting is nine taps: each costs a linear-PCF fetch, four texels, plus a point
+// read for the blocker depth, so 25 taps was 125 texels against the filter's 128.
 
 // Vogel disk, precomputed.
 //
@@ -227,6 +206,56 @@ static const float2 kPcssVogelDisk[32] = {
   float2(0.536595815, -0.834529766),
 };
 
+// Coarser disks for the lower filter settings. Each is its own Vogel set rather
+// than a prefix of the 32: the first N of an N-point disk are spread over a
+// smaller radius, so reusing the tail of the big one would shrink the kernel
+// instead of thinning it.
+static const float2 kPcssVogelDisk16[16] = {
+  float2(0.176776695, 0.000000000),
+  float2(-0.225772188, 0.206825818),
+  float2(0.034558052, -0.393771179),
+  float2(0.284571220, 0.371172764),
+  float2(-0.522223187, -0.092373929),
+  float2(0.494695392, -0.314684714),
+  float2(-0.165465928, 0.615525001),
+  float2(-0.315561467, -0.607594405),
+  float2(0.684642161, 0.250030221),
+  float2(-0.712256087, 0.294008957),
+  float2(0.343354501, -0.733728619),
+  float2(0.253730238, 0.808931991),
+  float2(-0.764745891, -0.443185879),
+  float2(0.897133984, -0.197232386),
+  float2(-0.547506908, 0.778772230),
+  float2(-0.126486769, -0.976089697),
+};
+
+static const float2 kPcssVogelDisk24[24] = {
+  float2(0.144337567, 0.000000000),
+  float2(-0.184342220, 0.168872574),
+  float2(0.028216531, -0.321512821),
+  float2(0.232351428, 0.303061293),
+  float2(-0.426393447, -0.075422997),
+  float2(0.403917096, -0.256938993),
+  float2(-0.135102365, 0.502574059),
+  float2(-0.257654859, -0.496098754),
+  float2(0.559007984, 0.204148820),
+  float2(-0.581554660, 0.240057308),
+  float2(0.280347776, -0.599086909),
+  float2(0.207169872, 0.660490205),
+  float2(-0.624412405, -0.361859755),
+  float2(0.732506831, -0.161039569),
+  float2(-0.447037518, 0.635864863),
+  float2(-0.103276014, -0.796973901),
+  float2(0.634013451, 0.534347213),
+  float2(-0.853183369, 0.035281807),
+  float2(0.622331776, -0.619303232),
+  float2(-0.041636411, 0.900425682),
+  float2(-0.592150676, -0.709594422),
+  float2(0.938032059, 0.126210892),
+  float2(-0.794792670, 0.552996032),
+  float2(0.217183078, -0.965400527),
+};
+
 // Interleaved gradient noise (Jimenez), the paper's per-pixel rotation source.
 float PcssInterleavedGradientNoise(float2 position_screen) {
   const float3 magic = float3(0.06711056, 0.00583715, 52.9829189);
@@ -235,6 +264,29 @@ float PcssInterleavedGradientNoise(float2 position_screen) {
 
 // 3Dmigoto declarations
 #define cmp -
+
+// One penumbra-mask tap: the blocker ratio at one neighbour, gated on occlusion.
+// grid is a literal at every call site, so the index arithmetic folds. The tap
+// count is not a runtime loop bound - the quality setting selects one of three
+// unrolled loops instead, which keeps the samples and the disk constants
+// compile-time.
+float PcssPenumbraTap(int k, int grid, float2 baseUV, float refZ,
+                      float2 uvStepX, float2 uvStepY, float zStepX, float zStepY,
+                      float blurPixels) {
+  const float2 o       = (float2(k % grid, k / grid) - (grid - 1) * 0.5) * blurPixels;
+  const float2 uvN     = baseUV + o.x * uvStepX + o.y * uvStepY;
+  const float  zN      = refZ   + o.x * zStepX  + o.y * zStepY;
+  const float  occN    = g_ShadowTexture.SampleCmpLevelZero(g_samplerComparisonLess_Linear_Clmap_s, uvN, zN).x;
+  const float  casterN = g_ShadowTexture.SampleLevel(g_samplerPoint_Clamp_s, uvN, 0).x;
+  const float  relN    = (zN - casterN) / max(casterN, 1e-9);
+  return occN * saturate(CUSTOM_SUN_SHADOW_K * relN * relN);
+}
+
+// One filter tap: the mean of the four comparisons GatherCmp returns.
+float PcssFilterTap(float2 c, float cs, float sn, float2 baseUV, float refZ, float radiusTexels) {
+  const float2 v = float2(c.x * cs - c.y * sn, c.x * sn + c.y * cs);
+  return dot(g_ShadowTexture.GatherCmp(g_samplerComparisonLess_Linear_Clmap_s, baseUV + v * radiusTexels, refZ), 0.25);
+}
 
 
 void main(
@@ -605,22 +657,29 @@ void main(
     const float  zStepY  = ddy(refZ);
 
     // Blur radius shrunk so the whole grid stays inside the tile; see tileSlack.
-    const float2 maskSpanPerPixel = (PCSS_PENUMBRA_GRID - 1) * 0.5 * (abs(uvStepX) + abs(uvStepY));
-    const float maskBlur = min(PCSS_PENUMBRA_BLUR_PIXELS,
+    // The span is taken for the largest grid, which is conservative for the
+    // smaller ones: it can only narrow the blur, never let a tap leave the tile.
+    const float2 maskSpanPerPixel = 2.0 * (abs(uvStepX) + abs(uvStepY));
+    const float maskBlur = min(CUSTOM_SUN_BLUR_PIXELS,
                                min(tileSlack.x, tileSlack.y) / max(maskSpanPerPixel.x, maskSpanPerPixel.y));
 
+    // One unrolled loop per quality level, chosen at runtime. The tap count has to
+    // be a compile-time loop bound, so it cannot be the setting's value directly;
+    // the branch is spatially coherent and only one path ever executes.
     float penumbra01 = 0.0;
-    [unroll] for (int k = 0; k < PCSS_PENUMBRA_TAPS; ++k) {
-      const float2 o       = (float2(k % PCSS_PENUMBRA_GRID, k / PCSS_PENUMBRA_GRID)
-                              - (PCSS_PENUMBRA_GRID - 1) * 0.5) * maskBlur;
-      const float2 uvN     = baseUV + o.x * uvStepX + o.y * uvStepY;
-      const float  zN      = refZ   + o.x * zStepX  + o.y * zStepY;
-      const float  occN    = g_ShadowTexture.SampleCmpLevelZero(g_samplerComparisonLess_Linear_Clmap_s, uvN, zN).x;
-      const float  casterN = g_ShadowTexture.SampleLevel(g_samplerPoint_Clamp_s, uvN, 0).x;
-      const float  relN    = (zN - casterN) / max(casterN, 1e-9);
-      penumbra01 += occN * saturate(PCSS_PENUMBRA_K * relN * relN);
+    if (CUSTOM_SUN_PENUMBRA_QUALITY < 0.5) {
+      [unroll] for (int k = 0; k < 9; ++k)
+        penumbra01 += PcssPenumbraTap(k, 3, baseUV, refZ, uvStepX, uvStepY, zStepX, zStepY, maskBlur);
+      penumbra01 /= 9.0;
+    } else if (CUSTOM_SUN_PENUMBRA_QUALITY < 1.5) {
+      [unroll] for (int k = 0; k < 16; ++k)
+        penumbra01 += PcssPenumbraTap(k, 4, baseUV, refZ, uvStepX, uvStepY, zStepX, zStepY, maskBlur);
+      penumbra01 /= 16.0;
+    } else {
+      [unroll] for (int k = 0; k < 25; ++k)
+        penumbra01 += PcssPenumbraTap(k, 5, baseUV, refZ, uvStepX, uvStepY, zStepX, zStepY, maskBlur);
+      penumbra01 /= 25.0;
     }
-    penumbra01 /= (float)PCSS_PENUMBRA_TAPS;
 
     // Per-cascade texel size, from m_shadowProjection2's cascade ladder. Needed to
     // express the penumbra in metres: a texel-space radius makes the blur's world
@@ -672,16 +731,23 @@ void main(
     // already holds the vanilla 4-tap result, so those pixels can keep it and
     // skip 128 texels of gathers. The branch is spatially coherent - it is lit
     // regions that take it - so it costs little in divergence.
-    if (penumbra01 > 0.0) {
+    if (penumbra01 > 0.0 || CUSTOM_SUN_SKIP_LIT == 0.0) {
+      // One unrolled loop per filter quality, as with the mask above.
+      const float radiusTexels = penumbraTiled * texel;
       float avg = 0.0;
-      [unroll] for (int j = 0; j < PCSS_PCF_TAPS; ++j) {
-        const float2 c  = kPcssVogelDisk[j];
-        const float2 v  = float2(c.x * cs - c.y * sn, c.x * sn + c.y * cs);
-        const float2 uv = baseUV + v * (penumbraTiled * texel);
-        const float4 g  = g_ShadowTexture.GatherCmp(g_samplerComparisonLess_Linear_Clmap_s, uv, refZ);
-        avg += dot(g, 0.25);
+      if (CUSTOM_SUN_FILTER_QUALITY < 0.5) {
+        [unroll] for (int j = 0; j < 16; ++j)
+          avg += PcssFilterTap(kPcssVogelDisk16[j], cs, sn, baseUV, refZ, radiusTexels);
+        avg /= 16.0;
+      } else if (CUSTOM_SUN_FILTER_QUALITY < 1.5) {
+        [unroll] for (int j = 0; j < 24; ++j)
+          avg += PcssFilterTap(kPcssVogelDisk24[j], cs, sn, baseUV, refZ, radiusTexels);
+        avg /= 24.0;
+      } else {
+        [unroll] for (int j = 0; j < 32; ++j)
+          avg += PcssFilterTap(kPcssVogelDisk[j], cs, sn, baseUV, refZ, radiusTexels);
+        avg /= 32.0;
       }
-      avg /= (float)PCSS_PCF_TAPS;
 
       // Keep vanilla's squaring. Removing it was tried and is wrong: it widens the
       // gradient only by *lightening* partial occlusion, and a tree canopy is
