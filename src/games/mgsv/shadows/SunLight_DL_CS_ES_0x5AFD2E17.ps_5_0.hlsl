@@ -64,6 +64,19 @@ cbuffer cPSLight : register(b3)
 
 }
 
+cbuffer cPSSystem : register(b0)
+{
+
+  struct
+  {
+    float4 m_param;
+    float4 m_renderInfo;
+    float4 m_renderBuffer;
+    float4 m_dominantLightDir;
+  } g_psSystem : packoffset(c0);
+
+}
+
 SamplerState g_samplerPoint_Wrap_s : register(s8);
 SamplerState g_samplerPoint_Clamp_s : register(s9);
 SamplerState g_samplerLinear_Wrap_s : register(s10);
@@ -155,6 +168,18 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
                                        // the stock cascade range it changes nothing.
                                        // Six texels is also about the most a 32 tap
                                        // gather PCF resolves cleanly.
+#define SS_STEPS        32     // depth-buffer march steps toward the light
+#define SS_STEP_SCALE   0.02   // step size, as a fraction of the receiver's depth,
+                               // so the march covers similar screen distance near
+                               // and far rather than collapsing at range
+#define SS_THICKNESS    0.02   // metres a surface must be in front of the ray to
+                               // count as occluding. Floored against the step
+                               // length, because a step longer than this skips
+                               // thin casters entirely - which reads as banding
+                               // and as occlusion in unrelated places.
+#define SS_FADE_START   8.0    // metres; screen space is reliable close in
+#define SS_FADE_END     25.0   // metres; beyond this the cascade map takes over
+
 #define PCSS_FILTER_MAX_TEXELS   128.0 // sampling guard, texels; rarely binds
 #define PCSS_FILTER_MIN_TEXELS   0.5   // never harder than vanilla's 0.5 texel PCF
 
@@ -927,6 +952,104 @@ void main(
   r2.xyz = r2.xyz;
   r2.xyzw = r2.xyzw;
   r2.xyzw = r2.xyzw;
+  // =========================================================================
+  // Screen-space shadow complement.
+  //
+  // The cascade map cannot afford detail at centimetre scale over a hundred
+  // metres of range, so this supplies the high-frequency half: ray-march the
+  // depth buffer toward the light and occlude where the ray passes behind a
+  // nearer surface. It is deliberately complementary - it only sees casters on
+  // screen, and fades out with distance, which is where the cascades take over.
+  //
+  // Everything is view space: m_dominantLightDir is view space (confirmed by
+  // probe), and the view position is reconstructed from the same depth being
+  // marched. No world conversion anywhere.
+  //
+  // PROBE (temporary): the screen-space term is rendered alone rather than
+  // combined, so a wrong march is visible as itself.
+  // =========================================================================
+  {
+    const float2 uv    = v2.xy / v2.z;
+    const float  d     = g_DepthTexture.SampleLevel(g_samplerPoint_Clamp_s, uv, 0).x;
+    const float2 cuv   = uv - g_psScene.m_cameraCenterOffset.xy;
+    const float  viewZ = g_psScene.m_projectionParam.z / max(d - g_psScene.m_projectionParam.w, 1e-6);
+    const float3 viewPos = float3(viewZ * cuv * g_psScene.m_projectionParam.xy, viewZ);
+
+    const float3 lightDir = normalize(g_psSystem.m_dominantLightDir.xyz);
+
+    // Step length scales with depth so the march covers similar screen distance
+    // near and far. The thickness is floored against it: a step longer than the
+    // thickness steps over thin casters, which is what produced banding and
+    // hits in unrelated places.
+    const float stepLen   = viewZ * SS_STEP_SCALE;
+    const float thickness = max(SS_THICKNESS, stepLen * 1.5);
+
+    // Per-pixel jitter of the start offset, so any residual banding reads as
+    // noise rather than stripes.
+    const float jitter = PcssInterleavedGradientNoise(v0.xy);
+
+    float occ = 0.0;
+    [unroll] for (int s = 0; s < SS_STEPS; ++s) {
+      const float3 p = viewPos + lightDir * (stepLen * ((float)s + jitter));
+      const float4 clip = mul(float4(p, 1.0), g_psScene.m_projection);
+      const float2 suv  = clip.xy / clip.w * float2(0.5, -0.5) + 0.5;
+      if (any(suv < 0.0) || any(suv > 1.0)) break;
+      const float  sd = g_DepthTexture.SampleLevel(g_samplerPoint_Clamp_s, suv, 0).x;
+      const float  sz = g_psScene.m_projectionParam.z / max(sd - g_psScene.m_projectionParam.w, 1e-6);
+      occ += (sz < p.z - thickness) ? 1.0 : 0.0;
+    }
+
+    // Fade out with distance: beyond this the cascade map is the right tool and
+    // screen space has too little of the caster on screen to be reliable.
+    const float fade = 1.0 - saturate((viewZ - SS_FADE_START) / max(SS_FADE_END - SS_FADE_START, 1e-3));
+    const float ssOcc = (occ / (float)SS_STEPS) * fade;
+
+    o0.xyzw = float4(saturate(1.0 - ssOcc).xxx, 1.0);
+    o1.xyzw = r0.xyzw;
+    return;
+  }
+
+  // =========================================================================
+  // PROBE (temporary): round-trip the reconstruction through the projection.
+  //
+  // Reconstruct viewPos from the depth, project it straight back, and compare
+  // with the UV we started from. If the reconstruction and the projection agree,
+  // the difference is zero and this renders black everywhere. Colour anywhere
+  // means the round trip is broken, and the pattern says which half:
+  //
+  //   a uniform tint        -> the projection convention is wrong
+  //   a smooth gradient     -> m_projectionParam.xy is not the UV scale I think
+  //   colour in one region  -> m_cameraCenterOffset, which the reconstruction
+  //                            subtracts but the projection does not add back
+  // =========================================================================
+  {
+    const float2 uv    = v2.xy / v2.z;
+    const float  d     = g_DepthTexture.SampleLevel(g_samplerPoint_Clamp_s, uv, 0).x;
+    const float2 cuv   = uv - g_psScene.m_cameraCenterOffset.xy;
+    const float  viewZ = g_psScene.m_projectionParam.z / max(d - g_psScene.m_projectionParam.w, 1e-6);
+    const float3 viewPos = float3(viewZ * cuv * g_psScene.m_projectionParam.xy, viewZ);
+
+    const float4 clip = mul(float4(viewPos, 1.0), g_psScene.m_projection);
+    const float2 ruv  = clip.xy / clip.w * float2(0.5, -0.5) + 0.5;
+
+    // Compare the projected UV against the engine's own, which is what the depth
+    // texture is indexed by. Neutral grey (0.5) means they agree. Red or green
+    // means a horizontal or vertical offset, and the sign says which way - the
+    // reconstruction subtracts m_cameraCenterOffset, so the projection has to add
+    // it back.
+    const float4 clipPos = mul(float4(viewPos, 1.0), g_psScene.m_projection);
+    const float2 suv     = clipPos.xy / clipPos.w * float2(0.5, -0.5) + 0.5;
+    const float2 diff    = (suv - uv) * 50.0;
+
+    const float4 clipPos = mul(float4(viewPos, 1.0), g_psScene.m_projection);
+    const float2 suv     = clipPos.xy / clipPos.w * float2(0.5, -0.5) + 0.5;
+    const float2 diff    = (suv - uv) * 50.0;
+
+    o0.xyzw = float4(diff + 0.5, 0.0, 1.0);
+    o1.xyzw = r0.xyzw;
+    return;
+  }
+
   o0.xyzw = r2.xyzw;
   o1.xyzw = r0.xyzw;
   return;
