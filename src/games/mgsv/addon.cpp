@@ -1074,33 +1074,6 @@ renodx::utils::settings::Settings settings = {
         .parse = [](float value) { return value * 0.001f; },
     },
     new renodx::utils::settings::Setting{
-        .key = "FxSunShadowPenumbraQuality",
-        .binding = &shader_injection.sun_shadow_penumbra_quality,
-        .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-        .default_value = 0.f,
-        .label = "Penumbra Quality",
-        .section = "Shadows",
-        .tooltip = "Neighbours averaged into the penumbra mask. It is the "
-                   "low-frequency half of the effect, so 9 taps matches the "
-                   "reference's own quarter-resolution mask; more only matters for "
-                   "very fine shadows.",
-        .labels = {"9 taps", "16 taps", "25 taps"},
-        .max = 2.f,
-    },
-    new renodx::utils::settings::Setting{
-        .key = "FxSunShadowFilterQuality",
-        .binding = &shader_injection.sun_shadow_filter_quality,
-        .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-        .default_value = 2.f,
-        .label = "Filter Quality",
-        .section = "Shadows",
-        .tooltip = "Taps in the variable-radius shadow filter, four texels each. "
-                   "This is the expensive half: fewer taps under-sample the disk "
-                   "and read as dithering rather than a soft edge.",
-        .labels = {"16 taps", "24 taps", "32 taps"},
-        .max = 2.f,
-    },
-    new renodx::utils::settings::Setting{
         .key = "FxSunShadowK",
         .binding = &shader_injection.sun_shadow_k,
         .default_value = 24.f,
@@ -1120,17 +1093,6 @@ renodx::utils::settings::Settings settings = {
         .tooltip = "Spacing of the penumbra mask's neighbours, in screen pixels. "
                    "Larger smooths the penumbra over more of the screen.",
         .max = 24.f,
-    },
-    new renodx::utils::settings::Setting{
-        .key = "FxSunShadowSkipLit",
-        .binding = &shader_injection.sun_shadow_skip_lit,
-        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
-        .default_value = 1.f,
-        .label = "Skip Fully Lit Pixels",
-        .section = "Shadows",
-        .tooltip = "Skips the shadow filter where the penumbra mask found no blocker, "
-                   "keeping the game's own result. Quality-neutral and the single "
-                   "biggest saving; turn it off only to measure it.",
     },
     new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
