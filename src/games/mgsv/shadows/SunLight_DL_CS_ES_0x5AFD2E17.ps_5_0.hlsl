@@ -168,17 +168,23 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
                                        // the stock cascade range it changes nothing.
                                        // Six texels is also about the most a 32 tap
                                        // gather PCF resolves cleanly.
-#define SS_STEPS        32     // depth-buffer march steps toward the light
-#define SS_STEP_SCALE   0.02   // step size, as a fraction of the receiver's depth,
+#define SS_STEPS        64     // depth-buffer march steps toward the light
+#define SS_STEP_SCALE   0.01   // step size, as a fraction of the receiver's depth,
                                // so the march covers similar screen distance near
                                // and far rather than collapsing at range
 #define SS_THICKNESS    0.02   // metres a surface must be in front of the ray to
-                               // count as occluding. Floored against the step
-                               // length, because a step longer than this skips
-                               // thin casters entirely - which reads as banding
-                               // and as occlusion in unrelated places.
+                               // count as occluding. Floored against the step so
+                               // the ray cannot skip a caster - but only at half a
+                               // step: a floor of one and a half steps at range
+                               // makes the thickness tens of centimetres, which
+                               // stops almost anything from occluding at all.
+#define SS_THICKNESS_FLOOR 0.5 // multiple of the step length the floor may reach
 #define SS_FADE_START   8.0    // metres; screen space is reliable close in
 #define SS_FADE_END     25.0   // metres; beyond this the cascade map takes over
+#define SS_NORMAL_BIAS  0.02   // metres to offset the ray's start along the surface
+                               // normal, which stops a surface occluding itself at
+                               // grazing angles. A bias, not a thickness scale:
+                               // it must not depend on the camera.
 
 #define PCSS_FILTER_MAX_TEXELS   128.0 // sampling guard, texels; rarely binds
 #define PCSS_FILTER_MIN_TEXELS   0.5   // never harder than vanilla's 0.5 texel PCF
@@ -975,23 +981,27 @@ void main(
                                   ndc.y * viewZ / g_psScene.m_projection._m11,
                                   viewZ);
 
-    const float3 lightDir = normalize(g_psSystem.m_dominantLightDir.xyz);
+    // Negated: m_dominantLightDir points away from the light, the same
+    // convention the spot shader handles with -r6.xyz. Marching along it
+    // unnegated walks away from the light, which makes p.z grow and every step
+    // satisfy the occlusion test - the whole frame occluded and the sun zeroed.
+    // Being view space it also rotates with the camera, so the effect appeared
+    // and vanished as you turned.
+    const float3 lightDir = -normalize(g_psSystem.m_dominantLightDir.xyz);
 
     // The G-buffer normal, view space, packed the way the spot shader decodes it.
     const float3 gbufN = g_NormalTexture.SampleLevel(g_samplerPoint_Clamp_s, uv, 0).xyz;
     const float3 normal = normalize(float3(gbufN.xy * 2.0 - 1.0, gbufN.z * gbufN.z * 2.0 - 1.0));
 
     // Step length scales with depth so the march covers similar screen distance
-    // near and far. The thickness is floored against it, and divided by N.V:
-    // the problem is a grazing VIEW, not a grazing light. Looking along a
-    // surface, the screen-space depth gradient explodes, so a step spans far
-    // more world distance along that surface and the comparison gets coarse.
-    // N.L does not capture this - with the sun high it is near 1 on the ground,
-    // so keying off it changed nothing.
-    const float3 viewDir  = normalize(-viewPos);
+    // near and far. The thickness is floored against it, so a step can never be
+    // longer than the thickness and skip a caster.
+    //
+    // Self-occlusion at grazing angles is handled by a normal bias below, not by
+    // scaling the thickness. Scaling by N.V made the thickness - and therefore
+    // the occlusion - depend on the camera, which a shadow must never do.
     const float stepLen   = viewZ * SS_STEP_SCALE;
-    const float grazing   = 1.0 / max(abs(dot(normal, viewDir)), 0.2);
-    const float thickness = max(SS_THICKNESS, stepLen * 1.5) * grazing;
+    const float thickness = max(SS_THICKNESS, stepLen * SS_THICKNESS_FLOOR);
 
     // Per-pixel jitter of the start offset, so any residual banding reads as
     // noise rather than stripes.
@@ -999,7 +1009,11 @@ void main(
 
     float occ = 0.0;
     [unroll] for (int s = 0; s < SS_STEPS; ++s) {
-      const float3 p = viewPos + lightDir * (stepLen * ((float)s + jitter));
+      // Bias the start along the normal. This is what keeps a surface from
+      // occluding itself when the view is grazing: the ray begins above the
+      // surface rather than on it, and unlike a thickness scale it does not
+      // depend on the camera, which a shadow must never do.
+      const float3 p = viewPos + normal * SS_NORMAL_BIAS + lightDir * (stepLen * ((float)s + jitter));
       const float4 clip = mul(float4(p, 1.0), g_psScene.m_projection);
       const float2 suv  = clip.xy / clip.w * float2(0.5, -0.5) + 0.5;
       if (any(suv < 0.0) || any(suv > 1.0)) break;
