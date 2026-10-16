@@ -955,34 +955,43 @@ void main(
   // =========================================================================
   // Screen-space shadow complement.
   //
-  // The cascade map cannot afford detail at centimetre scale over a hundred
-  // metres of range, so this supplies the high-frequency half: ray-march the
-  // depth buffer toward the light and occlude where the ray passes behind a
-  // nearer surface. It is deliberately complementary - it only sees casters on
-  // screen, and fades out with distance, which is where the cascades take over.
+  // The cascade map cannot afford centimetre detail over a hundred metres of
+  // range, so this supplies the high-frequency half: ray-march the depth buffer
+  // toward the light and occlude where the ray passes behind a nearer surface.
+  // Deliberately complementary - it only sees casters on screen and fades with
+  // distance, which is where the cascades take over.
   //
-  // Everything is view space: m_dominantLightDir is view space (confirmed by
-  // probe), and the view position is reconstructed from the same depth being
-  // marched. No world conversion anywhere.
-  //
-  // PROBE (temporary): the screen-space term is rendered alone rather than
-  // combined, so a wrong march is visible as itself.
+  // View space throughout. m_dominantLightDir is view space, and the view
+  // position is unprojected from the same depth being marched, using the
+  // projection matrix's own scale: m_projectionParam.xy produced a scale error,
+  // confirmed by probe.
   // =========================================================================
   {
     const float2 uv    = v2.xy / v2.z;
     const float  d     = g_DepthTexture.SampleLevel(g_samplerPoint_Clamp_s, uv, 0).x;
-    const float2 cuv   = uv - g_psScene.m_cameraCenterOffset.xy;
     const float  viewZ = g_psScene.m_projectionParam.z / max(d - g_psScene.m_projectionParam.w, 1e-6);
-    const float3 viewPos = float3(viewZ * cuv * g_psScene.m_projectionParam.xy, viewZ);
+    const float2 ndc   = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    const float3 viewPos = float3(ndc.x * viewZ / g_psScene.m_projection._m00,
+                                  ndc.y * viewZ / g_psScene.m_projection._m11,
+                                  viewZ);
 
     const float3 lightDir = normalize(g_psSystem.m_dominantLightDir.xyz);
 
+    // The G-buffer normal, view space, packed the way the spot shader decodes it.
+    const float3 gbufN = g_NormalTexture.SampleLevel(g_samplerPoint_Clamp_s, uv, 0).xyz;
+    const float3 normal = normalize(float3(gbufN.xy * 2.0 - 1.0, gbufN.z * gbufN.z * 2.0 - 1.0));
+
     // Step length scales with depth so the march covers similar screen distance
-    // near and far. The thickness is floored against it: a step longer than the
-    // thickness steps over thin casters, which is what produced banding and
-    // hits in unrelated places.
+    // near and far. The thickness is floored against it, and divided by N.V:
+    // the problem is a grazing VIEW, not a grazing light. Looking along a
+    // surface, the screen-space depth gradient explodes, so a step spans far
+    // more world distance along that surface and the comparison gets coarse.
+    // N.L does not capture this - with the sun high it is near 1 on the ground,
+    // so keying off it changed nothing.
+    const float3 viewDir  = normalize(-viewPos);
     const float stepLen   = viewZ * SS_STEP_SCALE;
-    const float thickness = max(SS_THICKNESS, stepLen * 1.5);
+    const float grazing   = 1.0 / max(abs(dot(normal, viewDir)), 0.2);
+    const float thickness = max(SS_THICKNESS, stepLen * 1.5) * grazing;
 
     // Per-pixel jitter of the start offset, so any residual banding reads as
     // noise rather than stripes.
@@ -1001,53 +1010,15 @@ void main(
 
     // Fade out with distance: beyond this the cascade map is the right tool and
     // screen space has too little of the caster on screen to be reliable.
-    const float fade = 1.0 - saturate((viewZ - SS_FADE_START) / max(SS_FADE_END - SS_FADE_START, 1e-3));
+    const float fade  = 1.0 - saturate((viewZ - SS_FADE_START) / max(SS_FADE_END - SS_FADE_START, 1e-3));
     const float ssOcc = (occ / (float)SS_STEPS) * fade;
 
-    o0.xyzw = float4(saturate(1.0 - ssOcc).xxx, 1.0);
-    o1.xyzw = r0.xyzw;
-    return;
-  }
-
-  // =========================================================================
-  // PROBE (temporary): round-trip the reconstruction through the projection.
-  //
-  // Reconstruct viewPos from the depth, project it straight back, and compare
-  // with the UV we started from. If the reconstruction and the projection agree,
-  // the difference is zero and this renders black everywhere. Colour anywhere
-  // means the round trip is broken, and the pattern says which half:
-  //
-  //   a uniform tint        -> the projection convention is wrong
-  //   a smooth gradient     -> m_projectionParam.xy is not the UV scale I think
-  //   colour in one region  -> m_cameraCenterOffset, which the reconstruction
-  //                            subtracts but the projection does not add back
-  // =========================================================================
-  {
-    const float2 uv    = v2.xy / v2.z;
-    const float  d     = g_DepthTexture.SampleLevel(g_samplerPoint_Clamp_s, uv, 0).x;
-    const float2 cuv   = uv - g_psScene.m_cameraCenterOffset.xy;
-    const float  viewZ = g_psScene.m_projectionParam.z / max(d - g_psScene.m_projectionParam.w, 1e-6);
-    const float3 viewPos = float3(viewZ * cuv * g_psScene.m_projectionParam.xy, viewZ);
-
-    const float4 clip = mul(float4(viewPos, 1.0), g_psScene.m_projection);
-    const float2 ruv  = clip.xy / clip.w * float2(0.5, -0.5) + 0.5;
-
-    // Compare the projected UV against the engine's own, which is what the depth
-    // texture is indexed by. Neutral grey (0.5) means they agree. Red or green
-    // means a horizontal or vertical offset, and the sign says which way - the
-    // reconstruction subtracts m_cameraCenterOffset, so the projection has to add
-    // it back.
-    const float4 clipPos = mul(float4(viewPos, 1.0), g_psScene.m_projection);
-    const float2 suv     = clipPos.xy / clipPos.w * float2(0.5, -0.5) + 0.5;
-    const float2 diff    = (suv - uv) * 50.0;
-
-    const float4 clipPos = mul(float4(viewPos, 1.0), g_psScene.m_projection);
-    const float2 suv     = clipPos.xy / clipPos.w * float2(0.5, -0.5) + 0.5;
-    const float2 diff    = (suv - uv) * 50.0;
-
-    o0.xyzw = float4(diff + 0.5, 0.0, 1.0);
-    o1.xyzw = r0.xyzw;
-    return;
+    // Scale the light rather than replacing the output. The render target is a
+    // light accumulation with a one/one blend, so anything written here is
+    // *added*. Writing 1 - ssOcc added a full unit of light everywhere and
+    // washed the frame out; what is wanted is to attenuate the light that this
+    // pass contributes where the march found an occluder.
+    r2.xyz *= (1.0 - ssOcc);
   }
 
   o0.xyzw = r2.xyzw;
