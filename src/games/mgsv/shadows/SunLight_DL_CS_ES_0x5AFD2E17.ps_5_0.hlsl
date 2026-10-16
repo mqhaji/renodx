@@ -111,10 +111,14 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
 // 0 for an unbound constant buffer, so anything read from cb13 - including the
 // gate - comes back as 0 and the effect disappears.
 //
-// #undef  CUSTOM_SUN_CONTACT_HARDENING
-// #define CUSTOM_SUN_CONTACT_HARDENING 1.0
-// #undef  CUSTOM_SUN_SHADOW_SOFTNESS
-// #define CUSTOM_SUN_SHADOW_SOFTNESS   0.05
+#undef  CUSTOM_SUN_CONTACT_HARDENING
+#define CUSTOM_SUN_CONTACT_HARDENING 1.0
+#undef  CUSTOM_SUN_SHADOW_SOFTNESS
+#define CUSTOM_SUN_SHADOW_SOFTNESS   0.05
+#undef  CUSTOM_SUN_SHADOW_K
+#define CUSTOM_SUN_SHADOW_K          24.0
+#undef  CUSTOM_SUN_BLUR_PIXELS
+#define CUSTOM_SUN_BLUR_PIXELS       24.0
 
 #define PCSS_PENUMBRA_MIN_WORLD  0.0   // penumbra at penumbra01 = 0, metres. Zero, not a
                                        // centimetre. A caster with no separation has to
