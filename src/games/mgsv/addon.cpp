@@ -1095,6 +1095,76 @@ renodx::utils::settings::Settings settings = {
         .max = 50.f,
     },
     new renodx::utils::settings::Setting{
+        .key = "FxSpotContactHardening",
+        .binding = &shader_injection.spot_contact_hardening,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 0.f,
+        .label = "Contact-Hardening Spot Shadows",
+        .section = "Shadows",
+        .tooltip = "Same treatment for spot lights. Their values are separate from "
+                   "the sun's because the scales differ - a spot's cone is tens of "
+                   "metres where the sun's cascade is hundreds, so the same caster "
+                   "separation gives a far larger ratio. Off by default.",
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotShadowSoftness",
+        .binding = &shader_injection.spot_shadow_softness,
+        .default_value = 80.f,
+        .label = "Spot Shadow Softness",
+        .section = "Shadows",
+        .tooltip = "Widest penumbra a fully separated spot shadow gets, in "
+                   "millimetres. The blur at the far end of the ramp.",
+        .max = 300.f,
+        .parse = [](float value) { return value * 0.001f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotShadowK",
+        .binding = &shader_injection.spot_shadow_k,
+        .default_value = 4.f,
+        .label = "Spot Penumbra Response",
+        .section = "Shadows",
+        .tooltip = "How fast separation reaches full softness. Lower stretches the "
+                   "ramp, so the blur keeps growing over a longer range. Too high "
+                   "and the radius saturates, which makes the shadow grow uniformly "
+                   "instead of trailing off.",
+        .max = 40.f,
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotShadowBlurPixels",
+        .binding = &shader_injection.spot_shadow_blur_pixels,
+        .default_value = 24.f,
+        .label = "Spot Penumbra Blur Radius",
+        .section = "Shadows",
+        .tooltip = "Spacing of the penumbra mask's neighbours, in screen pixels.",
+        .max = 50.f,
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotShadowDarkness",
+        .binding = &shader_injection.spot_shadow_darkness,
+        .default_value = 100.f,
+        .label = "Spot Shadow Darkness",
+        .section = "Shadows",
+        .tooltip = "Scales the shadow's occlusion, so higher is darker. The result "
+                   "is clamped at fully occluded, which is why this cannot go "
+                   "negative the way an unclamped multiplier can.",
+        .max = 300.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotConeFalloff",
+        .binding = &shader_injection.spot_cone_falloff,
+        .default_value = 100.f,
+        .label = "Spot Cone Falloff",
+        .section = "Shadows",
+        .tooltip = "How much of the game's cone-edge falloff scales the shadow. At "
+                   "100 a shadow fades toward the cone's rim, which is why vanilla "
+                   "spot shadows are faint over most of the cone. Lowering it "
+                   "darkens them, but going too low runs the shadow at full "
+                   "strength right up to the rim, which reads as a stretch.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
         .label = "Reset All",
         .section = "Options",
