@@ -1180,7 +1180,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "FxScreenSpaceShadowStrength",
         .binding = &shader_injection.ss_shadow_strength,
-        .default_value = 150.f,
+        .default_value = 200.f,
         .label = "Screen-Space Shadow Strength",
         .section = "Shadows",
         .tooltip = "Attenuation per unit of occlusion, so this is the main look "
@@ -1222,7 +1222,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "FxScreenSpaceShadowMaterialMax",
         .binding = &shader_injection.ss_shadow_material_max,
-        .default_value = 25.f,
+        .default_value = 100.f,
         .label = "Screen-Space Shadow Material Limit",
         .section = "Shadows",
         .tooltip = "The term runs only where the G-buffer's material index is below "
@@ -1248,7 +1248,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "FxScreenSpaceShadowFadeEnd",
         .binding = &shader_injection.ss_shadow_fade_end,
-        .default_value = 110.f,
+        .default_value = 123.f,
         .label = "Screen-Space Shadow Fade End",
         .section = "Shadows",
         .tooltip = "Distance at which it is gone, in metres. The last cascade "
