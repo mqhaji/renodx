@@ -206,7 +206,7 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
 // #undef  CUSTOM_SS_MATERIAL_MAX
 // #define CUSTOM_SS_MATERIAL_MAX 1.0
 
-#define SS_STEPS        64     // depth-buffer march steps toward the light, sized to
+#define SS_STEPS        48     // depth-buffer march steps toward the light, sized to
                                // the *screen* resolution of the reach rather than to
                                // the thickness. The reach is 2.5% of screen height -
                                // 54 px at 2160p - and the depth buffer holds nothing
@@ -1138,7 +1138,14 @@ void main(
 
     float occ = 0.0;
     for (int s = 0; s < SS_STEPS; ++s) {
-      const float t = (float)s + jitter;
+      // Quadratic step distribution: dense near the receiver, where contact-sized
+      // casters are, and sparser further out where only large ones can register.
+      // At 48 steps over a 108 px reach that is 0.56 px per step in the near field -
+      // finer than the 64-step uniform march it replaces - rising to 3.9 px at the
+      // far end. The near field is what the reach increase was for, so spending the
+      // budget there and taking 25% fewer depth fetches is a straight trade.
+      const float u = ((float)s + jitter) / (float)SS_STEPS;
+      const float t = (0.25 * u + 0.75 * u * u) * (float)SS_STEPS;
       const float4 clip = clipStart + clipStep * t;
       const float2 suv  = clip.xy / clip.w * float2(0.5, -0.5) + 0.5;
       if (any(suv < 0.0) || any(suv > 1.0)) break;
@@ -1160,9 +1167,15 @@ void main(
       // unrelated geometry the ray's screen path happens to cross.
       const float sep = rayStart.z + rayDir.z * t - sz;
       if (sep > CUSTOM_SS_THICKNESS
-          && sep < max(SS_CASTER_MAX_M, viewZ * SS_CASTER_PER_M)
-          && g_SpecularTexture.SampleLevel(g_samplerPoint_Wrap_s, suv, 0).z < CUSTOM_SS_MATERIAL_MAX) {
-        occ += 1.0;
+          && sep < max(SS_CASTER_MAX_M, viewZ * SS_CASTER_PER_M)) {
+        // The material fetch only earns its keep when the limit can reject
+        // something. At 1.0 it cannot, and hits are common enough that paying for
+        // it on every one of them is the largest avoidable cost in the loop: up to
+        // half the depth fetches have a second fetch stapled to them.
+        if (CUSTOM_SS_MATERIAL_MAX >= 0.999
+            || g_SpecularTexture.SampleLevel(g_samplerPoint_Wrap_s, suv, 0).z < CUSTOM_SS_MATERIAL_MAX) {
+          occ += 1.0;
+        }
       }
     }
 
