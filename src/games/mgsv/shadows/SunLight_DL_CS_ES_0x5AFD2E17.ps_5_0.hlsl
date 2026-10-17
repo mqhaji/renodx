@@ -186,6 +186,11 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
 // 0 for an unbound constant buffer, so anything read from cb13 - including the
 // toggle - comes back as 0 and the effect disappears.
 //
+// TEST BUILD - character casters only. The devkit live path supplies no cb13, so
+// the values are pinned here. MATERIAL_MAX splits the character band (>=) from
+// everything else (<); this build accepts a hit only when the *caster* is in the
+// character band, so any shadow that appears is Snake's and not the term working
+// as a whole.
 // #undef  CUSTOM_SS_SHADOWS
 // #define CUSTOM_SS_SHADOWS      1.0
 // #undef  CUSTOM_SS_REACH
@@ -193,13 +198,13 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
 // #undef  CUSTOM_SS_THICKNESS
 // #define CUSTOM_SS_THICKNESS    0.005
 // #undef  CUSTOM_SS_STRENGTH
-// #define CUSTOM_SS_STRENGTH     1.5
+// #define CUSTOM_SS_STRENGTH     2.0
 // #undef  CUSTOM_SS_FADE_START
 // #define CUSTOM_SS_FADE_START   40.0
 // #undef  CUSTOM_SS_FADE_END
-// #define CUSTOM_SS_FADE_END     110.0
+// #define CUSTOM_SS_FADE_END     122.9
 // #undef  CUSTOM_SS_MATERIAL_MAX
-// #define CUSTOM_SS_MATERIAL_MAX 0.25
+// #define CUSTOM_SS_MATERIAL_MAX 1.0
 
 #define SS_STEPS        64     // depth-buffer march steps toward the light, sized to
                                // the *screen* resolution of the reach rather than to
@@ -241,13 +246,20 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
                                // gradient added to the bias. A fixed bias cannot
                                // work: too small and a sloped surface occludes
                                // itself, too large and grass is missed.
-#define SS_NORMAL_BIAS  0.003  // metres to offset the ray's start along the surface
-                               // normal, which stops a surface occluding itself at
-                               // grazing angles. Must be smaller than the casters
-                               // being sought: at 2 cm the ray started above a grass
-                               // blade and never intersected it.
-                               // A bias, not a thickness scale: it must not depend
-                               // on the camera.
+#define SS_NORMAL_BIAS  0.0  // TEST: zeroed. This is the only thing that can put the
+                               // ray's start behind the receiver's own surface, so
+                               // zeroing it separates "the start intersects the
+                               // surface" from "a distant caster was found".
+                               // Was 0.003.
+#define SS_REACH_MAX_M  1.50   // world-space cap on the reach.
+#define SS_CASTER_MAX_M 0.25   // metres. Maximum separation between the ray and the
+                               // sample for the sample to count as the caster: the
+                               // caster has to be *near* the ray, not merely in front
+                               // of it. Without an upper bound, anything in front
+                               // counts however far away it is, which is why a head
+                               // against a distant background shadows the ground and
+                               // the same head against a near background does not -
+                               // the gap, not the geometry, decided it.
 
 #define PCSS_FILTER_MAX_TEXELS   128.0 // sampling guard, texels; rarely binds
 #define PCSS_FILTER_MIN_TEXELS   0.5   // never harder than vanilla's 0.5 texel PCF
@@ -1081,7 +1093,7 @@ void main(
     // The step is the reach over the step count, i.e. SS_STEPS is the number of
     // samples along the reach and CUSTOM_SS_REACH / SS_STEPS is their spacing on
     // screen; see SS_STEPS for why that is the quantity to size it by.
-    const float marchStep = (CUSTOM_SS_REACH * viewZ / abs(g_psScene.m_projection._m11)) / (float)SS_STEPS;
+    const float marchStep = min(CUSTOM_SS_REACH * viewZ / abs(g_psScene.m_projection._m11), SS_REACH_MAX_M) / (float)SS_STEPS;
     // Slope-scaled bias: the receiver's own screen-space depth gradient, so a
     // steeply sloped surface gets a proportionally larger bias and does not
     // occlude itself, while a flat one keeps a bias small enough to catch grass.
@@ -1132,7 +1144,11 @@ void main(
       // Read only where the depth test already passed. Most steps are in front of
       // nothing, and skipping their material read halves the loop's texture
       // traffic for a branch that resolves to the same answer.
-      if (sz + CUSTOM_SS_THICKNESS < rayStart.z + rayDir.z * t
+      // Bounded separation: the caster has to be near the ray, not merely in front
+      // of it. Too close and it is the receiver's own surface; too far and it is
+      // unrelated geometry the ray's screen path happens to cross.
+      const float sep = rayStart.z + rayDir.z * t - sz;
+      if (sep > CUSTOM_SS_THICKNESS && sep < SS_CASTER_MAX_M
           && g_SpecularTexture.SampleLevel(g_samplerPoint_Wrap_s, suv, 0).z < CUSTOM_SS_MATERIAL_MAX) {
         occ += 1.0;
       }
@@ -1149,6 +1165,7 @@ void main(
     }
   }
 
+  // PROBE removed; see docs for the measured first-hit distribution.
   o0.xyzw = r2.xyzw;
   o1.xyzw = r0.xyzw;
   return;
