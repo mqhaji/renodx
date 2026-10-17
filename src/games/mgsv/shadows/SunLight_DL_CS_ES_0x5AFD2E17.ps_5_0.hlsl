@@ -194,7 +194,7 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
 // #undef  CUSTOM_SS_SHADOWS
 // #define CUSTOM_SS_SHADOWS      1.0
 // #undef  CUSTOM_SS_REACH
-// #define CUSTOM_SS_REACH        0.05
+// #define CUSTOM_SS_REACH        0.10
 // #undef  CUSTOM_SS_THICKNESS
 // #define CUSTOM_SS_THICKNESS    0.005
 // #undef  CUSTOM_SS_STRENGTH
