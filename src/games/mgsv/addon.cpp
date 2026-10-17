@@ -1195,7 +1195,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "FxScreenSpaceShadowReach",
         .binding = &shader_injection.ss_shadow_reach,
-        .default_value = 2.5f,
+        .default_value = 5.0f,
         .label = "Screen-Space Shadow Reach",
         .section = "Shadows",
         .tooltip = "How far the ray travels, as a percentage of screen height, so "
