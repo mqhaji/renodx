@@ -251,15 +251,26 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
                                // zeroing it separates "the start intersects the
                                // surface" from "a distant caster was found".
                                // Was 0.003.
-#define SS_REACH_MAX_M  1.50   // world-space cap on the reach.
-#define SS_CASTER_MAX_M 0.25   // metres. Maximum separation between the ray and the
-                               // sample for the sample to count as the caster: the
-                               // caster has to be *near* the ray, not merely in front
-                               // of it. Without an upper bound, anything in front
-                               // counts however far away it is, which is why a head
-                               // against a distant background shadows the ground and
-                               // the same head against a near background does not -
-                               // the gap, not the geometry, decided it.
+#define SS_REACH_MAX_M  6.00   // world-space cap on the reach. Set above the fade's
+                               // own reach everywhere inside it - 3.6 m at 122.9 m - so
+                               // the search stays a constant 54 px of screen. The 1.5 m
+                               // cap this replaces began binding at 52 m and cut the
+                               // screen reach to 27 px by 100 m and 5.6 px by 500 m.
+#define SS_CASTER_MAX_M 0.25   // metres. Floor on the maximum separation between the ray
+                               // and the sample for it to count as the caster: contact
+                               // has to be near the ray, not merely in front of it.
+#define SS_CASTER_PER_M 0.010  // metres of that bound per metre of depth, so the bound
+                               // is max(SS_CASTER_MAX_M, depth * this). An absolute
+                               // bound cannot work at range: one pixel of depth is
+                               // 54 mm at 100 m and 272 mm at 500 m, so a fixed 25 cm
+                               // is 0.9 px out there and nothing can qualify. 1 cm per
+                               // metre holds 25 cm out to 25 m - close-range contact and
+                               // the character fix untouched - and gives 1 m at 100 m,
+                               // 2 m at 200 m.
+                               //
+                               // The character artifact lived in the *ratio* of the
+                               // bound to the pixel size rather than in its absolute
+                               // value, which is why scaling it is safe.
 
 #define PCSS_FILTER_MAX_TEXELS   128.0 // sampling guard, texels; rarely binds
 #define PCSS_FILTER_MIN_TEXELS   0.5   // never harder than vanilla's 0.5 texel PCF
@@ -1148,7 +1159,8 @@ void main(
       // of it. Too close and it is the receiver's own surface; too far and it is
       // unrelated geometry the ray's screen path happens to cross.
       const float sep = rayStart.z + rayDir.z * t - sz;
-      if (sep > CUSTOM_SS_THICKNESS && sep < SS_CASTER_MAX_M
+      if (sep > CUSTOM_SS_THICKNESS
+          && sep < max(SS_CASTER_MAX_M, viewZ * SS_CASTER_PER_M)
           && g_SpecularTexture.SampleLevel(g_samplerPoint_Wrap_s, suv, 0).z < CUSTOM_SS_MATERIAL_MAX) {
         occ += 1.0;
       }
