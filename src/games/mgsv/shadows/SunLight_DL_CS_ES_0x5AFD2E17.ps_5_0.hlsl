@@ -1083,13 +1083,23 @@ void main(
                                   ndc.y * viewZ / g_psScene.m_projection._m11,
                                   viewZ);
 
-    // Negated: m_dominantLightDir points away from the light, the same
-    // convention the spot shader handles with -r6.xyz. Marching along it
-    // unnegated walks away from the light, which makes p.z grow and every step
-    // satisfy the occlusion test - the whole frame occluded and the sun zeroed.
-    // Being view space it also rotates with the camera, so the effect appeared
-    // and vanished as you turned.
-    const float3 lightDir = -normalize(g_psSystem.m_dominantLightDir.xyz);
+    // The direction of the light *this pass renders*, not the scene's dominant
+    // light. m_dominantLightDir comes from the engine's DominantLightSearchJob,
+    // which picks whichever light wins a scene-wide search and interpolates the
+    // result over time; Utility::LuaInterface::SetDominantLightDirection lets
+    // scripts set it outright. A spot light coming into view can therefore take it
+    // over, and this term - which belongs to the sun pass - would march toward that
+    // spot instead of the sun. The direction drifts rather than snaps, because the
+    // job interpolates, which is why it read as the shadows being slightly off
+    // rather than as a broken shadow.
+    //
+    // m_lightParams[0] is the sun's own direction and the vanilla lighting already
+    // uses it: r2 is the decoded surface normal (the reflection at 884-888 only
+    // reduces to 2(N.V)N - V when it is), so dot(m_lightParams[0], r2) at 881 is
+    // N.L and must be positive on a lit surface. It points *toward* the light, the
+    // opposite convention to m_dominantLightDir, so it needs no negation. View
+    // space, like N and V, since 896-899 mixes it with that reflection.
+    const float3 lightDir = normalize(g_psLight.m_lightParams[0].xyz);
 
     // The G-buffer normal, view space, packed the way the spot shader decodes it.
     const float3 gbufN = g_NormalTexture.SampleLevel(g_samplerPoint_Clamp_s, uv, 0).xyz;
