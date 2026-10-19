@@ -63,8 +63,10 @@
 //     the exponential spacing of section 4.3 and table 2's "exp. steps", which the paper
 //     recommends for detail around small objects.
 //   * Line 7 and section 3.1, distribution. The paper asks for the occlusion integral to
-//     be distributed spatially *and* temporally. Both are here: a coherent 4x4 tile
-//     spatially, and CUSTOM_RANDOM - a fresh uniform every frame, which the addon's
+//     be distributed spatially *and* temporally. Both are here: per-pixel interleaved
+//     gradient noise spatially (a repeating 4x4 tile left a 4x4 residual that a temporal
+//     reconstruction could not remove, because the block shared its phase history), and
+//     CUSTOM_RANDOM - a fresh uniform every frame, which the addon's
 //     utils::random already rewrites for film grain - rotating the slice angles and the
 //     step jitter per frame. That is what makes a low sample count viable, and it covers
 //     DLSS as well as the analytical TAA and FSR3, since the gate is "any reconstruction
@@ -101,7 +103,10 @@
 #include "../shared.h"
 
 #define AO_PI 3.14159265
-#define AO_SECTORS 32u
+#define AO_SECTORS 128u
+// Levels in the addon's depth chain. The chain starts at half resolution, so level k here is
+// texture level k - 1 and covers W >> (k + 1).
+#define AO_DEPTH_MIP_LEVELS 4
 
 cbuffer Constants : register(b0)
 {
@@ -124,6 +129,9 @@ cbuffer Constants : register(b0)
 Texture2D<float4> depthBuffer : register(t1);
 Texture2D<float4> normalBuffer : register(t2);
 Texture2D<float4> lightBufferOriginal : register(t4);  // the light this stage applies AO to
+// The addon's depth mip chain: each texel is the nearest of the four below it. Only read
+// when the injection says the chain exists for this dispatch.
+Texture2D<float4> depthMips : register(t6);
 RWTexture2D<float4> resultBuffer : register(u0);
 
 // Linear view depth, the same expression the retail passes use.
@@ -154,8 +162,41 @@ float3 DecodeNormal(float3 enc) {
 // Sectors [start, start + width) of the bit field. A zero width must produce an empty
 // mask, and HLSL shifts are undefined at the width of the type, so the shift is
 // guarded rather than relying on a masked result.
-uint SectorMask(uint start, uint width) {
-  return width > 0u ? (0xFFFFFFFFu >> (AO_SECTORS - width)) << start : 0u;
+// Sectors [start, start + width) of the 128-bit field, one 32-bit limb at a time. The paper
+// uses 32 because they fit one limb; 128 is four, and the cost the paper measures for that is
+// 5-10%, which buys back the thing that was crushing both the occlusion and the bounce: with
+// 32 sectors a sample's band covers a small fraction of the field, so a surface's occluded
+// measure - and therefore the GI's per-sample weight - came out far below what the geometry
+// actually subtends. Shifts are undefined at the width of the type, so both ends are guarded,
+// and the arithmetic is signed because a start past a limb's base underflows unsigned.
+uint4 SectorMask(uint start, uint width) {
+  uint4 mask = uint4(0u, 0u, 0u, 0u);
+  if (width == 0u) return mask;
+  const int end = (int)(start + width);
+  [unroll] for (int limb = 0; limb < 4; ++limb) {
+    const int base = limb * 32;
+    const int first = min(max((int)start - base, 0), 32);
+    const int last = min(max(end - base, 0), 32);
+    if (last > first) {
+      const uint high = last >= 32 ? 0xFFFFFFFFu : (1u << (uint)last) - 1u;
+      const uint low = first >= 32 ? 0xFFFFFFFFu : (first == 0 ? 0u : ((1u << (uint)first) - 1u));
+      mask[limb] = high & ~low;
+    }
+  }
+  return mask;
+}
+
+// Population count over the four limbs: HLSL has no 128-bit integer, so the field is four of
+// them and this is the only place the count is assembled.
+uint CountBits(uint4 mask) {
+  return countbits(mask.x) + countbits(mask.y) + countbits(mask.z) + countbits(mask.w);
+}
+
+// Interleaved gradient noise: one value per pixel, spatially decorrelated at the pixel
+// level. Used for the sample jitter, so that a temporal reconstruction's residual is noise
+// rather than structure.
+float Ign(float2 p) {
+  return frac(52.9829189 * frac(dot(p, float2(0.06711056, 0.00583715))));
 }
 
 // Slice-relative CDF of the cosine-weighted measure inside a hemisphere slice.
@@ -262,14 +303,18 @@ void main(uint3 tid : SV_DispatchThreadID) {
   // reconstruction assumes has never been verified.
   const float thickness = thicknessScale * 0.05 * worldRadius;
 
-  // The sample jitter is spatially coherent, from a repeating 4x4 tile, rather than a
-  // per-pixel hash. A per-pixel random offset is neither spatial nor temporal in the
-  // sense the paper means: it makes the field grain, and the variation lands on the
-  // first sample, where no amount of extra samples averages it away. The temporal half
-  // sits with the frame phase below.
-  const uint tiles = 4u;
-  const uint tileIndex = dot(p % tiles, uint2(1u, tiles)) * 11u;
-  const float jitter = float((tileIndex % (tiles * tiles)) + 0.5) / float(tiles * tiles);
+  // The sample jitter is per pixel, from interleaved gradient noise. It was a repeating 4x4
+  // tile, which was wrong in a way that only shows once there is a temporal term: the tile
+  // gave sixteen values per frame and the frame phase is one scalar for the whole image, so
+  // every pixel of a 4x4 block shifted in lockstep and shared its entire phase history. A
+  // reconstruction averages over a finite window, so the block's residual stayed correlated
+  // across its own pixels - a 4x4 grid the reconstruction cannot remove, because it is
+  // structure rather than noise. Per-pixel noise is what a reconstruction is for: its
+  // residual is high frequency, which the neighbourhood clamp resolves.
+  const float jitter = Ign(pixel);
+  // A second, decorrelated value for the step jitter: it used to be a linear function of the
+  // slice jitter, which stacks the two errors instead of averaging them.
+  const float stepJitter = Ign(pixel + float2(47.0, 71.0));
 
   // The temporal term. CUSTOM_RANDOM is a fresh uniform in [0, 1) every frame: the addon
   // binds it to utils::random, whose present handler rewrites it unconditionally, and film
@@ -286,9 +331,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
   // with nothing accumulating it is shimmer, not grain.
   const float framePhase = CUSTOM_TAA != 0.0 ? CUSTOM_RANDOM : 0.0;
   const float slicePhase = frac(jitter + framePhase);
-  // The step jitter is a deliberately different value from the slice phase. They shared one
-  // until now, which stacks their errors instead of averaging them.
-  const float stepPhase = frac(jitter * 2.0 + 0.31 + framePhase);
+  const float stepPhase = frac(stepJitter + framePhase);
 
   // The visibility integral. `occlusion` accumulates each slice's own occluded fraction
   // and `sliceWeightSum` the measure of the slices that contributed, so the average below
@@ -322,7 +365,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     const float sinN = normalSign * sqrt(saturate(1.0 - cosN * cosN));
     const float invNormalization = 0.25 / max(cosN + normalAngle * sinN, 1e-4);
 
-    uint mask = 0u;
+    uint4 mask = uint4(0u, 0u, 0u, 0u);
     // The bands' exact widths and the spans the bit field claims for them, in sectors. See
     // the quantiser at the bottom of the step loop.
     float bandWidthSum = 0.0;
@@ -343,9 +386,36 @@ void main(uint3 tid : SV_DispatchThreadID) {
         if (sampleUv.x <= 0.0 || sampleUv.y <= 0.0 || sampleUv.x >= 1.0 || sampleUv.y >= 1.0) break;
 
         const int2 samplePixel = (int2)floor(sampleUv * float2(cBufferWidth, cBufferHeight));
-        const float sampleZ = LinearZ(depthBuffer.Load(int3(samplePixel, 0)).x);
+
+        // A distant step is looking for a large occluder but reads a single depth texel, so
+        // an occluder narrower than the step spacing falls between two steps and is never
+        // seen - the measured reason the effect wanted a high step count. The reference
+        // implementation answers that by fetching the step from a coarse level of a
+        // nearest-reduced depth chain, so one texel already covers the footprint the step
+        // skips over (XeGTAO's depth mip sampling). The level follows the step's distance
+        // with their 3.3 offset: steps within eight texels read full resolution, and a step
+        // a hundred and twenty-eight texels out reads a level whose texel is eight wide.
+        const int mipLevel =
+            CUSTOM_MGSV_AO_DEPTH_MIPS > 0.5
+                ? clamp((int)floor(log2(max(span * radiusPx, 1.0)) - 3.3), 0, AO_DEPTH_MIP_LEVELS)
+                : 0;
+        float sampleZ;
+        if (mipLevel == 0) {
+          sampleZ = LinearZ(depthBuffer.Load(int3(samplePixel, 0)).x);
+        } else {
+          const int2 coarseSize = max(int2(cBufferWidth, cBufferHeight) >> mipLevel, 1);
+          const int2 coarsePixel = clamp(samplePixel >> mipLevel, int2(0, 0), coarseSize - 1);
+          sampleZ = LinearZ(depthMips.Load(int3(coarsePixel, mipLevel - 1)).x);
+        }
         if (!(sampleZ > 0.0) || sampleZ > 1.0e6) continue;
 
+        // The sample keeps its exact position and takes only its *depth* from the coarse
+        // level. Reconstructing it at the reduced texel's centre - which is what the
+        // reference implementation does, and what this did at first - moves it off the slice
+        // line by up to half a coarse texel, and the horizon math below assumes the sample
+        // lies in the slice's plane. At level 4 that is eight pixels of sideways error at a
+        // hundred-pixel step: several sectors' worth, which showed up as bands collapsing
+        // into thin, grid-aligned lines instead of covering what they should.
         const float3 sf = ViewPos(float2(samplePixel), sampleZ);
         // The back sample, one thickness deeper along the view ray: the depth buffer
         // stores the *front* face, so the occluder's body extends away from the camera.
@@ -392,16 +462,18 @@ void main(uint3 tid : SV_DispatchThreadID) {
         const float hi = max(xF, xB) * (float)AO_SECTORS;
         const uint start = (uint)clamp(floor(lo + 0.5), 0.0, (float)AO_SECTORS);
         const uint end   = (uint)clamp(floor(hi + 0.5), 0.0, (float)AO_SECTORS);
+        const uint4 band = SectorMask(start, end - start);
         bandWidthSum += hi - lo;
         bandSpanSum += (float)(end - start);
-        mask |= SectorMask(start, end - start);
+
+        mask |= band;
       }
     }
 
     // The union's measure: the exact band widths, less the overlap the bit field detected.
     // A union where nothing overlaps therefore comes out exact, and one that overlaps is
     // corrected by however much the mask could see.
-    const float sliceOcclusion = saturate((bandWidthSum - bandSpanSum + (float)countbits(mask)) / (float)AO_SECTORS);
+    const float sliceOcclusion = saturate((bandWidthSum - bandSpanSum + (float)CountBits(mask)) / (float)AO_SECTORS);
     // Slices do not integrate equal amounts of the hemisphere, so averaging them equally
     // weights them as if they did. Each is weighted here by its own measure,
     // |projN| (cosN + n sinN), and the average is normalized by the sum. Equation 2 says
@@ -430,5 +502,6 @@ void main(uint3 tid : SV_DispatchThreadID) {
   // scales sunlit surfaces. The paper multiplies the ambient and indirect terms, which
   // this buffer does not separate.
   const float occlusionApplied = saturate(occlusionRatio * amount) * fade;
+
   resultBuffer[p] = float4(light.xyz * (1.0 - occlusionApplied), light.w);
 }

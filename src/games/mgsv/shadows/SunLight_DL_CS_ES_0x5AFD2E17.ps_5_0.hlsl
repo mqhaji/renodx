@@ -176,9 +176,11 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
 //   CUSTOM_SS_REACH         reach, as a fraction of screen height (ndc.y units)
 //   CUSTOM_SS_THICKNESS     how far in front of the ray a surface must sit, metres
 //   CUSTOM_SS_STRENGTH      attenuation per unit of occlusion
-//   CUSTOM_SS_FADE_START    metres, full strength nearer than this
 //   CUSTOM_SS_FADE_END      metres, gone past this
 //   CUSTOM_SS_MATERIAL_MAX  material index the term is allowed on
+//
+// The fade's start distance is fixed at 40 m in the body: it had a knob and never
+// needed one, since the end distance is what decides where the term is gone.
 //
 // All are declared in ../shared.h and set from the Shadows section of the
 // overlay. To iterate through the devkit instead, pin them here: the devkit
@@ -199,8 +201,6 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
 // #define CUSTOM_SS_THICKNESS    0.005
 // #undef  CUSTOM_SS_STRENGTH
 // #define CUSTOM_SS_STRENGTH     2.0
-// #undef  CUSTOM_SS_FADE_START
-// #define CUSTOM_SS_FADE_START   40.0
 // #undef  CUSTOM_SS_FADE_END
 // #define CUSTOM_SS_FADE_END     122.9
 // #undef  CUSTOM_SS_MATERIAL_MAX
@@ -1127,8 +1127,11 @@ void main(
 
     // Fade out with distance: beyond this the cascade map is the right tool and
     // screen space has too little of the caster on screen to be reliable. Taken
-    // before the loop, because the loop's saturation exit needs it.
-    const float fade = 1.0 - saturate((viewZ - CUSTOM_SS_FADE_START) / max(CUSTOM_SS_FADE_END - CUSTOM_SS_FADE_START, 1e-3));
+    // before the loop, because the loop's saturation exit needs it. Full strength
+    // begins at 40 m; that used to be a knob and never needed to be one, since the
+    // end distance is what decides where the term is gone.
+    const float fadeStart = 40.0;
+    const float fade = 1.0 - saturate((viewZ - fadeStart) / max(CUSTOM_SS_FADE_END - fadeStart, 1e-3));
 
     // Project the ray's start and its direction once. The ray is a straight line,
     // so its clip coordinates are affine in the step parameter - step t is just
