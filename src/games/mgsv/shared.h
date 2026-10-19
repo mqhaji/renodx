@@ -62,6 +62,19 @@ struct ShaderInjectData {
   float ss_shadow_fade_start;
   float ss_shadow_fade_end;
   float ss_shadow_material_max;
+
+  // Ambient occlusion replacement.
+  //
+  // ao_replace is read *host-side*, by the shader replacement callback, so the toggle
+  // needs no shader compile and the compute shader keeps no constant buffer dependency.
+  // The rest are used by the AO shader itself.
+  float ao_replace;
+  float ao_strength;
+  float ao_radius;
+  float ao_slices;
+  float ao_steps;
+  float ao_thickness;
+  float ao_fade;
 };
 
 #ifndef __cplusplus
@@ -118,6 +131,14 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_SS_FADE_START   shader_injection.ss_shadow_fade_start
 #define CUSTOM_SS_FADE_END     shader_injection.ss_shadow_fade_end
 #define CUSTOM_SS_MATERIAL_MAX shader_injection.ss_shadow_material_max
+
+#define CUSTOM_MGSV_AO_REPLACE   shader_injection.ao_replace
+#define CUSTOM_MGSV_AO_STRENGTH  shader_injection.ao_strength
+#define CUSTOM_MGSV_AO_RADIUS    shader_injection.ao_radius
+#define CUSTOM_MGSV_AO_SLICES    shader_injection.ao_slices
+#define CUSTOM_MGSV_AO_STEPS     shader_injection.ao_steps
+#define CUSTOM_MGSV_AO_THICKNESS shader_injection.ao_thickness
+#define CUSTOM_MGSV_AO_FADE      shader_injection.ao_fade
 
 #include "../../shaders/renodx.hlsl"
 
