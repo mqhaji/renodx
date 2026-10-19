@@ -503,5 +503,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
   // this buffer does not separate.
   const float occlusionApplied = saturate(occlusionRatio * amount) * fade;
 
-  resultBuffer[p] = float4(light.xyz * (1.0 - occlusionApplied), light.w);
+  // Alpha is 1.0, as the retail stage's bytecode does: it writes light * (1 - ao) with an
+  // explicit `mov r0.w, l(1.0)` before the store. The light's own alpha is 0.04 here, and
+  // writing that instead is what killed Snake's subsurface scattering the moment this
+  // replacement was enabled - independent of the occlusion strength.
+  resultBuffer[p] = float4(light.xyz * (1.0 - occlusionApplied), 1.0);
 }
