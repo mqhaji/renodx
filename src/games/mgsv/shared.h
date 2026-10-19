@@ -59,7 +59,6 @@ struct ShaderInjectData {
   float ss_shadow_reach;
   float ss_shadow_thickness;
   float ss_shadow_strength;
-  float ss_shadow_fade_start;
   float ss_shadow_fade_end;
   float ss_shadow_material_max;
 
@@ -75,6 +74,10 @@ struct ShaderInjectData {
   float ao_steps;
   float ao_thickness;
   float ao_fade;
+  // Host-side: 1 while the depth mip chain is built for this frame. The pass reads coarse
+  // levels only when it is set, so an unbindable chain degrades to the exact fetch instead
+  // of reading a fallback texel.
+  float ao_depth_mips;
 };
 
 #ifndef __cplusplus
@@ -128,7 +131,6 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_SS_REACH        shader_injection.ss_shadow_reach
 #define CUSTOM_SS_THICKNESS    shader_injection.ss_shadow_thickness
 #define CUSTOM_SS_STRENGTH     shader_injection.ss_shadow_strength
-#define CUSTOM_SS_FADE_START   shader_injection.ss_shadow_fade_start
 #define CUSTOM_SS_FADE_END     shader_injection.ss_shadow_fade_end
 #define CUSTOM_SS_MATERIAL_MAX shader_injection.ss_shadow_material_max
 
@@ -139,6 +141,7 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_MGSV_AO_STEPS     shader_injection.ao_steps
 #define CUSTOM_MGSV_AO_THICKNESS shader_injection.ao_thickness
 #define CUSTOM_MGSV_AO_FADE      shader_injection.ao_fade
+#define CUSTOM_MGSV_AO_DEPTH_MIPS shader_injection.ao_depth_mips
 
 #include "../../shaders/renodx.hlsl"
 
