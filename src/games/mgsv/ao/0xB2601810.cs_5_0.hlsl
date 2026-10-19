@@ -133,6 +133,10 @@ Texture2D<float4> lightBufferOriginal : register(t4);  // the light this stage a
 // when the injection says the chain exists for this dispatch.
 Texture2D<float4> depthMips : register(t6);
 RWTexture2D<float4> resultBuffer : register(u0);
+// The occlusion, for the post-shading composite. The light output above is written through
+// unchanged, so nothing that reads the light - the skin's scattering included - can be
+// affected by this pass.
+RWTexture2D<float4> occlusionResult : register(u1);
 
 // Linear view depth, the same expression the retail passes use.
 float LinearZ(float depth) {
@@ -252,6 +256,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
   const float z     = LinearZ(depth);
   if (!(z > 0.0) || z > 1.0e6) {
     resultBuffer[p] = light;
+    occlusionResult[p] = 0.0;
     return;
   }
 
@@ -277,6 +282,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
                    * saturate(exp2(-(depth / max(fadeDepth, 1e-4)) * (depth / max(fadeDepth, 1e-4))));
   if (fade < 0.001) {
     resultBuffer[p] = light;
+    occlusionResult[p] = 0.0;
     return;
   }
 
@@ -507,5 +513,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
   // explicit `mov r0.w, l(1.0)` before the store. The light's own alpha is 0.04 here, and
   // writing that instead is what killed Snake's subsurface scattering the moment this
   // replacement was enabled - independent of the occlusion strength.
-  resultBuffer[p] = float4(light.xyz * (1.0 - occlusionApplied), 1.0);
+  // The light goes through untouched; the occlusion is delivered separately and applied after
+  // shading, where it cannot reach any lighting input.
+  resultBuffer[p] = float4(light.xyz, 1.0);
+  occlusionResult[p] = float4(occlusionApplied, occlusionRatio, 0.0, 1.0);
 }

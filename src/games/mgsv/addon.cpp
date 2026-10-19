@@ -1062,6 +1062,202 @@ void SyncOutputMode() {
   }
 }
 
+// The AO pass, dispatched by the addon so it can write the occlusion somewhere other than the
+// light. The light output is an exact copy of its input: this pass must not be able to affect
+// anything that reads the light, which is what killed the skin's scattering when the occlusion
+// was applied here.
+struct AoPass {
+  reshade::api::pipeline_layout layout = {0};
+  reshade::api::pipeline pipeline = {0};
+  reshade::api::resource occlusion = {0};
+  reshade::api::resource_view occlusion_view = {0};
+  reshade::api::resource_view occlusion_uav = {0};
+  uint32_t width = 0;
+  uint32_t height = 0;
+  bool ready = false;
+};
+AoPass ao_pass;
+
+void DestroyAoPass(reshade::api::device* device) {
+  ao_pass.ready = false;
+  if (ao_pass.occlusion_uav.handle != 0) {
+    device->destroy_resource_view(ao_pass.occlusion_uav);
+    ao_pass.occlusion_uav = {0};
+  }
+  if (ao_pass.occlusion_view.handle != 0) {
+    device->destroy_resource_view(ao_pass.occlusion_view);
+    ao_pass.occlusion_view = {0};
+  }
+  if (ao_pass.occlusion.handle != 0) {
+    device->destroy_resource(ao_pass.occlusion);
+    ao_pass.occlusion = {0};
+  }
+  if (ao_pass.pipeline.handle != 0) {
+    device->destroy_pipeline(ao_pass.pipeline);
+    ao_pass.pipeline = {0};
+  }
+  if (ao_pass.layout.handle != 0) {
+    device->destroy_pipeline_layout(ao_pass.layout);
+    ao_pass.layout = {0};
+  }
+  ao_pass.width = 0;
+  ao_pass.height = 0;
+}
+
+bool EnsureAoPass(reshade::api::device* device, uint32_t width, uint32_t height) {
+  if (ao_pass.ready && ao_pass.width == width && ao_pass.height == height) return true;
+  DestroyAoPass(device);
+
+  const reshade::api::resource_desc desc(
+      width, height, 1u, 1u,
+      reshade::api::format::r16g16b16a16_float,
+      1u,
+      reshade::api::memory_heap::gpu_only,
+      reshade::api::resource_usage::shader_resource
+          | reshade::api::resource_usage::unordered_access);
+  if (!device->create_resource(desc, nullptr, desc.usage, &ao_pass.occlusion)
+      || !device->create_resource_view(
+          ao_pass.occlusion, reshade::api::resource_usage::shader_resource,
+          reshade::api::resource_view_desc(reshade::api::format::r16g16b16a16_float),
+          &ao_pass.occlusion_view)
+      || !device->create_resource_view(
+          ao_pass.occlusion, reshade::api::resource_usage::unordered_access,
+          reshade::api::resource_view_desc(reshade::api::format::r16g16b16a16_float),
+          &ao_pass.occlusion_uav)) {
+    reshade::log::message(reshade::log::level::error, "mgsv: AO occlusion target failed");
+    return false;
+  }
+
+  std::array<reshade::api::pipeline_layout_param, 3> params = {};
+  params[0].type = reshade::api::pipeline_layout_param_type::push_descriptors;
+  params[0].push_descriptors.count = 7u;  // t0..t6
+  params[0].push_descriptors.type = reshade::api::descriptor_type::texture_shader_resource_view;
+  params[0].push_descriptors.dx_register_index = 0u;
+  params[0].push_descriptors.dx_register_space = 0u;
+  params[1].type = reshade::api::pipeline_layout_param_type::push_descriptors;
+  params[1].push_descriptors.count = 2u;  // u0 light, u1 occlusion
+  params[1].push_descriptors.type = reshade::api::descriptor_type::texture_unordered_access_view;
+  params[1].push_descriptors.dx_register_index = 0u;
+  params[1].push_descriptors.dx_register_space = 0u;
+  params[2].type = reshade::api::pipeline_layout_param_type::push_constants;
+  params[2].push_constants.count = static_cast<uint32_t>(sizeof(shader_injection) / sizeof(uint32_t));
+  params[2].push_constants.dx_register_index = 13u;
+  params[2].push_constants.dx_register_space = 0u;
+  params[2].push_constants.visibility = reshade::api::shader_stage::compute;
+  if (!device->create_pipeline_layout(
+          static_cast<uint32_t>(params.size()), params.data(), &ao_pass.layout)) {
+    reshade::log::message(reshade::log::level::error, "mgsv: AO layout failed");
+    return false;
+  }
+
+  reshade::api::shader_desc shader_description = {
+      .code = __0xB2601810.data(),
+      .code_size = __0xB2601810.size(),
+  };
+  const reshade::api::pipeline_subobject subobject = {
+      .type = reshade::api::pipeline_subobject_type::compute_shader,
+      .count = 1,
+      .data = &shader_description,
+  };
+  if (!device->create_pipeline(ao_pass.layout, 1, &subobject, &ao_pass.pipeline)) {
+    reshade::log::message(reshade::log::level::error, "mgsv: AO pipeline failed");
+    return false;
+  }
+
+  ao_pass.width = width;
+  ao_pass.height = height;
+  ao_pass.ready = true;
+  reshade::log::message(reshade::log::level::info, "mgsv: AO pass created (occlusion split)");
+  return true;
+}
+
+// Returns false when the addon takes the dispatch.
+bool DispatchAo(reshade::api::command_list* cmd_list) {
+  if (shader_injection.ao_replace == 0.f) return true;
+
+  auto* device = cmd_list->get_device();
+
+  const auto depth_view = renodx::utils::state::GetBoundResourceView(
+      cmd_list, reshade::api::shader_stage::compute,
+      reshade::api::descriptor_type::shader_resource_view, 1u);
+  const auto normal_view = renodx::utils::state::GetBoundResourceView(
+      cmd_list, reshade::api::shader_stage::compute,
+      reshade::api::descriptor_type::shader_resource_view, 2u);
+  const auto light_view = renodx::utils::state::GetBoundResourceView(
+      cmd_list, reshade::api::shader_stage::compute,
+      reshade::api::descriptor_type::shader_resource_view, 4u);
+  const auto target_view = renodx::utils::state::GetBoundResourceView(
+      cmd_list, reshade::api::shader_stage::compute,
+      reshade::api::descriptor_type::unordered_access_view, 0u);
+  if (depth_view.handle == 0 || normal_view.handle == 0 || light_view.handle == 0
+      || target_view.handle == 0) {
+    return true;
+  }
+
+  const auto depth_desc = device->get_resource_desc(device->get_resource_from_view(depth_view));
+  if (depth_desc.type != reshade::api::resource_type::texture_2d) return true;
+  const uint32_t width = depth_desc.texture.width;
+  const uint32_t height = depth_desc.texture.height;
+  if (!EnsureAoPass(device, width, height)) return true;
+
+  BuildDepthMips(cmd_list);
+
+  std::array<reshade::api::resource_view, 7> saved;
+  for (uint32_t slot = 0; slot < saved.size(); ++slot) {
+    saved[slot] = renodx::utils::state::GetBoundResourceView(
+        cmd_list, reshade::api::shader_stage::compute,
+        reshade::api::descriptor_type::shader_resource_view, slot);
+  }
+
+  const auto fallback = GetAoFallbackView(cmd_list);
+  const std::array<reshade::api::resource_view, 7> sources = {
+      fallback,                  // t0, unused
+      depth_view,                // t1
+      normal_view,               // t2
+      fallback,                  // t3, unused
+      light_view,                // t4
+      fallback,                  // t5, unused
+      GetDepthMipView(cmd_list), // t6
+  };
+  const std::array<reshade::api::resource_view, 2> targets = {
+      target_view, ao_pass.occlusion_uav};
+  const reshade::api::descriptor_table_update source_update = {
+      .table = {0u}, .binding = 0u, .array_offset = 0u,
+      .count = static_cast<uint32_t>(sources.size()),
+      .type = reshade::api::descriptor_type::texture_shader_resource_view,
+      .descriptors = sources.data(),
+  };
+  const reshade::api::descriptor_table_update target_update = {
+      .table = {0u}, .binding = 0u, .array_offset = 0u,
+      .count = static_cast<uint32_t>(targets.size()),
+      .type = reshade::api::descriptor_type::texture_unordered_access_view,
+      .descriptors = targets.data(),
+  };
+
+  cmd_list->bind_pipeline(reshade::api::pipeline_stage::all_compute, ao_pass.pipeline);
+  cmd_list->push_descriptors(
+      reshade::api::shader_stage::all_compute, ao_pass.layout, 0u, source_update);
+  cmd_list->push_descriptors(
+      reshade::api::shader_stage::all_compute, ao_pass.layout, 1u, target_update);
+  cmd_list->push_constants(
+      reshade::api::shader_stage::all_compute, ao_pass.layout, 2u, 0u,
+      static_cast<uint32_t>(sizeof(shader_injection) / sizeof(uint32_t)), &shader_injection);
+  // Transposed, as the retail pass is.
+  cmd_list->dispatch(height, (width + 127u) / 128u, 1u);
+
+  for (uint32_t slot = 0; slot < saved.size(); ++slot) {
+    if (saved[slot].handle == 0) continue;
+    const reshade::api::descriptor_table_update restore = {
+        .table = {0u}, .binding = slot, .array_offset = 0u, .count = 1u,
+        .type = reshade::api::descriptor_type::texture_shader_resource_view,
+        .descriptors = &saved[slot],
+    };
+    cmd_list->push_descriptors(
+        reshade::api::shader_stage::all_compute, ao_pass.layout, 0u, restore);
+  }
+  return false;
+}
+
 renodx::mods::shader::CustomShaders custom_shaders = []() {
   renodx::mods::shader::CustomShaders shaders = {
       UpgradeRTVReplaceShaderCallback(0xE2D609B1, ArmDofFinalCopyRenderBufferWindow),            // DOF_ScatterCompositeNear
@@ -1116,13 +1312,9 @@ renodx::mods::shader::CustomShaders custom_shaders = []() {
              0xB2601810, __0xB2601810, [](reshade::api::command_list*) {
                return shader_injection.ao_replace != 0.f;
              });
-         shader.on_draw = &BuildDepthMips;
-         shader.views.push_back({
-             .type = reshade::api::descriptor_type::shader_resource_view,
-             .slot = 6u,
-             .space = 0u,
-             .get_view = &GetDepthMipView,
-         });
+         // The addon dispatches this itself: the pass writes the light through unchanged and
+         // delivers the occlusion separately, which the module's view path cannot do.
+         shader.on_draw = &DispatchAo;
          return shader;
        }()},
 
@@ -1831,6 +2023,7 @@ void OnPresent(
 }
 
 void OnDestroyDevice(reshade::api::device* device) {
+  DestroyAoPass(device);
   DestroyDepthMipChain(device);
   DestroyAoFallbackView(device);
 }
