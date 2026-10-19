@@ -13,6 +13,7 @@
 #include <embed/shaders.h>
 
 #include <d3d11.h>
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -748,9 +749,302 @@ bool OnUpgradeRTVReplaceShaderDraw(reshade::api::command_list* cmd_list) {
 
 ShaderInjectData shader_injection;
 float output_mode = 1.f;
+// Whether the march may fetch distant steps from the reduced depth chain. Host-side, so
+// "off" never builds the chain and the shader falls back to the exact fetch.
+float ao_depth_mips_enabled = 0.f;
 renodx::utils::settings::Setting* tone_map_peak_nits_setting = nullptr;
 renodx::utils::settings::Setting* tone_map_game_nits_setting = nullptr;
 renodx::utils::settings::Setting* tone_map_ui_nits_setting = nullptr;
+
+// The 1x1 stand-in both extra AO bindings fall back to. The mod treats a null view as a
+// missing binding and skips the draw, which would disable the AO whenever a capture or the
+// mip chain is unavailable, so a binding must always return something.
+reshade::api::resource ao_fallback_resource = {0};
+reshade::api::resource_view ao_fallback_view = {0};
+
+void DestroyAoFallbackView(reshade::api::device* device) {
+  if (ao_fallback_view.handle != 0) {
+    device->destroy_resource_view(ao_fallback_view);
+    ao_fallback_view = {0};
+  }
+  if (ao_fallback_resource.handle != 0) {
+    device->destroy_resource(ao_fallback_resource);
+    ao_fallback_resource = {0};
+  }
+}
+
+reshade::api::resource_view GetAoFallbackView(reshade::api::command_list* cmd_list) {
+  if (ao_fallback_view.handle != 0) return ao_fallback_view;
+  auto* device = cmd_list->get_device();
+  const reshade::api::resource_desc desc(
+      1u, 1u, 1u, 1u,
+      reshade::api::format::r16g16b16a16_float,
+      1u,
+      reshade::api::memory_heap::gpu_only,
+      reshade::api::resource_usage::shader_resource
+          | reshade::api::resource_usage::copy_dest);
+  if (device->create_resource(desc, nullptr, desc.usage, &ao_fallback_resource)
+      && device->create_resource_view(
+          ao_fallback_resource,
+          reshade::api::resource_usage::shader_resource,
+          reshade::api::resource_view_desc(reshade::api::format::r16g16b16a16_float),
+          &ao_fallback_view)) {
+    reshade::log::message(reshade::log::level::info, "mgsv: AO fallback view created");
+    return ao_fallback_view;
+  }
+  DestroyAoFallbackView(device);
+  reshade::log::message(reshade::log::level::error, "mgsv: AO fallback view failed");
+  return {0};
+}
+
+// The AO march's depth mip chain.
+//
+// The march samples the depth buffer at its own sample positions, so an occluder that falls
+// between two of them is invisible however many slices are added - measured as the reason the
+// effect wanted a high step count. Every level here holds the *nearest* of the four texels
+// below it, so a distant step can fetch one texel that already covers the footprint its
+// spacing would otherwise skip over. XeGTAO's depth mip sampling is the same idea.
+//
+// Raw depth is reduced, not linearised. The pass linearises as z / (depth - w), so a larger
+// raw value is nearer and background sits at the small end; a max-reduce is therefore already
+// the conservative direction and keeps the projection constants out of the prefilter.
+//
+// Level k covers W >> (k + 1), so the chain starts at half resolution and stops at a
+// sixteenth - the span a step of tens of pixels needs, without paying for levels the march
+// never reaches.
+constexpr uint32_t kDepthMipLevels = 4;
+
+struct DepthMipChain {
+  reshade::api::resource resource = {0};
+  reshade::api::resource_view view = {0};  // all levels, bound at t6
+  std::array<reshade::api::resource_view, kDepthMipLevels> level_views = {};         // u0
+  std::array<reshade::api::resource_view, kDepthMipLevels> level_source_views = {};  // t0
+  reshade::api::pipeline_layout layout = {0};
+  reshade::api::pipeline pipeline = {0};
+  uint32_t width = 0;
+  uint32_t height = 0;
+  bool ready = false;
+};
+DepthMipChain depth_mip_chain;
+
+void DestroyDepthMipChain(reshade::api::device* device) {
+  depth_mip_chain.ready = false;
+  for (auto& view : depth_mip_chain.level_views) {
+    if (view.handle != 0) {
+      device->destroy_resource_view(view);
+      view = {0};
+    }
+  }
+  for (auto& view : depth_mip_chain.level_source_views) {
+    if (view.handle != 0) {
+      device->destroy_resource_view(view);
+      view = {0};
+    }
+  }
+  if (depth_mip_chain.view.handle != 0) {
+    device->destroy_resource_view(depth_mip_chain.view);
+    depth_mip_chain.view = {0};
+  }
+  if (depth_mip_chain.resource.handle != 0) {
+    device->destroy_resource(depth_mip_chain.resource);
+    depth_mip_chain.resource = {0};
+  }
+  if (depth_mip_chain.pipeline.handle != 0) {
+    device->destroy_pipeline(depth_mip_chain.pipeline);
+    depth_mip_chain.pipeline = {0};
+  }
+  if (depth_mip_chain.layout.handle != 0) {
+    device->destroy_pipeline_layout(depth_mip_chain.layout);
+    depth_mip_chain.layout = {0};
+  }
+  depth_mip_chain.width = 0;
+  depth_mip_chain.height = 0;
+}
+
+bool EnsureDepthMipChain(reshade::api::device* device, uint32_t width, uint32_t height) {
+  if (depth_mip_chain.ready
+      && depth_mip_chain.width == width
+      && depth_mip_chain.height == height) {
+    return true;
+  }
+  DestroyDepthMipChain(device);
+
+  const reshade::api::resource_desc desc(
+      std::max(width / 2u, 1u), std::max(height / 2u, 1u), 1u, kDepthMipLevels,
+      reshade::api::format::r32_float,
+      1u,
+      reshade::api::memory_heap::gpu_only,
+      reshade::api::resource_usage::shader_resource
+          | reshade::api::resource_usage::unordered_access);
+  if (!device->create_resource(desc, nullptr, desc.usage, &depth_mip_chain.resource)) {
+    reshade::log::message(reshade::log::level::error, "mgsv: depth mip chain allocation failed");
+    return false;
+  }
+  if (!device->create_resource_view(
+          depth_mip_chain.resource,
+          reshade::api::resource_usage::shader_resource,
+          reshade::api::resource_view_desc(reshade::api::format::r32_float),
+          &depth_mip_chain.view)) {
+    reshade::log::message(reshade::log::level::error, "mgsv: depth mip chain read view failed");
+    return false;
+  }
+  for (uint32_t level = 0; level < kDepthMipLevels; ++level) {
+    const reshade::api::resource_view_desc level_desc(
+        reshade::api::format::r32_float, level, 1u, 0u, 1u);
+    if (!device->create_resource_view(
+            depth_mip_chain.resource,
+            reshade::api::resource_usage::unordered_access,
+            level_desc,
+            &depth_mip_chain.level_views[level])) {
+      reshade::log::message(reshade::log::level::error, "mgsv: depth mip chain write view failed");
+      return false;
+    }
+    if (!device->create_resource_view(
+            depth_mip_chain.resource,
+            reshade::api::resource_usage::shader_resource,
+            level_desc,
+            &depth_mip_chain.level_source_views[level])) {
+      reshade::log::message(reshade::log::level::error, "mgsv: depth mip chain level view failed");
+      return false;
+    }
+  }
+
+  std::array<reshade::api::pipeline_layout_param, 2> params = {};
+  params[0].type = reshade::api::pipeline_layout_param_type::push_descriptors;
+  params[0].push_descriptors.count = 1u;
+  params[0].push_descriptors.type = reshade::api::descriptor_type::shader_resource_view;
+  params[0].push_descriptors.dx_register_index = 0u;
+  params[0].push_descriptors.dx_register_space = 0u;
+  params[1].type = reshade::api::pipeline_layout_param_type::push_descriptors;
+  params[1].push_descriptors.count = 1u;
+  params[1].push_descriptors.type = reshade::api::descriptor_type::unordered_access_view;
+  params[1].push_descriptors.dx_register_index = 0u;
+  params[1].push_descriptors.dx_register_space = 0u;
+  if (!device->create_pipeline_layout(
+          static_cast<uint32_t>(params.size()), params.data(), &depth_mip_chain.layout)) {
+    reshade::log::message(reshade::log::level::error, "mgsv: depth mip chain layout failed");
+    return false;
+  }
+
+  reshade::api::shader_desc shader_description = {
+      .code = __mgsv_ao_depth_mips.data(),
+      .code_size = __mgsv_ao_depth_mips.size(),
+  };
+  const reshade::api::pipeline_subobject subobject = {
+      .type = reshade::api::pipeline_subobject_type::compute_shader,
+      .count = 1,
+      .data = &shader_description,
+  };
+  if (!device->create_pipeline(depth_mip_chain.layout, 1, &subobject, &depth_mip_chain.pipeline)) {
+    reshade::log::message(reshade::log::level::error, "mgsv: depth mip chain pipeline failed");
+    return false;
+  }
+
+  depth_mip_chain.width = width;
+  depth_mip_chain.height = height;
+  depth_mip_chain.ready = true;
+  reshade::log::message(reshade::log::level::info, "mgsv: depth mip chain created");
+  return true;
+}
+
+// Builds the chain immediately before the AO dispatch, from the depth the AO is about to read.
+//
+// The prefilter writes t0 and u0, the same registers the replacement uses for its input and
+// its output, so both are saved and put back before the replacement runs.
+bool BuildDepthMips(reshade::api::command_list* cmd_list) {
+  shader_injection.ao_depth_mips = 0.f;
+  if (shader_injection.ao_replace == 0.f || ao_depth_mips_enabled == 0.f) return true;
+
+  auto* device = cmd_list->get_device();
+  const auto depth_view = renodx::utils::state::GetBoundResourceView(
+      cmd_list,
+      reshade::api::shader_stage::compute,
+      reshade::api::descriptor_type::shader_resource_view,
+      1u);
+  if (depth_view.handle == 0) return true;
+
+  const auto depth_desc = device->get_resource_desc(device->get_resource_from_view(depth_view));
+  if (depth_desc.type != reshade::api::resource_type::texture_2d) return true;
+  const uint32_t width = depth_desc.texture.width;
+  const uint32_t height = depth_desc.texture.height;
+  if (width < 2u || height < 2u) return true;
+
+  if (!EnsureDepthMipChain(device, width, height)) return true;
+
+  const auto previous_source = renodx::utils::state::GetBoundResourceView(
+      cmd_list,
+      reshade::api::shader_stage::compute,
+      reshade::api::descriptor_type::shader_resource_view,
+      0u);
+  const auto previous_target = renodx::utils::state::GetBoundResourceView(
+      cmd_list,
+      reshade::api::shader_stage::compute,
+      reshade::api::descriptor_type::unordered_access_view,
+      0u);
+
+  cmd_list->bind_pipeline(reshade::api::pipeline_stage::all_compute, depth_mip_chain.pipeline);
+  for (uint32_t level = 0; level < kDepthMipLevels; ++level) {
+    const reshade::api::resource_view source =
+        level == 0 ? depth_view : depth_mip_chain.level_source_views[level - 1];
+    const reshade::api::resource_view target = depth_mip_chain.level_views[level];
+    const reshade::api::descriptor_table_update updates[] = {
+        {.table = {},
+         .binding = 0u,
+         .array_offset = 0u,
+         .count = 1u,
+         .type = reshade::api::descriptor_type::shader_resource_view,
+         .descriptors = &source},
+        {.table = {},
+         .binding = 0u,
+         .array_offset = 0u,
+         .count = 1u,
+         .type = reshade::api::descriptor_type::unordered_access_view,
+         .descriptors = &target},
+    };
+    cmd_list->push_descriptors(
+        reshade::api::shader_stage::all_compute, depth_mip_chain.layout, 0u, updates[0]);
+    cmd_list->push_descriptors(
+        reshade::api::shader_stage::all_compute, depth_mip_chain.layout, 1u, updates[1]);
+
+    const uint32_t level_width = std::max(width >> (level + 1u), 1u);
+    const uint32_t level_height = std::max(height >> (level + 1u), 1u);
+    cmd_list->dispatch((level_width + 7u) / 8u, (level_height + 7u) / 8u, 1u);
+  }
+
+  if (previous_source.handle != 0) {
+    const reshade::api::descriptor_table_update restore = {
+        .table = {},
+        .binding = 0u,
+        .array_offset = 0u,
+        .count = 1u,
+        .type = reshade::api::descriptor_type::shader_resource_view,
+        .descriptors = &previous_source,
+    };
+    cmd_list->push_descriptors(
+        reshade::api::shader_stage::all_compute, depth_mip_chain.layout, 0u, restore);
+  }
+  if (previous_target.handle != 0) {
+    const reshade::api::descriptor_table_update restore = {
+        .table = {},
+        .binding = 0u,
+        .array_offset = 0u,
+        .count = 1u,
+        .type = reshade::api::descriptor_type::unordered_access_view,
+        .descriptors = &previous_target,
+    };
+    cmd_list->push_descriptors(
+        reshade::api::shader_stage::all_compute, depth_mip_chain.layout, 1u, restore);
+  }
+
+  shader_injection.ao_depth_mips = 1.f;
+  return true;
+}
+
+reshade::api::resource_view GetDepthMipView(reshade::api::command_list* cmd_list) {
+  if (depth_mip_chain.ready) return depth_mip_chain.view;
+  return GetAoFallbackView(cmd_list);
+}
+
 
 bool IsHDROutputSelected() { return output_mode != 0.f; }
 
@@ -813,9 +1107,24 @@ renodx::mods::shader::CustomShaders custom_shaders = []() {
       // characters. The later blur and composite of the chain do not run in normal play,
       // so nothing downstream smooths this pass and the game's own AO is inactive.
       // The decision is host-side, so "off" runs the original shader.
-      CustomShaderEntryCallback(0xB2601810, [](reshade::api::command_list*) {
-        return shader_injection.ao_replace != 0.f;
-      }),
+      //
+      // t6 carries the depth mip chain the march fetches its distant steps from; it is
+      // rebuilt for every dispatch in the callback below.
+      {0xB2601810,
+       [] {
+         auto shader = renodx::mods::shader::CreateCallbackShader(
+             0xB2601810, __0xB2601810, [](reshade::api::command_list*) {
+               return shader_injection.ao_replace != 0.f;
+             });
+         shader.on_draw = &BuildDepthMips;
+         shader.views.push_back({
+             .type = reshade::api::descriptor_type::shader_resource_view,
+             .slot = 6u,
+             .space = 0u,
+             .get_view = &GetDepthMipView,
+         });
+         return shader;
+       }()},
 
       __ALL_CUSTOM_SHADERS,
   };
@@ -1247,16 +1556,6 @@ renodx::utils::settings::Settings settings = {
         .parse = [](float value) { return value * 0.01f; },
     },
     new renodx::utils::settings::Setting{
-        .key = "FxScreenSpaceShadowFadeStart",
-        .binding = &shader_injection.ss_shadow_fade_start,
-        .default_value = 40.f,
-        .label = "Screen-Space Shadow Fade Start",
-        .section = "Shadows",
-        .tooltip = "Distance at which the term starts fading out, in metres. Full "
-                   "strength nearer than this.",
-        .max = 300.f,
-    },
-    new renodx::utils::settings::Setting{
         .key = "FxScreenSpaceShadowFadeEnd",
         .binding = &shader_injection.ss_shadow_fade_end,
         .default_value = 123.f,
@@ -1299,14 +1598,14 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "AoRadius",
         .binding = &shader_injection.ao_radius,
-        .default_value = 250.f,
+        .default_value = 50.f,
         .label = "AO Radius",
         .section = "Ambient Occlusion",
         .tooltip = "Sample radius as a fraction of the screen. Larger "
                    "gives more large-scale occlusion and less fine detail. The "
                    "occluder thickness is derived from this, so the two can never "
                    "disagree.",
-        .max = 1200.f,
+        .max = 100.f,
         .parse = [](float value) { return value * 0.01f; },
     },
     new renodx::utils::settings::Setting{
@@ -1336,14 +1635,14 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "AoThickness",
         .binding = &shader_injection.ao_thickness,
-        .default_value = 400.f,
+        .default_value = 800.f,
         .label = "AO Thickness",
         .section = "Ambient Occlusion",
         .tooltip = "Multiplier on the occluder thickness, which the VBAO paper derives "
                    "as a small constant fraction of the radius - its benchmark is five "
-                   "percent, which is what 100 gives. The default is 400, twenty percent, "
-                   "inside the range the paper itself compares; at its own five percent "
-                   "the effect is almost invisible here. It is the parameter that decides "
+                   "percent, which is what 100 gives. The default is 800, forty percent; "
+                   "at the paper's own five percent the effect is almost invisible here. "
+                   "It is the parameter that decides "
                    "visual fidelity: too large and surfaces start to occlude themselves, "
                    "too small and every sample's angular band falls below one sector and "
                    "the occlusion disappears entirely.",
@@ -1353,7 +1652,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "AoFade",
         .binding = &shader_injection.ao_fade,
-        .default_value = 25.f,
+        .default_value = 100.f,
         .label = "AO Fade Distance",
         .section = "Ambient Occlusion",
         .tooltip = "How far out the effect reaches before fading to nothing, as a "
@@ -1363,6 +1662,20 @@ renodx::utils::settings::Settings settings = {
                    "optional thickness that grows linearly with distance.",
         .max = 100.f,
         .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "AoDepthMips",
+        .binding = &ao_depth_mips_enabled,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 0.f,
+        .label = "Coarse Depth",
+        .section = "Ambient Occlusion",
+        .tooltip = "Lets distant steps fetch their depth from a reduced chain, so one texel "
+                   "covers the footprint the step spacing would otherwise skip over. That "
+                   "is what a step far from the pixel needs: an occluder narrower than the "
+                   "spacing is otherwise invisible between two samples. Pure A/B, since "
+                   "whether it helps is measurable: with it off the march reads the plain "
+                   "depth buffer at every step.",
     },
     new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
@@ -1517,6 +1830,11 @@ void OnPresent(
   ResetTonemapCopyTracking();
 }
 
+void OnDestroyDevice(reshade::api::device* device) {
+  DestroyDepthMipChain(device);
+  DestroyAoFallbackView(device);
+}
+
 bool initialized = false;
 
 }  // namespace
@@ -1574,12 +1892,14 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       reshade::register_event<reshade::addon_event::copy_resource>(OnCopyTonemapOutputResource);
       reshade::register_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);  // auto detect peak and paper white
       reshade::register_event<reshade::addon_event::present>(OnPresent);
+  reshade::register_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
 
       break;
     case DLL_PROCESS_DETACH:
       reshade::unregister_event<reshade::addon_event::copy_resource>(OnCopyTonemapOutputResource);
       reshade::unregister_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);  // auto detect peak and paper white
       reshade::unregister_event<reshade::addon_event::present>(OnPresent);
+  reshade::unregister_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
       renodx::mods::swapchain::v2::set_color_space = true;
       reshade::unregister_addon(h_module);
       break;
