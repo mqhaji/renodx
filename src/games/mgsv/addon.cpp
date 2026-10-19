@@ -806,6 +806,17 @@ renodx::mods::shader::CustomShaders custom_shaders = []() {
       // The named Tonemap shader is the late LUT/color-grading pass in MGSV.
       UpgradeTonemapOutputRTV(0xE04D1471),
 
+      // The AO replacement replaces the *second* stage of the game's AO chain
+      // (0xB2601810), the one that applies the occlusion to the light. The first stage
+      // (0x6DAF0C4A) is left vanilla: its output only feeds this one, and it gates that
+      // input by a fresnel term, so an occlusion value fed into it reached nothing but
+      // characters. The later blur and composite of the chain do not run in normal play,
+      // so nothing downstream smooths this pass and the game's own AO is inactive.
+      // The decision is host-side, so "off" runs the original shader.
+      CustomShaderEntryCallback(0xB2601810, [](reshade::api::command_list*) {
+        return shader_injection.ao_replace != 0.f;
+      }),
+
       __ALL_CUSTOM_SHADERS,
   };
 
@@ -1254,6 +1265,104 @@ renodx::utils::settings::Settings settings = {
         .tooltip = "Distance at which it is gone, in metres. The last cascade "
                    "reaches 122.9 m, so past this the cascade map is on its own.",
         .max = 500.f,
+    },
+    new renodx::utils::settings::Setting{
+        .key = "AoReplace",
+        .binding = &shader_injection.ao_replace,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 1.f,
+        .label = "AO (replaces the game's)",
+        .section = "Ambient Occlusion",
+        .tooltip = "Replaces the second stage of the game's ambient-occlusion chain - "
+                   "the one that applies the occlusion to the light - with a "
+                   "visibility-bitmask AO computed from the depth and normal buffers. "
+                   "Off runs the original shader, so the comparison is against the "
+                   "game's own effect rather than a lookalike. Record and open "
+                   "questions: MGSV_AmbientOcclusion.md.",
+    },
+    new renodx::utils::settings::Setting{
+        .key = "AoStrength",
+        .binding = &shader_injection.ao_strength,
+        .default_value = 150.f,
+        .label = "AO Amount",
+        .section = "Ambient Occlusion",
+        .tooltip = "How much of the computed visibility is applied, as a percentage. "
+                   "100 is the paper's own occlusion; above that overshoots toward a "
+                   "full darkening, below it fades the effect out. The default is 150, "
+                   "because the paper's own thickness reads quiet at full strength. This "
+                   "buffer is the whole light, so the visibility scales sunlit surfaces "
+                   "too - the paper applies it to the ambient and indirect terms only, "
+                   "which this buffer does not separate.",
+        .max = 400.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "AoRadius",
+        .binding = &shader_injection.ao_radius,
+        .default_value = 250.f,
+        .label = "AO Radius",
+        .section = "Ambient Occlusion",
+        .tooltip = "Sample radius as a fraction of the screen. Larger "
+                   "gives more large-scale occlusion and less fine detail. The "
+                   "occluder thickness is derived from this, so the two can never "
+                   "disagree.",
+        .max = 1200.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "AoSlices",
+        .binding = &shader_injection.ao_slices,
+        .default_value = 2.f,
+        .label = "AO Slices",
+        .section = "Ambient Occlusion",
+        .tooltip = "Directions sampled per pixel. The pattern rotates every frame, so a "
+                   "frame's temporal reconstruction - the analytical TAA, FSR3 or DLSS - "
+                   "accumulates the phases and a low count converges: eight phases turn "
+                   "two directions into sixteen. With reconstruction Off the term is "
+                   "inert and slices and steps have to carry the averaging themselves. "
+                   "Cost is slices x steps x 2 depth fetches per pixel.",
+        .max = 8.f,
+    },
+    new renodx::utils::settings::Setting{
+        .key = "AoSteps",
+        .binding = &shader_injection.ao_steps,
+        .default_value = 4.f,
+        .label = "AO Steps",
+        .section = "Ambient Occlusion",
+        .tooltip = "Samples taken along each slice, per side, on an exponential "
+                   "distribution that is dense near the pixel and sparse further out.",
+        .max = 20.f,
+    },
+    new renodx::utils::settings::Setting{
+        .key = "AoThickness",
+        .binding = &shader_injection.ao_thickness,
+        .default_value = 400.f,
+        .label = "AO Thickness",
+        .section = "Ambient Occlusion",
+        .tooltip = "Multiplier on the occluder thickness, which the VBAO paper derives "
+                   "as a small constant fraction of the radius - its benchmark is five "
+                   "percent, which is what 100 gives. The default is 400, twenty percent, "
+                   "inside the range the paper itself compares; at its own five percent "
+                   "the effect is almost invisible here. It is the parameter that decides "
+                   "visual fidelity: too large and surfaces start to occlude themselves, "
+                   "too small and every sample's angular band falls below one sector and "
+                   "the occlusion disappears entirely.",
+        .max = 2000.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "AoFade",
+        .binding = &shader_injection.ao_fade,
+        .default_value = 25.f,
+        .label = "AO Fade Distance",
+        .section = "Ambient Occlusion",
+        .tooltip = "How far out the effect reaches before fading to nothing, as a "
+                   "fraction of the depth range. Screen-space occlusion has nothing "
+                   "to say at distance, and fading it out there is what keeps the "
+                   "far field clean. Not part of the paper, whose equivalent is an "
+                   "optional thickness that grows linearly with distance.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.01f; },
     },
     new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,

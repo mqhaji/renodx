@@ -9,6 +9,7 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 - **Motion blur** with HDR-aware rendering
 - **Depth-of-field effects** with an HDR pre-final scene copy
 - **Optional temporal anti-aliasing** with native projection jitter and high-precision velocity
+- **An ambient occlusion replacement** built from the visibility-bitmask paper
 - **User-configurable settings** via the ReShade overlay UI
 
 ---
@@ -245,6 +246,33 @@ device destruction stops admission rather than unpatching/freeing trampolines. L
 
 See the [temporal reference](taa/README.md) for controls, motion/jitter ownership, SDK lifecycle, and limitations;
 the [roadmap](taa/ROADMAP.md) contains only outstanding work.
+
+---
+
+## Ambient Occlusion
+
+MGSV's ambient occlusion is a two-pass compute chain. The addon replaces the second pass
+(`0xB2601810`), the one that applies the occlusion to the light, with a visibility-bitmask
+AO written from *Screen Space Indirect Lighting with Visibility Bitmask* (Therrien,
+Levesque, Gilet, The Visual Computer 2023). The first pass (`0x6DAF0C4A`) stays vanilla:
+it gates its input by a fresnel term, so an occlusion value fed into it reached nothing
+but characters.
+
+The chain's blur and composite passes do not run in normal play, so nothing downstream
+smooths this pass and the game's own AO is effectively inactive. That is why the shader
+carries its own sample counts, and why `AO Slices` and `AO Steps` are the quality knobs.
+
+Settings are in the **Ambient Occlusion** section. The replacement decision is host-side,
+so **AO (replaces the game's)** off runs the original shader, making the comparison the
+game's own effect rather than a lookalike.
+
+**Status: follows the paper's Algorithm 1 with five recorded deviations — the sector
+measure and the application are the paper's, so the visibility is computed in
+equal-measure sectors and multiplies the light.** The mapping, the deviations and their
+reasons, the verification, and what is still open are in the workspace note
+`MGSV_AmbientOcclusion.md`, beside `vbao.pdf` in the parent repository's `docs/` folder.
+Do not change the back-sample sign, the sector rounding, or the slice weights without
+reading it first — each has already cost a round.
 
 ---
 
