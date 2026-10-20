@@ -949,18 +949,12 @@ bool EnsureDepthMipChain(reshade::api::device* device, uint32_t width, uint32_t 
 
 // Builds the chain immediately before the AO dispatch, from the depth the AO is about to read.
 //
-// The prefilter writes t0 and u0, the same registers the replacement uses for its input and
-// its output, so both are saved and put back before the replacement runs.
-bool BuildDepthMips(reshade::api::command_list* cmd_list) {
+// The prefilter binds its own layout, so the caller's descriptors are untouched.
+bool BuildDepthMips(reshade::api::command_list* cmd_list, reshade::api::resource_view depth_view) {
   shader_injection.ao_depth_mips = 0.f;
   if (shader_injection.ao_replace == 0.f || ao_depth_mips_enabled == 0.f) return true;
 
   auto* device = cmd_list->get_device();
-  const auto depth_view = renodx::utils::state::GetBoundResourceView(
-      cmd_list,
-      reshade::api::shader_stage::compute,
-      reshade::api::descriptor_type::shader_resource_view,
-      1u);
   if (depth_view.handle == 0) return true;
 
   const auto depth_desc = device->get_resource_desc(device->get_resource_from_view(depth_view));
@@ -1062,36 +1056,37 @@ void SyncOutputMode() {
   }
 }
 
-// The AO pass, dispatched by the addon so it can write the occlusion somewhere other than the
-// light. The light output is an exact copy of its input: this pass must not be able to affect
-// anything that reads the light, which is what killed the skin's scattering when the occlusion
-// was applied here.
+// Ambient occlusion, applied after the game's subsurface-scatter pass.
+//
+// The retail passes at 0x6DAF0C4A / 0xB2601810 are the scatter chain, not AO, and
+// replacing either of them is what removed the scattering that makes skin read as
+// skin. This pass therefore runs on its own dispatch, after stage 2 has written the
+// scattered light, and scales that light in place. No retail shader is replaced:
+// the hook below only borrows their frame position.
 struct AoPass {
   reshade::api::pipeline_layout layout = {0};
   reshade::api::pipeline pipeline = {0};
-  reshade::api::resource occlusion = {0};
-  reshade::api::resource_view occlusion_view = {0};
-  reshade::api::resource_view occlusion_uav = {0};
   uint32_t width = 0;
   uint32_t height = 0;
   bool ready = false;
 };
 AoPass ao_pass;
 
+// The views stage 2 had bound: captured before its dispatch and consumed after it.
+// The light is the retail stage's own output target, so what this pass scales is
+// the scattered value rather than something it has to recompute.
+struct AoFrame {
+  reshade::api::resource_view depth = {0};
+  reshade::api::resource_view normal = {0};
+  reshade::api::resource_view light = {0};
+  uint32_t width = 0;
+  uint32_t height = 0;
+  bool valid = false;
+};
+AoFrame ao_frame;
+
 void DestroyAoPass(reshade::api::device* device) {
   ao_pass.ready = false;
-  if (ao_pass.occlusion_uav.handle != 0) {
-    device->destroy_resource_view(ao_pass.occlusion_uav);
-    ao_pass.occlusion_uav = {0};
-  }
-  if (ao_pass.occlusion_view.handle != 0) {
-    device->destroy_resource_view(ao_pass.occlusion_view);
-    ao_pass.occlusion_view = {0};
-  }
-  if (ao_pass.occlusion.handle != 0) {
-    device->destroy_resource(ao_pass.occlusion);
-    ao_pass.occlusion = {0};
-  }
   if (ao_pass.pipeline.handle != 0) {
     device->destroy_pipeline(ao_pass.pipeline);
     ao_pass.pipeline = {0};
@@ -1108,26 +1103,6 @@ bool EnsureAoPass(reshade::api::device* device, uint32_t width, uint32_t height)
   if (ao_pass.ready && ao_pass.width == width && ao_pass.height == height) return true;
   DestroyAoPass(device);
 
-  const reshade::api::resource_desc desc(
-      width, height, 1u, 1u,
-      reshade::api::format::r16g16b16a16_float,
-      1u,
-      reshade::api::memory_heap::gpu_only,
-      reshade::api::resource_usage::shader_resource
-          | reshade::api::resource_usage::unordered_access);
-  if (!device->create_resource(desc, nullptr, desc.usage, &ao_pass.occlusion)
-      || !device->create_resource_view(
-          ao_pass.occlusion, reshade::api::resource_usage::shader_resource,
-          reshade::api::resource_view_desc(reshade::api::format::r16g16b16a16_float),
-          &ao_pass.occlusion_view)
-      || !device->create_resource_view(
-          ao_pass.occlusion, reshade::api::resource_usage::unordered_access,
-          reshade::api::resource_view_desc(reshade::api::format::r16g16b16a16_float),
-          &ao_pass.occlusion_uav)) {
-    reshade::log::message(reshade::log::level::error, "mgsv: AO occlusion target failed");
-    return false;
-  }
-
   std::array<reshade::api::pipeline_layout_param, 3> params = {};
   params[0].type = reshade::api::pipeline_layout_param_type::push_descriptors;
   params[0].push_descriptors.count = 7u;  // t0..t6
@@ -1135,7 +1110,7 @@ bool EnsureAoPass(reshade::api::device* device, uint32_t width, uint32_t height)
   params[0].push_descriptors.dx_register_index = 0u;
   params[0].push_descriptors.dx_register_space = 0u;
   params[1].type = reshade::api::pipeline_layout_param_type::push_descriptors;
-  params[1].push_descriptors.count = 2u;  // u0 light, u1 occlusion
+  params[1].push_descriptors.count = 1u;  // u0 light, read-modify-write
   params[1].push_descriptors.type = reshade::api::descriptor_type::texture_unordered_access_view;
   params[1].push_descriptors.dx_register_index = 0u;
   params[1].push_descriptors.dx_register_space = 0u;
@@ -1151,8 +1126,8 @@ bool EnsureAoPass(reshade::api::device* device, uint32_t width, uint32_t height)
   }
 
   reshade::api::shader_desc shader_description = {
-      .code = __0xB2601810.data(),
-      .code_size = __0xB2601810.size(),
+      .code = __mgsv_ao.data(),
+      .code_size = __mgsv_ao.size(),
   };
   const reshade::api::pipeline_subobject subobject = {
       .type = reshade::api::pipeline_subobject_type::compute_shader,
@@ -1167,15 +1142,15 @@ bool EnsureAoPass(reshade::api::device* device, uint32_t width, uint32_t height)
   ao_pass.width = width;
   ao_pass.height = height;
   ao_pass.ready = true;
-  reshade::log::message(reshade::log::level::info, "mgsv: AO pass created (occlusion split)");
+  reshade::log::message(reshade::log::level::info, "mgsv: AO pass created (scatter preserved)");
   return true;
 }
 
-// Returns false when the addon takes the dispatch.
-bool DispatchAo(reshade::api::command_list* cmd_list) {
+// Runs before the retail scatter stage. This is the only point where its bindings -
+// the depth and normal this pass needs, and the light it scales - are known to be live.
+bool CaptureAoFrame(reshade::api::command_list* cmd_list) {
+  ao_frame.valid = false;
   if (shader_injection.ao_replace == 0.f) return true;
-
-  auto* device = cmd_list->get_device();
 
   const auto depth_view = renodx::utils::state::GetBoundResourceView(
       cmd_list, reshade::api::shader_stage::compute,
@@ -1185,79 +1160,103 @@ bool DispatchAo(reshade::api::command_list* cmd_list) {
       reshade::api::descriptor_type::shader_resource_view, 2u);
   const auto light_view = renodx::utils::state::GetBoundResourceView(
       cmd_list, reshade::api::shader_stage::compute,
-      reshade::api::descriptor_type::shader_resource_view, 4u);
-  const auto target_view = renodx::utils::state::GetBoundResourceView(
-      cmd_list, reshade::api::shader_stage::compute,
       reshade::api::descriptor_type::unordered_access_view, 0u);
-  if (depth_view.handle == 0 || normal_view.handle == 0 || light_view.handle == 0
-      || target_view.handle == 0) {
-    return true;
-  }
+  if (depth_view.handle == 0 || normal_view.handle == 0 || light_view.handle == 0) return true;
 
-  const auto depth_desc = device->get_resource_desc(device->get_resource_from_view(depth_view));
-  if (depth_desc.type != reshade::api::resource_type::texture_2d) return true;
-  const uint32_t width = depth_desc.texture.width;
-  const uint32_t height = depth_desc.texture.height;
-  if (!EnsureAoPass(device, width, height)) return true;
+  auto* device = cmd_list->get_device();
+  const auto light_desc = device->get_resource_desc(device->get_resource_from_view(light_view));
+  if (light_desc.type != reshade::api::resource_type::texture_2d) return true;
 
-  BuildDepthMips(cmd_list);
+  ao_frame = {
+      .depth = depth_view,
+      .normal = normal_view,
+      .light = light_view,
+      .width = light_desc.texture.width,
+      .height = light_desc.texture.height,
+      .valid = true,
+  };
+  return true;
+}
 
-  std::array<reshade::api::resource_view, 7> saved;
-  for (uint32_t slot = 0; slot < saved.size(); ++slot) {
-    saved[slot] = renodx::utils::state::GetBoundResourceView(
+// Runs after the retail scatter stage, so the light already holds the scattered
+// value and this pass only scales it.
+void ApplyAo(reshade::api::command_list* cmd_list) {
+  if (!ao_frame.valid) return;
+  const AoFrame frame = ao_frame;
+  ao_frame.valid = false;
+
+  if (!EnsureAoPass(cmd_list->get_device(), frame.width, frame.height)) return;
+
+  BuildDepthMips(cmd_list, frame.depth);
+
+  std::array<reshade::api::resource_view, 7> saved_sources = {};
+  for (uint32_t slot = 0; slot < saved_sources.size(); ++slot) {
+    saved_sources[slot] = renodx::utils::state::GetBoundResourceView(
         cmd_list, reshade::api::shader_stage::compute,
         reshade::api::descriptor_type::shader_resource_view, slot);
   }
+  const auto saved_target = renodx::utils::state::GetBoundResourceView(
+      cmd_list, reshade::api::shader_stage::compute,
+      reshade::api::descriptor_type::unordered_access_view, 0u);
 
   const auto fallback = GetAoFallbackView(cmd_list);
   const std::array<reshade::api::resource_view, 7> sources = {
-      fallback,                  // t0, unused
-      depth_view,                // t1
-      normal_view,               // t2
-      fallback,                  // t3, unused
-      light_view,                // t4
-      fallback,                  // t5, unused
-      GetDepthMipView(cmd_list), // t6
+      fallback,                   // t0, unused
+      frame.depth,                // t1
+      frame.normal,               // t2
+      fallback,                   // t3, unused
+      fallback,                   // t4, unused
+      fallback,                   // t5, unused
+      GetDepthMipView(cmd_list),  // t6
   };
-  const std::array<reshade::api::resource_view, 2> targets = {
-      target_view, ao_pass.occlusion_uav};
-  const reshade::api::descriptor_table_update source_update = {
-      .table = {0u}, .binding = 0u, .array_offset = 0u,
-      .count = static_cast<uint32_t>(sources.size()),
-      .type = reshade::api::descriptor_type::texture_shader_resource_view,
-      .descriptors = sources.data(),
-  };
-  const reshade::api::descriptor_table_update target_update = {
-      .table = {0u}, .binding = 0u, .array_offset = 0u,
-      .count = static_cast<uint32_t>(targets.size()),
-      .type = reshade::api::descriptor_type::texture_unordered_access_view,
-      .descriptors = targets.data(),
-  };
+  const std::array<reshade::api::resource_view, 1> targets = {frame.light};
 
   cmd_list->bind_pipeline(reshade::api::pipeline_stage::all_compute, ao_pass.pipeline);
   cmd_list->push_descriptors(
-      reshade::api::shader_stage::all_compute, ao_pass.layout, 0u, source_update);
+      reshade::api::shader_stage::all_compute, ao_pass.layout, 0u,
+      {.table = {0u},
+       .binding = 0u,
+       .array_offset = 0u,
+       .count = static_cast<uint32_t>(sources.size()),
+       .type = reshade::api::descriptor_type::texture_shader_resource_view,
+       .descriptors = sources.data()});
   cmd_list->push_descriptors(
-      reshade::api::shader_stage::all_compute, ao_pass.layout, 1u, target_update);
+      reshade::api::shader_stage::all_compute, ao_pass.layout, 1u,
+      {.table = {0u},
+       .binding = 0u,
+       .array_offset = 0u,
+       .count = static_cast<uint32_t>(targets.size()),
+       .type = reshade::api::descriptor_type::texture_unordered_access_view,
+       .descriptors = targets.data()});
   cmd_list->push_constants(
       reshade::api::shader_stage::all_compute, ao_pass.layout, 2u, 0u,
       static_cast<uint32_t>(sizeof(shader_injection) / sizeof(uint32_t)), &shader_injection);
-  // Transposed, as the retail pass is.
-  cmd_list->dispatch(height, (width + 127u) / 128u, 1u);
+  // This pass owns its dispatch, so the tiling is the shader's own 8x8 blocks over the
+  // depth surface: one pixel per thread, no retail dispatch shape to match.
+  cmd_list->dispatch((frame.width + 7u) / 8u, (frame.height + 7u) / 8u, 1u);
 
-  for (uint32_t slot = 0; slot < saved.size(); ++slot) {
-    if (saved[slot].handle == 0) continue;
-    const reshade::api::descriptor_table_update restore = {
-        .table = {0u}, .binding = slot, .array_offset = 0u, .count = 1u,
-        .type = reshade::api::descriptor_type::texture_shader_resource_view,
-        .descriptors = &saved[slot],
-    };
+  for (uint32_t slot = 0; slot < saved_sources.size(); ++slot) {
+    if (saved_sources[slot].handle == 0) continue;
     cmd_list->push_descriptors(
-        reshade::api::shader_stage::all_compute, ao_pass.layout, 0u, restore);
+        reshade::api::shader_stage::all_compute, ao_pass.layout, 0u,
+        {.table = {0u},
+         .binding = slot,
+         .array_offset = 0u,
+         .count = 1u,
+         .type = reshade::api::descriptor_type::texture_shader_resource_view,
+         .descriptors = &saved_sources[slot]});
   }
-  return false;
+  if (saved_target.handle != 0) {
+    cmd_list->push_descriptors(
+        reshade::api::shader_stage::all_compute, ao_pass.layout, 1u,
+        {.table = {0u},
+         .binding = 0u,
+         .array_offset = 0u,
+         .count = 1u,
+         .type = reshade::api::descriptor_type::texture_unordered_access_view,
+         .descriptors = &saved_target});
+  }
 }
-
 renodx::mods::shader::CustomShaders custom_shaders = []() {
   renodx::mods::shader::CustomShaders shaders = {
       UpgradeRTVReplaceShaderCallback(0xE2D609B1, ArmDofFinalCopyRenderBufferWindow),            // DOF_ScatterCompositeNear
@@ -1296,26 +1295,24 @@ renodx::mods::shader::CustomShaders custom_shaders = []() {
       // The named Tonemap shader is the late LUT/color-grading pass in MGSV.
       UpgradeTonemapOutputRTV(0xE04D1471),
 
-      // The AO replacement replaces the *second* stage of the game's AO chain
-      // (0xB2601810), the one that applies the occlusion to the light. The first stage
-      // (0x6DAF0C4A) is left vanilla: its output only feeds this one, and it gates that
-      // input by a fresnel term, so an occlusion value fed into it reached nothing but
-      // characters. The later blur and composite of the chain do not run in normal play,
-      // so nothing downstream smooths this pass and the game's own AO is inactive.
-      // The decision is host-side, so "off" runs the original shader.
+      // The two passes at 0x6DAF0C4A / 0xB2601810 are the game's screen-space
+      // subsurface-scatter chain, not AO, so neither is replaced: replacing stage 2 is
+      // what removed the scattering that makes skin read as skin. This entry only hooks
+      // stage 2, to capture its bindings before the dispatch and to run the AO after it.
+      // The engine's own shader runs untouched.
       //
       // t6 carries the depth mip chain the march fetches its distant steps from; it is
       // rebuilt for every dispatch in the callback below.
       {0xB2601810,
        [] {
-         auto shader = renodx::mods::shader::CreateCallbackShader(
-             0xB2601810, __0xB2601810, [](reshade::api::command_list*) {
-               return shader_injection.ao_replace != 0.f;
-             });
-         // The addon dispatches this itself: the pass writes the light through unchanged and
-         // delivers the occlusion separately, which the module's view path cannot do.
-         shader.on_draw = &DispatchAo;
-         return shader;
+         return renodx::mods::shader::CustomShader{
+             .crc32 = 0xB2601810,
+             // Nothing is injected into the retail pipeline; the AO pushes its own
+             // constants into its own layout.
+             .on_inject = [](reshade::api::command_list*) { return false; },
+             .on_draw = &CaptureAoFrame,
+             .on_drawn = &ApplyAo,
+         };
        }()},
 
       __ALL_CUSTOM_SHADERS,
@@ -1762,14 +1759,13 @@ renodx::utils::settings::Settings settings = {
         .binding = &shader_injection.ao_replace,
         .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
         .default_value = 1.f,
-        .label = "AO (replaces the game's)",
+        .label = "AO (added after the game's scatter)",
         .section = "Ambient Occlusion",
-        .tooltip = "Replaces the second stage of the game's ambient-occlusion chain - "
-                   "the one that applies the occlusion to the light - with a "
-                   "visibility-bitmask AO computed from the depth and normal buffers. "
-                   "Off runs the original shader, so the comparison is against the "
-                   "game's own effect rather than a lookalike. Record and open "
-                   "questions: MGSV_AmbientOcclusion.md.",
+        .tooltip = "Adds a visibility-bitmask AO computed from the depth and normal "
+                   "buffers. It runs after the game's subsurface-scatter pass and scales "
+                   "the scattered light, so the skin's scattering is preserved; the "
+                   "game's own shaders are never replaced. Off leaves the game untouched. "
+                   "Record and open questions: MGSV_AmbientOcclusion.md.",
     },
     new renodx::utils::settings::Setting{
         .key = "AoStrength",
