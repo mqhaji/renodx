@@ -62,14 +62,19 @@ float2 DiskSample(uint index, uint count, float rotation, float radius_jitter) {
 [numthreads(8, 8, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
   const uint2 pixel = tid.xy;
-  if (pixel.x >= cBufferWidth || pixel.y >= cBufferHeight) return;
 
-  const float z = LinearZ(depthBuffer.Load(int3(pixel, 0)).x);
+  // The gather may run below full resolution. Its threads map onto full-resolution pixels,
+  // which is where every G-buffer read and every sample offset lives.
+  const float scale = max(CUSTOM_MGSV_IL_SCALE, 1.0);
+  const int2 centre = (int2)floor((float2(pixel) + 0.5) * scale);
+  if (centre.x >= (int)cBufferWidth || centre.y >= (int)cBufferHeight) return;
+
+  const float z = LinearZ(depthBuffer.Load(int3(centre, 0)).x);
   if (!(z > 0.0) || z > 1.0e6) return;
 
-  const float2 pixel_f = float2(pixel);
+  const float2 pixel_f = float2(centre);
   const float3 P = ViewPos(pixel_f, z);
-  const float3 N = DecodeNormal(normalBuffer.Load(int3(pixel, 0)).xyz);
+  const float3 N = DecodeNormal(normalBuffer.Load(int3(centre, 0)).xyz);
 
   // The radius is a fraction of screen height. A world-space radius is the right model for
   // bounce, but it needs a known world scale: LinearZ is not in metres, so converting a
