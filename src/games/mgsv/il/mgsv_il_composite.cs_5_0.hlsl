@@ -5,9 +5,9 @@
 // light. Splitting them is what makes a denoiser possible at all - the gather's output has to
 // exist as a texture before anything can filter it.
 //
-// The filter is a 5x5 bilateral in screen space, weighted by normal similarity and relative
-// depth difference. A plain blur would smear light across silhouettes, which reads as a halo;
-// the depth and normal weights keep it inside a surface. Samples the gather rejected (alpha
+// The filter is a bilateral in screen space, weighted by normal similarity and relative depth
+// difference. A plain blur would smear light across silhouettes, which reads as a halo; the
+// depth and normal weights keep it inside a surface. Samples the gather rejected (alpha
 // zero) are skipped, so a starved pixel stays dark instead of being filled by its neighbours.
 
 #include "../shared.h"
@@ -23,6 +23,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
   const uint2 pixel = tid.xy;
   if (pixel.x >= cBufferWidth || pixel.y >= cBufferHeight) return;
 
+  const float scale = max(CUSTOM_MGSV_IL_SCALE, 1.0);
+  const int radius = (int)clamp(CUSTOM_MGSV_IL_FILTER_RADIUS, 1.0, 3.0);
+  const int2 centre_bounce_pixel = (int2)floor(float2(pixel) / scale);
+
   const float z = LinearZ(depthBuffer.Load(int3(pixel, 0)).x);
   if (!(z > 0.0) || z > 1.0e6) return;
 
@@ -32,12 +36,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
   float3 sum = 0.0;
   float weight_sum = 0.0;
 
-  [unroll] for (int dy = -2; dy <= 2; ++dy) {
-    [unroll] for (int dx = -2; dx <= 2; ++dx) {
+  [loop] for (int dy = -radius; dy <= radius; ++dy) {
+    [loop] for (int dx = -radius; dx <= radius; ++dx) {
       const int2 q = int2(pixel) + int2(dx, dy);
       if (q.x < 0 || q.y < 0 || q.x >= (int)cBufferWidth || q.y >= (int)cBufferHeight) continue;
 
-      const float4 gathered = bounceBuffer.Load(int3(q, 0));
+      const int2 bounce_pixel = (int2)floor(float2(q) / scale);
+      const float4 gathered = bounceBuffer.Load(int3(bounce_pixel, 0));
       if (gathered.a < 0.5) continue;  // the gather had too few contributors here
 
       const float qz = LinearZ(depthBuffer.Load(int3(q, 0)).x);
@@ -53,7 +58,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
   }
 
   if (weight_sum <= 0.0) return;
-  const float3 bounce = (sum / weight_sum) * CUSTOM_MGSV_IL_AMOUNT * bounceBuffer.Load(int3(pixel, 0)).a;
+  const float3 bounce = (sum / weight_sum) * CUSTOM_MGSV_IL_AMOUNT
+                      * bounceBuffer.Load(int3(centre_bounce_pixel, 0)).a;
 
   const float4 centre = lightOutput.Load(int3(pixel, 0));
   const float3 output = CUSTOM_MGSV_IL_DEBUG > 0.5 ? bounce : centre.rgb + bounce;
