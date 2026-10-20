@@ -6,7 +6,8 @@
 //
 // This is a 1:1 port of the retail DXBC; see ssss.hlsli for the algorithm and
 // the bindings. Nothing is injected and nothing is tuned: the pass exists to
-// reproduce the base game's output so later work has a clean reference.
+// reproduce the base game's output so later work has a clean reference. The addon
+// does not register it - load it through DevKit live shaders to A/B against retail.
 
 #include "ssss.hlsli"
 

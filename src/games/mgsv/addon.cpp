@@ -756,9 +756,8 @@ renodx::utils::settings::Setting* tone_map_peak_nits_setting = nullptr;
 renodx::utils::settings::Setting* tone_map_game_nits_setting = nullptr;
 renodx::utils::settings::Setting* tone_map_ui_nits_setting = nullptr;
 
-// The 1x1 stand-in both extra AO bindings fall back to. The mod treats a null view as a
-// missing binding and skips the draw, which would disable the AO whenever a capture or the
-// mip chain is unavailable, so a binding must always return something.
+// The 1x1 stand-in bound at t2 whenever the depth mip chain is not built. A null view
+// would read as a missing binding, so the slot always has to resolve to something.
 reshade::api::resource ao_fallback_resource = {0};
 reshade::api::resource_view ao_fallback_view = {0};
 
@@ -816,7 +815,7 @@ constexpr uint32_t kDepthMipLevels = 4;
 
 struct DepthMipChain {
   reshade::api::resource resource = {0};
-  reshade::api::resource_view view = {0};  // all levels, bound at t6
+  reshade::api::resource_view view = {0};  // all levels, bound at t2
   std::array<reshade::api::resource_view, kDepthMipLevels> level_views = {};         // u0
   std::array<reshade::api::resource_view, kDepthMipLevels> level_source_views = {};  // t0
   reshade::api::pipeline_layout layout = {0};
@@ -952,7 +951,7 @@ bool EnsureDepthMipChain(reshade::api::device* device, uint32_t width, uint32_t 
 // The prefilter binds its own layout, so the caller's descriptors are untouched.
 bool BuildDepthMips(reshade::api::command_list* cmd_list, reshade::api::resource_view depth_view) {
   shader_injection.ao_depth_mips = 0.f;
-  if (shader_injection.ao_replace == 0.f || ao_depth_mips_enabled == 0.f) return true;
+  if (shader_injection.ao_enabled == 0.f || ao_depth_mips_enabled == 0.f) return true;
 
   auto* device = cmd_list->get_device();
   if (depth_view.handle == 0) return true;
@@ -1105,7 +1104,7 @@ bool EnsureAoPass(reshade::api::device* device, uint32_t width, uint32_t height)
 
   std::array<reshade::api::pipeline_layout_param, 3> params = {};
   params[0].type = reshade::api::pipeline_layout_param_type::push_descriptors;
-  params[0].push_descriptors.count = 7u;  // t0..t6
+  params[0].push_descriptors.count = 3u;  // t0 depth, t1 normal, t2 depth mips
   params[0].push_descriptors.type = reshade::api::descriptor_type::texture_shader_resource_view;
   params[0].push_descriptors.dx_register_index = 0u;
   params[0].push_descriptors.dx_register_space = 0u;
@@ -1150,7 +1149,7 @@ bool EnsureAoPass(reshade::api::device* device, uint32_t width, uint32_t height)
 // the depth and normal this pass needs, and the light it scales - are known to be live.
 bool CaptureAoFrame(reshade::api::command_list* cmd_list) {
   ao_frame.valid = false;
-  if (shader_injection.ao_replace == 0.f) return true;
+  if (shader_injection.ao_enabled == 0.f) return true;
 
   const auto depth_view = renodx::utils::state::GetBoundResourceView(
       cmd_list, reshade::api::shader_stage::compute,
@@ -1189,7 +1188,7 @@ void ApplyAo(reshade::api::command_list* cmd_list) {
 
   BuildDepthMips(cmd_list, frame.depth);
 
-  std::array<reshade::api::resource_view, 7> saved_sources = {};
+  std::array<reshade::api::resource_view, 3> saved_sources = {};
   for (uint32_t slot = 0; slot < saved_sources.size(); ++slot) {
     saved_sources[slot] = renodx::utils::state::GetBoundResourceView(
         cmd_list, reshade::api::shader_stage::compute,
@@ -1199,15 +1198,10 @@ void ApplyAo(reshade::api::command_list* cmd_list) {
       cmd_list, reshade::api::shader_stage::compute,
       reshade::api::descriptor_type::unordered_access_view, 0u);
 
-  const auto fallback = GetAoFallbackView(cmd_list);
-  const std::array<reshade::api::resource_view, 7> sources = {
-      fallback,                   // t0, unused
-      frame.depth,                // t1
-      frame.normal,               // t2
-      fallback,                   // t3, unused
-      fallback,                   // t4, unused
-      fallback,                   // t5, unused
-      GetDepthMipView(cmd_list),  // t6
+  const std::array<reshade::api::resource_view, 3> sources = {
+      frame.depth,                // t0
+      frame.normal,               // t1
+      GetDepthMipView(cmd_list),  // t2, the addon's chain or the stand-in
   };
   const std::array<reshade::api::resource_view, 1> targets = {frame.light};
 
@@ -1301,7 +1295,7 @@ renodx::mods::shader::CustomShaders custom_shaders = []() {
       // stage 2, to capture its bindings before the dispatch and to run the AO after it.
       // The engine's own shader runs untouched.
       //
-      // t6 carries the depth mip chain the march fetches its distant steps from; it is
+      // t2 carries the depth mip chain the march fetches its distant steps from; it is
       // rebuilt for every dispatch in the callback below.
       {0xB2601810,
        [] {
@@ -1756,7 +1750,7 @@ renodx::utils::settings::Settings settings = {
     },
     new renodx::utils::settings::Setting{
         .key = "AoReplace",
-        .binding = &shader_injection.ao_replace,
+        .binding = &shader_injection.ao_enabled,
         .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
         .default_value = 1.f,
         .label = "AO (added after the game's scatter)",

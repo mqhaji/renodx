@@ -18,14 +18,11 @@
 // "pixel was shaded" flag.
 //
 // Bindings (own layout, dispatched by the addon):
-//   b0   Constants - inherited from the engine's retail AO constants
-//   t1   depth       (r32_float)
-//   t2   normal      (b8g8r8a8, same packing as the deferred G-buffer)
-//   t6   depth mips  (addon-built nearest-reduced chain)
+//   b0   Constants - the engine's scatter-pass constants still bound at this point
+//   t0   depth       (r32_float)
+//   t1   normal      (b8g8r8a8, same packing as the deferred G-buffer)
+//   t2   depth mips  (addon-built nearest-reduced chain)
 //   u0   light       (read-modify-write, rgb scaled, alpha preserved)
-//
-// The engine's t0 of the retail chain - the horizontal stage's average of the
-// light - is not bound and not read.
 
 #include "../shared.h"
 
@@ -52,11 +49,11 @@ cbuffer Constants : register(b0)
 // The light is both input and output: this pass is the last writer of the buffer
 // the retail scatter stage just produced, so a typed UAV load returns the
 // scattered value and the store puts the occluded value back.
-Texture2D<float4> depthBuffer : register(t1);
-Texture2D<float4> normalBuffer : register(t2);
+Texture2D<float4> depthBuffer : register(t0);
+Texture2D<float4> normalBuffer : register(t1);
 // The addon's depth mip chain: each texel is the nearest of the four below it. Only read
 // when the injection says the chain exists for this dispatch.
-Texture2D<float4> depthMips : register(t6);
+Texture2D<float4> depthMips : register(t2);
 RWTexture2D<float4> resultBuffer : register(u0);
 
 // Linear view depth, the same expression the retail passes use.
@@ -374,11 +371,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // which is the common case and every monotone surface, that is exact and there is
         // no quantisation left to show as grain.
         //
-        // The dither this replaces was unbiased in expectation but deterministic per pixel,
-        // so its error was the same at every pixel of a flat surface - a fixed pattern that
-        // reads as grain and that no sample count averages away, since every band in a slice
-        // shares the phase. Carrying the widths removes the randomness from the decision
-        // instead of sampling it, and what remains is smooth.
+        // A stochastic dither was tried and rejected: deterministic per pixel, so on a flat
+        // surface it read as a fixed pattern rather than noise.
         const float lo = min(xF, xB) * (float)AO_SECTORS;
         const float hi = max(xF, xB) * (float)AO_SECTORS;
         const uint start = (uint)clamp(floor(lo + 0.5), 0.0, (float)AO_SECTORS);
