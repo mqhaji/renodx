@@ -1093,32 +1093,44 @@ struct LightPass {
 LightPass ao_pass;
 LightPass il_pass;
 LightPass il_composite_pass;
+LightPass il_add_pass;
+LightPass il_accumulate_pass;
 
-// The gather's output, so the composite can denoise it before it reaches the light. A pass
-// cannot filter its own output, which is the whole reason this buffer exists.
-reshade::api::resource il_bounce_resource = {0};
-reshade::api::resource_view il_bounce_view = {0};
-reshade::api::resource_view il_bounce_uav = {0};
-uint32_t il_bounce_width = 0;
-uint32_t il_bounce_height = 0;
+// The gather and filter each need their own target: a pass cannot filter its own output, and
+// the add pass reads the filtered one at full resolution.
+struct IlTarget {
+  reshade::api::resource resource = {0};
+  reshade::api::resource_view view = {0};
+  reshade::api::resource_view uav = {0};
+  uint32_t width = 0;
+  uint32_t height = 0;
+};
+IlTarget il_bounce_target;
+IlTarget il_filtered_target;
+// Ping-ponged accumulation. The frame reads one and writes the other, then swaps.
+IlTarget il_history_targets[2];
+uint32_t il_history_index = 0;
+uint32_t il_history_width = 0;
+uint32_t il_history_height = 0;
+bool il_history_valid = false;
 
-bool EnsureIlBounce(reshade::api::device* device, uint32_t width, uint32_t height) {
-  if (il_bounce_uav.handle != 0 && il_bounce_width == width && il_bounce_height == height) return true;
+bool EnsureIlTarget(reshade::api::device* device, IlTarget* target, uint32_t width, uint32_t height) {
+  if (target->uav.handle != 0 && target->width == width && target->height == height) return true;
 
-  if (il_bounce_uav.handle != 0) {
-    device->destroy_resource_view(il_bounce_uav);
-    il_bounce_uav = {0};
+  if (target->uav.handle != 0) {
+    device->destroy_resource_view(target->uav);
+    target->uav = {0};
   }
-  if (il_bounce_view.handle != 0) {
-    device->destroy_resource_view(il_bounce_view);
-    il_bounce_view = {0};
+  if (target->view.handle != 0) {
+    device->destroy_resource_view(target->view);
+    target->view = {0};
   }
-  if (il_bounce_resource.handle != 0) {
-    device->destroy_resource(il_bounce_resource);
-    il_bounce_resource = {0};
+  if (target->resource.handle != 0) {
+    device->destroy_resource(target->resource);
+    target->resource = {0};
   }
-  il_bounce_width = 0;
-  il_bounce_height = 0;
+  target->width = 0;
+  target->height = 0;
 
   const reshade::api::resource_desc desc(
       width, height, 1u, 1u,
@@ -1127,25 +1139,41 @@ bool EnsureIlBounce(reshade::api::device* device, uint32_t width, uint32_t heigh
       reshade::api::memory_heap::gpu_only,
       reshade::api::resource_usage::shader_resource
           | reshade::api::resource_usage::unordered_access);
-  if (!device->create_resource(desc, nullptr, desc.usage, &il_bounce_resource)
+  if (!device->create_resource(desc, nullptr, desc.usage, &target->resource)
       || !device->create_resource_view(
-          il_bounce_resource,
+          target->resource,
           reshade::api::resource_usage::shader_resource,
           reshade::api::resource_view_desc(reshade::api::format::r16g16b16a16_float),
-          &il_bounce_view)
+          &target->view)
       || !device->create_resource_view(
-          il_bounce_resource,
+          target->resource,
           reshade::api::resource_usage::unordered_access,
           reshade::api::resource_view_desc(reshade::api::format::r16g16b16a16_float),
-          &il_bounce_uav)) {
-    reshade::log::message(reshade::log::level::error, "mgsv: IL bounce target failed");
+          &target->uav)) {
+    reshade::log::message(reshade::log::level::error, "mgsv: IL target failed");
     return false;
   }
 
-  il_bounce_width = width;
-  il_bounce_height = height;
-  reshade::log::message(reshade::log::level::info, "mgsv: IL bounce target created");
+  target->width = width;
+  target->height = height;
   return true;
+}
+
+void DestroyIlTarget(reshade::api::device* device, IlTarget* target) {
+  if (target->uav.handle != 0) {
+    device->destroy_resource_view(target->uav);
+    target->uav = {0};
+  }
+  if (target->view.handle != 0) {
+    device->destroy_resource_view(target->view);
+    target->view = {0};
+  }
+  if (target->resource.handle != 0) {
+    device->destroy_resource(target->resource);
+    target->resource = {0};
+  }
+  target->width = 0;
+  target->height = 0;
 }
 
 bool EnsureLightPassLayout(reshade::api::device* device) {
@@ -1345,7 +1373,7 @@ void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* pass,
 }
 
 void DestroyLightPasses(reshade::api::device* device) {
-  for (auto* pass : {&ao_pass, &il_pass, &il_composite_pass}) {
+  for (auto* pass : {&ao_pass, &il_pass, &il_composite_pass, &il_add_pass, &il_accumulate_pass}) {
     pass->ready = false;
     if (pass->pipeline.handle != 0) {
       device->destroy_pipeline(pass->pipeline);
@@ -1385,10 +1413,25 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
     const uint32_t il_width = (frame.width + il_scale - 1u) / il_scale;
     const uint32_t il_height = (frame.height + il_scale - 1u) / il_scale;
 
-    if (EnsureIlBounce(device, il_width, il_height)
+    // The history is only valid while its size matches and the GI chain has run continuously.
+    if (il_history_width != il_width || il_history_height != il_height) {
+      il_history_width = il_width;
+      il_history_height = il_height;
+      il_history_index = 0;
+      il_history_valid = false;
+    }
+
+    if (EnsureIlTarget(device, &il_bounce_target, il_width, il_height)
+        && EnsureIlTarget(device, &il_filtered_target, il_width, il_height)
+        && EnsureIlTarget(device, &il_history_targets[0], il_width, il_height)
+        && EnsureIlTarget(device, &il_history_targets[1], il_width, il_height)
         && EnsureLightPass(device, &il_pass, "mgsv: IL pass created", __mgsv_il, il_width, il_height)
         && EnsureLightPass(device, &il_composite_pass, "mgsv: IL composite created",
-                           __mgsv_il_composite, frame.width, frame.height)) {
+                           __mgsv_il_composite, il_width, il_height)
+        && EnsureLightPass(device, &il_add_pass, "mgsv: IL add created",
+                           __mgsv_il_add, frame.width, frame.height)
+        && EnsureLightPass(device, &il_accumulate_pass, "mgsv: IL accumulate created",
+                           __mgsv_il_accumulate, il_width, il_height)) {
       const std::array<reshade::api::resource_view, 5> gather_sources = {
           frame.depth,    // t0
           frame.normal,   // t1
@@ -1396,16 +1439,46 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
           albedo_view,    // t3
           specular_view,  // t4
       };
-      DispatchLightPass(cmd_list, &il_pass, gather_sources, il_bounce_uav, il_width, il_height);
+      DispatchLightPass(cmd_list, &il_pass, gather_sources, il_bounce_target.uav,
+                        il_width, il_height);
 
-      const std::array<reshade::api::resource_view, 5> composite_sources = {
-          il_bounce_view,              // t0
+      // Temporal accumulation against the previous result. The velocity view comes from the
+      // TAA capture, which is backend-independent and already written by this point in the
+      // frame; when it is missing (reconstruction off) the blend collapses to zero.
+      const auto velocity_view = taa::input_capture::resources.velocity_srv;
+      shader_injection.il_history_valid = il_history_valid && velocity_view.handle != 0 ? 1.f : 0.f;
+      const uint32_t read_index = il_history_index;
+      const uint32_t write_index = read_index ^ 1u;
+      const std::array<reshade::api::resource_view, 5> accumulate_sources = {
+          il_bounce_target.view,       // t0
+          il_history_targets[read_index].view,  // t1
+          velocity_view,               // t2
+          frame.depth,                 // t3
+          frame.normal,                // t4
+      };
+      DispatchLightPass(cmd_list, &il_accumulate_pass, accumulate_sources,
+                        il_history_targets[write_index].uav, il_width, il_height);
+      il_history_index = write_index;
+      il_history_valid = true;
+
+      const std::array<reshade::api::resource_view, 5> filter_sources = {
+          il_history_targets[write_index].view,  // t0
           frame.depth,                 // t1
           frame.normal,                // t2
           GetAoFallbackView(cmd_list), // t3, unused
           GetAoFallbackView(cmd_list), // t4, unused
       };
-      DispatchLightPass(cmd_list, &il_composite_pass, composite_sources, frame.light,
+      DispatchLightPass(cmd_list, &il_composite_pass, filter_sources, il_filtered_target.uav,
+                        il_width, il_height);
+
+      const std::array<reshade::api::resource_view, 5> add_sources = {
+          il_filtered_target.view,     // t0
+          GetAoFallbackView(cmd_list), // t1, unused
+          GetAoFallbackView(cmd_list), // t2, unused
+          GetAoFallbackView(cmd_list), // t3, unused
+          GetAoFallbackView(cmd_list), // t4, unused
+      };
+      DispatchLightPass(cmd_list, &il_add_pass, add_sources, frame.light,
                         frame.width, frame.height);
     }
   }
@@ -2123,6 +2196,20 @@ renodx::utils::settings::Settings settings = {
         .max = 3.f,
     },
     new renodx::utils::settings::Setting{
+        .key = "IlHistory",
+        .binding = &shader_injection.il_history_blend,
+        .default_value = 85.f,
+        .label = "GI History",
+        .section = "Indirect Lighting",
+        .tooltip = "How much of the previous frame survives, as a percentage. Reprojection "
+                   "uses the game's velocity buffer with the same decode the TAA pass uses, "
+                   "and the history is clipped to the current neighbourhood, so the blend "
+                   "buys noise reduction without ghosting. It is inert when temporal "
+                   "reconstruction is off, because there is no velocity buffer then.",
+        .max = 95.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
         .key = "IlDebug",
         .binding = &shader_injection.il_debug,
         .value_type = renodx::utils::settings::SettingValueType::INTEGER,
@@ -2294,20 +2381,11 @@ void OnDestroyDevice(reshade::api::device* device) {
   DestroyAoFallbackView(device);
   albedo_view = {0};
   specular_view = {0};
-  if (il_bounce_uav.handle != 0) {
-    device->destroy_resource_view(il_bounce_uav);
-    il_bounce_uav = {0};
-  }
-  if (il_bounce_view.handle != 0) {
-    device->destroy_resource_view(il_bounce_view);
-    il_bounce_view = {0};
-  }
-  if (il_bounce_resource.handle != 0) {
-    device->destroy_resource(il_bounce_resource);
-    il_bounce_resource = {0};
-  }
-  il_bounce_width = 0;
-  il_bounce_height = 0;
+  DestroyIlTarget(device, &il_bounce_target);
+  DestroyIlTarget(device, &il_filtered_target);
+  DestroyIlTarget(device, &il_history_targets[0]);
+  DestroyIlTarget(device, &il_history_targets[1]);
+  il_history_valid = false;
 }
 
 bool initialized = false;
