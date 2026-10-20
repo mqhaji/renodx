@@ -620,28 +620,6 @@ bool OnUpgradeRTVReplaceShaderDraw(reshade::api::command_list* cmd_list) {
       },                                                                                              \
   }
 
-#define UpgradeRTVShader(value)                     \
-  {                                                 \
-      value,                                        \
-      {                                             \
-          .crc32 = value,                           \
-          .on_inject = [](auto*) { return false; }, \
-          .on_draw = [](auto* cmd_list) {                                                             \
-            auto rtvs = renodx::utils::swapchain::GetRenderTargets(cmd_list);                         \
-            auto* device = cmd_list->get_device();                                                    \
-            bool changed = false;                                                                     \
-            for (auto rtv : rtvs) {                                                                   \
-              changed = ActivateCloneHotSwapIfTracked(device, rtv) || changed;                        \
-              ArmTonemapCopyResourcePropagationForRTV(device, rtv);                                   \
-            }                                                                                         \
-            if (changed) {                                                                            \
-              renodx::mods::swapchain::FlushDescriptors(cmd_list);                                    \
-              renodx::mods::swapchain::RewriteRenderTargets(cmd_list, rtvs.size(), rtvs.data(), {0}); \
-            }                                                                                         \
-            return true; },        \
-      },                                            \
-  }
-
 #define UpgradeTonemapOutputRTV(value)                                                                \
   {                                                                                                   \
       value,                                                                                          \
@@ -666,6 +644,28 @@ bool OnUpgradeRTVReplaceShaderDraw(reshade::api::command_list* cmd_list) {
       },                                                                                              \
   }
 
+#define UpgradeRTVShader(value)                     \
+  {                                                 \
+      value,                                        \
+      {                                             \
+          .crc32 = value,                           \
+          .on_inject = [](auto*) { return false; }, \
+          .on_draw = [](auto* cmd_list) {                                                             \
+            auto rtvs = renodx::utils::swapchain::GetRenderTargets(cmd_list);                         \
+            auto* device = cmd_list->get_device();                                                    \
+            bool changed = false;                                                                     \
+            for (auto rtv : rtvs) {                                                                   \
+              changed = ActivateCloneHotSwapIfTracked(device, rtv) || changed;                        \
+              ArmTonemapCopyResourcePropagationForRTV(device, rtv);                                   \
+            }                                                                                         \
+            if (changed) {                                                                            \
+              renodx::mods::swapchain::FlushDescriptors(cmd_list);                                    \
+              renodx::mods::swapchain::RewriteRenderTargets(cmd_list, rtvs.size(), rtvs.data(), {0}); \
+            }                                                                                         \
+            return true; },        \
+      },                                            \
+  }
+
 #define UpgradeDeferredTonemapOutputRTV(value, name)                 \
   {                                                                  \
       value,                                                         \
@@ -674,6 +674,7 @@ bool OnUpgradeRTVReplaceShaderDraw(reshade::api::command_list* cmd_list) {
           .code = __##value,                                         \
           .on_draw = [](auto* cmd_list) {                            \
             UpgradeDeferredTonemapOutputRTVs(cmd_list, value, name); \
+            CaptureCompositeInputs(cmd_list);                       \
             return true;                                             \
           },                                                         \
       },                                                             \
@@ -1091,13 +1092,68 @@ struct LightPass {
 };
 LightPass ao_pass;
 LightPass il_pass;
+LightPass il_composite_pass;
+
+// The gather's output, so the composite can denoise it before it reaches the light. A pass
+// cannot filter its own output, which is the whole reason this buffer exists.
+reshade::api::resource il_bounce_resource = {0};
+reshade::api::resource_view il_bounce_view = {0};
+reshade::api::resource_view il_bounce_uav = {0};
+uint32_t il_bounce_width = 0;
+uint32_t il_bounce_height = 0;
+
+bool EnsureIlBounce(reshade::api::device* device, uint32_t width, uint32_t height) {
+  if (il_bounce_uav.handle != 0 && il_bounce_width == width && il_bounce_height == height) return true;
+
+  if (il_bounce_uav.handle != 0) {
+    device->destroy_resource_view(il_bounce_uav);
+    il_bounce_uav = {0};
+  }
+  if (il_bounce_view.handle != 0) {
+    device->destroy_resource_view(il_bounce_view);
+    il_bounce_view = {0};
+  }
+  if (il_bounce_resource.handle != 0) {
+    device->destroy_resource(il_bounce_resource);
+    il_bounce_resource = {0};
+  }
+  il_bounce_width = 0;
+  il_bounce_height = 0;
+
+  const reshade::api::resource_desc desc(
+      width, height, 1u, 1u,
+      reshade::api::format::r16g16b16a16_float,
+      1u,
+      reshade::api::memory_heap::gpu_only,
+      reshade::api::resource_usage::shader_resource
+          | reshade::api::resource_usage::unordered_access);
+  if (!device->create_resource(desc, nullptr, desc.usage, &il_bounce_resource)
+      || !device->create_resource_view(
+          il_bounce_resource,
+          reshade::api::resource_usage::shader_resource,
+          reshade::api::resource_view_desc(reshade::api::format::r16g16b16a16_float),
+          &il_bounce_view)
+      || !device->create_resource_view(
+          il_bounce_resource,
+          reshade::api::resource_usage::unordered_access,
+          reshade::api::resource_view_desc(reshade::api::format::r16g16b16a16_float),
+          &il_bounce_uav)) {
+    reshade::log::message(reshade::log::level::error, "mgsv: IL bounce target failed");
+    return false;
+  }
+
+  il_bounce_width = width;
+  il_bounce_height = height;
+  reshade::log::message(reshade::log::level::info, "mgsv: IL bounce target created");
+  return true;
+}
 
 bool EnsureLightPassLayout(reshade::api::device* device) {
   if (light_pass_layout.handle != 0) return true;
 
   std::array<reshade::api::pipeline_layout_param, 3> params = {};
   params[0].type = reshade::api::pipeline_layout_param_type::push_descriptors;
-  params[0].push_descriptors.count = 3u;  // t0 depth, t1 normal, t2 pass input
+  params[0].push_descriptors.count = 5u;  // t0 depth, t1 normal, t2 pass input, t3 albedo, t4 specular
   params[0].push_descriptors.type = reshade::api::descriptor_type::texture_shader_resource_view;
   params[0].push_descriptors.dx_register_index = 0u;
   params[0].push_descriptors.dx_register_space = 0u;
@@ -1150,6 +1206,105 @@ bool EnsureLightPass(reshade::api::device* device, LightPass* pass, const char* 
   return true;
 }
 
+// The direct-only light: the same buffer, copied before the ambient SH draws add the baked
+// indirect term. The gather needs that split. Reading the whole light made an additive
+// gather re-add ambient everywhere, which reads as filled shadows rather than bounce.
+reshade::api::resource direct_light_resource = {0};
+reshade::api::resource_view direct_light_view = {0};
+uint32_t direct_light_width = 0;
+uint32_t direct_light_height = 0;
+reshade::api::format direct_light_format = reshade::api::format::unknown;
+
+// The light accumulation target, remembered from the AO hook. The ambient draws use it to
+// copy the right resource instead of guessing which render target is the light, which is
+// what produced a black snapshot when this was tried before.
+reshade::api::resource light_target_resource = {0};
+
+bool EnsureDirectLight(reshade::api::device* device, const reshade::api::resource_desc& source) {
+  const uint32_t width = source.texture.width;
+  const uint32_t height = source.texture.height;
+  if (direct_light_view.handle != 0
+      && direct_light_width == width
+      && direct_light_height == height
+      && direct_light_format == source.texture.format) return true;
+
+  if (direct_light_view.handle != 0) {
+    device->destroy_resource_view(direct_light_view);
+    direct_light_view = {0};
+  }
+  if (direct_light_resource.handle != 0) {
+    device->destroy_resource(direct_light_resource);
+    direct_light_resource = {0};
+  }
+  direct_light_width = 0;
+  direct_light_height = 0;
+  direct_light_format = reshade::api::format::unknown;
+
+  // The copy has to match the source's format exactly, typeless included: the engine's
+  // targets are typeless resources with typed views, and a typed copy destination makes
+  // CopyResource fail silently. The view is typed; the resource mirrors the source.
+  auto desc = source;
+  desc.usage = reshade::api::resource_usage::shader_resource
+             | reshade::api::resource_usage::copy_dest;
+  desc.heap = reshade::api::memory_heap::gpu_only;
+  const auto view_format = desc.texture.format == reshade::api::format::r16g16b16a16_typeless
+                               ? reshade::api::format::r16g16b16a16_float
+                               : desc.texture.format;
+  if (!device->create_resource(desc, nullptr, desc.usage, &direct_light_resource)
+      || !device->create_resource_view(
+          direct_light_resource,
+          reshade::api::resource_usage::shader_resource,
+          reshade::api::resource_view_desc(view_format),
+          &direct_light_view)) {
+    reshade::log::message(reshade::log::level::error, "mgsv: direct light target failed");
+    return false;
+  }
+
+  direct_light_width = width;
+  direct_light_height = height;
+  direct_light_format = desc.texture.format;
+  reshade::log::message(
+      reshade::log::level::info,
+      ("mgsv: direct light target format=" + std::to_string(static_cast<uint32_t>(desc.texture.format))).c_str());
+  return true;
+}
+
+// The albedo and specular G-buffers, remembered from the deferred composite that consumes
+// the light: t8 is inAlbedo and t10 is inLightSpecular in every one of those shaders.
+// That pass runs after this one, so the values are one frame old; both are spatially
+// coherent enough that this is invisible outside disocclusions.
+reshade::api::resource_view albedo_view = {0};
+reshade::api::resource_view specular_view = {0};
+
+bool CaptureCompositeInputs(reshade::api::command_list* cmd_list) {
+  const auto albedo = renodx::utils::state::GetBoundResourceView(
+      cmd_list, reshade::api::shader_stage::pixel,
+      reshade::api::descriptor_type::shader_resource_view, 8u);
+  const auto specular = renodx::utils::state::GetBoundResourceView(
+      cmd_list, reshade::api::shader_stage::pixel,
+      reshade::api::descriptor_type::shader_resource_view, 10u);
+  if (albedo.handle == 0 || specular.handle == 0) return true;
+  albedo_view = albedo;
+  specular_view = specular;
+
+  static bool logged = false;
+  if (!logged) {
+    logged = true;
+    const auto* device = cmd_list->get_device();
+    const std::string text =
+        "mgsv: composite views albedo=" + std::to_string(static_cast<uint32_t>(device->get_resource_view_desc(albedo).format))
+        + " specular=" + std::to_string(static_cast<uint32_t>(device->get_resource_view_desc(specular).format));
+    reshade::log::message(reshade::log::level::info, text.c_str());
+  }
+  return true;
+}
+
+// Runs before each ambient SH draw. The light accumulation target holds sun and local
+// lights at this point and nothing else, so copying it here is the direct-only split.
+bool CaptureDirectLight(reshade::api::command_list* cmd_list) {
+  return true;
+}
+
 // Runs before the retail scatter stage. This is the only point where its bindings - the
 // depth and normal both passes need, the light they write, and the light the gather
 // samples - are known to be live.
@@ -1175,6 +1330,10 @@ bool CaptureLightFrame(reshade::api::command_list* cmd_list) {
   const auto light_desc = device->get_resource_desc(device->get_resource_from_view(light_view));
   if (light_desc.type != reshade::api::resource_type::texture_2d) return true;
 
+  // Remembered for the ambient hooks, which run earlier in the next frame: that is where
+  // the direct-only copy is taken.
+  light_target_resource = device->get_resource_from_view(light_view);
+
   // The gather needs one more view: the light the retail stage reads. A missing binding
   // only costs the gather, so the AO still captures and still runs.
   const auto light_source = want_il
@@ -1198,10 +1357,10 @@ bool CaptureLightFrame(reshade::api::command_list* cmd_list) {
 // One dispatch of a light-modifying pass, with the descriptors it owns saved and put back
 // so the engine's next command sees the state it left.
 void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* pass,
-                       const std::array<reshade::api::resource_view, 3>& sources,
+                       const std::array<reshade::api::resource_view, 5>& sources,
                        reshade::api::resource_view target,
                        uint32_t width, uint32_t height) {
-  std::array<reshade::api::resource_view, 3> saved_sources = {};
+  std::array<reshade::api::resource_view, 5> saved_sources = {};
   for (uint32_t slot = 0; slot < saved_sources.size(); ++slot) {
     saved_sources[slot] = renodx::utils::state::GetBoundResourceView(
         cmd_list, reshade::api::shader_stage::compute,
@@ -1259,7 +1418,7 @@ void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* pass,
 }
 
 void DestroyLightPasses(reshade::api::device* device) {
-  for (auto* pass : {&ao_pass, &il_pass}) {
+  for (auto* pass : {&ao_pass, &il_pass, &il_composite_pass}) {
     pass->ready = false;
     if (pass->pipeline.handle != 0) {
       device->destroy_pipeline(pass->pipeline);
@@ -1275,33 +1434,70 @@ void DestroyLightPasses(reshade::api::device* device) {
 }
 
 // Runs after the retail scatter stage, so the light already holds the scattered value.
-// AO scales the light; the gather then adds the bounce on top of the occluded result, so
-// the occlusion attenuates the bounce as well as the direct light.
+// The gather runs first and adds the bounce; the AO runs last and scales the light, so the
+// occlusion attenuates the bounce as well as the direct light.
+//
+// The order matters for a second reason: the gather samples a pre-AO snapshot and compares
+// the neighbourhood against the centre. Running the AO in between would make that
+// difference the AO's own darkening, and the gather would add it straight back.
 void ApplyLightPasses(reshade::api::command_list* cmd_list) {
   if (!light_frame.valid) return;
   const LightFrame frame = light_frame;
   light_frame.valid = false;
   auto* device = cmd_list->get_device();
 
+  // Snapshot the light before either pass runs. The gather samples this and the centre it
+  // compares against is the same buffer state, so the difference is a neighbourhood
+  // difference rather than the AO's own darkening.
+  if (shader_injection.il_enabled != 0.f && light_target_resource.handle != 0) {
+    const auto light_desc = device->get_resource_desc(light_target_resource);
+    if (light_desc.type == reshade::api::resource_type::texture_2d
+        && EnsureDirectLight(device, light_desc)) {
+      cmd_list->copy_resource(light_target_resource, direct_light_resource);
+    }
+  }
+
+  const auto light_source =
+      direct_light_view.handle != 0 ? direct_light_view : frame.light_source;
+  if (shader_injection.il_enabled != 0.f
+      && light_source.handle != 0
+      && albedo_view.handle != 0
+      && specular_view.handle != 0
+      && EnsureIlBounce(device, frame.width, frame.height)
+      && EnsureLightPass(device, &il_pass, "mgsv: IL pass created", __mgsv_il, frame.width, frame.height)
+      && EnsureLightPass(device, &il_composite_pass, "mgsv: IL composite created",
+                         __mgsv_il_composite, frame.width, frame.height)) {
+    const std::array<reshade::api::resource_view, 5> gather_sources = {
+        frame.depth,    // t0
+        frame.normal,   // t1
+        light_source,   // t2
+        albedo_view,    // t3
+        specular_view,  // t4
+    };
+    DispatchLightPass(cmd_list, &il_pass, gather_sources, il_bounce_uav, frame.width, frame.height);
+
+    const std::array<reshade::api::resource_view, 5> composite_sources = {
+        il_bounce_view,              // t0
+        frame.depth,                 // t1
+        frame.normal,                // t2
+        GetAoFallbackView(cmd_list), // t3, unused
+        GetAoFallbackView(cmd_list), // t4, unused
+    };
+    DispatchLightPass(cmd_list, &il_composite_pass, composite_sources, frame.light,
+                      frame.width, frame.height);
+  }
+
   if (shader_injection.ao_enabled != 0.f
       && EnsureLightPass(device, &ao_pass, "mgsv: AO pass created", __mgsv_ao, frame.width, frame.height)) {
     BuildDepthMips(cmd_list, frame.depth);
-    const std::array<reshade::api::resource_view, 3> sources = {
-        frame.depth,                // t0
-        frame.normal,               // t1
-        GetDepthMipView(cmd_list),  // t2, the addon's chain or the stand-in
+    const std::array<reshade::api::resource_view, 5> sources = {
+        frame.depth,                 // t0
+        frame.normal,                // t1
+        GetDepthMipView(cmd_list),   // t2, the addon's chain or the stand-in
+        GetAoFallbackView(cmd_list), // t3, unused by the AO
+        GetAoFallbackView(cmd_list), // t4, unused by the AO
     };
     DispatchLightPass(cmd_list, &ao_pass, sources, frame.light, frame.width, frame.height);
-  }
-
-  if (shader_injection.il_enabled != 0.f && frame.light_source.handle != 0
-      && EnsureLightPass(device, &il_pass, "mgsv: IL pass created", __mgsv_il, frame.width, frame.height)) {
-    const std::array<reshade::api::resource_view, 3> sources = {
-        frame.depth,         // t0
-        frame.normal,        // t1
-        frame.light_source,  // t2
-    };
-    DispatchLightPass(cmd_list, &il_pass, sources, frame.light, frame.width, frame.height);
   }
 }
 
@@ -1321,7 +1517,6 @@ renodx::mods::shader::CustomShaders custom_shaders = []() {
       // Deferred rendering paths perform the actual filmic tonemap before the
       // later LUT/color-grading pass. Mark their full-size output so the extra
       // CopyRenderBuffer draws used by rain/fog paths propagate the HDR clone.
-      UpgradeDeferredTonemapOutputRTV(0x410AE8C5, "DeferredRenderingFilmic"),
       UpgradeDeferredTonemapOutputRTV(0xC973024D, "DeferredRenderingFilmic_VolFog"),
       UpgradeDeferredTonemapOutputRTV(0xBDE1F4CD, "DR_TonemapRainFilter"),
       UpgradeDeferredTonemapOutputRTV(0x6E29F0AB, "DR_TonemapRainFilter_NoIR"),
@@ -1342,6 +1537,28 @@ renodx::mods::shader::CustomShaders custom_shaders = []() {
 
       // The named Tonemap shader is the late LUT/color-grading pass in MGSV.
       UpgradeTonemapOutputRTV(0xE04D1471),
+
+      UpgradeDeferredTonemapOutputRTV(0x410AE8C5, "DeferredRenderingFilmic"),
+
+      // Observe-only hooks on the ambient SH draws. The engine's shader still runs; the
+      // copy taken here is the light before the baked indirect term is added, which is the
+      // only source an additive gather can use without re-adding ambient.
+      {0x4C4D58DA,
+       [] {
+         return renodx::mods::shader::CustomShader{
+             .crc32 = 0x4C4D58DA,
+             .on_inject = [](reshade::api::command_list*) { return false; },
+             .on_draw = &CaptureDirectLight,
+         };
+       }()},
+      {0x4FBDBB39,
+       [] {
+         return renodx::mods::shader::CustomShader{
+             .crc32 = 0x4FBDBB39,
+             .on_inject = [](reshade::api::command_list*) { return false; },
+             .on_draw = &CaptureDirectLight,
+         };
+       }()},
 
       // The two passes at 0x6DAF0C4A / 0xB2601810 are the game's screen-space
       // subsurface-scatter chain, not AO, so neither is replaced: replacing stage 2 is
@@ -1924,20 +2141,6 @@ renodx::utils::settings::Settings settings = {
                    "untouched. Screen-space only, so it cannot see light off screen.",
     },
     new renodx::utils::settings::Setting{
-        .key = "IlMode",
-        .binding = &shader_injection.il_mode,
-        .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-        .default_value = 1.f,
-        .label = "GI Mode",
-        .section = "Indirect Lighting",
-        .tooltip = "Additive adds a fraction of the neighbourhood's mean light, which "
-                   "lifts everything and needs the same surface rejected to avoid a halo. "
-                   "Difference adds only how much brighter the neighbourhood is than the "
-                   "pixel, so a uniformly lit plane contributes nothing and a bright pool "
-                   "beside it does - which is where a flashlight's light actually is.",
-        .labels = {"Additive", "Difference"},
-    },
-    new renodx::utils::settings::Setting{
         .key = "IlAmount",
         .binding = &shader_injection.il_amount,
         .default_value = 30.f,
@@ -1955,13 +2158,14 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "IlRadius",
         .binding = &shader_injection.il_radius,
-        .default_value = 3.f,
+        .default_value = 10.f,
         .label = "GI Radius",
         .section = "Indirect Lighting",
-        .tooltip = "Gather radius as a percentage of screen height. Larger reaches "
-                   "further and bleeds more, at the cost of missing detail close to "
-                   "the pixel.",
-        .max = 20.f,
+        .tooltip = "Gather radius as a percentage of screen height. The projection fixes "
+                   "the scale: 1% of height is about 1.2 cm per metre of depth, so 3% - the "
+                   "old default - reached only 10 cm at 3 m and never found a lamp across "
+                   "the room. 10% reaches 35 cm at 3 m and 1.2 m at 10 m.",
+        .max = 100.f,
         .parse = [](float value) { return value * 0.01f; },
     },
     new renodx::utils::settings::Setting{
@@ -1977,16 +2181,18 @@ renodx::utils::settings::Settings settings = {
         .max = 16.f,
     },
     new renodx::utils::settings::Setting{
-        .key = "IlFalloff",
-        .binding = &shader_injection.il_falloff,
-        .default_value = 1.f,
-        .label = "GI Falloff",
+        .key = "IlMinSamples",
+        .binding = &shader_injection.il_min_samples,
+        .default_value = 2.f,
+        .label = "GI Min Samples",
         .section = "Indirect Lighting",
-        .tooltip = "Exponent of the distance falloff, normalised against the radius. "
-                   "Higher concentrates the gather near the pixel, lower spreads it "
-                   "across the whole radius.",
-        .max = 4.f,
-        .format = "%.1f",
+        .tooltip = "How many of the gather's samples must survive the rejection gates "
+                   "before a pixel adds any bounce. At 1 a single bright neighbour can "
+                   "become the whole term and the image flashes; too high and the term "
+                   "disappears where geometry rejects most of the disk. Two is the "
+                   "compromise that keeps it reading without the single-sample spikes.",
+        .min = 1.f,
+        .max = 16.f,
     },
     new renodx::utils::settings::Setting{
         .key = "IlDebug",
@@ -1999,7 +2205,7 @@ renodx::utils::settings::Settings settings = {
                    "contribution alone, so it can be judged without the scene lighting. "
                    "Source only writes the buffer the gather samples, which answers "
                    "whether a given light is in that buffer at all.",
-        .labels = {"Off", "GI only", "Source only"},
+        .labels = {"Off", "GI only"},
     },
     new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
@@ -2158,6 +2364,34 @@ void OnDestroyDevice(reshade::api::device* device) {
   DestroyLightPasses(device);
   DestroyDepthMipChain(device);
   DestroyAoFallbackView(device);
+  if (direct_light_view.handle != 0) {
+    device->destroy_resource_view(direct_light_view);
+    direct_light_view = {0};
+  }
+  if (direct_light_resource.handle != 0) {
+    device->destroy_resource(direct_light_resource);
+    direct_light_resource = {0};
+  }
+  direct_light_width = 0;
+  direct_light_height = 0;
+  direct_light_format = reshade::api::format::unknown;
+  albedo_view = {0};
+  specular_view = {0};
+  light_target_resource = {0};
+  if (il_bounce_uav.handle != 0) {
+    device->destroy_resource_view(il_bounce_uav);
+    il_bounce_uav = {0};
+  }
+  if (il_bounce_view.handle != 0) {
+    device->destroy_resource_view(il_bounce_view);
+    il_bounce_view = {0};
+  }
+  if (il_bounce_resource.handle != 0) {
+    device->destroy_resource(il_bounce_resource);
+    il_bounce_resource = {0};
+  }
+  il_bounce_width = 0;
+  il_bounce_height = 0;
 }
 
 bool initialized = false;

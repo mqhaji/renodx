@@ -87,12 +87,10 @@ struct ShaderInjectData {
   float il_amount;
   // Gather radius as a fraction of screen height.
   float il_radius;
-  // Samples per pixel, and the exponent of the distance falloff.
+  // Samples per pixel.
   float il_samples;
-  float il_falloff;
-  // 0 adds a fraction of the neighbourhood's mean; 1 adds its difference from this pixel,
-  // which is what lets a bright pool on the same plane contribute without self-feeding.
-  float il_mode;
+  // Contributors required before a pixel is allowed to add any bounce.
+  float il_min_samples;
   // 1 writes the gather's term alone into the light, for judging it.
   float il_debug;
 };
@@ -162,8 +160,7 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_MGSV_IL_AMOUNT shader_injection.il_amount
 #define CUSTOM_MGSV_IL_RADIUS shader_injection.il_radius
 #define CUSTOM_MGSV_IL_SAMPLES shader_injection.il_samples
-#define CUSTOM_MGSV_IL_FALLOFF shader_injection.il_falloff
-#define CUSTOM_MGSV_IL_MODE    shader_injection.il_mode
+#define CUSTOM_MGSV_IL_MIN_SAMPLES shader_injection.il_min_samples
 #define CUSTOM_MGSV_IL_DEBUG  shader_injection.il_debug
 
 #include "../../shaders/renodx.hlsl"
