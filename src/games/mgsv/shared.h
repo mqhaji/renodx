@@ -89,6 +89,12 @@ struct ShaderInjectData {
   float il_radius;
   // Samples per pixel.
   float il_samples;
+  // Full-resolution pixels per gather pixel: 1 at full resolution, 2 at half.
+  float il_scale;
+  // Bilateral kernel radius: 1 gives 3x3, 2 gives 5x5, 3 gives 7x7.
+  float il_filter_radius;
+  // Host-side: 0 runs the gather at full resolution, 1 at half.
+  float il_resolution;
   // Contributors required before a pixel is allowed to add any bounce.
   float il_min_samples;
   // 1 writes the gather's term alone into the light, for judging it.
@@ -161,6 +167,8 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_MGSV_IL_RADIUS shader_injection.il_radius
 #define CUSTOM_MGSV_IL_SAMPLES shader_injection.il_samples
 #define CUSTOM_MGSV_IL_MIN_SAMPLES shader_injection.il_min_samples
+#define CUSTOM_MGSV_IL_SCALE       shader_injection.il_scale
+#define CUSTOM_MGSV_IL_FILTER_RADIUS shader_injection.il_filter_radius
 #define CUSTOM_MGSV_IL_DEBUG  shader_injection.il_debug
 
 #include "../../shaders/renodx.hlsl"
