@@ -5,7 +5,8 @@
 // this shader's vThreadID.y is the column and vThreadID.x is the row.
 //
 // This is a 1:1 port of the retail DXBC; see ssss.hlsli for the algorithm and
-// the bindings. Nothing is injected and nothing is tuned.
+// the bindings. Nothing is injected and nothing is tuned. The addon does not
+// register it - load it through DevKit live shaders to A/B against retail.
 //
 // The tail is the retail translucency term:
 //
