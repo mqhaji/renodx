@@ -251,20 +251,28 @@ the [roadmap](taa/ROADMAP.md) contains only outstanding work.
 
 ## Ambient Occlusion
 
-MGSV's ambient occlusion is a two-pass compute chain. The addon replaces the second pass
-(`0xB2601810`), the one that applies the occlusion to the light, with a visibility-bitmask
-AO written from *Screen Space Indirect Lighting with Visibility Bitmask* (Therrien,
-Levesque, Gilet, The Visual Computer 2023). The first pass (`0x6DAF0C4A`) stays vanilla:
-it gates its input by a fresnel term, so an occlusion value fed into it reached nothing
-but characters.
+The two passes at `0x6DAF0C4A` and `0xB2601810` are the game's screen-space
+**subsurface-scatter** chain, not ambient occlusion. Replacing stage 2 removed the
+scattering that makes skin read as skin, which is the bug this module used to hit. Both
+passes are now left vanilla.
 
-The chain's blur and composite passes do not run in normal play, so nothing downstream
-smooths this pass and the game's own AO is effectively inactive. That is why the shader
-carries its own sample counts, and why `AO Slices` and `AO Steps` are the quality knobs.
+AO runs as its own dispatch, hooked after stage 2: it scales the light buffer the scatter
+pass just wrote, in place, rgb only, with alpha preserved. The scatter has already
+happened when it reads the buffer, so the occlusion cannot remove it, and no retail
+shader is replaced. The pass is a visibility-bitmask AO written from *Screen Space
+Indirect Lighting with Visibility Bitmask* (Therrien, Levesque, Gilet, The Visual
+Computer 2023).
 
-Settings are in the **Ambient Occlusion** section. The replacement decision is host-side,
-so **AO (replaces the game's)** off runs the original shader, making the comparison the
-game's own effect rather than a lookalike.
+Settings are in the **Ambient Occlusion** section. **AO (added after the game's scatter)**
+off skips the dispatch entirely, so the comparison is against the untouched game.
+
+**Status: follows the paper's Algorithm 1 with five recorded deviations — the sector
+measure and the application are the paper's, so the visibility is computed in
+equal-measure sectors and multiplies the light.** The mapping, the deviations and their
+reasons, the verification, and what is still open are in the workspace note
+`MGSV_AmbientOcclusion.md`, beside `vbao.pdf` in the parent repository's `docs/` folder.
+Do not change the back-sample sign, the sector rounding, or the slice weights without
+reading it first — each has already cost a round.
 
 **Status: follows the paper's Algorithm 1 with five recorded deviations — the sector
 measure and the application are the paper's, so the visibility is computed in
