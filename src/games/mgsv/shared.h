@@ -95,6 +95,10 @@ struct ShaderInjectData {
   float il_filter_radius;
   // Host-side: 0 runs the gather at full resolution, 1 at half.
   float il_resolution;
+  // Temporal blend: how much of the accumulated history survives each frame, and the host-side
+  // flag that clears it on the first frame after a reset.
+  float il_history_blend;
+  float il_history_valid;
   // Contributors required before a pixel is allowed to add any bounce.
   float il_min_samples;
   // 1 writes the gather's term alone into the light, for judging it.
@@ -169,6 +173,8 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_MGSV_IL_MIN_SAMPLES shader_injection.il_min_samples
 #define CUSTOM_MGSV_IL_SCALE       shader_injection.il_scale
 #define CUSTOM_MGSV_IL_FILTER_RADIUS shader_injection.il_filter_radius
+#define CUSTOM_MGSV_IL_HISTORY       shader_injection.il_history_blend
+#define CUSTOM_MGSV_IL_HISTORY_VALID shader_injection.il_history_valid
 #define CUSTOM_MGSV_IL_DEBUG  shader_injection.il_debug
 
 #include "../../shaders/renodx.hlsl"
