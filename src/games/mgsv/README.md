@@ -9,7 +9,7 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 - **Motion blur** with HDR-aware rendering
 - **Depth-of-field effects** with an HDR pre-final scene copy
 - **Optional temporal anti-aliasing** with native projection jitter and high-precision velocity
-- **An ambient occlusion replacement** built from the visibility-bitmask paper
+- **Ambient occlusion** from the visibility-bitmask paper, applied after the game's subsurface scatter
 - **User-configurable settings** via the ReShade overlay UI
 
 ---
