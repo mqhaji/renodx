@@ -78,6 +78,23 @@ struct ShaderInjectData {
   // levels only when it is set, so an unbindable chain degrades to the exact fetch instead
   // of reading a fallback texel.
   float ao_depth_mips;
+
+  // Screen-space diffuse gather, dispatched after the AO.
+  //
+  // il_enabled is host-side, like ao_enabled; the rest are read by the gather.
+  float il_enabled;
+  // Fraction of the neighbourhood's mean radiance added to the light.
+  float il_amount;
+  // Gather radius as a fraction of screen height.
+  float il_radius;
+  // Samples per pixel, and the exponent of the distance falloff.
+  float il_samples;
+  float il_falloff;
+  // 0 adds a fraction of the neighbourhood's mean; 1 adds its difference from this pixel,
+  // which is what lets a bright pool on the same plane contribute without self-feeding.
+  float il_mode;
+  // 1 writes the gather's term alone into the light, for judging it.
+  float il_debug;
 };
 
 #ifndef __cplusplus
@@ -141,6 +158,13 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_MGSV_AO_THICKNESS shader_injection.ao_thickness
 #define CUSTOM_MGSV_AO_FADE      shader_injection.ao_fade
 #define CUSTOM_MGSV_AO_DEPTH_MIPS shader_injection.ao_depth_mips
+
+#define CUSTOM_MGSV_IL_AMOUNT shader_injection.il_amount
+#define CUSTOM_MGSV_IL_RADIUS shader_injection.il_radius
+#define CUSTOM_MGSV_IL_SAMPLES shader_injection.il_samples
+#define CUSTOM_MGSV_IL_FALLOFF shader_injection.il_falloff
+#define CUSTOM_MGSV_IL_MODE    shader_injection.il_mode
+#define CUSTOM_MGSV_IL_DEBUG  shader_injection.il_debug
 
 #include "../../shaders/renodx.hlsl"
 
