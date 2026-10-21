@@ -44,8 +44,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
 
       // Out-of-range loads return zero, and alpha zero is rejected below, so the shader does
       // not need the gather target's size.
+      // Alpha carries the history length, not validity, so only a *never written* texel is
+      // rejected. Rejecting anything under half would black out every disocclusion for 15 frames.
       const float4 gathered = bounceBuffer.Load(int3(bounce_pixel, 0));
-      if (gathered.a < 0.5) continue;
+      if (gathered.a <= 0.0) continue;
 
       const int2 q = (int2)floor((float2(bounce_pixel) + 0.5) * scale);
       const float qz = LinearZ(depthBuffer.Load(int3(q, 0)).x);

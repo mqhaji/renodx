@@ -24,18 +24,18 @@ void main(uint3 tid : SV_DispatchThreadID) {
   const float2 fraction = frac(position);
 
   float3 radiance = 0.0;
-  float validity = 0.0;
   [unroll] for (int y = 0; y <= 1; ++y) {
     [unroll] for (int x = 0; x <= 1; ++x) {
       const float4 tap = filteredBuffer.Load(int3(max(base + int2(x, y), int2(0, 0)), 0));
       const float weight = (x != 0 ? fraction.x : 1.0 - fraction.x)
                          * (y != 0 ? fraction.y : 1.0 - fraction.y);
       radiance += tap.rgb * weight;
-      validity += tap.a * weight;
     }
   }
 
-  const float3 bounce = radiance * CUSTOM_MGSV_IL_AMOUNT * saturate(validity);
+  // Alpha is the history length, not validity: it must not attenuate the amount, or the GI
+  // would fade in over the first 32 frames after every disocclusion.
+  const float3 bounce = radiance * CUSTOM_MGSV_IL_AMOUNT;
   const float4 centre = lightOutput.Load(int3(pixel, 0));
   const float3 output = CUSTOM_MGSV_IL_DEBUG > 0.5 ? bounce : centre.rgb + bounce;
   lightOutput[pixel] = float4(output, centre.a);
