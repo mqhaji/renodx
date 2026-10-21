@@ -1,24 +1,30 @@
 // MGSV screen-space diffuse gather - the temporal half.
 //
 // Accumulates the gather across frames so the filter only has to clean the residual instead of
-// carrying all the noise. Reprojection uses the velocity buffer the game already writes for its
-// own temporal reconstruction, decoded exactly as the TAA pass decodes it: MGSV stores a
-// current-minus-previous UV delta in .ba as 0.5 + 0.5 * (ndc * size / 128), so inverting the
-// scale and the NDC mapping gives (encoded * 2 - 1) * 64 / screen_size.
+// carrying all the noise. The gather's noise is temporally zero-mean - which is why DLSS
+// already improves it - so accumulation is the right operation.
 //
-// History is clamped to the current frame's 3x3 neighbourhood before blending. That is the same
-// rejection a TAA uses, and it is what stops a mis-reprojected history - a disocclusion, a fast
-// edge, a camera cut - from smearing across the image.
+// Step 1 of the staged plan: plumbing only. Two history targets alternating as read/write, plus a
+// separate accumulated target for the filter, so the pass never reads what it writes. The alpha
+// channel carries the history length, normalized, which the length debug view shows and which
+// later steps will use to weight the blend.
+//
+// Two debug views exist to verify this without guessing:
+//   2 = |history - current|, which must go near-black when the camera is still
+//   3 = history length, which must climb on a static surface
 
 #include "../shared.h"
 #include "../gbuffer.hlsli"
 
-Texture2D<float4> currentBuffer : register(t0);   // this frame's gather
-Texture2D<float4> historyBuffer : register(t1);   // previous accumulated result
-Texture2D<float4> velocityBuffer : register(t2);  // MGSV camera velocity, .ba
+#define HISTORY_MAX_LENGTH 32.0
+
+Texture2D<float4> currentBuffer : register(t0);  // this frame's gather
+Texture2D<float4> historyBuffer : register(t1);  // previous accumulated result
+Texture2D<float4> velocityBuffer : register(t2); // MGSV camera velocity, .ba
 Texture2D<float4> depthBuffer : register(t3);
 Texture2D<float4> normalBuffer : register(t4);
-RWTexture2D<float4> accumulatedOutput : register(u0);
+RWTexture2D<float4> historyOutput : register(u0);    // next frame's history, always the real result
+RWTexture2D<float4> accumulatedOutput : register(u1); // what the filter reads, may show a probe
 
 [numthreads(8, 8, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
@@ -31,19 +37,18 @@ void main(uint3 tid : SV_DispatchThreadID) {
   if (centre.x >= (int)cBufferWidth || centre.y >= (int)cBufferHeight) return;
 
   const float4 current = currentBuffer.Load(int3(pixel, 0));
-  const float blend = CUSTOM_MGSV_IL_HISTORY * saturate(CUSTOM_MGSV_IL_HISTORY_VALID);
 
   const float4 raw = velocityBuffer.Load(int3(centre, 0));
   const float2 velocity = (raw.ba * 2.0 - 1.0) * 64.0 / float2(cBufferWidth, cBufferHeight);
 
   // Reproject in gather space, then fetch the history with a manual bilinear tap so no sampler
   // is needed in this layout.
-  const float2 uv = (float2(pixel) + 0.5) / float2(gather_size);
+  const float2 uv = (float2(centre) + 0.5) / float2(cBufferWidth, cBufferHeight);
   const float2 previous = (uv - velocity) * float2(gather_size) - 0.5;
   const int2 base = (int2)floor(previous);
   const float2 fraction = frac(previous);
   float3 history = 0.0;
-  float history_valid = 0.0;
+  float history_length = 0.0;
   [unroll] for (int y = 0; y <= 1; ++y) {
     [unroll] for (int x = 0; x <= 1; ++x) {
       const int2 q = clamp(base + int2(x, y), int2(0, 0), gather_size - 1);
@@ -51,7 +56,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
       const float weight = (x != 0 ? fraction.x : 1.0 - fraction.x)
                          * (y != 0 ? fraction.y : 1.0 - fraction.y);
       history += tap.rgb * weight;
-      history_valid += tap.a * weight;
+      history_length += tap.a * HISTORY_MAX_LENGTH * weight;
     }
   }
 
@@ -68,7 +73,27 @@ void main(uint3 tid : SV_DispatchThreadID) {
     }
   }
 
-  const float weight = blend * saturate(history_valid);
-  const float3 result = lerp(current.rgb, clamp(history, minimum, maximum), weight);
-  accumulatedOutput[pixel] = float4(result, current.a);
+  const bool has_history = history_length > 0.5;
+  const float blend = CUSTOM_MGSV_IL_HISTORY * saturate(CUSTOM_MGSV_IL_HISTORY_VALID)
+                    * (has_history ? 1.0 : 0.0);
+  const float3 result = lerp(current.rgb, clamp(history, minimum, maximum), blend);
+
+  const float length = has_history ? min(history_length + 1.0, HISTORY_MAX_LENGTH) : 1.0;
+  const float4 real = float4(result, length / HISTORY_MAX_LENGTH);
+
+  // The history always receives the real result: a probe written into it would poison the next
+  // frame and make the view self-fulfilling.
+  historyOutput[pixel] = real;
+
+  if (CUSTOM_MGSV_IL_DEBUG > 2.5) {
+    // History length: dark where the history was just reset, bright where it has accumulated.
+    // Green marks pixels that saw no history at all - if the whole view is green, the read is
+    // dead, not the accumulation.
+    accumulatedOutput[pixel] = float4(length / HISTORY_MAX_LENGTH, has_history ? 0.0 : 1.0, 0.0, 1.0);
+  } else if (CUSTOM_MGSV_IL_DEBUG > 1.5) {
+    // History delta: must be near-black with a static camera.
+    accumulatedOutput[pixel] = float4(abs(history - current.rgb) * 10.0, 1.0);
+  } else {
+    accumulatedOutput[pixel] = real;
+  }
 }
