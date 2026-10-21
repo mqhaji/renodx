@@ -1334,15 +1334,9 @@ void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* pass,
       reshade::api::descriptor_type::unordered_access_view, 0u);
 
   cmd_list->bind_pipeline(reshade::api::pipeline_stage::all_compute, pass->pipeline);
+  // UAVs before SRVs. Binding an SRV whose resource is still bound as a UAV makes D3D11
+  // silently drop the SRV, so a stale UAV from the previous dispatch would zero every read.
   const std::array<reshade::api::resource_view, 2> targets = {target, second_target};
-  cmd_list->push_descriptors(
-      reshade::api::shader_stage::all_compute, light_pass_layout, 0u,
-      {.table = {0u},
-       .binding = 0u,
-       .array_offset = 0u,
-       .count = static_cast<uint32_t>(sources.size()),
-       .type = reshade::api::descriptor_type::texture_shader_resource_view,
-       .descriptors = sources.data()});
   cmd_list->push_descriptors(
       reshade::api::shader_stage::all_compute, light_pass_layout, 1u,
       {.table = {0u},
@@ -1351,6 +1345,14 @@ void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* pass,
        .count = 2u,
        .type = reshade::api::descriptor_type::texture_unordered_access_view,
        .descriptors = targets.data()});
+  cmd_list->push_descriptors(
+      reshade::api::shader_stage::all_compute, light_pass_layout, 0u,
+      {.table = {0u},
+       .binding = 0u,
+       .array_offset = 0u,
+       .count = static_cast<uint32_t>(sources.size()),
+       .type = reshade::api::descriptor_type::texture_shader_resource_view,
+       .descriptors = sources.data()});
   cmd_list->push_constants(
       reshade::api::shader_stage::all_compute, light_pass_layout, 2u, 0u,
       static_cast<uint32_t>(sizeof(shader_injection) / sizeof(uint32_t)), &shader_injection);
@@ -1448,7 +1450,7 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
           albedo_view,    // t3
           specular_view,  // t4
       };
-      DispatchLightPass(cmd_list, &il_pass, gather_sources, il_bounce_target.uav, il_bounce_target.uav, il_width, il_height);
+      DispatchLightPass(cmd_list, &il_pass, gather_sources, il_bounce_target.uav, il_filtered_target.uav, il_width, il_height);
 
       // Temporal accumulation against the previous result. The velocity view comes from the
       // TAA capture, which is backend-independent and already written by this point in the
@@ -1469,68 +1471,6 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
       il_history_index = write_index;
       il_history_valid = true;
 
-      // TEMPORARY PROBE (step 1 verification): copy the history to host memory every 60th frame
-      // and log its alpha channel, so accumulation is proven with data instead of a debug view.
-      static reshade::api::resource il_probe_staging = {0};
-      static uint32_t il_probe_width = 0;
-      static uint32_t il_probe_height = 0;
-      static uint32_t il_probe_count = 0;
-      if (il_probe_staging.handle == 0 || il_probe_width != il_width || il_probe_height != il_height) {
-        if (il_probe_staging.handle != 0) device->destroy_resource(il_probe_staging);
-        il_probe_staging = {0};
-        const reshade::api::resource_desc probe_desc(
-            il_width, il_height, 1u, 1u, reshade::api::format::r16g16b16a16_float, 1u,
-            reshade::api::memory_heap::cpu_only, reshade::api::resource_usage::copy_dest);
-        if (device->create_resource(probe_desc, nullptr, probe_desc.usage, &il_probe_staging)) {
-          il_probe_width = il_width;
-          il_probe_height = il_height;
-        }
-      } else if (++il_probe_count % 60u == 0u) {
-        reshade::api::subresource_data mapped = {};
-        if (device->map_texture_region(il_probe_staging, 0, nullptr,
-                                       reshade::api::map_access::read_only, &mapped)) {
-          uint16_t minimum = 0x7C00;
-          uint16_t maximum = 0;
-          uint32_t zeros = 0;
-          uint32_t below_half = 0;
-          const auto* bits = static_cast<const uint8_t*>(mapped.data);
-          for (uint32_t y = 0; y < il_height; ++y) {
-            const auto* texel = reinterpret_cast<const uint16_t*>(bits + y * mapped.row_pitch);
-            for (uint32_t x = 0; x < il_width; ++x) {
-              const uint16_t alpha = texel[x * 4 + 3];
-              if (alpha < minimum) minimum = alpha;
-              if (alpha > maximum) maximum = alpha;
-              if (alpha == 0) ++zeros;
-              if (alpha < 0x3800) ++below_half;  // 0.5 in half precision
-            }
-          }
-          // Bottom third of the image is the foreground in every camera position.
-          uint16_t foreground_min = 0x7C00;
-          uint16_t foreground_max = 0;
-          for (uint32_t y = il_height * 2 / 3; y < il_height; ++y) {
-            const auto* texel = reinterpret_cast<const uint16_t*>(bits + y * mapped.row_pitch);
-            for (uint32_t x = 0; x < il_width; ++x) {
-              if (texel[x * 4 + 3] < foreground_min) foreground_min = texel[x * 4 + 3];
-              if (texel[x * 4 + 3] > foreground_max) foreground_max = texel[x * 4 + 3];
-            }
-          }
-          device->unmap_texture_region(il_probe_staging, 0);
-          char line[256] = {};
-          std::snprintf(line, sizeof(line),
-                        "mgsv: IL history alpha (debug %.0f) min %04x max %04x zero %u below-half %u "
-                        "fg %04x..%04x of %u",
-                        shader_injection.il_debug, minimum, maximum, zeros, below_half,
-                        foreground_min, foreground_max, il_width * il_height);
-          reshade::log::message(reshade::log::level::info, line);
-        }
-        cmd_list->barrier(il_history_targets[write_index].resource,
-                          reshade::api::resource_usage::unordered_access,
-                          reshade::api::resource_usage::copy_source);
-        cmd_list->copy_resource(il_history_targets[write_index].resource, il_probe_staging);
-        cmd_list->barrier(il_history_targets[write_index].resource,
-                          reshade::api::resource_usage::copy_source,
-                          reshade::api::resource_usage::unordered_access);
-      }
 
       const std::array<reshade::api::resource_view, 5> filter_sources = {
           il_accumulated_target.view,  // t0
@@ -1539,7 +1479,7 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
           GetAoFallbackView(cmd_list), // t3, unused
           GetAoFallbackView(cmd_list), // t4, unused
       };
-      DispatchLightPass(cmd_list, &il_composite_pass, filter_sources, il_filtered_target.uav, il_filtered_target.uav, il_width, il_height);
+      DispatchLightPass(cmd_list, &il_composite_pass, filter_sources, il_filtered_target.uav, il_bounce_target.uav, il_width, il_height);
 
       const std::array<reshade::api::resource_view, 5> add_sources = {
           il_filtered_target.view,     // t0
@@ -1548,7 +1488,68 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
           GetAoFallbackView(cmd_list), // t3, unused
           GetAoFallbackView(cmd_list), // t4, unused
       };
-      DispatchLightPass(cmd_list, &il_add_pass, add_sources, frame.light, frame.light, frame.width, frame.height);
+      DispatchLightPass(cmd_list, &il_add_pass, add_sources, frame.light, il_accumulated_target.uav, frame.width, frame.height);
+
+      // TEMPORARY PROBE: capture the three temporal targets once a second and log their channel
+      // ranges, so a value that dies can be located instead of guessed at.
+      static reshade::api::resource il_probe_staging[4] = {};
+      static uint32_t il_probe_width = 0;
+      static uint32_t il_probe_height = 0;
+      static uint32_t il_probe_count = 0;
+      const std::array<reshade::api::resource, 4> il_probe_sources = {
+          il_bounce_target.resource,
+          il_history_targets[write_index].resource,
+          il_accumulated_target.resource,
+          il_filtered_target.resource,
+      };
+      if (il_probe_staging[0].handle == 0 || il_probe_width != il_width
+          || il_probe_height != il_height) {
+        for (auto& staging : il_probe_staging) {
+          if (staging.handle != 0) device->destroy_resource(staging);
+          const reshade::api::resource_desc probe_desc(
+              il_width, il_height, 1u, 1u, reshade::api::format::r16g16b16a16_float, 1u,
+              reshade::api::memory_heap::cpu_only, reshade::api::resource_usage::copy_dest);
+          device->create_resource(probe_desc, nullptr, probe_desc.usage, &staging);
+        }
+        il_probe_width = il_width;
+        il_probe_height = il_height;
+      } else if (++il_probe_count % 60u == 0u) {
+        for (uint32_t index = 0; index < 4; ++index) {
+          reshade::api::subresource_data mapped = {};
+          if (device->map_texture_region(il_probe_staging[index], 0, nullptr,
+                                         reshade::api::map_access::read_only, &mapped)) {
+            uint16_t minimum[4] = {0x7C00, 0x7C00, 0x7C00, 0x7C00};
+            uint16_t maximum[4] = {};
+            const auto* bits = static_cast<const uint8_t*>(mapped.data);
+            for (uint32_t y = 0; y < il_height; ++y) {
+              const auto* texel = reinterpret_cast<const uint16_t*>(bits + y * mapped.row_pitch);
+              for (uint32_t x = 0; x < il_width; ++x) {
+                for (uint32_t channel = 0; channel < 4; ++channel) {
+                  const uint16_t value = texel[x * 4 + channel];
+                  if (value < minimum[channel]) minimum[channel] = value;
+                  if (value > maximum[channel]) maximum[channel] = value;
+                }
+              }
+            }
+            device->unmap_texture_region(il_probe_staging[index], 0);
+            char line[256] = {};
+            std::snprintf(line, sizeof(line),
+                          "mgsv: IL probe %u (debug %.0f) r %04x..%04x g %04x..%04x b %04x..%04x "
+                          "a %04x..%04x view %llx",
+                          index, shader_injection.il_debug,
+                          minimum[0], maximum[0], minimum[1], maximum[1],
+                          minimum[2], maximum[2], minimum[3], maximum[3], frame.depth.handle);
+            reshade::log::message(reshade::log::level::info, line);
+          }
+          cmd_list->barrier(il_probe_sources[index],
+                            reshade::api::resource_usage::unordered_access,
+                            reshade::api::resource_usage::copy_source);
+          cmd_list->copy_resource(il_probe_sources[index], il_probe_staging[index]);
+          cmd_list->barrier(il_probe_sources[index],
+                            reshade::api::resource_usage::copy_source,
+                            reshade::api::resource_usage::unordered_access);
+        }
+      }
     }
   }
 
@@ -1562,7 +1563,7 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
         GetAoFallbackView(cmd_list), // t3, unused by the AO
         GetAoFallbackView(cmd_list), // t4, unused by the AO
     };
-    DispatchLightPass(cmd_list, &ao_pass, sources, frame.light, frame.light, frame.width, frame.height);
+    DispatchLightPass(cmd_list, &ao_pass, sources, frame.light, il_accumulated_target.uav, frame.width, frame.height);
   }
 }
 
