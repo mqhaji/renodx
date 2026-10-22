@@ -10,6 +10,15 @@ Copy-Item build.vs\Release\renodx-mgsv.addon64 "C:\Steam\steamapps\common\MGS_TP
 
 Debug builds abort on MSVC iterator asserts (pre-existing); verify with Release.
 
+## Ambient occlusion
+
+- **AO Resolution** [Half] - the occlusion is computed at half resolution and resolved with a
+  depth-joint bilateral. Full is available to compare.
+- **AO Temporal** [on] - accumulates the occlusion across frames. The pass rotates its sample
+  pattern every frame, so the residual averages out; with it off the frame is written through
+  unchanged.
+- **AO History** [90] - ceiling on the previous frame's weight, `min(this, 1 - 1/length)`.
+
 ## Indirect lighting
 
 Design and measured behaviour: `docs/MGSV_IndirectLighting.md`.
@@ -28,6 +37,10 @@ Settings that matter (defaults in brackets):
   Full resolution; at Quarter the difference is small.
 
 ### Verification
+
+For the AO: with a still camera, toggling **AO Temporal** should not change the image — the
+accumulated and the raw pass converge to the same contact shadows. Pan or walk and no occlusion
+should trail behind the character; if it does, the depth/normal rejection is failing.
 
 1. Load into gameplay with the camera still. Open **GI Debug -> History length**: the frame should
    be bright red nearly everywhere, with thin green lines only on silhouettes. Green fills a whole
