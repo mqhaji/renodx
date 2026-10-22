@@ -42,7 +42,7 @@ Texture2D<float4> normalBuffer : register(t1);
 // The addon's depth mip chain: each texel is the nearest of the four below it. Only read
 // when the injection says the chain exists for this dispatch.
 Texture2D<float4> depthMips : register(t2);
-RWTexture2D<float4> resultBuffer : register(u0);
+RWTexture2D<float4> aoOutput : register(u0);
 
 
 // Sectors [start, start + width) of the bit field. A zero width must produce an empty
@@ -125,16 +125,21 @@ float RemapHorizonCdfCos(float horizonCos, float sideSign, float normalAngle, fl
 [numthreads(8, 8, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
   // This pass owns its dispatch, so the thread id is the pixel directly: no
-  // transposed retail tiling to reproduce here.
-  const uint2 p = tid.xy;
-  if (p.x >= cBufferWidth || p.y >= cBufferHeight) return;
+  // transposed retail tiling to reproduce here. The pixel is in AO space, which may be
+  // coarser than the frame; everything below reads at full resolution through `p`.
+  const uint2 ao_pixel = tid.xy;
+  const float scale = max(CUSTOM_MGSV_AO_SCALE, 1.0);
+  const int2 ao_size = int2(float2(cBufferWidth, cBufferHeight) / scale);
+  if (ao_pixel.x >= (uint)ao_size.x || ao_pixel.y >= (uint)ao_size.y) return;
 
-  // Typed UAV load: the scattered light the retail stage just wrote.
-  const float4 light = resultBuffer.Load(int3(p, 0));
+  const int2 p = (int2)floor((float2(ao_pixel) + 0.5) * scale);
+  if (p.x >= (int)cBufferWidth || p.y >= (int)cBufferHeight) return;
 
   const float depth = depthBuffer.Load(int3(p, 0)).x;
   const float z     = LinearZ(depth);
   if (!(z > 0.0) || z > 1.0e6) {
+    // Nothing to occlude. Writing still matters: a skipped texel keeps whatever it held.
+    aoOutput[ao_pixel] = float4(1.0, 1.0, 1.0, 1.0);
     return;
   }
 
@@ -159,6 +164,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
   const float fade = saturate(1.0 - depth * depth)
                    * saturate(exp2(-(depth / max(fadeDepth, 1e-4)) * (depth / max(fadeDepth, 1e-4))));
   if (fade < 0.001) {
+    aoOutput[ao_pixel] = float4(1.0, 1.0, 1.0, 1.0);
     return;
   }
 
@@ -365,7 +371,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
   const float occlusionRatio = saturate(occlusion / max(sliceWeightSum, 1e-4));
 
   // The application, per the paper (sections 3.2 and 3.3): the un-occluded fraction
-  // multiplies the light.
+  // multiplies the light - but not here. This pass writes the fraction itself, so it can run
+  // at a coarser resolution than the light it will be applied to.
   //
   // Amount scales the occlusion rather than lerping toward it: 1 is the paper's occlusion
   // and above 1 over-darkens, which is what makes the top of the slider do anything. The
@@ -376,9 +383,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
   // this buffer does not separate.
   const float occlusionApplied = saturate(occlusionRatio * amount) * fade;
 
-  // Alpha is written through from the light, not set to 1. The retail chain reads the
-  // light's alpha (0.04 at the shading stage) as its "this pixel was shaded" flag, and
-  // overwriting it is what broke skin scattering when the scatter pass was replaced.
-  // This pass only scales rgb, so the flag survives untouched.
-  resultBuffer[p] = float4(light.rgb * (1.0 - occlusionApplied), light.a);
+  // The un-occluded fraction, resolved to full resolution by the joint-bilateral upsample in
+  // the AO resolve. That pass is what multiplies the light, and it preserves the light's
+  // alpha, which the retail chain reads as its "this pixel was shaded" flag.
+  aoOutput[ao_pixel] = float4(1.0 - occlusionApplied, 1.0 - occlusionApplied,
+                              1.0 - occlusionApplied, 1.0);
 }

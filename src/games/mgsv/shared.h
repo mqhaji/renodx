@@ -78,7 +78,11 @@ struct ShaderInjectData {
   // levels only when it is set, so an unbindable chain degrades to the exact fetch instead
   // of reading a fallback texel.
   float ao_depth_mips;
-
+  // Host-side: how many screen pixels one AO pixel covers (1 = full, 2 = half). The factor is
+  // resolved back to full resolution by a depth-joint upsample.
+  float ao_scale;
+  // Host-side: 0 = full, 1 = half.
+  float ao_resolution;
   // Screen-space diffuse gather, dispatched after the AO.
   //
   // il_enabled is host-side, like ao_enabled; the rest are read by the gather.
@@ -168,6 +172,7 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_MGSV_AO_THICKNESS shader_injection.ao_thickness
 #define CUSTOM_MGSV_AO_FADE      shader_injection.ao_fade
 #define CUSTOM_MGSV_AO_DEPTH_MIPS shader_injection.ao_depth_mips
+#define CUSTOM_MGSV_AO_SCALE      shader_injection.ao_scale
 
 #define CUSTOM_MGSV_IL_AMOUNT shader_injection.il_amount
 #define CUSTOM_MGSV_IL_RADIUS shader_injection.il_radius
