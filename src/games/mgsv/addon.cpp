@@ -1520,22 +1520,38 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
       il_history_valid = true;
 
 
-      const std::array<reshade::api::resource_view, 7> filter_sources = {
-          il_accumulated_target.view,  // t0
-          frame.depth,                 // t1
-          frame.normal,                // t2
-          il_moments_targets[il_history_index].view, // t3, has-signal test
-          GetAoFallbackView(cmd_list), // t4, unused
-          GetAoFallbackView(cmd_list), // t5, unused
-          GetAoFallbackView(cmd_list), // t6, unused
-      };
-      DispatchLightPass(cmd_list, &il_composite_pass, filter_sources, il_filtered_target.uav,
-                        il_bounce_target.uav, il_history_aux_targets[write_index ^ 1u].uav,
-                        il_history_targets[write_index ^ 1u].uav, il_width, il_height);
+      // A-trous: stride 1, 2, 4 per iteration. The targets alternate so no dispatch reads what
+      // it writes, and il_bounce_target stays the gather so the host probe keeps measuring it.
+      const uint32_t filter_passes =
+          static_cast<uint32_t>(std::clamp(shader_injection.il_filter_radius, 1.f, 3.f));
+      reshade::api::resource_view filter_input = il_accumulated_target.view;
+      for (uint32_t step = 0; step < filter_passes; ++step) {
+        const auto filter_output = (step % 2) == 0 ? il_filtered_target.uav : il_accumulated_target.uav;
+        const std::array<reshade::api::resource_view, 7> filter_sources = {
+            filter_input,                              // t0
+            frame.depth,                               // t1
+            frame.normal,                              // t2
+            il_moments_targets[il_history_index].view, // t3, has-signal and variance
+            GetAoFallbackView(cmd_list),               // t4, unused
+            GetAoFallbackView(cmd_list),               // t5, unused
+            GetAoFallbackView(cmd_list),               // t6, unused
+        };
+        shader_injection.il_filter_step = static_cast<float>(step);
+        DispatchLightPass(cmd_list, &il_composite_pass, filter_sources, filter_output,
+                          il_bounce_target.uav, il_history_aux_targets[il_history_index].uav,
+                          il_history_targets[il_history_index].uav, il_width, il_height);
+        filter_input = (step % 2) == 0 ? il_filtered_target.view : il_accumulated_target.view;
+      }
+      shader_injection.il_filter_step = 0.f;
+      // An even pass count ends in the accumulate target, so the resolve and the probe follow
+      // whichever target holds the last iteration instead of assuming it is il_filtered_target.
+      const bool filtered_in_filtered = (filter_passes % 2) != 0;
+      const auto il_filtered_view = filtered_in_filtered ? il_filtered_target.view
+                                                         : il_accumulated_target.view;
 
       const std::array<reshade::api::resource_view, 7> add_sources = {
-          il_filtered_target.view,     // t0
-          GetAoFallbackView(cmd_list), // t1, unused
+          il_filtered_view,            // t0
+          frame.depth,                 // t1, joint bilateral upsample
           GetAoFallbackView(cmd_list), // t2, unused
           GetAoFallbackView(cmd_list), // t3, unused
           GetAoFallbackView(cmd_list), // t4, unused
@@ -1562,7 +1578,7 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
           il_bounce_target.resource,
           il_history_targets[write_index ^ 1u].resource,  // the history this frame reads
           il_accumulated_target.resource,
-          il_filtered_target.resource,
+          filtered_in_filtered ? il_filtered_target.resource : il_accumulated_target.resource,
           il_history_aux_targets[write_index].resource,
           il_moments_targets[write_index].resource,
       };
@@ -2545,12 +2561,12 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "IlFilterRadius",
         .binding = &shader_injection.il_filter_radius,
-        .default_value = 2.f,
-        .label = "GI Filter Radius",
+        .default_value = 3.f,
+        .label = "GI Denoise Passes",
         .section = "Indirect Lighting",
-        .tooltip = "Bilateral kernel radius in pixels: 1 is 3x3, 2 is 5x5, 3 is 7x7. The "
-                   "filter is what turns the gather's grain into light, so this trades "
-                   "smoothness against cost.",
+        .tooltip = "How many a-trous iterations the denoiser runs: 1, 2 or 3, with stride 1, 2 and "
+                   "4. Each one doubles the reach, so 3 covers a 16-pixel radius. It is the main "
+                   "smoothness-versus-cost control.",
         .min = 1.f,
         .max = 3.f,
     },
