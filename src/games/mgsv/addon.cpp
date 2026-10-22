@@ -1526,9 +1526,14 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
       // TEMPORARY PROBE: capture the four temporal targets once a second, log their channel
       // ranges, and measure |history - gather| so reprojection quality is a number, not an
       // impression. Removed once the temporal stage is proven.
+      // Only a 256x256 window is read back. A full-frame copy stalls the GPU for tens of
+      // milliseconds and shows up as a visible hitch once a second.
+      constexpr uint32_t IL_PROBE_SIZE = 256;
       static reshade::api::resource il_probe_staging[4] = {};
       static uint32_t il_probe_width = 0;
       static uint32_t il_probe_height = 0;
+      static uint32_t il_probe_x = 0;
+      static uint32_t il_probe_y = 0;
       static uint32_t il_probe_count = 0;
       const std::array<reshade::api::resource, 4> il_probe_sources = {
           il_bounce_target.resource,
@@ -1536,17 +1541,21 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
           il_accumulated_target.resource,
           il_filtered_target.resource,
       };
-      if (il_probe_staging[0].handle == 0 || il_probe_width != il_width
-          || il_probe_height != il_height) {
+      const uint32_t probe_width = il_width < IL_PROBE_SIZE ? il_width : IL_PROBE_SIZE;
+      const uint32_t probe_height = il_height < IL_PROBE_SIZE ? il_height : IL_PROBE_SIZE;
+      if (il_probe_staging[0].handle == 0 || il_probe_width != probe_width
+          || il_probe_height != probe_height) {
         for (auto& staging : il_probe_staging) {
           if (staging.handle != 0) device->destroy_resource(staging);
           const reshade::api::resource_desc probe_desc(
-              il_width, il_height, 1u, 1u, reshade::api::format::r16g16b16a16_float, 1u,
+              probe_width, probe_height, 1u, 1u, reshade::api::format::r16g16b16a16_float, 1u,
               reshade::api::memory_heap::cpu_only, reshade::api::resource_usage::copy_dest);
           device->create_resource(probe_desc, nullptr, probe_desc.usage, &staging);
         }
-        il_probe_width = il_width;
-        il_probe_height = il_height;
+        il_probe_width = probe_width;
+        il_probe_height = probe_height;
+        il_probe_x = (il_width - probe_width) / 2;
+        il_probe_y = (il_height - probe_height) / 2;
       } else if (++il_probe_count % 60u == 0u) {
         std::array<reshade::api::subresource_data, 4> mapped = {};
         for (uint32_t index = 0; index < 4; ++index) {
@@ -1557,9 +1566,9 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
           uint16_t minimum[4] = {0x7C00, 0x7C00, 0x7C00, 0x7C00};
           uint16_t maximum[4] = {};
           const auto* bits = static_cast<const uint8_t*>(mapped[index].data);
-          for (uint32_t y = 0; y < il_height; ++y) {
+          for (uint32_t y = 0; y < il_probe_height; ++y) {
             const auto* texel = reinterpret_cast<const uint16_t*>(bits + y * mapped[index].row_pitch);
-            for (uint32_t x = 0; x < il_width; ++x) {
+            for (uint32_t x = 0; x < il_probe_width; ++x) {
               for (uint32_t channel = 0; channel < 4; ++channel) {
                 const uint16_t value = texel[x * 4 + channel];
                 if (value < minimum[channel]) minimum[channel] = value;
@@ -1588,12 +1597,12 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
             double gather_mean = 0.0;
             double delta_mean[3] = {};
             uint32_t noisy = 0;
-            for (uint32_t y = 0; y < il_height; ++y) {
+            for (uint32_t y = 0; y < il_probe_height; ++y) {
               const auto* gather = reinterpret_cast<const uint16_t*>(
                   static_cast<const uint8_t*>(mapped[0].data) + y * mapped[0].row_pitch);
               const auto* history = reinterpret_cast<const uint16_t*>(
                   static_cast<const uint8_t*>(mapped[1].data) + y * mapped[1].row_pitch);
-              for (uint32_t x = 0; x < il_width; ++x) {
+              for (uint32_t x = 0; x < il_probe_width; ++x) {
                 for (uint32_t channel = 0; channel < 3; ++channel) {
                   delta_mean[channel] += std::abs(HalfToFloat(gather[x * 4 + channel])
                                                   - HalfToFloat(history[x * 4 + channel]));
@@ -1604,7 +1613,7 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
                 }
               }
             }
-            const double texels = static_cast<double>(il_width) * il_height;
+            const double texels = static_cast<double>(il_probe_width) * il_probe_height;
             device->unmap_texture_region(il_probe_staging[1], 0);
             device->unmap_texture_region(il_probe_staging[0], 0);
             char line[256] = {};
@@ -1628,12 +1637,12 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
             double max_y = 0.0;
             std::vector<float> corrected;
             std::vector<float> raw;
-            corrected.reserve((il_width / 8 + 1) * (il_height / 8 + 1));
+            corrected.reserve((il_probe_width / 8 + 1) * (il_probe_height / 8 + 1));
             raw.reserve(corrected.capacity());
-            for (uint32_t y = 0; y < il_height; ++y) {
+            for (uint32_t y = 0; y < il_probe_height; ++y) {
               const auto* texel = reinterpret_cast<const uint16_t*>(
                   static_cast<const uint8_t*>(mapped[2].data) + y * mapped[2].row_pitch);
-              for (uint32_t x = 0; x < il_width; ++x) {
+              for (uint32_t x = 0; x < il_probe_width; ++x) {
                 const double offset_x = HalfToFloat(texel[x * 4 + 0]);
                 const double offset_y = HalfToFloat(texel[x * 4 + 1]);
                 sum_x += offset_x;
@@ -1646,7 +1655,7 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
                 }
               }
             }
-            const double texels = static_cast<double>(il_width) * il_height;
+            const double texels = static_cast<double>(il_probe_width) * il_probe_height;
             const auto median = [](std::vector<float>& values) {
               if (values.empty()) return 0.f;
               const auto middle = values.begin() + static_cast<ptrdiff_t>(values.size() / 2);
@@ -1672,10 +1681,17 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
           }
         }
         for (uint32_t index = 0; index < 4; ++index) {
+          const reshade::api::subresource_box source_box(
+              il_probe_x, il_probe_y, 0u, il_probe_x + il_probe_width,
+              il_probe_y + il_probe_height, 1u);
+          const reshade::api::subresource_box dest_box(
+              0u, 0u, 0u, il_probe_width, il_probe_height, 1u);
           cmd_list->barrier(il_probe_sources[index],
                             reshade::api::resource_usage::unordered_access,
                             reshade::api::resource_usage::copy_source);
-          cmd_list->copy_resource(il_probe_sources[index], il_probe_staging[index]);
+          cmd_list->copy_texture_region(il_probe_sources[index], 0u, &source_box,
+                                        il_probe_staging[index], 0u, &dest_box,
+                                        reshade::api::filter_mode::min_mag_mip_point);
           cmd_list->barrier(il_probe_sources[index],
                             reshade::api::resource_usage::copy_source,
                             reshade::api::resource_usage::unordered_access);
