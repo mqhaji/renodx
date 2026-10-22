@@ -18,7 +18,7 @@ Texture2D<float4> bounceBuffer : register(t0);  // radiance to filter
 Texture2D<float4> depthBuffer : register(t1);
 Texture2D<float4> normalBuffer : register(t2);
 // x = mean luminance (zero means never sampled), z = variance, w = relative variance.
-Texture2D<float4> momentsBuffer : register(t3);
+Texture2D<float2> momentsBuffer : register(t3);
 RWTexture2D<float4> filteredOutput : register(u0);
 
 #define FILTER_MAX_RADIANCE 1.0e4
@@ -50,12 +50,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
   const float3 N = DecodeNormal(normalBuffer.Load(int3(centre, 0)).xyz);
   const float inv_z = 1.0 / z;
 
-  const float4 centre_moments = momentsBuffer.Load(int3(pixel, 0));
+  const float2 centre_moments = momentsBuffer.Load(int3(pixel, 0)).xy;
   const float centre_luminance = Luminance(centre_sample.rgb);
+  const float centre_variance = max(centre_moments.y - centre_moments.x * centre_moments.x, 0.0);
   // A floor on the noise estimate: on a clean surface the measured variance can be small enough
   // that the weight would reject every neighbour and nothing would be smoothed at all.
   const float sigma_luminance =
-      sqrt(max(centre_moments.z, 0.0)) + 0.02 + 0.1 * abs(centre_luminance);
+      sqrt(centre_variance) + 0.02 + 0.1 * abs(centre_luminance);
 
   const int stride = 1 << (int)clamp(CUSTOM_MGSV_IL_FILTER_STEP, 0.0, 4.0);
   float3 sum = 0.0;

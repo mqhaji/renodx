@@ -28,11 +28,11 @@ Texture2D<float4> normalBuffer : register(t4);
 Texture2D<float4> historyAuxBuffer : register(t5);
 // Running luminance moments. xy = mean and mean-square, so the variance the denoiser needs is
 // m2 - m1^2 at any pixel, without storing a second history of the signal itself.
-Texture2D<float4> momentsBuffer : register(t6);
+Texture2D<float2> momentsBuffer : register(t6);
 RWTexture2D<float4> historyOutput : register(u0);    // next frame's history, always the real result
 RWTexture2D<float4> accumulatedOutput : register(u1); // what the filter reads, may show a probe
 RWTexture2D<float4> historyAuxOutput : register(u2);  // z, normal.xy, length for the next frame
-RWTexture2D<float4> momentsOutput : register(u3);     // m1, m2, variance
+RWTexture2D<float2> momentsOutput : register(u3);     // m1, m2
 
 [numthreads(8, 8, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
@@ -158,7 +158,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
   // Brightness-relative spread: absolute variance is meaningless across a dark corridor and a
   // lit wall, and the a-trous needs a weight that behaves the same in both.
   const float relative_variance = variance / max(m1 * m1, 1.0e-6);
-  momentsOutput[pixel] = float4(m1, m2, variance, relative_variance);
+  // Only the two moments are stored; the variance is derived where it is needed. The target is
+  // RG16F for that reason, which halves its bandwidth.
+  momentsOutput[pixel] = float2(m1, m2);
 
   if (CUSTOM_MGSV_IL_DEBUG > 4.5) {
     // Variance: black is a clean average, mid grey is a 100% relative spread, white is worse.
