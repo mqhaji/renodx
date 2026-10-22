@@ -2183,11 +2183,14 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "AoSteps",
         .binding = &shader_injection.ao_steps,
-        .default_value = 6.f,
+        .default_value = 2.f,
         .label = "AO Steps",
         .section = "Ambient Occlusion",
-        .tooltip = "Samples taken along each slice, per side, on an exponential "
-                   "distribution that is dense near the pixel and sparse further out.",
+        .tooltip = "Samples taken along each slice, per side, on an exponential distribution "
+                   "that is dense near the pixel and sparse further out. Two is enough now that "
+                   "the pattern rotates every frame and the result accumulates: the temporal "
+                   "history supplies the density that more steps used to buy, at a third of the "
+                   "per-frame cost.",
         .max = 20.f,
     },
     new renodx::utils::settings::Setting{
