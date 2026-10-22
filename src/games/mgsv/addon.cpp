@@ -2038,15 +2038,12 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "FxScreenSpaceShadowReach",
         .binding = &shader_injection.ss_shadow_reach,
-        .default_value = 2.f,
+        .default_value = 4.f,
         .label = "Screen-Space Shadow Reach",
         .section = "Shadows",
-        .tooltip = "How far the ray travels, as a percentage of screen height, so "
-                   "the world distance grows with depth: 2.5% is about 54 px at "
-                   "2160p, and reaches 29 cm at 10 m, 1.2 m at 40 m and 2.9 m at "
-                   "100 m. That growth is what lets a tree shade the ground under "
-                   "it at range. Raise it to catch more, at the cost of the ray "
-                   "crossing geometry that is merely nearby.",
+        .tooltip = "How far the shadow ray travels, as a percentage of screen height. Higher "
+                   "reaches casters further away, at the risk of the ray crossing geometry that "
+                   "is only nearby.",
         .max = 10.f,
         .parse = [](float value) { return value * 0.02f; },
     },
