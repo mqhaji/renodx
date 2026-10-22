@@ -89,6 +89,8 @@ struct ShaderInjectData {
   // Fraction of the previous frame kept, and 1 only while the history matches this frame.
   float ao_history_blend;
   float ao_history_valid;
+  // 1 replaces the resolved factor with the history length, for judging convergence.
+  float ao_debug;
   // Screen-space diffuse gather, dispatched after the AO.
   //
   // il_enabled is host-side, like ao_enabled; the rest are read by the gather.
@@ -182,6 +184,7 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_MGSV_AO_TEMPORAL   shader_injection.ao_temporal
 #define CUSTOM_MGSV_AO_HISTORY    shader_injection.ao_history_blend
 #define CUSTOM_MGSV_AO_HISTORY_VALID shader_injection.ao_history_valid
+#define CUSTOM_MGSV_AO_DEBUG      shader_injection.ao_debug
 
 #define CUSTOM_MGSV_IL_AMOUNT shader_injection.il_amount
 #define CUSTOM_MGSV_IL_RADIUS shader_injection.il_radius
