@@ -13,9 +13,12 @@
 #include <embed/shaders.h>
 
 #include <d3d11.h>
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -1110,6 +1113,36 @@ struct IlTarget {
 };
 IlTarget il_bounce_target;
 IlTarget il_filtered_target;
+
+// TEMPORARY: half decode for the host-side probe, removed once the temporal stage is proven.
+float HalfToFloat(uint16_t value) {
+  const uint32_t sign = static_cast<uint32_t>(value & 0x8000u) << 16;
+  uint32_t exponent = (value >> 10) & 0x1Fu;
+  uint32_t mantissa = value & 0x3FFu;
+  if (exponent == 0) {
+    if (mantissa == 0) {
+      float zero;
+      const uint32_t bits = sign;
+      std::memcpy(&zero, &bits, sizeof(zero));
+      return zero;
+    }
+    exponent = 127 - 14;
+    while ((mantissa & 0x400u) == 0) {
+      mantissa <<= 1;
+      --exponent;
+    }
+    mantissa &= 0x3FFu;
+  } else if (exponent == 31) {
+    exponent = 255;
+  } else {
+    exponent = exponent - 15 + 127;
+  }
+  float result;
+  const uint32_t bits = sign | (exponent << 23) | (mantissa << 13);
+  std::memcpy(&result, &bits, sizeof(result));
+  return result;
+}
+
 // Ping-ponged accumulation. The frame reads one and writes the other, then swaps.
 IlTarget il_history_targets[2];
 IlTarget il_accumulated_target;
@@ -1490,8 +1523,9 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
       };
       DispatchLightPass(cmd_list, &il_add_pass, add_sources, frame.light, il_accumulated_target.uav, frame.width, frame.height);
 
-      // TEMPORARY PROBE: capture the three temporal targets once a second and log their channel
-      // ranges, so a value that dies can be located instead of guessed at.
+      // TEMPORARY PROBE: capture the four temporal targets once a second, log their channel
+      // ranges, and measure |history - gather| so reprojection quality is a number, not an
+      // impression. Removed once the temporal stage is proven.
       static reshade::api::resource il_probe_staging[4] = {};
       static uint32_t il_probe_width = 0;
       static uint32_t il_probe_height = 0;
@@ -1514,33 +1548,122 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
         il_probe_width = il_width;
         il_probe_height = il_height;
       } else if (++il_probe_count % 60u == 0u) {
+        std::array<reshade::api::subresource_data, 4> mapped = {};
         for (uint32_t index = 0; index < 4; ++index) {
-          reshade::api::subresource_data mapped = {};
-          if (device->map_texture_region(il_probe_staging[index], 0, nullptr,
-                                         reshade::api::map_access::read_only, &mapped)) {
-            uint16_t minimum[4] = {0x7C00, 0x7C00, 0x7C00, 0x7C00};
-            uint16_t maximum[4] = {};
-            const auto* bits = static_cast<const uint8_t*>(mapped.data);
+          if (!device->map_texture_region(il_probe_staging[index], 0, nullptr,
+                                          reshade::api::map_access::read_only, &mapped[index])) {
+            continue;
+          }
+          uint16_t minimum[4] = {0x7C00, 0x7C00, 0x7C00, 0x7C00};
+          uint16_t maximum[4] = {};
+          const auto* bits = static_cast<const uint8_t*>(mapped[index].data);
+          for (uint32_t y = 0; y < il_height; ++y) {
+            const auto* texel = reinterpret_cast<const uint16_t*>(bits + y * mapped[index].row_pitch);
+            for (uint32_t x = 0; x < il_width; ++x) {
+              for (uint32_t channel = 0; channel < 4; ++channel) {
+                const uint16_t value = texel[x * 4 + channel];
+                if (value < minimum[channel]) minimum[channel] = value;
+                if (value > maximum[channel]) maximum[channel] = value;
+              }
+            }
+          }
+          device->unmap_texture_region(il_probe_staging[index], 0);
+          char line[256] = {};
+          std::snprintf(line, sizeof(line),
+                        "mgsv: IL probe %u (debug %.0f) r %04x..%04x g %04x..%04x b %04x..%04x "
+                        "a %04x..%04x",
+                        index, shader_injection.il_debug,
+                        minimum[0], maximum[0], minimum[1], maximum[1],
+                        minimum[2], maximum[2], minimum[3], maximum[3]);
+          reshade::log::message(reshade::log::level::info, line);
+        }
+
+        // |history - gather| on the same frame: near zero means the reprojection lands on the
+        // sample it came from, which is exactly what a static camera must produce.
+        if (mapped[0].data != nullptr && mapped[1].data != nullptr) {
+          if (device->map_texture_region(il_probe_staging[0], 0, nullptr,
+                                         reshade::api::map_access::read_only, &mapped[0])
+              && device->map_texture_region(il_probe_staging[1], 0, nullptr,
+                                            reshade::api::map_access::read_only, &mapped[1])) {
+            double gather_mean = 0.0;
+            double delta_mean[3] = {};
+            uint32_t noisy = 0;
             for (uint32_t y = 0; y < il_height; ++y) {
-              const auto* texel = reinterpret_cast<const uint16_t*>(bits + y * mapped.row_pitch);
+              const auto* gather = reinterpret_cast<const uint16_t*>(
+                  static_cast<const uint8_t*>(mapped[0].data) + y * mapped[0].row_pitch);
+              const auto* history = reinterpret_cast<const uint16_t*>(
+                  static_cast<const uint8_t*>(mapped[1].data) + y * mapped[1].row_pitch);
               for (uint32_t x = 0; x < il_width; ++x) {
-                for (uint32_t channel = 0; channel < 4; ++channel) {
-                  const uint16_t value = texel[x * 4 + channel];
-                  if (value < minimum[channel]) minimum[channel] = value;
-                  if (value > maximum[channel]) maximum[channel] = value;
+                for (uint32_t channel = 0; channel < 3; ++channel) {
+                  delta_mean[channel] += std::abs(HalfToFloat(gather[x * 4 + channel])
+                                                  - HalfToFloat(history[x * 4 + channel]));
+                }
+                gather_mean += HalfToFloat(gather[x * 4]);
+                if (std::abs(HalfToFloat(gather[x * 4]) - HalfToFloat(history[x * 4])) > 0.02) {
+                  ++noisy;
                 }
               }
             }
-            device->unmap_texture_region(il_probe_staging[index], 0);
+            const double texels = static_cast<double>(il_width) * il_height;
+            device->unmap_texture_region(il_probe_staging[1], 0);
+            device->unmap_texture_region(il_probe_staging[0], 0);
             char line[256] = {};
             std::snprintf(line, sizeof(line),
-                          "mgsv: IL probe %u (debug %.0f) r %04x..%04x g %04x..%04x b %04x..%04x "
-                          "a %04x..%04x view %llx",
-                          index, shader_injection.il_debug,
-                          minimum[0], maximum[0], minimum[1], maximum[1],
-                          minimum[2], maximum[2], minimum[3], maximum[3], frame.depth.handle);
+                          "mgsv: IL reprojection gather %.4f delta %.4f/%.4f/%.4f noisy %.1f%%",
+                          gather_mean / texels, delta_mean[0] / texels, delta_mean[1] / texels,
+                          delta_mean[2] / texels, 100.0 * noisy / texels);
             reshade::log::message(reshade::log::level::info, line);
           }
+        }
+        // Reprojection offset in pixels, read from the display target while debug 4 is active.
+        // Medians are used because a few pixels (sky, particles) carry garbage velocity and
+        // would swamp a mean.
+        if (mapped[2].data != nullptr) {
+          if (device->map_texture_region(il_probe_staging[2], 0, nullptr,
+                                         reshade::api::map_access::read_only, &mapped[2])) {
+            double sum_x = 0.0;
+            double sum_y = 0.0;
+            double max_x = 0.0;
+            double max_y = 0.0;
+            std::vector<float> corrected;
+            std::vector<float> raw;
+            corrected.reserve((il_width / 8 + 1) * (il_height / 8 + 1));
+            raw.reserve(corrected.capacity());
+            for (uint32_t y = 0; y < il_height; ++y) {
+              const auto* texel = reinterpret_cast<const uint16_t*>(
+                  static_cast<const uint8_t*>(mapped[2].data) + y * mapped[2].row_pitch);
+              for (uint32_t x = 0; x < il_width; ++x) {
+                const double offset_x = HalfToFloat(texel[x * 4 + 0]);
+                const double offset_y = HalfToFloat(texel[x * 4 + 1]);
+                sum_x += offset_x;
+                sum_y += offset_y;
+                if (offset_x > max_x) max_x = offset_x;
+                if (offset_y > max_y) max_y = offset_y;
+                if ((x % 8u) == 0u && (y % 8u) == 0u) {
+                  corrected.push_back(static_cast<float>(offset_x));
+                  raw.push_back(HalfToFloat(texel[x * 4 + 2]));
+                }
+              }
+            }
+            const double texels = static_cast<double>(il_width) * il_height;
+            const auto median = [](std::vector<float>& values) {
+              if (values.empty()) return 0.f;
+              const auto middle = values.begin() + static_cast<ptrdiff_t>(values.size() / 2);
+              std::nth_element(values.begin(), middle, values.end());
+              return *middle;
+            };
+            const float corrected_median = median(corrected);
+            const float raw_median = median(raw);
+            device->unmap_texture_region(il_probe_staging[2], 0);
+            char line[256] = {};
+            std::snprintf(line, sizeof(line),
+                          "mgsv: IL offset px mean %.3f/%.3f median %.3f raw %.3f max %.3f/%.3f",
+                          sum_x / texels, sum_y / texels, corrected_median, raw_median, max_x,
+                          max_y);
+            reshade::log::message(reshade::log::level::info, line);
+          }
+        }
+        for (uint32_t index = 0; index < 4; ++index) {
           cmd_list->barrier(il_probe_sources[index],
                             reshade::api::resource_usage::unordered_access,
                             reshade::api::resource_usage::copy_source);
@@ -2290,7 +2413,7 @@ renodx::utils::settings::Settings settings = {
                    "contribution alone, so it can be judged without the scene lighting. "
                    "Source only writes the buffer the gather samples, which answers "
                    "whether a given light is in that buffer at all.",
-        .labels = {"Off", "GI only", "History delta", "History length"},
+        .labels = {"Off", "GI only", "History delta", "History length", "Reprojection"},
     },
     new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
