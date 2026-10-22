@@ -1155,10 +1155,10 @@ bool EnsureLightTarget(reshade::api::device* device, LightTarget* target, uint32
       width, height, 1u, 1u, format,
       1u,
       reshade::api::memory_heap::gpu_only,
+      // Only the compute passes touch these targets. The copy usages belonged to the diagnostic
+      // readback, which is gone.
       reshade::api::resource_usage::shader_resource
-          | reshade::api::resource_usage::unordered_access
-          | reshade::api::resource_usage::copy_source
-          | reshade::api::resource_usage::copy_dest);
+          | reshade::api::resource_usage::unordered_access);
   if (!device->create_resource(desc, nullptr, desc.usage, &target->resource)
       || !device->create_resource_view(
           target->resource,
