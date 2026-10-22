@@ -1,86 +1,99 @@
 // MGSV screen-space diffuse gather - the denoise half.
 //
-// The gather writes the neighbourhood's mean radiance into its own target; this pass filters
-// it at the same resolution and leaves the result for the add pass. It runs at the gather's
-// resolution, so half-resolution GI costs a quarter here as well - which matters, because the
-// filter is the most expensive stage per pixel.
+// A-trous edge-aware filter, one dispatch per iteration, 5x5 taps whose stride doubles each
+// step (1, 2, 4). Three iterations reach a 16-pixel radius with 75 taps instead of a 33x33
+// kernel, and the weights are the same at every scale: depth, normal and luminance.
 //
-// The filter is a bilateral in screen space, weighted by normal similarity and relative depth
-// difference. A plain blur smears light across silhouettes, which reads as a halo; the depth
-// and normal weights keep it inside a surface. Samples the gather rejected (alpha zero) are
-// skipped, so a starved pixel stays dark instead of being filled by its neighbours.
+// The luminance weight divides the neighbour difference by the measured per-pixel noise from
+// the temporal moments, so a converged surface is smoothed hard and a just-reset pixel is
+// barely touched - which is what keeps edges from smearing during movement.
+//
+// Pixels with no valid gather sample are skipped, not averaged in: they hold zero radiance, and
+// averaging that in is what turned starved patches into black blobs.
 
 #include "../shared.h"
 #include "../gbuffer.hlsli"
 
-Texture2D<float4> bounceBuffer : register(t0);  // rgb mean radiance, a validity
+Texture2D<float4> bounceBuffer : register(t0);  // radiance to filter
 Texture2D<float4> depthBuffer : register(t1);
 Texture2D<float4> normalBuffer : register(t2);
-// x = running mean luminance. Zero means this pixel has never had a single valid gather
-// sample, which is the only case where its radiance must not be averaged in.
+// x = mean luminance (zero means never sampled), z = variance, w = relative variance.
 Texture2D<float4> momentsBuffer : register(t3);
 RWTexture2D<float4> filteredOutput : register(u0);
+
+#define FILTER_MAX_RADIANCE 1.0e4
+
+float Luminance(float3 color) {
+  return dot(color, float3(0.2126, 0.7152, 0.0722));
+}
 
 [numthreads(8, 8, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
   const uint2 pixel = tid.xy;
-
-  // Full-resolution coordinate of this gather pixel: depth and normals only exist there.
   const float scale = max(CUSTOM_MGSV_IL_SCALE, 1.0);
+  const int2 gather_size = int2(float2(cBufferWidth, cBufferHeight) / scale);
+  if (pixel.x >= (uint)gather_size.x || pixel.y >= (uint)gather_size.y) return;
+
+  // Depth and normals only exist at full resolution.
   const int2 centre = (int2)floor((float2(pixel) + 0.5) * scale);
   if (centre.x >= (int)cBufferWidth || centre.y >= (int)cBufferHeight) return;
 
+  const float4 centre_sample = bounceBuffer.Load(int3(pixel, 0));
   const float z = LinearZ(depthBuffer.Load(int3(centre, 0)).x);
   if (!(z > 0.0) || z > 1.0e6) {
-    // Sky and any pixel without geometry get no bounce. Writing zero matters: returning here
-    // leaves the target holding whatever it held, and the texels that were never written are
-    // the zeros from creation - which is how black patches grew over the image.
+    // Sky and anything without geometry gets no bounce. Writing matters: a skipped write would
+    // leave the texel holding whatever it held, including the zeros from creation.
     filteredOutput[pixel] = 0.0;
     return;
   }
 
   const float3 N = DecodeNormal(normalBuffer.Load(int3(centre, 0)).xyz);
   const float inv_z = 1.0 / z;
-  const int radius = (int)clamp(CUSTOM_MGSV_IL_FILTER_RADIUS, 1.0, 3.0);
 
+  const float4 centre_moments = momentsBuffer.Load(int3(pixel, 0));
+  const float centre_luminance = Luminance(centre_sample.rgb);
+  // A floor on the noise estimate: on a clean surface the measured variance can be small enough
+  // that the weight would reject every neighbour and nothing would be smoothed at all.
+  const float sigma_luminance =
+      sqrt(max(centre_moments.z, 0.0)) + 0.02 + 0.1 * abs(centre_luminance);
+
+  const int stride = 1 << (int)clamp(CUSTOM_MGSV_IL_FILTER_STEP, 0.0, 4.0);
   float3 sum = 0.0;
   float weight_sum = 0.0;
 
-  [loop] for (int dy = -radius; dy <= radius; ++dy) {
-    [loop] for (int dx = -radius; dx <= radius; ++dx) {
-      const int2 bounce_pixel = int2(pixel) + int2(dx, dy);
-      if (bounce_pixel.x < 0 || bounce_pixel.y < 0) continue;
+  [unroll] for (int dy = -2; dy <= 2; ++dy) {
+    [unroll] for (int dx = -2; dx <= 2; ++dx) {
+      const int2 q = int2(pixel) + int2(dx, dy) * stride;
+      if (q.x < 0 || q.y < 0 || q.x >= gather_size.x || q.y >= gather_size.y) continue;
 
-      // Out-of-range loads return zero, and alpha zero is rejected below, so the shader does
-      // not need the gather target's size.
-      // Alpha carries the history length, not validity, so only a *never written* texel is
-      // rejected. Rejecting anything under half would black out every disocclusion for 15 frames.
-      // Starved gather pixels hold zero radiance. Averaging that in turns every starved patch
-      // into a black blob, so taps that never had a sample are skipped and filled by their
-      // neighbours instead.
-      if (momentsBuffer.Load(int3(bounce_pixel, 0)).x <= 0.0) continue;
-      const float4 gathered = bounceBuffer.Load(int3(bounce_pixel, 0));
+      // Never-sampled pixels carry zero radiance; averaging that in is what darkens neighbours.
+      if (momentsBuffer.Load(int3(q, 0)).x <= 0.0) continue;
 
-      const int2 q = (int2)floor((float2(bounce_pixel) + 0.5) * scale);
-      const float qz = LinearZ(depthBuffer.Load(int3(q, 0)).x);
+      const int2 full = (int2)floor((float2(q) + 0.5) * scale);
+      const float qz = LinearZ(depthBuffer.Load(int3(full, 0)).x);
       if (!(qz > 0.0) || qz > 1.0e6) continue;
 
-      const float3 Nq = DecodeNormal(normalBuffer.Load(int3(q, 0)).xyz);
+      const float3 neighbour = bounceBuffer.Load(int3(q, 0)).rgb;
+      if (any(!isfinite(neighbour))) continue;
+
+      const float3 Nq = DecodeNormal(normalBuffer.Load(int3(full, 0)).xyz);
       const float normal_match = saturate(dot(N, Nq));
       const float depth_match = 1.0 / (1.0 + 32.0 * abs(qz - z) * inv_z);
-      const float weight = normal_match * normal_match * normal_match * normal_match * depth_match;
-      sum += gathered.rgb * weight;
+      const float luminance_match =
+          1.0 / (1.0 + abs(Luminance(neighbour) - centre_luminance) / sigma_luminance);
+
+      const float weight = normal_match * normal_match * normal_match * normal_match
+                         * depth_match * luminance_match;
+      sum += neighbour * weight;
       weight_sum += weight;
     }
   }
 
   if (weight_sum <= 1.0e-4) {
-    filteredOutput[pixel] = bounceBuffer.Load(int3(pixel, 0));
+    filteredOutput[pixel] = centre_sample;
     return;
   }
-  // A near-zero weight sum divides the accumulated radiance up into the thousands, and one
-  // non-finite value poisons the history for every later frame (the temporal blend keeps it) -
-  // which is what a black patch actually is.
-  const float3 filtered = sum / weight_sum;
-  filteredOutput[pixel] = float4(clamp(filtered, 0.0, 1.0e4), 1.0);
+  // A near-zero weight sum divides the radiance up into the thousands; that value then lives in
+  // the history forever and renders black, so both the division and the result are bounded.
+  filteredOutput[pixel] = float4(clamp(sum / weight_sum, 0.0, FILTER_MAX_RADIANCE), 1.0);
 }
