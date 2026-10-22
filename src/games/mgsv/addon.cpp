@@ -1606,6 +1606,7 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
       // straight through, so the resolve below always reads the same target.
       const auto velocity_view = taa::input_capture::resources.velocity_srv;
       shader_injection.ao_history_valid = ao_history_valid && velocity_view.handle != 0 ? 1.f : 0.f;
+
       const std::array<reshade::api::resource_view, 7> accumulate_sources = {
           ao_target.view,                            // t0
           ao_history_targets[ao_history_index].view, // t1
@@ -2193,14 +2194,15 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "AoSteps",
         .binding = &shader_injection.ao_steps,
-        .default_value = 2.f,
+        .default_value = 4.f,
         .label = "AO Steps",
         .section = "Ambient Occlusion",
         .tooltip = "Samples taken along each slice, per side, on an exponential distribution "
-                   "that is dense near the pixel and sparse further out. Two is enough now that "
-                   "the pattern rotates every frame and the result accumulates: the temporal "
-                   "history supplies the density that more steps used to buy, at a third of the "
-                   "per-frame cost.",
+                   "that is dense near the pixel and sparse further out. The temporal pass "
+                   "averages, it does not sharpen: at two steps every frame is a lopsided "
+                   "estimate and the average converges to a visibly softer field. Four restores "
+                   "the angular coverage per frame, and the history then removes the residual "
+                   "noise without the softness.",
         .max = 20.f,
     },
     new renodx::utils::settings::Setting{
@@ -2286,6 +2288,19 @@ renodx::utils::settings::Settings settings = {
                    "sample instead of dragging the old one across the edge.",
         .max = 97.f,
         .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "AoDebug",
+        .binding = &shader_injection.ao_debug,
+        .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+        .default_value = 0.f,
+        .label = "AO Debug",
+        .section = "Ambient Occlusion",
+        .tooltip = "Off is the resolved occlusion. History length replaces the image with how "
+                   "converged the temporal history is: bright red means full, dark means the "
+                   "pixel resets every frame. If it never brightens while standing still, the "
+                   "accumulation is not running and AO Temporal has no effect.",
+        .labels = {"Off", "History length"},
     },
     new renodx::utils::settings::Setting{
         .key = "IlEnabled",
