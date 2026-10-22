@@ -1094,6 +1094,7 @@ struct LightPass {
   bool ready = false;
 };
 LightPass ao_pass;
+LightPass ao_resolve_pass;
 LightPass il_pass;
 LightPass il_composite_pass;
 LightPass il_add_pass;
@@ -1109,6 +1110,7 @@ struct IlTarget {
   uint32_t height = 0;
 };
 IlTarget il_bounce_target;
+IlTarget ao_target;
 IlTarget il_filtered_target;
 
 // Ping-ponged accumulation. The frame reads one and writes the other, then swaps.
@@ -1389,7 +1391,8 @@ void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* pass,
 }
 
 void DestroyLightPasses(reshade::api::device* device) {
-  for (auto* pass : {&ao_pass, &il_pass, &il_composite_pass, &il_add_pass, &il_accumulate_pass}) {
+  for (auto* pass : {&ao_pass, &ao_resolve_pass, &il_pass, &il_composite_pass, &il_add_pass,
+                      &il_accumulate_pass}) {
     pass->ready = false;
     if (pass->pipeline.handle != 0) {
       device->destroy_pipeline(pass->pipeline);
@@ -1536,21 +1539,46 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
     }
   }
 
-  if (shader_injection.ao_enabled != 0.f
-      && EnsureLightPass(device, &ao_pass, "mgsv: AO pass created", __mgsv_ao, frame.width, frame.height)) {
-    BuildDepthMips(cmd_list, frame.depth);
-    const std::array<reshade::api::resource_view, 7> sources = {
-        frame.depth,                 // t0
-        frame.normal,                // t1
-        GetDepthMipView(cmd_list),   // t2, the addon's chain or the stand-in
-        GetAoFallbackView(cmd_list), // t3, unused by the AO
-        GetAoFallbackView(cmd_list), // t4, unused by the AO
-        GetAoFallbackView(cmd_list), // t5, unused by the AO
-        GetAoFallbackView(cmd_list), // t6, unused by the AO
-    };
-    DispatchLightPass(cmd_list, &ao_pass, sources, frame.light, il_accumulated_target.uav,
+  if (shader_injection.ao_enabled != 0.f) {
+    // 0 = full, 1 = half. The AO writes its un-occluded fraction at this size; the resolve
+    // multiplies the light with it at full resolution, depth-joint so silhouettes keep their edge.
+    const uint32_t ao_scale = shader_injection.ao_resolution > 0.5f ? 2u : 1u;
+    shader_injection.ao_scale = static_cast<float>(ao_scale);
+    const uint32_t ao_width = (frame.width + ao_scale - 1u) / ao_scale;
+    const uint32_t ao_height = (frame.height + ao_scale - 1u) / ao_scale;
+
+    if (EnsureIlTarget(device, &ao_target, ao_width, ao_height)
+        && EnsureLightPass(device, &ao_pass, "mgsv: AO pass created", __mgsv_ao, ao_width,
+                           ao_height)
+        && EnsureLightPass(device, &ao_resolve_pass, "mgsv: AO resolve created",
+                           __mgsv_ao_resolve, frame.width, frame.height)) {
+      BuildDepthMips(cmd_list, frame.depth);
+      const std::array<reshade::api::resource_view, 7> sources = {
+          frame.depth,                 // t0
+          frame.normal,                // t1
+          GetDepthMipView(cmd_list),   // t2, the addon's chain or the stand-in
+          GetAoFallbackView(cmd_list), // t3, unused by the AO
+          GetAoFallbackView(cmd_list), // t4, unused by the AO
+          GetAoFallbackView(cmd_list), // t5, unused by the AO
+          GetAoFallbackView(cmd_list), // t6, unused by the AO
+      };
+      DispatchLightPass(cmd_list, &ao_pass, sources, ao_target.uav, il_accumulated_target.uav,
                         il_bounce_target.uav, il_moments_targets[il_history_index].uav,
-                        frame.width, frame.height);
+                        ao_width, ao_height);
+
+      const std::array<reshade::api::resource_view, 7> resolve_sources = {
+          ao_target.view,              // t0
+          frame.depth,                 // t1, joint bilateral upsample
+          GetAoFallbackView(cmd_list), // t2, unused
+          GetAoFallbackView(cmd_list), // t3, unused
+          GetAoFallbackView(cmd_list), // t4, unused
+          GetAoFallbackView(cmd_list), // t5, unused
+          GetAoFallbackView(cmd_list), // t6, unused
+      };
+      DispatchLightPass(cmd_list, &ao_resolve_pass, resolve_sources, frame.light,
+                        il_accumulated_target.uav, il_bounce_target.uav,
+                        il_moments_targets[il_history_index].uav, frame.width, frame.height);
+    }
   }
 }
 
@@ -2161,6 +2189,19 @@ renodx::utils::settings::Settings settings = {
                    "depth buffer at every step.",
     },
     new renodx::utils::settings::Setting{
+        .key = "AoResolution",
+        .binding = &shader_injection.ao_resolution,
+        .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+        .default_value = 1.f,
+        .label = "AO Resolution",
+        .section = "Ambient Occlusion",
+        .tooltip = "Half computes the occlusion at a quarter of the pixels and resolves it back "
+                   "with a depth-joint upsample, which is where most of the cost of this pass "
+                   "comes from. The upsample refuses to blend across silhouettes, so contact "
+                   "shadows keep their edge; full is there to compare against.",
+        .labels = {"Full", "Half"},
+    },
+    new renodx::utils::settings::Setting{
         .key = "IlEnabled",
         .binding = &shader_injection.il_enabled,
         .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
@@ -2451,6 +2492,7 @@ void OnDestroyDevice(reshade::api::device* device) {
   DestroyIlTarget(device, &il_history_aux_targets[1]);
   DestroyIlTarget(device, &il_moments_targets[0]);
   DestroyIlTarget(device, &il_moments_targets[1]);
+  DestroyIlTarget(device, &ao_target);
   DestroyIlTarget(device, &il_accumulated_target);
   il_history_valid = false;
 }
