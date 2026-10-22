@@ -57,5 +57,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
 
   const float applied = weight_sum > 1.0e-4 ? factor / weight_sum : 1.0;
   const float4 light = lightBuffer.Load(int3(pixel, 0));
+  if (CUSTOM_MGSV_AO_DEBUG > 0.5) {
+    // History length at the nearest tap: bright where the temporal history is converged, dark
+    // where it resets every frame. If this never brightens while standing still, accumulation is
+    // not happening, and the image will look identical with the toggle off.
+    const float length = aoBuffer.Load(int3(max(base, int2(0, 0)), 0)).a;
+    lightBuffer[pixel] = float4(length, 0.0, 0.0, light.a);
+    return;
+  }
   lightBuffer[pixel] = float4(light.rgb * saturate(applied), light.a);
 }
