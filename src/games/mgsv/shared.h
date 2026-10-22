@@ -83,6 +83,12 @@ struct ShaderInjectData {
   float ao_scale;
   // Host-side: 0 = full, 1 = half.
   float ao_resolution;
+  // Host-side: 1 accumulates the factor across frames. Off writes the frame straight through,
+  // so the toggle costs one pass-through dispatch and no second code path.
+  float ao_temporal;
+  // Fraction of the previous frame kept, and 1 only while the history matches this frame.
+  float ao_history_blend;
+  float ao_history_valid;
   // Screen-space diffuse gather, dispatched after the AO.
   //
   // il_enabled is host-side, like ao_enabled; the rest are read by the gather.
@@ -173,6 +179,9 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_MGSV_AO_FADE      shader_injection.ao_fade
 #define CUSTOM_MGSV_AO_DEPTH_MIPS shader_injection.ao_depth_mips
 #define CUSTOM_MGSV_AO_SCALE      shader_injection.ao_scale
+#define CUSTOM_MGSV_AO_TEMPORAL   shader_injection.ao_temporal
+#define CUSTOM_MGSV_AO_HISTORY    shader_injection.ao_history_blend
+#define CUSTOM_MGSV_AO_HISTORY_VALID shader_injection.ao_history_valid
 
 #define CUSTOM_MGSV_IL_AMOUNT shader_injection.il_amount
 #define CUSTOM_MGSV_IL_RADIUS shader_injection.il_radius
