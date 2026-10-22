@@ -1100,9 +1100,9 @@ LightPass il_composite_pass;
 LightPass il_add_pass;
 LightPass il_accumulate_pass;
 
-// The gather and filter each need their own target: a pass cannot filter its own output, and
-// the add pass reads the filtered one at full resolution.
-struct IlTarget {
+// A texture an addon pass owns, with the SRV/UAV pair that pass needs. Shared by the AO and the
+// indirect lighting chains, which is why the name is not tied to either.
+struct LightTarget {
   reshade::api::resource resource = {0};
   reshade::api::resource_view view = {0};
   reshade::api::resource_view uav = {0};
@@ -1110,23 +1110,25 @@ struct IlTarget {
   uint32_t height = 0;
   reshade::api::format format = reshade::api::format::unknown;
 };
-IlTarget il_bounce_target;
-IlTarget ao_target;
 
-IlTarget il_filtered_target;
+// Ambient occlusion: the un-occluded factor at AO resolution, resolved to the light afterwards.
+LightTarget ao_target;
 
-// Ping-ponged accumulation. The frame reads one and writes the other, then swaps.
-IlTarget il_history_targets[2];
-IlTarget il_history_aux_targets[2];
-IlTarget il_moments_targets[2];
-IlTarget il_accumulated_target;
+// Indirect lighting: one target per stage, because a pass cannot read what it writes.
+LightTarget il_bounce_target;    // the gather
+LightTarget il_filtered_target;  // the a-trous output the resolve reads
+// Ping-ponged temporal state. The frame reads one and writes the other, then swaps.
+LightTarget il_history_targets[2];
+LightTarget il_history_aux_targets[2];
+LightTarget il_moments_targets[2];
+LightTarget il_accumulated_target;
 uint32_t il_history_index = 0;
 
 uint32_t il_history_width = 0;
 uint32_t il_history_height = 0;
 bool il_history_valid = false;
 
-bool EnsureIlTarget(reshade::api::device* device, IlTarget* target, uint32_t width, uint32_t height,
+bool EnsureLightTarget(reshade::api::device* device, LightTarget* target, uint32_t width, uint32_t height,
                     reshade::api::format format = reshade::api::format::r16g16b16a16_float) {
   if (target->uav.handle != 0 && target->width == width && target->height == height
       && target->format == format) {
@@ -1177,7 +1179,7 @@ bool EnsureIlTarget(reshade::api::device* device, IlTarget* target, uint32_t wid
   return true;
 }
 
-void DestroyIlTarget(reshade::api::device* device, IlTarget* target) {
+void DestroyLightTarget(reshade::api::device* device, LightTarget* target) {
   if (target->uav.handle != 0) {
     device->destroy_resource_view(target->uav);
     target->uav = {0};
@@ -1448,17 +1450,17 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
       il_history_valid = false;
     }
 
-    if (EnsureIlTarget(device, &il_bounce_target, il_width, il_height)
-        && EnsureIlTarget(device, &il_filtered_target, il_width, il_height)
-        && EnsureIlTarget(device, &il_history_targets[0], il_width, il_height)
-        && EnsureIlTarget(device, &il_history_targets[1], il_width, il_height)
-        && EnsureIlTarget(device, &il_history_aux_targets[0], il_width, il_height)
-        && EnsureIlTarget(device, &il_history_aux_targets[1], il_width, il_height)
-        && EnsureIlTarget(device, &il_moments_targets[0], il_width, il_height,
+    if (EnsureLightTarget(device, &il_bounce_target, il_width, il_height)
+        && EnsureLightTarget(device, &il_filtered_target, il_width, il_height)
+        && EnsureLightTarget(device, &il_history_targets[0], il_width, il_height)
+        && EnsureLightTarget(device, &il_history_targets[1], il_width, il_height)
+        && EnsureLightTarget(device, &il_history_aux_targets[0], il_width, il_height)
+        && EnsureLightTarget(device, &il_history_aux_targets[1], il_width, il_height)
+        && EnsureLightTarget(device, &il_moments_targets[0], il_width, il_height,
                                 reshade::api::format::r16g16_float)
-        && EnsureIlTarget(device, &il_moments_targets[1], il_width, il_height,
+        && EnsureLightTarget(device, &il_moments_targets[1], il_width, il_height,
                                 reshade::api::format::r16g16_float)
-        && EnsureIlTarget(device, &il_accumulated_target, il_width, il_height)
+        && EnsureLightTarget(device, &il_accumulated_target, il_width, il_height)
         && EnsureLightPass(device, &il_pass, "mgsv: IL pass created", __mgsv_il, il_width, il_height)
         && EnsureLightPass(device, &il_composite_pass, "mgsv: IL composite created",
                            __mgsv_il_composite, il_width, il_height)
@@ -1556,7 +1558,7 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
     const uint32_t ao_width = (frame.width + ao_scale - 1u) / ao_scale;
     const uint32_t ao_height = (frame.height + ao_scale - 1u) / ao_scale;
 
-    if (EnsureIlTarget(device, &ao_target, ao_width, ao_height)
+    if (EnsureLightTarget(device, &ao_target, ao_width, ao_height)
         && EnsureLightPass(device, &ao_pass, "mgsv: AO pass created", __mgsv_ao, ao_width,
                            ao_height)
         && EnsureLightPass(device, &ao_resolve_pass, "mgsv: AO resolve created",
@@ -2151,11 +2153,10 @@ renodx::utils::settings::Settings settings = {
         .label = "AO Steps",
         .section = "Ambient Occlusion",
         .tooltip = "Samples taken along each slice, per side, on an exponential distribution "
-                   "that is dense near the pixel and sparse further out. The temporal pass "
-                   "averages, it does not sharpen: at two steps every frame is a lopsided "
-                   "estimate and the average converges to a visibly softer field. Four restores "
-                   "the angular coverage per frame, and the history then removes the residual "
-                   "noise without the softness.",
+                   "that is dense near the pixel and sparse further out. This is the AO's detail "
+                   "dial: more steps resolve thin occluders - grass, wire, railings - more "
+                   "sharply, at a linear cost. The half-resolution pass already removed most of "
+                   "the pixel cost, so these buy sharpness rather than coverage.",
         .max = 20.f,
     },
     new renodx::utils::settings::Setting{
@@ -2504,16 +2505,16 @@ void OnDestroyDevice(reshade::api::device* device) {
   DestroyAoFallbackView(device);
   albedo_view = {0};
   specular_view = {0};
-  DestroyIlTarget(device, &il_bounce_target);
-  DestroyIlTarget(device, &il_filtered_target);
-  DestroyIlTarget(device, &il_history_targets[0]);
-  DestroyIlTarget(device, &il_history_targets[1]);
-  DestroyIlTarget(device, &il_history_aux_targets[0]);
-  DestroyIlTarget(device, &il_history_aux_targets[1]);
-  DestroyIlTarget(device, &il_moments_targets[0]);
-  DestroyIlTarget(device, &il_moments_targets[1]);
-  DestroyIlTarget(device, &ao_target);
-  DestroyIlTarget(device, &il_accumulated_target);
+  DestroyLightTarget(device, &il_bounce_target);
+  DestroyLightTarget(device, &il_filtered_target);
+  DestroyLightTarget(device, &il_history_targets[0]);
+  DestroyLightTarget(device, &il_history_targets[1]);
+  DestroyLightTarget(device, &il_history_aux_targets[0]);
+  DestroyLightTarget(device, &il_history_aux_targets[1]);
+  DestroyLightTarget(device, &il_moments_targets[0]);
+  DestroyLightTarget(device, &il_moments_targets[1]);
+  DestroyLightTarget(device, &ao_target);
+  DestroyLightTarget(device, &il_accumulated_target);
   il_history_valid = false;
 }
 
