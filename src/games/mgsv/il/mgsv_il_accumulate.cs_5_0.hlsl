@@ -26,9 +26,13 @@ Texture2D<float4> normalBuffer : register(t4);
 // Previous frame's geometry and history length. The radiance history cannot carry this: its
 // alpha is already the length, and a rejection test needs depth and normal, not colour.
 Texture2D<float4> historyAuxBuffer : register(t5);
+// Running luminance moments. xy = mean and mean-square, so the variance the denoiser needs is
+// m2 - m1^2 at any pixel, without storing a second history of the signal itself.
+Texture2D<float4> momentsBuffer : register(t6);
 RWTexture2D<float4> historyOutput : register(u0);    // next frame's history, always the real result
 RWTexture2D<float4> accumulatedOutput : register(u1); // what the filter reads, may show a probe
 RWTexture2D<float4> historyAuxOutput : register(u2);  // z, normal.xy, length for the next frame
+RWTexture2D<float4> momentsOutput : register(u3);     // m1, m2, variance
 
 [numthreads(8, 8, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
@@ -118,7 +122,20 @@ void main(uint3 tid : SV_DispatchThreadID) {
   historyOutput[pixel] = real;
   historyAuxOutput[pixel] = float4(z, N.x, N.y, length / HISTORY_MAX_LENGTH);
 
-  if (CUSTOM_MGSV_IL_DEBUG > 3.5) {
+  // Luminance moments, filtered with the same weight as the colour so the variance describes the
+  // history that actually exists rather than an ideal infinite average. On a reset the moments
+  // restart from this frame alone.
+  const float luminance = dot(result, float3(0.2126, 0.7152, 0.0722));
+  const float2 previous_moments = momentsBuffer.Load(int3(aux_pixel, 0)).xy;
+  const float m1 = lerp(luminance, previous_moments.x, blend);
+  const float m2 = lerp(luminance * luminance, previous_moments.y, blend);
+  const float variance = max(m2 - m1 * m1, 0.0);
+  momentsOutput[pixel] = float4(m1, m2, variance, 0.0);
+
+  if (CUSTOM_MGSV_IL_DEBUG > 4.5) {
+    // Variance: bright where the gather is noisy, black on a surface that averages cleanly.
+    accumulatedOutput[pixel] = float4(saturate(variance * 100.0), 0.0, 0.0, 1.0);
+  } else if (CUSTOM_MGSV_IL_DEBUG > 3.5) {
     // Reprojection offset in pixels. R/G are the jitter the engine advertises in b0, in signed
     // pixels; B is the raw velocity magnitude. If R/G are zero while the scene renders, b0 is
     // not where the jitter lives for this pass.
