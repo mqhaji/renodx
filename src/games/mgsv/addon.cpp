@@ -1532,7 +1532,7 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
       static uint32_t il_probe_count = 0;
       const std::array<reshade::api::resource, 4> il_probe_sources = {
           il_bounce_target.resource,
-          il_history_targets[write_index].resource,
+          il_history_targets[write_index ^ 1u].resource,  // the history this frame reads
           il_accumulated_target.resource,
           il_filtered_target.resource,
       };
@@ -1609,9 +1609,10 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
             device->unmap_texture_region(il_probe_staging[0], 0);
             char line[256] = {};
             std::snprintf(line, sizeof(line),
-                          "mgsv: IL reprojection gather %.4f delta %.4f/%.4f/%.4f noisy %.1f%%",
+                          "mgsv: IL reprojection gather %.4f delta %.4f/%.4f/%.4f noisy %.1f%% blend %.2f/%.0f",
                           gather_mean / texels, delta_mean[0] / texels, delta_mean[1] / texels,
-                          delta_mean[2] / texels, 100.0 * noisy / texels);
+                          delta_mean[2] / texels, 100.0 * noisy / texels,
+                          shader_injection.il_history_blend, shader_injection.il_history_valid);
             reshade::log::message(reshade::log::level::info, line);
           }
         }
@@ -1655,11 +1656,18 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
             const float corrected_median = median(corrected);
             const float raw_median = median(raw);
             device->unmap_texture_region(il_probe_staging[2], 0);
-            char line[256] = {};
+            const auto camera = taa::camera_state::Get();
+            char line[400] = {};
             std::snprintf(line, sizeof(line),
-                          "mgsv: IL offset px mean %.3f/%.3f median %.3f raw %.3f max %.3f/%.3f",
+                          "mgsv: IL offset px b0 %.3f/%.3f med %.3f raw %.3f max %.1f | taa valid %d jitter %.3f/%.3f "
+                          "prev %.3f/%.3f sample %u",
                           sum_x / texels, sum_y / texels, corrected_median, raw_median, max_x,
-                          max_y);
+                          camera.valid ? 1 : 0,
+                          camera.jitter_uv_x * static_cast<float>(il_width),
+                          camera.jitter_uv_y * static_cast<float>(il_height),
+                          camera.previous_jitter_uv_x * static_cast<float>(il_width),
+                          camera.previous_jitter_uv_y * static_cast<float>(il_height),
+                          camera.sample_index);
             reshade::log::message(reshade::log::level::info, line);
           }
         }

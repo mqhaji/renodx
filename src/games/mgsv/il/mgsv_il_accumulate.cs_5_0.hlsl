@@ -39,11 +39,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
   const float4 current = currentBuffer.Load(int3(pixel, 0));
 
   const float4 raw = velocityBuffer.Load(int3(centre, 0));
-  // The buffer still carries the projection jitter this frame was sampled with, so a static
-  // camera reports a small constant motion in every pixel. Subtracting the jitter (the engine
-  // stores it in NDC, hence the half) is what makes a still image reproject onto itself.
-  const float2 velocity = (raw.ba * 2.0 - 1.0) * 64.0 / float2(cBufferWidth, cBufferHeight)
-                        - cCameraCenterOffset * 0.5;
+  // Plain decode, no jitter term. Measured: b0's cCameraCenterOffset is 0.000 px at this hook
+  // while the TAA jitter is ~0.4 px, and the decoded velocity at a still camera is 0.031 px -
+  // the velocity pass already runs with the jittered projection, so the jitter cancels in the
+  // buffer instead of appearing in it.
+  const float2 velocity = (raw.ba * 2.0 - 1.0) * 64.0 / float2(cBufferWidth, cBufferHeight);
 
   // Reproject in gather space, then fetch the history with a manual bilinear tap so no sampler
   // is needed in this layout.
@@ -90,11 +90,12 @@ void main(uint3 tid : SV_DispatchThreadID) {
   historyOutput[pixel] = real;
 
   if (CUSTOM_MGSV_IL_DEBUG > 3.5) {
-    // Reprojection offset in pixels. R/G are the corrected offset, B is the raw buffer value,
-    // so the two can be compared in one frame: the correction must shrink the typical offset.
+    // Reprojection offset in pixels. R/G are the jitter the engine advertises in b0, in signed
+    // pixels; B is the raw velocity magnitude. If R/G are zero while the scene renders, b0 is
+    // not where the jitter lives for this pass.
     const float2 raw_velocity = (raw.ba * 2.0 - 1.0) * 64.0 / float2(cBufferWidth, cBufferHeight);
-    accumulatedOutput[pixel] = float4(abs(velocity.x) * (float)cBufferWidth,
-                                      abs(velocity.y) * (float)cBufferHeight,
+    accumulatedOutput[pixel] = float4(cCameraCenterOffset.x * (float)cBufferWidth,
+                                      cCameraCenterOffset.y * (float)cBufferHeight,
                                       abs(raw_velocity.x) * (float)cBufferWidth, 1.0);
   } else if (CUSTOM_MGSV_IL_DEBUG > 2.5) {
     // History length: dark where the history was just reset, bright where it has accumulated.
