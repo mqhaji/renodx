@@ -1736,21 +1736,33 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
         if (device->map_texture_region(il_probe_staging[5], 0, nullptr,
                                        reshade::api::map_access::read_only, &mapped[5])) {
           double variance_sum = 0.0;
+          double relative_sum = 0.0;
+          double mean_sum = 0.0;
           float variance_max = 0.0f;
+          float mean_max = 0.0f;
+          float relative_max = 0.0f;
           for (uint32_t y = 0; y < il_probe_height; ++y) {
             const auto* texel = reinterpret_cast<const uint16_t*>(
                 static_cast<const uint8_t*>(mapped[5].data) + y * mapped[5].row_pitch);
             for (uint32_t x = 0; x < il_probe_width; ++x) {
               const float variance = HalfToFloat(texel[x * 4 + 2]);
+              const float relative = HalfToFloat(texel[x * 4 + 3]);
+              const float mean = HalfToFloat(texel[x * 4 + 0]);
+              mean_sum += mean;
+              if (mean > mean_max) mean_max = mean;
               variance_sum += variance;
+              relative_sum += relative;
               if (variance > variance_max) variance_max = variance;
+              if (relative > relative_max) relative_max = relative;
             }
           }
           const double texels = static_cast<double>(il_probe_width) * il_probe_height;
           device->unmap_texture_region(il_probe_staging[5], 0);
           char line[256] = {};
-          std::snprintf(line, sizeof(line), "mgsv: IL variance mean %.5f max %.5f",
-                        variance_sum / texels, variance_max);
+          std::snprintf(line, sizeof(line),
+                        "mgsv: IL variance abs %.5f/%.5f rel %.4f/%.4f m1 %.3f/%.3f (mean/max)",
+                        variance_sum / texels, variance_max, relative_sum / texels, relative_max,
+                        mean_sum / texels, mean_max);
           reshade::log::message(reshade::log::level::info, line);
         }
         for (uint32_t index = 0; index < 6; ++index) {
