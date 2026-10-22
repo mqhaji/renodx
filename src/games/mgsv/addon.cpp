@@ -1109,6 +1109,7 @@ struct IlTarget {
   reshade::api::resource_view uav = {0};
   uint32_t width = 0;
   uint32_t height = 0;
+  reshade::api::format format = reshade::api::format::unknown;
 };
 IlTarget il_bounce_target;
 IlTarget ao_target;
@@ -1133,8 +1134,12 @@ uint32_t il_history_width = 0;
 uint32_t il_history_height = 0;
 bool il_history_valid = false;
 
-bool EnsureIlTarget(reshade::api::device* device, IlTarget* target, uint32_t width, uint32_t height) {
-  if (target->uav.handle != 0 && target->width == width && target->height == height) return true;
+bool EnsureIlTarget(reshade::api::device* device, IlTarget* target, uint32_t width, uint32_t height,
+                    reshade::api::format format = reshade::api::format::r16g16b16a16_float) {
+  if (target->uav.handle != 0 && target->width == width && target->height == height
+      && target->format == format) {
+    return true;
+  }
 
   if (target->uav.handle != 0) {
     device->destroy_resource_view(target->uav);
@@ -1150,10 +1155,10 @@ bool EnsureIlTarget(reshade::api::device* device, IlTarget* target, uint32_t wid
   }
   target->width = 0;
   target->height = 0;
+  target->format = format;
 
   const reshade::api::resource_desc desc(
-      width, height, 1u, 1u,
-      reshade::api::format::r16g16b16a16_float,
+      width, height, 1u, 1u, format,
       1u,
       reshade::api::memory_heap::gpu_only,
       reshade::api::resource_usage::shader_resource
@@ -1164,7 +1169,7 @@ bool EnsureIlTarget(reshade::api::device* device, IlTarget* target, uint32_t wid
       || !device->create_resource_view(
           target->resource,
           reshade::api::resource_usage::shader_resource,
-          reshade::api::resource_view_desc(reshade::api::format::r16g16b16a16_float),
+          reshade::api::resource_view_desc(format),
           &target->view)
       || !device->create_resource_view(
           target->resource,
@@ -1458,8 +1463,10 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
         && EnsureIlTarget(device, &il_history_targets[1], il_width, il_height)
         && EnsureIlTarget(device, &il_history_aux_targets[0], il_width, il_height)
         && EnsureIlTarget(device, &il_history_aux_targets[1], il_width, il_height)
-        && EnsureIlTarget(device, &il_moments_targets[0], il_width, il_height)
-        && EnsureIlTarget(device, &il_moments_targets[1], il_width, il_height)
+        && EnsureIlTarget(device, &il_moments_targets[0], il_width, il_height,
+                                reshade::api::format::r16g16_float)
+        && EnsureIlTarget(device, &il_moments_targets[1], il_width, il_height,
+                                reshade::api::format::r16g16_float)
         && EnsureIlTarget(device, &il_accumulated_target, il_width, il_height)
         && EnsureLightPass(device, &il_pass, "mgsv: IL pass created", __mgsv_il, il_width, il_height)
         && EnsureLightPass(device, &il_composite_pass, "mgsv: IL composite created",
@@ -1552,7 +1559,10 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
   if (shader_injection.ao_enabled != 0.f) {
     // 0 = full, 1 = half. The AO writes its un-occluded fraction at this size; the resolve
     // multiplies the light with it at full resolution, depth-joint so silhouettes keep their edge.
-    const uint32_t ao_scale = shader_injection.ao_resolution > 0.5f ? 2u : 1u;
+    // 0 = full, 1 = half, 2 = quarter: the AO factor, history and aux all follow.
+    const uint32_t ao_scale = shader_injection.ao_resolution > 1.5f
+                                  ? 4u
+                                  : (shader_injection.ao_resolution > 0.5f ? 2u : 1u);
     shader_injection.ao_scale = static_cast<float>(ao_scale);
     const uint32_t ao_width = (frame.width + ao_scale - 1u) / ao_scale;
     const uint32_t ao_height = (frame.height + ao_scale - 1u) / ao_scale;
@@ -2245,11 +2255,12 @@ renodx::utils::settings::Settings settings = {
         .default_value = 1.f,
         .label = "AO Resolution",
         .section = "Ambient Occlusion",
-        .tooltip = "Half computes the occlusion at a quarter of the pixels and resolves it back "
-                   "with a depth-joint upsample, which is where most of the cost of this pass "
-                   "comes from. The upsample refuses to blend across silhouettes, so contact "
-                   "shadows keep their edge; full is there to compare against.",
-        .labels = {"Full", "Half"},
+        .tooltip = "Half computes the occlusion at a quarter of the pixels and quarter at a "
+                   "sixteenth, resolving it back with a depth-joint upsample. The upsample "
+                   "refuses to blend across silhouettes, so contact shadows keep their edge; "
+                   "quarter is where thin geometry - grass, wire - starts to soften first. "
+                   "Full is there to compare against.",
+        .labels = {"Full", "Half", "Quarter"},
     },
     new renodx::utils::settings::Setting{
         .key = "AoTemporal",
@@ -2320,12 +2331,13 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "IlSamples",
         .binding = &shader_injection.il_samples,
-        .default_value = 16.f,
+        .default_value = 8.f,
         .label = "GI Samples",
         .section = "Indirect Lighting",
         .tooltip = "Samples per pixel. Noise falls with the square root of this and cost "
-                   "rises linearly, so it is the direct quality dial; at 16 the gather is "
-                   "wide enough that the denoiser only has to clean the residual.",
+                   "rises linearly. Eight is enough now that the gather rotates every frame and "
+                   "the history accumulates the residual; the extra taps buy resolution the "
+                   "gather cannot see anyway.",
         .min = 2.f,
         .max = 16.f,
     },
