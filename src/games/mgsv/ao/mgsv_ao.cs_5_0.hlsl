@@ -1,4 +1,4 @@
-// MGSV VBAO - visibility-bitmask ambient occlusion, applied to the light buffer.
+// MGSV VBAO - visibility-bitmask ambient occlusion. Writes the un-occluded fraction.
 //
 // Screen Space Indirect Lighting with Visibility Bitmask, Therrien, Levesque and
 // Gilet, The Visual Computer 2023 - docs/vbao.pdf, Algorithm 1. This file keeps
@@ -9,20 +9,20 @@
 // 0x6DAF0C4A / 0xB2601810 are the game's screen-space *subsurface scatter*
 // chain, not AO. Replacing either of them removes the scattering that makes skin
 // read as skin. This pass therefore runs on its own dispatch, after stage 2 has
-// written the scattered light, and multiplies that result. The scatter has
-// already happened when this reads the buffer, so the occlusion cannot remove it.
+// written the scattered light.
 //
-// The light is read and written through the same UAV: the resource this pass
-// overwrites is the one the retail stage just wrote, and no engine pass is
-// touched. Alpha is written through unchanged - the retail chain reads it as the
-// "pixel was shaded" flag.
+// This pass does not touch the light. It writes the un-occluded fraction to its
+// own target, at a resolution that can be coarser than the frame, and the resolve
+// pass multiplies the light with it at full resolution using a depth-joint
+// upsample - which is what keeps a silhouette from darkening the surface behind
+// it. Alpha of the light therefore never passes through this shader.
 //
 // Bindings (own layout, dispatched by the addon):
 //   b0   Constants - the engine's scatter-pass constants still bound at this point
 //   t0   depth       (r32_float)
 //   t1   normal      (b8g8r8a8, same packing as the deferred G-buffer)
 //   t2   depth mips  (addon-built nearest-reduced chain)
-//   u0   light       (read-modify-write, rgb scaled, alpha preserved)
+//   u0   AO factor   (r channel = un-occluded fraction, written at AO resolution)
 
 #include "../shared.h"
 
@@ -34,9 +34,7 @@
 
 #include "../gbuffer.hlsli"
 
-// The light is both input and output: this pass is the last writer of the buffer
-// the retail scatter stage just produced, so a typed UAV load returns the
-// scattered value and the store puts the occluded value back.
+// The un-occluded fraction is what this pass produces; the resolve applies it.
 Texture2D<float4> depthBuffer : register(t0);
 Texture2D<float4> normalBuffer : register(t1);
 // The addon's depth mip chain: each texel is the nearest of the four below it. Only read
@@ -378,9 +376,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
   // and above 1 over-darkens, which is what makes the top of the slider do anything. The
   // saturation happens after the scale, so a pixel can at worst be fully dark.
   //
-  // Note that this buffer is the whole light, direct included, so the visibility also
-  // scales sunlit surfaces. The paper multiplies the ambient and indirect terms, which
-  // this buffer does not separate.
+  // Note that the resolve multiplies the whole light, direct included, so the visibility also
+  // darkens sunlit surfaces. The paper multiplies the ambient and indirect terms, which that
+  // buffer does not separate.
   const float occlusionApplied = saturate(occlusionRatio * amount) * fade;
 
   // The un-occluded fraction, resolved to full resolution by the joint-bilateral upsample in
