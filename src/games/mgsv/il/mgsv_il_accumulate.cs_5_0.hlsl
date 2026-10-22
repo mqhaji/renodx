@@ -77,18 +77,23 @@ void main(uint3 tid : SV_DispatchThreadID) {
   // A pixel whose gather found too few valid samples writes zero with alpha zero. Blending that
   // in darkens the pixel a little every frame until it goes black, and it is also what made the
   // variance explode: zeros alternating with real values.
+  // One non-finite value poisons the history permanently: every later frame blends it forward
+  // at the history weight, the moments square it into infinity, and the pixel renders black.
+  history = all(isfinite(history)) ? clamp(history, 0.0, 1.0e4) : 0.0;
+  const float3 gathered = all(isfinite(current.rgb)) ? clamp(current.rgb, 0.0, 1.0e4) : 0.0;
+
   const bool has_sample = current.a > 0.5;
 
   // Neighbourhood clip: the history may only move the result within what this frame's
   // neighbourhood allows, so a stale or mis-reprojected sample cannot smear. Starved neighbours
   // are skipped, otherwise the range always includes zero and the history can only darken.
-  float3 minimum = current.rgb;
-  float3 maximum = current.rgb;
+  float3 minimum = gathered;
+  float3 maximum = gathered;
   [unroll] for (int dy = -1; dy <= 1; ++dy) {
     [unroll] for (int dx = -1; dx <= 1; ++dx) {
       const int2 q = clamp(int2(pixel) + int2(dx, dy), int2(0, 0), gather_size - 1);
       const float4 neighbour = currentBuffer.Load(int3(q, 0));
-      if (neighbour.a <= 0.5) continue;
+      if (neighbour.a <= 0.5 || any(!isfinite(neighbour.rgb))) continue;
       minimum = min(minimum, neighbour.rgb);
       maximum = max(maximum, neighbour.rgb);
     }
@@ -120,7 +125,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
                           ? min(CUSTOM_MGSV_IL_HISTORY, adaptive) * saturate(CUSTOM_MGSV_IL_HISTORY_VALID)
                           : 0.0;
   const float3 result = has_sample
-                            ? lerp(current.rgb, clamp(history, minimum, maximum), blend)
+                            ? lerp(gathered, clamp(history, minimum, maximum), blend)
                             : history;
 
   const float length = has_sample
@@ -136,7 +141,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
   // Luminance moments of the incoming sample, not of the blended result: the variance has to
   // describe how much the gather itself fluctuates, otherwise it only measures the output's
   // already-filtered wobble and the denoiser gets no signal about where the noise is.
-  const float sample_luminance = dot(current.rgb, float3(0.2126, 0.7152, 0.0722));
+  const float sample_luminance = dot(gathered, float3(0.2126, 0.7152, 0.0722));
   const float2 previous_moments = momentsBuffer.Load(int3(aux_pixel, 0)).xy;
   float m1 = previous_moments.x;
   float m2 = previous_moments.y;
@@ -149,7 +154,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
       m2 = sample_luminance * sample_luminance;
     }
   }
-  const float variance = max(m2 - m1 * m1, 0.0);
+  const float variance = all(isfinite(float2(m1, m2))) ? max(m2 - m1 * m1, 0.0) : 0.0;
   // Brightness-relative spread: absolute variance is meaningless across a dark corridor and a
   // lit wall, and the a-trous needs a weight that behaves the same in both.
   const float relative_variance = variance / max(m1 * m1, 1.0e-6);

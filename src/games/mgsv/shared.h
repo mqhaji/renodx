@@ -103,6 +103,8 @@ struct ShaderInjectData {
   float il_min_samples;
   // 1 writes the gather's term alone into the light, for judging it.
   float il_debug;
+  // a-trous iteration: 0, 1, 2 with stride 1, 2, 4.
+  float il_filter_step;
 };
 
 #ifndef __cplusplus
@@ -176,6 +178,7 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_MGSV_IL_HISTORY       shader_injection.il_history_blend
 #define CUSTOM_MGSV_IL_HISTORY_VALID shader_injection.il_history_valid
 #define CUSTOM_MGSV_IL_DEBUG  shader_injection.il_debug
+#define CUSTOM_MGSV_IL_FILTER_STEP shader_injection.il_filter_step
 
 #include "../../shaders/renodx.hlsl"
 
