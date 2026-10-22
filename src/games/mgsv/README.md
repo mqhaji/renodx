@@ -14,17 +14,18 @@ Debug builds abort on MSVC iterator asserts (pre-existing); verify with Release.
 
 Design and measured behaviour: `docs/MGSV_IndirectLighting.md`.
 
-Settings that matter:
+Settings that matter (defaults in brackets):
 
-- **GI Amount** - percentage of the gathered mean added to the light. It is a fraction, not a sum.
-- **GI Resolution** - Full, Half or Quarter. The whole chain scales with it.
-- **GI Samples / GI Min Samples** - gather taps, and how many must survive rejection before a
-  pixel contributes at all.
-- **GI Radius** - gather reach as a fraction of screen height.
-- **GI History** - ceiling on the temporal weight. The effective weight is
+- **GI Amount** [100] - percentage of the gathered mean added to the light. It is a fraction,
+  not a sum.
+- **GI Resolution** [Quarter] - Full, Half or Quarter. The whole chain scales with it.
+- **GI Samples / GI Min Samples** [16 / 1] - gather taps, and how many must survive rejection
+  before a pixel contributes at all. One keeps grazing ground from dropping out.
+- **GI Radius** [80] - gather reach as a percentage of screen height.
+- **GI History** [90] - ceiling on the temporal weight. The effective weight is
   `min(this, 1 - 1/length)`, so a just-reset pixel trusts the new sample.
-- **GI Denoise Passes** - 1-3 a-trous iterations, stride 1/2/4. 3 is visibly cleaner at
-  Full resolution.
+- **GI Denoise Passes** [3] - 1-3 a-trous iterations, stride 1/2/4. 3 is visibly cleaner at
+  Full resolution; at Quarter the difference is small.
 
 ### Verification
 
