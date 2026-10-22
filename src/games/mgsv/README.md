@@ -13,11 +13,12 @@ Debug builds abort on MSVC iterator asserts (pre-existing); verify with Release.
 ## Ambient occlusion
 
 - **AO Resolution** [Half] - the occlusion is computed at half resolution and resolved with a
-  depth-joint bilateral. Full is available to compare.
-- **AO Temporal** [on] - accumulates the occlusion across frames. The pass rotates its sample
-  pattern every frame, so the residual averages out; with it off the frame is written through
-  unchanged.
-- **AO History** [90] - ceiling on the previous frame's weight, `min(this, 1 - 1/length)`.
+  depth-joint bilateral. Full and Quarter are available to compare.
+- **AO Steps** [6] - taps per slice per side. Higher is sharper on thin geometry; the cost is
+  linear.
+- Temporal accumulation was implemented, measured and removed: the depth-joint resolve already
+  denoises spatially, so the temporal history only traded a sharper-looking sparse estimate for a
+  softer converged mean, while costing a dispatch and 80 MB of targets.
 
 ## Indirect lighting
 
@@ -38,9 +39,9 @@ Settings that matter (defaults in brackets):
 
 ### Verification
 
-For the AO: with a still camera, toggling **AO Temporal** should not change the image — the
-accumulated and the raw pass converge to the same contact shadows. Pan or walk and no occlusion
-should trail behind the character; if it does, the depth/normal rejection is failing.
+For the AO: the image must be identical at **AO Resolution** Full and Half except for the
+softening of the thinnest occluders (grass, wire). If half resolution looks different in a way
+beyond that, the depth-joint upsample is not doing its job.
 
 1. Load into gameplay with the camera still. Open **GI Debug -> History length**: the frame should
    be bright red nearly everywhere, with thin green lines only on silhouettes. Green fills a whole

@@ -1095,7 +1095,6 @@ struct LightPass {
 };
 LightPass ao_pass;
 LightPass ao_resolve_pass;
-LightPass ao_accumulate_pass;
 LightPass il_pass;
 LightPass il_composite_pass;
 LightPass il_add_pass;
@@ -1113,14 +1112,7 @@ struct IlTarget {
 };
 IlTarget il_bounce_target;
 IlTarget ao_target;
-IlTarget ao_history_targets[2];
-IlTarget ao_history_aux_targets[2];
-IlTarget ao_accumulated_target;
-uint32_t ao_history_index = 0;
-bool ao_history_valid = false;
-uint32_t ao_history_width = 0;
-uint32_t ao_history_height = 0;
-bool ao_history_temporal = false;
+
 IlTarget il_filtered_target;
 
 // Ping-ponged accumulation. The frame reads one and writes the other, then swaps.
@@ -1405,8 +1397,7 @@ void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* pass,
 }
 
 void DestroyLightPasses(reshade::api::device* device) {
-  for (auto* pass : {&ao_pass, &ao_accumulate_pass, &ao_resolve_pass, &il_pass,
-                      &il_composite_pass, &il_add_pass,
+  for (auto* pass : {&ao_pass, &ao_resolve_pass, &il_pass, &il_composite_pass, &il_add_pass,
                       &il_accumulate_pass}) {
     pass->ready = false;
     if (pass->pipeline.handle != 0) {
@@ -1557,9 +1548,7 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
   }
 
   if (shader_injection.ao_enabled != 0.f) {
-    // 0 = full, 1 = half. The AO writes its un-occluded fraction at this size; the resolve
-    // multiplies the light with it at full resolution, depth-joint so silhouettes keep their edge.
-    // 0 = full, 1 = half, 2 = quarter: the AO factor, history and aux all follow.
+    // 0 = full, 1 = half, 2 = quarter: the AO factor and its resolve follow this.
     const uint32_t ao_scale = shader_injection.ao_resolution > 1.5f
                                   ? 4u
                                   : (shader_injection.ao_resolution > 0.5f ? 2u : 1u);
@@ -1567,25 +1556,9 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
     const uint32_t ao_width = (frame.width + ao_scale - 1u) / ao_scale;
     const uint32_t ao_height = (frame.height + ao_scale - 1u) / ao_scale;
 
-    // The history only survives while its size and the temporal toggle are unchanged.
-    if (ao_history_width != ao_width || ao_history_height != ao_height
-        || ao_history_temporal != (shader_injection.ao_temporal > 0.5f)) {
-      ao_history_width = ao_width;
-      ao_history_height = ao_height;
-      ao_history_temporal = shader_injection.ao_temporal > 0.5f;
-      ao_history_valid = false;
-    }
-
     if (EnsureIlTarget(device, &ao_target, ao_width, ao_height)
-        && EnsureIlTarget(device, &ao_history_targets[0], ao_width, ao_height)
-        && EnsureIlTarget(device, &ao_history_targets[1], ao_width, ao_height)
-        && EnsureIlTarget(device, &ao_history_aux_targets[0], ao_width, ao_height)
-        && EnsureIlTarget(device, &ao_history_aux_targets[1], ao_width, ao_height)
-        && EnsureIlTarget(device, &ao_accumulated_target, ao_width, ao_height)
         && EnsureLightPass(device, &ao_pass, "mgsv: AO pass created", __mgsv_ao, ao_width,
                            ao_height)
-        && EnsureLightPass(device, &ao_accumulate_pass, "mgsv: AO accumulate created",
-                           __mgsv_ao_accumulate, ao_width, ao_height)
         && EnsureLightPass(device, &ao_resolve_pass, "mgsv: AO resolve created",
                            __mgsv_ao_resolve, frame.width, frame.height)) {
       BuildDepthMips(cmd_list, frame.depth);
@@ -1602,30 +1575,8 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
                         il_bounce_target.uav, il_moments_targets[il_history_index].uav,
                         ao_width, ao_height);
 
-      // Temporal accumulation of the factor. With AO Temporal off the shader writes the frame
-      // straight through, so the resolve below always reads the same target.
-      const auto velocity_view = taa::input_capture::resources.velocity_srv;
-      shader_injection.ao_history_valid = ao_history_valid && velocity_view.handle != 0 ? 1.f : 0.f;
-
-      const std::array<reshade::api::resource_view, 7> accumulate_sources = {
-          ao_target.view,                            // t0
-          ao_history_targets[ao_history_index].view, // t1
-          velocity_view,                             // t2
-          frame.depth,                               // t3
-          frame.normal,                              // t4
-          ao_history_aux_targets[ao_history_index].view, // t5
-          GetAoFallbackView(cmd_list),               // t6, unused
-      };
-      const uint32_t ao_write_index = ao_history_index ^ 1u;
-      DispatchLightPass(cmd_list, &ao_accumulate_pass, accumulate_sources,
-                        ao_history_targets[ao_write_index].uav, ao_accumulated_target.uav,
-                        ao_history_aux_targets[ao_write_index].uav,
-                        il_moments_targets[il_history_index].uav, ao_width, ao_height);
-      ao_history_index = ao_write_index;
-      ao_history_valid = true;
-
       const std::array<reshade::api::resource_view, 7> resolve_sources = {
-          ao_accumulated_target.view,  // t0
+          ao_target.view,              // t0
           frame.depth,                 // t1, joint bilateral upsample
           GetAoFallbackView(cmd_list), // t2, unused
           GetAoFallbackView(cmd_list), // t3, unused
@@ -1634,7 +1585,7 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
           GetAoFallbackView(cmd_list), // t6, unused
       };
       DispatchLightPass(cmd_list, &ao_resolve_pass, resolve_sources, frame.light,
-                        ao_target.uav, ao_history_targets[ao_history_index].uav,
+                        il_accumulated_target.uav, il_bounce_target.uav,
                         il_moments_targets[il_history_index].uav, frame.width, frame.height);
     }
   }
@@ -2124,6 +2075,8 @@ renodx::utils::settings::Settings settings = {
                    "shadow themselves and the ground again.",
         .max = 100.f,
         .parse = [](float value) { return value * 0.01f; },
+        // Hidden from the UI: a scene-specific caster/receiver split, not a look.
+        .is_visible = [] { return false; },
     },
     new renodx::utils::settings::Setting{
         .key = "FxScreenSpaceShadowFadeEnd",
@@ -2194,7 +2147,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "AoSteps",
         .binding = &shader_injection.ao_steps,
-        .default_value = 4.f,
+        .default_value = 6.f,
         .label = "AO Steps",
         .section = "Ambient Occlusion",
         .tooltip = "Samples taken along each slice, per side, on an exponential distribution "
@@ -2265,44 +2218,6 @@ renodx::utils::settings::Settings settings = {
         .labels = {"Full", "Half", "Quarter"},
     },
     new renodx::utils::settings::Setting{
-        .key = "AoTemporal",
-        .binding = &shader_injection.ao_temporal,
-        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
-        .default_value = 1.f,
-        .label = "AO Temporal",
-        .section = "Ambient Occlusion",
-        .tooltip = "Accumulates the occlusion across frames. The pass already rotates its sample "
-                   "pattern every frame, so the residual averages out and a low sample count "
-                   "settles into the same contact shadows a much higher one produces. Off writes "
-                   "the frame straight through, which is exactly the untiled result.",
-    },
-    new renodx::utils::settings::Setting{
-        .key = "AoHistory",
-        .binding = &shader_injection.ao_history_blend,
-        .default_value = 90.f,
-        .label = "AO History",
-        .section = "Ambient Occlusion",
-        .tooltip = "Ceiling on how much of the previous frame survives, as a percentage. The "
-                   "weight actually used is the smaller of this and 1 - 1/length, so a pixel "
-                   "that just lost its history - a disocclusion or a silhouette - trusts the new "
-                   "sample instead of dragging the old one across the edge.",
-        .max = 97.f,
-        .parse = [](float value) { return value * 0.01f; },
-    },
-    new renodx::utils::settings::Setting{
-        .key = "AoDebug",
-        .binding = &shader_injection.ao_debug,
-        .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-        .default_value = 0.f,
-        .label = "AO Debug",
-        .section = "Ambient Occlusion",
-        .tooltip = "Off is the resolved occlusion. History length replaces the image with how "
-                   "converged the temporal history is: bright red means full, dark means the "
-                   "pixel resets every frame. If it never brightens while standing still, the "
-                   "accumulation is not running and AO Temporal has no effect.",
-        .labels = {"Off", "History length"},
-    },
-    new renodx::utils::settings::Setting{
         .key = "IlEnabled",
         .binding = &shader_injection.il_enabled,
         .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
@@ -2369,6 +2284,9 @@ renodx::utils::settings::Settings settings = {
                    "losing those surfaces.",
         .min = 1.f,
         .max = 16.f,
+        // Hidden from the UI: grazing surfaces need one sample to survive for the ground to
+        // contribute at all, and the shader clamps the value, so there is nothing to tune.
+        .is_visible = [] { return false; },
     },
     new renodx::utils::settings::Setting{
         .key = "IlResolution",
@@ -2595,11 +2513,6 @@ void OnDestroyDevice(reshade::api::device* device) {
   DestroyIlTarget(device, &il_moments_targets[0]);
   DestroyIlTarget(device, &il_moments_targets[1]);
   DestroyIlTarget(device, &ao_target);
-  DestroyIlTarget(device, &ao_history_targets[0]);
-  DestroyIlTarget(device, &ao_history_targets[1]);
-  DestroyIlTarget(device, &ao_history_aux_targets[0]);
-  DestroyIlTarget(device, &ao_history_aux_targets[1]);
-  DestroyIlTarget(device, &ao_accumulated_target);
   DestroyIlTarget(device, &il_accumulated_target);
   il_history_valid = false;
 }
