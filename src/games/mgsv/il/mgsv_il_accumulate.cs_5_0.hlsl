@@ -39,7 +39,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
   const float4 current = currentBuffer.Load(int3(pixel, 0));
 
   const float4 raw = velocityBuffer.Load(int3(centre, 0));
-  const float2 velocity = (raw.ba * 2.0 - 1.0) * 64.0 / float2(cBufferWidth, cBufferHeight);
+  // The buffer still carries the projection jitter this frame was sampled with, so a static
+  // camera reports a small constant motion in every pixel. Subtracting the jitter (the engine
+  // stores it in NDC, hence the half) is what makes a still image reproject onto itself.
+  const float2 velocity = (raw.ba * 2.0 - 1.0) * 64.0 / float2(cBufferWidth, cBufferHeight)
+                        - cCameraCenterOffset * 0.5;
 
   // Reproject in gather space, then fetch the history with a manual bilinear tap so no sampler
   // is needed in this layout.
@@ -85,7 +89,14 @@ void main(uint3 tid : SV_DispatchThreadID) {
   // frame and make the view self-fulfilling.
   historyOutput[pixel] = real;
 
-  if (CUSTOM_MGSV_IL_DEBUG > 2.5) {
+  if (CUSTOM_MGSV_IL_DEBUG > 3.5) {
+    // Reprojection offset in pixels. R/G are the corrected offset, B is the raw buffer value,
+    // so the two can be compared in one frame: the correction must shrink the typical offset.
+    const float2 raw_velocity = (raw.ba * 2.0 - 1.0) * 64.0 / float2(cBufferWidth, cBufferHeight);
+    accumulatedOutput[pixel] = float4(abs(velocity.x) * (float)cBufferWidth,
+                                      abs(velocity.y) * (float)cBufferHeight,
+                                      abs(raw_velocity.x) * (float)cBufferWidth, 1.0);
+  } else if (CUSTOM_MGSV_IL_DEBUG > 2.5) {
     // History length: dark where the history was just reset, bright where it has accumulated.
     // Green marks pixels that saw no history at all - if the whole view is green, the read is
     // dead, not the accumulation.
