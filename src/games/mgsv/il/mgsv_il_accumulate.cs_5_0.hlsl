@@ -74,16 +74,23 @@ void main(uint3 tid : SV_DispatchThreadID) {
     }
   }
 
+  // A pixel whose gather found too few valid samples writes zero with alpha zero. Blending that
+  // in darkens the pixel a little every frame until it goes black, and it is also what made the
+  // variance explode: zeros alternating with real values.
+  const bool has_sample = current.a > 0.5;
+
   // Neighbourhood clip: the history may only move the result within what this frame's
-  // neighbourhood allows, so a stale or mis-reprojected sample cannot smear.
+  // neighbourhood allows, so a stale or mis-reprojected sample cannot smear. Starved neighbours
+  // are skipped, otherwise the range always includes zero and the history can only darken.
   float3 minimum = current.rgb;
   float3 maximum = current.rgb;
   [unroll] for (int dy = -1; dy <= 1; ++dy) {
     [unroll] for (int dx = -1; dx <= 1; ++dx) {
       const int2 q = clamp(int2(pixel) + int2(dx, dy), int2(0, 0), gather_size - 1);
-      const float3 neighbour = currentBuffer.Load(int3(q, 0)).rgb;
-      minimum = min(minimum, neighbour);
-      maximum = max(maximum, neighbour);
+      const float4 neighbour = currentBuffer.Load(int3(q, 0));
+      if (neighbour.a <= 0.5) continue;
+      minimum = min(minimum, neighbour.rgb);
+      maximum = max(maximum, neighbour.rgb);
     }
   }
 
@@ -112,9 +119,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
   const float blend = has_history
                           ? min(CUSTOM_MGSV_IL_HISTORY, adaptive) * saturate(CUSTOM_MGSV_IL_HISTORY_VALID)
                           : 0.0;
-  const float3 result = lerp(current.rgb, clamp(history, minimum, maximum), blend);
+  const float3 result = has_sample
+                            ? lerp(current.rgb, clamp(history, minimum, maximum), blend)
+                            : history;
 
-  const float length = has_history ? min(history_length + 1.0, HISTORY_MAX_LENGTH) : 1.0;
+  const float length = has_sample
+                           ? (has_history ? min(history_length + 1.0, HISTORY_MAX_LENGTH) : 1.0)
+                           : max(history_length, 1.0);
   const float4 real = float4(result, length / HISTORY_MAX_LENGTH);
 
   // The history always receives the real result: a probe written into it would poison the next
@@ -122,19 +133,33 @@ void main(uint3 tid : SV_DispatchThreadID) {
   historyOutput[pixel] = real;
   historyAuxOutput[pixel] = float4(z, N.x, N.y, length / HISTORY_MAX_LENGTH);
 
-  // Luminance moments, filtered with the same weight as the colour so the variance describes the
-  // history that actually exists rather than an ideal infinite average. On a reset the moments
-  // restart from this frame alone.
-  const float luminance = dot(result, float3(0.2126, 0.7152, 0.0722));
+  // Luminance moments of the incoming sample, not of the blended result: the variance has to
+  // describe how much the gather itself fluctuates, otherwise it only measures the output's
+  // already-filtered wobble and the denoiser gets no signal about where the noise is.
+  const float sample_luminance = dot(current.rgb, float3(0.2126, 0.7152, 0.0722));
   const float2 previous_moments = momentsBuffer.Load(int3(aux_pixel, 0)).xy;
-  const float m1 = lerp(luminance, previous_moments.x, blend);
-  const float m2 = lerp(luminance * luminance, previous_moments.y, blend);
+  float m1 = previous_moments.x;
+  float m2 = previous_moments.y;
+  if (current.a > 0.5) {
+    if (has_history) {
+      m1 = lerp(sample_luminance, m1, blend);
+      m2 = lerp(sample_luminance * sample_luminance, m2, blend);
+    } else {
+      m1 = sample_luminance;
+      m2 = sample_luminance * sample_luminance;
+    }
+  }
   const float variance = max(m2 - m1 * m1, 0.0);
-  momentsOutput[pixel] = float4(m1, m2, variance, 0.0);
+  // Brightness-relative spread: absolute variance is meaningless across a dark corridor and a
+  // lit wall, and the a-trous needs a weight that behaves the same in both.
+  const float relative_variance = variance / max(m1 * m1, 1.0e-6);
+  momentsOutput[pixel] = float4(m1, m2, variance, relative_variance);
 
   if (CUSTOM_MGSV_IL_DEBUG > 4.5) {
-    // Variance: bright where the gather is noisy, black on a surface that averages cleanly.
-    accumulatedOutput[pixel] = float4(saturate(variance * 100.0), 0.0, 0.0, 1.0);
+    // Variance: black is a clean average, mid grey is a 100% relative spread, white is worse.
+    // The rational mapping keeps the whole range visible instead of saturating everywhere.
+    const float display = relative_variance / (1.0 + relative_variance);
+    accumulatedOutput[pixel] = float4(display, 0.0, 0.0, 1.0);
   } else if (CUSTOM_MGSV_IL_DEBUG > 3.5) {
     // Reprojection offset in pixels. R/G are the jitter the engine advertises in b0, in signed
     // pixels; B is the raw velocity magnitude. If R/G are zero while the scene renders, b0 is
