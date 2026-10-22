@@ -1898,10 +1898,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 1.f,
         .label = "Contact-Hardening Sun Shadows",
         .section = "Shadows",
-        .tooltip = "Softens sun shadows with distance from whatever casts them: sharp "
-                   "where an object meets the ground, wider further away, in place of "
-                   "the game's fixed-radius filter. Changes how the scene's shadows "
-                   "read, so it is off by default. Vanilla shadows are kept when off.",
+        .tooltip = "Sharpens sun shadows close to their caster and softens them with distance.",
     },
     new renodx::utils::settings::Setting{
         .key = "FxSunShadowSoftness",
@@ -1909,10 +1906,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 115.f,
         .label = "Sun Shadow Softness",
         .section = "Shadows",
-        .tooltip = "Widest penumbra a fully separated shadow gets, in millimetres. "
-                   "Raise it if a shadow-map mod stretches the cascade range: that "
-                   "makes each shadow-map texel cover more ground, which would "
-                   "otherwise shrink the softening out of sight.",
+        .tooltip = "Maximum softness of a shadow, in millimetres.",
         .max = 150.f,
         .parse = [](float value) { return value * 0.001f; },
     },
@@ -1922,9 +1916,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 60.f,
         .label = "Penumbra Response",
         .section = "Shadows",
-        .tooltip = "How quickly separation between caster and receiver reaches full "
-                   "softness. Too high and every shadow saturates, which flattens "
-                   "the gradient the hardening is made of.",
+        .tooltip = "How fast a shadow reaches full softness with caster separation.",
         .max = 100.f,
     },
     new renodx::utils::settings::Setting{
@@ -1933,8 +1925,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 35.f,
         .label = "Penumbra Blur Radius",
         .section = "Shadows",
-        .tooltip = "Spacing of the penumbra mask's neighbours, in screen pixels. "
-                   "Larger smooths the penumbra over more of the screen.",
+        .tooltip = "Pixel spacing of the penumbra blur.",
         .max = 50.f,
     },
     new renodx::utils::settings::Setting{
@@ -1944,10 +1935,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 1.f,
         .label = "Contact-Hardening Spot Shadows",
         .section = "Shadows",
-        .tooltip = "Same treatment for spot lights. Their values are separate from "
-                   "the sun's because the scales differ - a spot's cone is tens of "
-                   "metres where the sun's cascade is hundreds, so the same caster "
-                   "separation gives a far larger ratio. Off by default.",
+        .tooltip = "Same treatment for spot lights.",
     },
     new renodx::utils::settings::Setting{
         .key = "FxSpotShadowSoftness",
@@ -1955,8 +1943,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 160.f,
         .label = "Spot Shadow Softness",
         .section = "Shadows",
-        .tooltip = "Widest penumbra a fully separated spot shadow gets, in "
-                   "millimetres. The blur at the far end of the ramp.",
+        .tooltip = "Maximum softness of a spot shadow, in millimetres.",
         .max = 300.f,
         .parse = [](float value) { return value * 0.001f; },
     },
@@ -1966,10 +1953,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 4.f,
         .label = "Spot Penumbra Response",
         .section = "Shadows",
-        .tooltip = "How fast separation reaches full softness. Lower stretches the "
-                   "ramp, so the blur keeps growing over a longer range. Too high "
-                   "and the radius saturates, which makes the shadow grow uniformly "
-                   "instead of trailing off.",
+        .tooltip = "How fast a spot shadow reaches full softness.",
         .max = 40.f,
     },
     new renodx::utils::settings::Setting{
@@ -1987,9 +1971,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 100.f,
         .label = "Spot Shadow Darkness",
         .section = "Shadows",
-        .tooltip = "Scales the shadow's occlusion, so higher is darker. The result "
-                   "is clamped at fully occluded, which is why this cannot go "
-                   "negative the way an unclamped multiplier can.",
+        .tooltip = "Shadow occlusion scale; higher is darker.",
         .max = 300.f,
         .parse = [](float value) { return value * 0.01f; },
     },
@@ -1999,11 +1981,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 100.f,
         .label = "Spot Cone Falloff",
         .section = "Shadows",
-        .tooltip = "How much of the game's cone-edge falloff scales the shadow. At "
-                   "100 a shadow fades toward the cone's rim, which is why vanilla "
-                   "spot shadows are faint over most of the cone. Lowering it "
-                   "darkens them, but going too low runs the shadow at full "
-                   "strength right up to the rim, which reads as a stretch.",
+        .tooltip = "How much the cone-edge falloff darkens the shadow.",
         .max = 100.f,
         .parse = [](float value) { return value * 0.01f; },
     },
@@ -2014,11 +1992,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 1.f,
         .label = "Screen-Space Shadows",
         .section = "Shadows",
-        .tooltip = "Ray-marches the depth buffer toward the sun and darkens where "
-                   "the ray passes behind something nearer. Supplies the detail the "
-                   "cascade map cannot resolve at its texel size - grass, low bushes, "
-                   "the contact where a trunk meets the ground - out to the end of "
-                   "the cascade range. Off by default.",
+        .tooltip = "Marches the depth buffer toward the sun and darkens what it reaches.",
     },
     new renodx::utils::settings::Setting{
         .key = "FxScreenSpaceShadowStrength",
@@ -2026,12 +2000,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 200.f,
         .label = "Screen-Space Shadow Strength",
         .section = "Shadows",
-        .tooltip = "Attenuation per unit of occlusion, so this is the main look "
-                   "dial. The march reports the fraction of its steps that found an "
-                   "occluder, and that fraction is usually well below one, so the "
-                   "setting's scale runs past its own value: 150 removes 60% of the "
-                   "light where 40% of the march was occluded. Around 200 the core "
-                   "of a strong contact flattens to black.",
+        .tooltip = "Occlusion per unit of blocking; the main strength control.",
         .max = 400.f,
         .parse = [](float value) { return value * 0.01f; },
     },
@@ -2041,9 +2010,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 4.f,
         .label = "Screen-Space Shadow Reach",
         .section = "Shadows",
-        .tooltip = "How far the shadow ray travels, as a percentage of screen height. Higher "
-                   "reaches casters further away, at the risk of the ray crossing geometry that "
-                   "is only nearby.",
+        .tooltip = "How far the ray travels, as a percentage of screen height.",
         .max = 10.f,
         .parse = [](float value) { return value * 0.02f; },
     },
@@ -2053,9 +2020,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 2.f,
         .label = "Screen-Space Shadow Thickness",
         .section = "Shadows",
-        .tooltip = "How far in front of the ray a surface must sit before it counts "
-                   "as an occluder. Too high and thin casters are missed - at 20 mm "
-                   "it exceeded a grass blade, so the ray passed beside the grass.",
+        .tooltip = "How close a surface must be to the ray to count as a blocker.",
         .max = 100.f,
         .parse = [](float value) { return value * 0.001f; },
     },
@@ -2065,13 +2030,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 100.f,
         .label = "Screen-Space Shadow Material Limit",
         .section = "Shadows",
-        .tooltip = "The term runs only where the G-buffer's material index is below "
-                   "this. It exists because the depth test cannot tell a caster from "
-                   "the receiver's own surface on a solid object, which outlined "
-                   "characters; the material separates them. Grass, terrain and "
-                   "rocks all measure below 25, the character's body at 25-50. "
-                   "Lowering it risks cutting foliage; raising it lets characters "
-                   "shadow themselves and the ground again.",
+        .tooltip = "Material index below which the term applies.",
         .max = 100.f,
         .parse = [](float value) { return value * 0.01f; },
         // Hidden from the UI: a scene-specific caster/receiver split, not a look.
@@ -2083,8 +2042,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 500.f,
         .label = "Screen-Space Shadow Fade End",
         .section = "Shadows",
-        .tooltip = "Distance at which it is gone, in metres. The last cascade "
-                   "reaches 122.9 m, so past this the cascade map is on its own.",
+        .tooltip = "Distance in metres at which the term is gone.",
         .max = 500.f,
     },
     new renodx::utils::settings::Setting{
@@ -2094,11 +2052,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 1.f,
         .label = "AO (added after the game's scatter)",
         .section = "Ambient Occlusion",
-        .tooltip = "Adds a visibility-bitmask AO computed from the depth and normal "
-                   "buffers. It runs after the game's subsurface-scatter pass and scales "
-                   "the scattered light, so the skin's scattering is preserved; the "
-                   "game's own shaders are never replaced. Off leaves the game untouched. "
-                   "Record and open questions: MGSV_AmbientOcclusion.md.",
+        .tooltip = "Adds visibility-bitmask AO from the depth and normal buffers.",
     },
     new renodx::utils::settings::Setting{
         .key = "AoStrength",
@@ -2106,13 +2060,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 100.f,
         .label = "AO Amount",
         .section = "Ambient Occlusion",
-        .tooltip = "How much of the computed visibility is applied, as a percentage. "
-                   "100 is the paper's own occlusion; above that overshoots toward a "
-                   "full darkening, below it fades the effect out. The default is 150, "
-                   "because the paper's own thickness reads quiet at full strength. This "
-                   "buffer is the whole light, so the visibility scales sunlit surfaces "
-                   "too - the paper applies it to the ambient and indirect terms only, "
-                   "which this buffer does not separate.",
+        .tooltip = "How much of the computed occlusion is applied, as a percentage.",
         .max = 400.f,
         .parse = [](float value) { return value * 0.01f; },
     },
@@ -2122,10 +2070,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 70.f,
         .label = "AO Radius",
         .section = "Ambient Occlusion",
-        .tooltip = "Sample radius as a fraction of the screen. Larger "
-                   "gives more large-scale occlusion and less fine detail. The "
-                   "occluder thickness is derived from this, so the two can never "
-                   "disagree.",
+        .tooltip = "Sample radius as a fraction of the screen.",
         .max = 100.f,
         .parse = [](float value) { return value * 0.01f; },
     },
@@ -2135,12 +2080,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 2.f,
         .label = "AO Slices",
         .section = "Ambient Occlusion",
-        .tooltip = "Directions sampled per pixel. The pattern rotates every frame, so a "
-                   "frame's temporal reconstruction - the analytical TAA, FSR3 or DLSS - "
-                   "accumulates the phases and a low count converges: eight phases turn "
-                   "two directions into sixteen. With reconstruction Off the term is "
-                   "inert and slices and steps have to carry the averaging themselves. "
-                   "Cost is slices x steps x 2 depth fetches per pixel.",
+        .tooltip = "Directions sampled per pixel.",
         .max = 8.f,
     },
     new renodx::utils::settings::Setting{
@@ -2149,11 +2089,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 6.f,
         .label = "AO Steps",
         .section = "Ambient Occlusion",
-        .tooltip = "Samples taken along each slice, per side, on an exponential distribution "
-                   "that is dense near the pixel and sparse further out. This is the AO's detail "
-                   "dial: more steps resolve thin occluders - grass, wire, railings - more "
-                   "sharply, at a linear cost. The half-resolution pass already removed most of "
-                   "the pixel cost, so these buy sharpness rather than coverage.",
+        .tooltip = "Samples per slice. More steps resolve thin occluders more sharply.",
         .max = 20.f,
     },
     new renodx::utils::settings::Setting{
@@ -2162,14 +2098,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 800.f,
         .label = "AO Thickness",
         .section = "Ambient Occlusion",
-        .tooltip = "Multiplier on the occluder thickness, which the VBAO paper derives "
-                   "as a small constant fraction of the radius - its benchmark is five "
-                   "percent, which is what 100 gives. The default is 800, forty percent; "
-                   "at the paper's own five percent the effect is almost invisible here. "
-                   "It is the parameter that decides "
-                   "visual fidelity: too large and surfaces start to occlude themselves, "
-                   "too small and every sample's angular band falls below one sector and "
-                   "the occlusion disappears entirely.",
+        .tooltip = "Occluder thickness relative to the radius.",
         .max = 2000.f,
         .parse = [](float value) { return value * 0.01f; },
     },
@@ -2179,11 +2108,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 100.f,
         .label = "AO Fade Distance",
         .section = "Ambient Occlusion",
-        .tooltip = "How far out the effect reaches before fading to nothing, as a "
-                   "fraction of the depth range. Screen-space occlusion has nothing "
-                   "to say at distance, and fading it out there is what keeps the "
-                   "far field clean. Not part of the paper, whose equivalent is an "
-                   "optional thickness that grows linearly with distance.",
+        .tooltip = "Distance at which the occlusion fades out.",
         .max = 100.f,
         .parse = [](float value) { return value * 0.01f; },
     },
@@ -2194,12 +2119,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 0.f,
         .label = "Coarse Depth",
         .section = "Ambient Occlusion",
-        .tooltip = "Lets distant steps fetch their depth from a reduced chain, so one texel "
-                   "covers the footprint the step spacing would otherwise skip over. That "
-                   "is what a step far from the pixel needs: an occluder narrower than the "
-                   "spacing is otherwise invisible between two samples. Pure A/B, since "
-                   "whether it helps is measurable: with it off the march reads the plain "
-                   "depth buffer at every step.",
+        .tooltip = "Reads distant steps from a reduced depth chain.",
     },
     new renodx::utils::settings::Setting{
         .key = "AoResolution",
@@ -2208,11 +2128,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 1.f,
         .label = "AO Resolution",
         .section = "Ambient Occlusion",
-        .tooltip = "Half computes the occlusion at a quarter of the pixels and quarter at a "
-                   "sixteenth, resolving it back with a depth-joint upsample. The upsample "
-                   "refuses to blend across silhouettes, so contact shadows keep their edge; "
-                   "quarter is where thin geometry - grass, wire - starts to soften first. "
-                   "Full is there to compare against.",
+        .tooltip = "Resolution the occlusion is computed at, before the depth-resolve.",
         .labels = {"Full", "Half", "Quarter"},
     },
     new renodx::utils::settings::Setting{
@@ -2222,11 +2138,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 1.f,
         .label = "Screen Space GI",
         .section = "Indirect Lighting",
-        .tooltip = "Adds a screen-space diffuse gather after the AO. It samples the "
-                   "light of visible neighbours and adds a fraction of their mean back "
-                   "to the light, which is what produces colour bleeding into contact "
-                   "shadows. Its own dispatch and its own settings: off leaves the AO "
-                   "untouched. Screen-space only, so it cannot see light off screen.",
+        .tooltip = "Adds a screen-space diffuse gather after the AO.",
     },
     new renodx::utils::settings::Setting{
         .key = "IlAmount",
@@ -2234,11 +2146,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 100.f,
         .label = "GI Amount",
         .section = "Indirect Lighting",
-        .tooltip = "How much of the gathered mean is added, as a percentage. It is a "
-                   "fraction of the neighbourhood's lighting rather than a sum, so "
-                   "shortening the radius does not dim it. 100 is a full-strength bounce; "
-                   "the gather reads the whole light, ambient included, so pushing past "
-                   "that feeds on ambient that should already be there.",
+        .tooltip = "How much of the gathered light is added, as a percentage.",
         .max = 200.f,
         .parse = [](float value) { return value * 0.01f; },
     },
@@ -2248,11 +2156,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 80.f,
         .label = "GI Radius",
         .section = "Indirect Lighting",
-        .tooltip = "Gather radius as a percentage of screen height. The projection fixes "
-                   "the scale: 1% of height is about 1.2 cm per metre of depth. 80% reaches "
-                   "across a room and is what the pass needs to see a light source that is "
-                   "not directly beside the pixel; lower values trade that reach for a "
-                   "tighter, more local bounce.",
+        .tooltip = "Gather radius as a percentage of screen height.",
         .max = 100.f,
         .parse = [](float value) { return value * 0.01f; },
     },
@@ -2262,10 +2166,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 8.f,
         .label = "GI Samples",
         .section = "Indirect Lighting",
-        .tooltip = "Samples per pixel. Noise falls with the square root of this and cost "
-                   "rises linearly. Eight is enough now that the gather rotates every frame and "
-                   "the history accumulates the residual; the extra taps buy resolution the "
-                   "gather cannot see anyway.",
+        .tooltip = "Samples per pixel. More is less noise, at linear cost.",
         .min = 2.f,
         .max = 16.f,
     },
@@ -2275,11 +2176,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 1.f,
         .label = "GI Min Samples",
         .section = "Indirect Lighting",
-        .tooltip = "How many of the gather's samples must survive the rejection gates "
-                   "before a pixel adds any bounce. One keeps grazing surfaces - flat "
-                   "ground especially - from dropping out entirely; two is safer against "
-                   "a single bright neighbour becoming the whole term, at the cost of "
-                   "losing those surfaces.",
+        .tooltip = "Samples that must survive rejection before a pixel contributes.",
         .min = 1.f,
         .max = 16.f,
         // Hidden from the UI: grazing surfaces need one sample to survive for the ground to
@@ -2293,10 +2190,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 2.f,
         .label = "GI Resolution",
         .section = "Indirect Lighting",
-        .tooltip = "Half runs the gather on a quarter of the pixels and quarter on a "
-                   "sixteenth, with the denoiser covering the rest. A screen-space gather "
-                   "cannot resolve detail finer than its sample count anyway, so the cheaper "
-                   "steps lose very little; full is there to compare against.",
+        .tooltip = "Resolution the gather and its denoiser run at.",
         .labels = {"Full", "Half", "Quarter"},
     },
     new renodx::utils::settings::Setting{
@@ -2305,9 +2199,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 3.f,
         .label = "GI Denoise Passes",
         .section = "Indirect Lighting",
-        .tooltip = "How many a-trous iterations the denoiser runs: 1, 2 or 3, with stride 1, 2 and "
-                   "4. Each one doubles the reach, so 3 covers a 16-pixel radius. It is the main "
-                   "smoothness-versus-cost control.",
+        .tooltip = "A-trous iterations the denoiser runs.",
         .min = 1.f,
         .max = 3.f,
     },
@@ -2317,14 +2209,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 90.f,
         .label = "GI History",
         .section = "Indirect Lighting",
-        .tooltip = "Ceiling on how much of the previous frame survives, as a percentage. "
-                   "The weight actually used is the smaller of this and 1 - 1/length, so a "
-                   "pixel that just lost its history trusts the new sample and ramps back "
-                   "up. Reprojection uses the game's velocity buffer with the same decode "
-                   "the TAA pass uses, and the history is clipped to the current "
-                   "neighbourhood, so the blend buys noise reduction without ghosting. It "
-                   "is inert when temporal reconstruction is off, because there is no "
-                   "velocity buffer then.",
+        .tooltip = "Ceiling on how much of the previous frame survives.",
         .max = 95.f,
         .parse = [](float value) { return value * 0.01f; },
     },
@@ -2335,12 +2220,7 @@ renodx::utils::settings::Settings settings = {
         .default_value = 0.f,
         .label = "GI Debug",
         .section = "Indirect Lighting",
-        .tooltip = "Off adds the gather to the light. GI only shows the gather's own "
-                   "contribution, so it can be judged without the scene lighting. History "
-                   "delta is the difference against the previous frame, History length is "
-                   "how converged the temporal history is (bright means full), "
-                   "Reprojection is the offset the history is dragged through in pixels, "
-                   "and Variance is the measured per-pixel noise the denoiser weights by.",
+        .tooltip = "Shows a diagnostic view instead of the scene.",
         .labels = {"Off", "GI only", "History delta", "History length", "Reprojection", "Variance"},
     },
     new renodx::utils::settings::Setting{
