@@ -2176,54 +2176,54 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "IlAmount",
         .binding = &shader_injection.il_amount,
-        .default_value = 30.f,
+        .default_value = 100.f,
         .label = "GI Amount",
         .section = "Indirect Lighting",
         .tooltip = "How much of the gathered mean is added, as a percentage. It is a "
                    "fraction of the neighbourhood's lighting rather than a sum, so "
-                   "shortening the radius does not dim it. The gather reads the whole "
-                   "light, ambient included, so high values feed on ambient that should "
-                   "already be there - this is the main reason to keep it low until a "
-                   "direct-only source exists.",
+                   "shortening the radius does not dim it. 100 is a full-strength bounce; "
+                   "the gather reads the whole light, ambient included, so pushing past "
+                   "that feeds on ambient that should already be there.",
         .max = 200.f,
         .parse = [](float value) { return value * 0.01f; },
     },
     new renodx::utils::settings::Setting{
         .key = "IlRadius",
         .binding = &shader_injection.il_radius,
-        .default_value = 10.f,
+        .default_value = 80.f,
         .label = "GI Radius",
         .section = "Indirect Lighting",
         .tooltip = "Gather radius as a percentage of screen height. The projection fixes "
-                   "the scale: 1% of height is about 1.2 cm per metre of depth, so 3% - the "
-                   "old default - reached only 10 cm at 3 m and never found a lamp across "
-                   "the room. 10% reaches 35 cm at 3 m and 1.2 m at 10 m.",
+                   "the scale: 1% of height is about 1.2 cm per metre of depth. 80% reaches "
+                   "across a room and is what the pass needs to see a light source that is "
+                   "not directly beside the pixel; lower values trade that reach for a "
+                   "tighter, more local bounce.",
         .max = 100.f,
         .parse = [](float value) { return value * 0.01f; },
     },
     new renodx::utils::settings::Setting{
         .key = "IlSamples",
         .binding = &shader_injection.il_samples,
-        .default_value = 8.f,
+        .default_value = 16.f,
         .label = "GI Samples",
         .section = "Indirect Lighting",
         .tooltip = "Samples per pixel. Noise falls with the square root of this and cost "
-                   "rises linearly, so it is the direct quality dial; below eight the "
-                   "gather is a handful of neighbours and reads patchy.",
+                   "rises linearly, so it is the direct quality dial; at 16 the gather is "
+                   "wide enough that the denoiser only has to clean the residual.",
         .min = 2.f,
         .max = 16.f,
     },
     new renodx::utils::settings::Setting{
         .key = "IlMinSamples",
         .binding = &shader_injection.il_min_samples,
-        .default_value = 2.f,
+        .default_value = 1.f,
         .label = "GI Min Samples",
         .section = "Indirect Lighting",
         .tooltip = "How many of the gather's samples must survive the rejection gates "
-                   "before a pixel adds any bounce. At 1 a single bright neighbour can "
-                   "become the whole term and the image flashes; too high and the term "
-                   "disappears where geometry rejects most of the disk. Two is the "
-                   "compromise that keeps it reading without the single-sample spikes.",
+                   "before a pixel adds any bounce. One keeps grazing surfaces - flat "
+                   "ground especially - from dropping out entirely; two is safer against "
+                   "a single bright neighbour becoming the whole term, at the cost of "
+                   "losing those surfaces.",
         .min = 1.f,
         .max = 16.f,
     },
@@ -2231,7 +2231,7 @@ renodx::utils::settings::Settings settings = {
         .key = "IlResolution",
         .binding = &shader_injection.il_resolution,
         .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-        .default_value = 1.f,
+        .default_value = 2.f,
         .label = "GI Resolution",
         .section = "Indirect Lighting",
         .tooltip = "Half runs the gather on a quarter of the pixels and quarter on a "
@@ -2255,14 +2255,17 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "IlHistory",
         .binding = &shader_injection.il_history_blend,
-        .default_value = 85.f,
+        .default_value = 90.f,
         .label = "GI History",
         .section = "Indirect Lighting",
-        .tooltip = "How much of the previous frame survives, as a percentage. Reprojection "
-                   "uses the game's velocity buffer with the same decode the TAA pass uses, "
-                   "and the history is clipped to the current neighbourhood, so the blend "
-                   "buys noise reduction without ghosting. It is inert when temporal "
-                   "reconstruction is off, because there is no velocity buffer then.",
+        .tooltip = "Ceiling on how much of the previous frame survives, as a percentage. "
+                   "The weight actually used is the smaller of this and 1 - 1/length, so a "
+                   "pixel that just lost its history trusts the new sample and ramps back "
+                   "up. Reprojection uses the game's velocity buffer with the same decode "
+                   "the TAA pass uses, and the history is clipped to the current "
+                   "neighbourhood, so the blend buys noise reduction without ghosting. It "
+                   "is inert when temporal reconstruction is off, because there is no "
+                   "velocity buffer then.",
         .max = 95.f,
         .parse = [](float value) { return value * 0.01f; },
     },
@@ -2273,10 +2276,12 @@ renodx::utils::settings::Settings settings = {
         .default_value = 0.f,
         .label = "GI Debug",
         .section = "Indirect Lighting",
-        .tooltip = "Off is the gather added to the light. GI only writes the gather's "
-                   "contribution alone, so it can be judged without the scene lighting. "
-                   "Source only writes the buffer the gather samples, which answers "
-                   "whether a given light is in that buffer at all.",
+        .tooltip = "Off adds the gather to the light. GI only shows the gather's own "
+                   "contribution, so it can be judged without the scene lighting. History "
+                   "delta is the difference against the previous frame, History length is "
+                   "how converged the temporal history is (bright means full), "
+                   "Reprojection is the offset the history is dragged through in pixels, "
+                   "and Variance is the measured per-pixel noise the denoiser weights by.",
         .labels = {"Off", "GI only", "History delta", "History length", "Reprojection", "Variance"},
     },
     new renodx::utils::settings::Setting{
