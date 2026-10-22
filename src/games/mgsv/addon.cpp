@@ -1174,7 +1174,7 @@ bool EnsureIlTarget(reshade::api::device* device, IlTarget* target, uint32_t wid
       || !device->create_resource_view(
           target->resource,
           reshade::api::resource_usage::unordered_access,
-          reshade::api::resource_view_desc(reshade::api::format::r16g16b16a16_float),
+          reshade::api::resource_view_desc(format),
           &target->uav)) {
     reshade::log::message(reshade::log::level::error, "mgsv: IL target failed");
     return false;
