@@ -1145,6 +1145,7 @@ float HalfToFloat(uint16_t value) {
 
 // Ping-ponged accumulation. The frame reads one and writes the other, then swaps.
 IlTarget il_history_targets[2];
+IlTarget il_history_aux_targets[2];
 IlTarget il_accumulated_target;
 uint32_t il_history_index = 0;
 
@@ -1221,12 +1222,12 @@ bool EnsureLightPassLayout(reshade::api::device* device) {
 
   std::array<reshade::api::pipeline_layout_param, 3> params = {};
   params[0].type = reshade::api::pipeline_layout_param_type::push_descriptors;
-  params[0].push_descriptors.count = 5u;  // t0 depth, t1 normal, t2 pass input, t3 albedo, t4 specular
+  params[0].push_descriptors.count = 6u;  // t0 depth, t1 normal, t2 pass input, t3 albedo, t4 specular, t5 history aux
   params[0].push_descriptors.type = reshade::api::descriptor_type::texture_shader_resource_view;
   params[0].push_descriptors.dx_register_index = 0u;
   params[0].push_descriptors.dx_register_space = 0u;
   params[1].type = reshade::api::pipeline_layout_param_type::push_descriptors;
-  params[1].push_descriptors.count = 2u;  // u0 result, u1 optional second output
+  params[1].push_descriptors.count = 3u;  // u0 result, u1 display, u2 history aux
   params[1].push_descriptors.type = reshade::api::descriptor_type::texture_unordered_access_view;
   params[1].push_descriptors.dx_register_index = 0u;
   params[1].push_descriptors.dx_register_space = 0u;
@@ -1352,11 +1353,12 @@ bool CaptureLightFrame(reshade::api::command_list* cmd_list) {
 // One dispatch of a light-modifying pass, with the descriptors it owns saved and put back
 // so the engine's next command sees the state it left.
 void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* pass,
-                       const std::array<reshade::api::resource_view, 5>& sources,
+                       const std::array<reshade::api::resource_view, 6>& sources,
                        reshade::api::resource_view target,
                        reshade::api::resource_view second_target,
+                       reshade::api::resource_view third_target,
                        uint32_t width, uint32_t height) {
-  std::array<reshade::api::resource_view, 5> saved_sources = {};
+  std::array<reshade::api::resource_view, 6> saved_sources = {};
   for (uint32_t slot = 0; slot < saved_sources.size(); ++slot) {
     saved_sources[slot] = renodx::utils::state::GetBoundResourceView(
         cmd_list, reshade::api::shader_stage::compute,
@@ -1369,13 +1371,13 @@ void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* pass,
   cmd_list->bind_pipeline(reshade::api::pipeline_stage::all_compute, pass->pipeline);
   // UAVs before SRVs. Binding an SRV whose resource is still bound as a UAV makes D3D11
   // silently drop the SRV, so a stale UAV from the previous dispatch would zero every read.
-  const std::array<reshade::api::resource_view, 2> targets = {target, second_target};
+  const std::array<reshade::api::resource_view, 3> targets = {target, second_target, third_target};
   cmd_list->push_descriptors(
       reshade::api::shader_stage::all_compute, light_pass_layout, 1u,
       {.table = {0u},
        .binding = 0u,
        .array_offset = 0u,
-       .count = 2u,
+       .count = 3u,
        .type = reshade::api::descriptor_type::texture_unordered_access_view,
        .descriptors = targets.data()});
   cmd_list->push_descriptors(
@@ -1468,6 +1470,8 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
         && EnsureIlTarget(device, &il_filtered_target, il_width, il_height)
         && EnsureIlTarget(device, &il_history_targets[0], il_width, il_height)
         && EnsureIlTarget(device, &il_history_targets[1], il_width, il_height)
+        && EnsureIlTarget(device, &il_history_aux_targets[0], il_width, il_height)
+        && EnsureIlTarget(device, &il_history_aux_targets[1], il_width, il_height)
         && EnsureIlTarget(device, &il_accumulated_target, il_width, il_height)
         && EnsureLightPass(device, &il_pass, "mgsv: IL pass created", __mgsv_il, il_width, il_height)
         && EnsureLightPass(device, &il_composite_pass, "mgsv: IL composite created",
@@ -1476,52 +1480,62 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
                            __mgsv_il_add, frame.width, frame.height)
         && EnsureLightPass(device, &il_accumulate_pass, "mgsv: IL accumulate created",
                            __mgsv_il_accumulate, il_width, il_height)) {
-      const std::array<reshade::api::resource_view, 5> gather_sources = {
-          frame.depth,    // t0
-          frame.normal,   // t1
-          light_source,   // t2
-          albedo_view,    // t3
-          specular_view,  // t4
+      const std::array<reshade::api::resource_view, 6> gather_sources = {
+          frame.depth,                 // t0
+          frame.normal,                // t1
+          light_source,                // t2
+          albedo_view,                 // t3
+          specular_view,               // t4
+          GetAoFallbackView(cmd_list), // t5, unused
       };
-      DispatchLightPass(cmd_list, &il_pass, gather_sources, il_bounce_target.uav, il_filtered_target.uav, il_width, il_height);
+      DispatchLightPass(cmd_list, &il_pass, gather_sources, il_bounce_target.uav,
+                        il_filtered_target.uav, il_accumulated_target.uav,
+                        il_width, il_height);
 
       // Temporal accumulation against the previous result. The velocity view comes from the
       // TAA capture, which is backend-independent and already written by this point in the
       // frame; when it is missing (reconstruction off) the blend collapses to zero.
       const auto velocity_view = taa::input_capture::resources.velocity_srv;
       shader_injection.il_history_valid = il_history_valid && velocity_view.handle != 0 ? 1.f : 0.f;
-      const std::array<reshade::api::resource_view, 5> accumulate_sources = {
-          il_bounce_target.view,       // t0
+      const std::array<reshade::api::resource_view, 6> accumulate_sources = {
+          il_bounce_target.view,                      // t0
           il_history_targets[il_history_index].view,  // t1
-          velocity_view,               // t2
-          frame.depth,                 // t3
-          frame.normal,                // t4
+          velocity_view,                              // t2
+          frame.depth,                                // t3
+          frame.normal,                               // t4
+          il_history_aux_targets[il_history_index].view, // t5
       };
       const uint32_t write_index = il_history_index ^ 1u;
       DispatchLightPass(cmd_list, &il_accumulate_pass, accumulate_sources,
                         il_history_targets[write_index].uav, il_accumulated_target.uav,
-                        il_width, il_height);
+                        il_history_aux_targets[write_index].uav, il_width, il_height);
       il_history_index = write_index;
       il_history_valid = true;
 
 
-      const std::array<reshade::api::resource_view, 5> filter_sources = {
+      const std::array<reshade::api::resource_view, 6> filter_sources = {
           il_accumulated_target.view,  // t0
           frame.depth,                 // t1
           frame.normal,                // t2
           GetAoFallbackView(cmd_list), // t3, unused
           GetAoFallbackView(cmd_list), // t4, unused
+          GetAoFallbackView(cmd_list), // t5, unused
       };
-      DispatchLightPass(cmd_list, &il_composite_pass, filter_sources, il_filtered_target.uav, il_bounce_target.uav, il_width, il_height);
+      DispatchLightPass(cmd_list, &il_composite_pass, filter_sources, il_filtered_target.uav,
+                        il_bounce_target.uav, il_history_aux_targets[write_index ^ 1u].uav,
+                        il_width, il_height);
 
-      const std::array<reshade::api::resource_view, 5> add_sources = {
+      const std::array<reshade::api::resource_view, 6> add_sources = {
           il_filtered_target.view,     // t0
           GetAoFallbackView(cmd_list), // t1, unused
           GetAoFallbackView(cmd_list), // t2, unused
           GetAoFallbackView(cmd_list), // t3, unused
           GetAoFallbackView(cmd_list), // t4, unused
+          GetAoFallbackView(cmd_list), // t5, unused
       };
-      DispatchLightPass(cmd_list, &il_add_pass, add_sources, frame.light, il_accumulated_target.uav, frame.width, frame.height);
+      DispatchLightPass(cmd_list, &il_add_pass, add_sources, frame.light,
+                        il_accumulated_target.uav, il_bounce_target.uav,
+                        frame.width, frame.height);
 
       // TEMPORARY PROBE: capture the four temporal targets once a second, log their channel
       // ranges, and measure |history - gather| so reprojection quality is a number, not an
@@ -1529,17 +1543,18 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
       // Only a 256x256 window is read back. A full-frame copy stalls the GPU for tens of
       // milliseconds and shows up as a visible hitch once a second.
       constexpr uint32_t IL_PROBE_SIZE = 256;
-      static reshade::api::resource il_probe_staging[4] = {};
+      static reshade::api::resource il_probe_staging[5] = {};
       static uint32_t il_probe_width = 0;
       static uint32_t il_probe_height = 0;
       static uint32_t il_probe_x = 0;
       static uint32_t il_probe_y = 0;
       static uint32_t il_probe_count = 0;
-      const std::array<reshade::api::resource, 4> il_probe_sources = {
+      const std::array<reshade::api::resource, 5> il_probe_sources = {
           il_bounce_target.resource,
           il_history_targets[write_index ^ 1u].resource,  // the history this frame reads
           il_accumulated_target.resource,
           il_filtered_target.resource,
+          il_history_aux_targets[write_index].resource,
       };
       const uint32_t probe_width = il_width < IL_PROBE_SIZE ? il_width : IL_PROBE_SIZE;
       const uint32_t probe_height = il_height < IL_PROBE_SIZE ? il_height : IL_PROBE_SIZE;
@@ -1558,7 +1573,7 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
         il_probe_y = (il_height - probe_height) / 2;
       } else if (++il_probe_count % 60u == 0u) {
         std::array<reshade::api::subresource_data, 4> mapped = {};
-        for (uint32_t index = 0; index < 4; ++index) {
+        for (uint32_t index = 0; index < 5; ++index) {
           if (!device->map_texture_region(il_probe_staging[index], 0, nullptr,
                                           reshade::api::map_access::read_only, &mapped[index])) {
             continue;
@@ -1680,7 +1695,34 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
             reshade::log::message(reshade::log::level::info, line);
           }
         }
-        for (uint32_t index = 0; index < 4; ++index) {
+        // History length distribution. This is step 3's acceptance measure: with a still camera
+        // every texel must sit at the maximum, and only real disocclusions may reset.
+        if (device->map_texture_region(il_probe_staging[4], 0, nullptr,
+                                       reshade::api::map_access::read_only, &mapped[4])) {
+          double length_sum = 0.0;
+          float length_min = 1e9f;
+          float length_max = 0.0f;
+          uint32_t reset = 0;
+          for (uint32_t y = 0; y < il_probe_height; ++y) {
+            const auto* texel = reinterpret_cast<const uint16_t*>(
+                static_cast<const uint8_t*>(mapped[4].data) + y * mapped[4].row_pitch);
+            for (uint32_t x = 0; x < il_probe_width; ++x) {
+              const float length = HalfToFloat(texel[x * 4 + 3]) * 32.0f;
+              length_sum += length;
+              if (length < length_min) length_min = length;
+              if (length > length_max) length_max = length;
+              if (length < 1.5f) ++reset;
+            }
+          }
+          const double texels = static_cast<double>(il_probe_width) * il_probe_height;
+          device->unmap_texture_region(il_probe_staging[4], 0);
+          char line[256] = {};
+          std::snprintf(line, sizeof(line),
+                        "mgsv: IL length min %.1f mean %.1f max %.1f reset %.2f%%",
+                        length_min, length_sum / texels, length_max, 100.0 * reset / texels);
+          reshade::log::message(reshade::log::level::info, line);
+        }
+        for (uint32_t index = 0; index < 5; ++index) {
           const reshade::api::subresource_box source_box(
               il_probe_x, il_probe_y, 0u, il_probe_x + il_probe_width,
               il_probe_y + il_probe_height, 1u);
@@ -1703,14 +1745,16 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
   if (shader_injection.ao_enabled != 0.f
       && EnsureLightPass(device, &ao_pass, "mgsv: AO pass created", __mgsv_ao, frame.width, frame.height)) {
     BuildDepthMips(cmd_list, frame.depth);
-    const std::array<reshade::api::resource_view, 5> sources = {
+    const std::array<reshade::api::resource_view, 6> sources = {
         frame.depth,                 // t0
         frame.normal,                // t1
         GetDepthMipView(cmd_list),   // t2, the addon's chain or the stand-in
         GetAoFallbackView(cmd_list), // t3, unused by the AO
         GetAoFallbackView(cmd_list), // t4, unused by the AO
+        GetAoFallbackView(cmd_list), // t5, unused by the AO
     };
-    DispatchLightPass(cmd_list, &ao_pass, sources, frame.light, il_accumulated_target.uav, frame.width, frame.height);
+    DispatchLightPass(cmd_list, &ao_pass, sources, frame.light, il_accumulated_target.uav,
+                        il_bounce_target.uav, frame.width, frame.height);
   }
 }
 
@@ -2602,6 +2646,8 @@ void OnDestroyDevice(reshade::api::device* device) {
   DestroyIlTarget(device, &il_filtered_target);
   DestroyIlTarget(device, &il_history_targets[0]);
   DestroyIlTarget(device, &il_history_targets[1]);
+  DestroyIlTarget(device, &il_history_aux_targets[0]);
+  DestroyIlTarget(device, &il_history_aux_targets[1]);
   DestroyIlTarget(device, &il_accumulated_target);
   il_history_valid = false;
 }
