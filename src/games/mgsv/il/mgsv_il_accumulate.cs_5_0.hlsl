@@ -23,8 +23,12 @@ Texture2D<float4> historyBuffer : register(t1);  // previous accumulated result
 Texture2D<float4> velocityBuffer : register(t2); // MGSV camera velocity, .ba
 Texture2D<float4> depthBuffer : register(t3);
 Texture2D<float4> normalBuffer : register(t4);
+// Previous frame's geometry and history length. The radiance history cannot carry this: its
+// alpha is already the length, and a rejection test needs depth and normal, not colour.
+Texture2D<float4> historyAuxBuffer : register(t5);
 RWTexture2D<float4> historyOutput : register(u0);    // next frame's history, always the real result
 RWTexture2D<float4> accumulatedOutput : register(u1); // what the filter reads, may show a probe
+RWTexture2D<float4> historyAuxOutput : register(u2);  // z, normal.xy, length for the next frame
 
 [numthreads(8, 8, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
@@ -37,6 +41,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
   if (centre.x >= (int)cBufferWidth || centre.y >= (int)cBufferHeight) return;
 
   const float4 current = currentBuffer.Load(int3(pixel, 0));
+  const float z = LinearZ(depthBuffer.Load(int3(centre, 0)).x);
+  const float3 N = DecodeNormal(normalBuffer.Load(int3(centre, 0)).xyz);
 
   const float4 raw = velocityBuffer.Load(int3(centre, 0));
   // Plain decode, no jitter term. Measured: b0's cCameraCenterOffset is 0.000 px at this hook
@@ -77,9 +83,31 @@ void main(uint3 tid : SV_DispatchThreadID) {
     }
   }
 
-  const bool has_history = history_length > 0.5;
-  const float blend = CUSTOM_MGSV_IL_HISTORY * saturate(CUSTOM_MGSV_IL_HISTORY_VALID)
-                    * (has_history ? 1.0 : 0.0);
+  // Rejection: compare this frame's geometry against the geometry the history was accumulated
+  // on. A disocclusion or a silhouette cannot be recognised from colour alone, which is why the
+  // aux target exists.
+  const int2 aux_pixel = clamp((int2)round(previous), int2(0, 0), gather_size - 1);
+  const float4 previous_aux = historyAuxBuffer.Load(int3(aux_pixel, 0));
+  const float previous_z = previous_aux.x;
+  const float2 previous_normal_xy = previous_aux.yz;
+  // Only the xy is stored, and the packed normal's nz is negative by construction
+  // (nz = enc.z^2 - 1), so reconstruct it with this frame's sign instead of a blind +sqrt.
+  const float previous_normal_z = (N.z < 0.0 ? -1.0 : 1.0)
+                                  * sqrt(saturate(1.0 - dot(previous_normal_xy, previous_normal_xy)));
+  const float3 previous_normal = float3(previous_normal_xy, previous_normal_z);
+  const bool inside = previous.x >= 0.0 && previous.y >= 0.0
+                      && previous.x <= (float)(gather_size.x - 1)
+                      && previous.y <= (float)(gather_size.y - 1);
+  const bool depth_matches = previous_z > 0.0 && abs(z - previous_z) <= 0.02 * max(z, 1.0e-6);
+  const bool normal_matches = dot(N, previous_normal) >= 0.9;
+  const bool has_history = inside && depth_matches && normal_matches && history_length > 0.5;
+
+  // A freshly reset pixel trusts only the current sample and ramps back up; a converged one is
+  // limited by the user's ceiling.
+  const float adaptive = 1.0 - 1.0 / max(history_length, 1.0);
+  const float blend = has_history
+                          ? min(CUSTOM_MGSV_IL_HISTORY, adaptive) * saturate(CUSTOM_MGSV_IL_HISTORY_VALID)
+                          : 0.0;
   const float3 result = lerp(current.rgb, clamp(history, minimum, maximum), blend);
 
   const float length = has_history ? min(history_length + 1.0, HISTORY_MAX_LENGTH) : 1.0;
@@ -88,6 +116,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
   // The history always receives the real result: a probe written into it would poison the next
   // frame and make the view self-fulfilling.
   historyOutput[pixel] = real;
+  historyAuxOutput[pixel] = float4(z, N.x, N.y, length / HISTORY_MAX_LENGTH);
 
   if (CUSTOM_MGSV_IL_DEBUG > 3.5) {
     // Reprojection offset in pixels. R/G are the jitter the engine advertises in b0, in signed
