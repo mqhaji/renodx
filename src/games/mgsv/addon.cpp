@@ -1580,7 +1580,8 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
         il_probe_width = probe_width;
         il_probe_height = probe_height;
         il_probe_x = (il_width - probe_width) / 2;
-        il_probe_y = (il_height - probe_height) / 2;
+        // Bottom of the frame: that is where the ground and the black blobs are.
+        il_probe_y = il_height > probe_height ? (il_height - probe_height) * 3 / 4 : 0;
       } else if (++il_probe_count % 60u == 0u) {
         std::array<reshade::api::subresource_data, 4> mapped = {};
         for (uint32_t index = 0; index < 6; ++index) {
@@ -1622,6 +1623,46 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
                         minimum[2], maximum[2], minimum[3], maximum[3],
                         100.0 * dark / window, 100.0 * invalid / window);
           reshade::log::message(reshade::log::level::info, line);
+
+          // Spatial map of the dark cells, so a patch can be located instead of described.
+          if (index == 0 || index == 3) {
+            constexpr int COLUMNS = 16;
+            constexpr int ROWS = 9;
+            uint32_t cell_total[ROWS * COLUMNS] = {};
+            uint32_t cell_dark[ROWS * COLUMNS] = {};
+            for (uint32_t y = 0; y < il_probe_height; ++y) {
+              const auto* texel = reinterpret_cast<const uint16_t*>(
+                  static_cast<const uint8_t*>(mapped[index].data) + y * mapped[index].row_pitch);
+              const int row = static_cast<int>(y * ROWS / il_probe_height);
+              for (uint32_t x = 0; x < il_probe_width; ++x) {
+                const int column = static_cast<int>(x * COLUMNS / il_probe_width);
+                const int slot = row * COLUMNS + column;
+                ++cell_total[slot];
+                if (HalfToFloat(texel[x * 4 + 0]) < 0.002f
+                    && HalfToFloat(texel[x * 4 + 1]) < 0.002f
+                    && HalfToFloat(texel[x * 4 + 2]) < 0.002f) {
+                  ++cell_dark[slot];
+                }
+              }
+            }
+            char map[COLUMNS * 4 + 1] = {};
+            reshade::log::message(reshade::log::level::info,
+                                  index == 0 ? "mgsv: IL dark map gather" : "mgsv: IL dark map filtered");
+            for (int row = 0; row < ROWS; ++row) {
+              for (int column = 0; column < COLUMNS; ++column) {
+                const int slot = row * COLUMNS + column;
+                const int percent = cell_total[slot] == 0
+                                        ? 0
+                                        : static_cast<int>(100 * cell_dark[slot] / cell_total[slot]);
+                map[column * 4 + 0] = percent >= 100 ? '#' : (percent >= 50 ? '+' : (percent >= 1 ? '.' : ' '));
+                map[column * 4 + 1] = ' ';
+                map[column * 4 + 2] = ' ';
+                map[column * 4 + 3] = ' ';
+              }
+              map[COLUMNS * 4 - 1] = 0;
+              reshade::log::message(reshade::log::level::info, map);
+            }
+          }
         }
 
         // |history - gather| on the same frame: near zero means the reprojection lands on the

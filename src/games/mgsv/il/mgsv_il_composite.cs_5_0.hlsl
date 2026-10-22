@@ -31,7 +31,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
   if (centre.x >= (int)cBufferWidth || centre.y >= (int)cBufferHeight) return;
 
   const float z = LinearZ(depthBuffer.Load(int3(centre, 0)).x);
-  if (!(z > 0.0) || z > 1.0e6) return;
+  if (!(z > 0.0) || z > 1.0e6) {
+    // Sky and any pixel without geometry get no bounce. Writing zero matters: returning here
+    // leaves the target holding whatever it held, and the texels that were never written are
+    // the zeros from creation - which is how black patches grew over the image.
+    filteredOutput[pixel] = 0.0;
+    return;
+  }
 
   const float3 N = DecodeNormal(normalBuffer.Load(int3(centre, 0)).xyz);
   const float inv_z = 1.0 / z;
@@ -68,6 +74,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
     }
   }
 
-  if (weight_sum <= 0.0) return;
-  filteredOutput[pixel] = float4(sum / weight_sum, 1.0);
+  if (weight_sum <= 1.0e-4) {
+    filteredOutput[pixel] = bounceBuffer.Load(int3(pixel, 0));
+    return;
+  }
+  // A near-zero weight sum divides the accumulated radiance up into the thousands, and one
+  // non-finite value poisons the history for every later frame (the temporal blend keeps it) -
+  // which is what a black patch actually is.
+  const float3 filtered = sum / weight_sum;
+  filteredOutput[pixel] = float4(clamp(filtered, 0.0, 1.0e4), 1.0);
 }
