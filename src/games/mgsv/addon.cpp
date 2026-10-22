@@ -1524,14 +1524,14 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
           il_accumulated_target.view,  // t0
           frame.depth,                 // t1
           frame.normal,                // t2
-          GetAoFallbackView(cmd_list), // t3, unused
+          il_moments_targets[il_history_index].view, // t3, has-signal test
           GetAoFallbackView(cmd_list), // t4, unused
           GetAoFallbackView(cmd_list), // t5, unused
           GetAoFallbackView(cmd_list), // t6, unused
       };
       DispatchLightPass(cmd_list, &il_composite_pass, filter_sources, il_filtered_target.uav,
                         il_bounce_target.uav, il_history_aux_targets[write_index ^ 1u].uav,
-                        il_moments_targets[il_history_index].uav, il_width, il_height);
+                        il_history_targets[write_index ^ 1u].uav, il_width, il_height);
 
       const std::array<reshade::api::resource_view, 7> add_sources = {
           il_filtered_target.view,     // t0
@@ -1590,6 +1590,8 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
           }
           uint16_t minimum[4] = {0x7C00, 0x7C00, 0x7C00, 0x7C00};
           uint16_t maximum[4] = {};
+          uint32_t dark = 0;
+          uint32_t invalid = 0;
           const auto* bits = static_cast<const uint8_t*>(mapped[index].data);
           for (uint32_t y = 0; y < il_probe_height; ++y) {
             const auto* texel = reinterpret_cast<const uint16_t*>(bits + y * mapped[index].row_pitch);
@@ -1599,16 +1601,26 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
                 if (value < minimum[channel]) minimum[channel] = value;
                 if (value > maximum[channel]) maximum[channel] = value;
               }
+              const bool valid = HalfToFloat(texel[x * 4 + 3]) > 0.5f;
+              if (!valid) {
+                ++invalid;
+              } else if (HalfToFloat(texel[x * 4 + 0]) < 0.002f
+                         && HalfToFloat(texel[x * 4 + 1]) < 0.002f
+                         && HalfToFloat(texel[x * 4 + 2]) < 0.002f) {
+                ++dark;
+              }
             }
           }
           device->unmap_texture_region(il_probe_staging[index], 0);
+          const double window = static_cast<double>(il_probe_width) * il_probe_height;
           char line[256] = {};
           std::snprintf(line, sizeof(line),
                         "mgsv: IL probe %u (debug %.0f) r %04x..%04x g %04x..%04x b %04x..%04x "
-                        "a %04x..%04x",
+                        "a %04x..%04x dark %.1f%% invalid %.1f%%",
                         index, shader_injection.il_debug,
                         minimum[0], maximum[0], minimum[1], maximum[1],
-                        minimum[2], maximum[2], minimum[3], maximum[3]);
+                        minimum[2], maximum[2], minimum[3], maximum[3],
+                        100.0 * dark / window, 100.0 * invalid / window);
           reshade::log::message(reshade::log::level::info, line);
         }
 

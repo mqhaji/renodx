@@ -16,6 +16,9 @@
 Texture2D<float4> bounceBuffer : register(t0);  // rgb mean radiance, a validity
 Texture2D<float4> depthBuffer : register(t1);
 Texture2D<float4> normalBuffer : register(t2);
+// x = running mean luminance. Zero means this pixel has never had a single valid gather
+// sample, which is the only case where its radiance must not be averaged in.
+Texture2D<float4> momentsBuffer : register(t3);
 RWTexture2D<float4> filteredOutput : register(u0);
 
 [numthreads(8, 8, 1)]
@@ -46,8 +49,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
       // not need the gather target's size.
       // Alpha carries the history length, not validity, so only a *never written* texel is
       // rejected. Rejecting anything under half would black out every disocclusion for 15 frames.
+      // Starved gather pixels hold zero radiance. Averaging that in turns every starved patch
+      // into a black blob, so taps that never had a sample are skipped and filled by their
+      // neighbours instead.
+      if (momentsBuffer.Load(int3(bounce_pixel, 0)).x <= 0.0) continue;
       const float4 gathered = bounceBuffer.Load(int3(bounce_pixel, 0));
-      if (gathered.a <= 0.0) continue;
 
       const int2 q = (int2)floor((float2(bounce_pixel) + 0.5) * scale);
       const float qz = LinearZ(depthBuffer.Load(int3(q, 0)).x);
