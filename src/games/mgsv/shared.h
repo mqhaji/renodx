@@ -121,6 +121,20 @@ struct ShaderInjectData {
   float spot_ss_strength;
   float spot_ss_fade_end;
   float spot_ss_material_max;
+  // Point lights. Appended after every existing field so no established offset
+  // moves; the point shader consumes the same nibble as the spot but the
+  // paraboloid map needs its own softness and march.
+  float point_contact_hardening;
+  float point_shadow_softness;
+  float point_shadow_k;
+  float point_shadow_blur_pixels;
+  float point_shadow_darkness;
+  float point_screen_space_shadows;
+  float point_ss_reach;
+  float point_ss_thickness;
+  float point_ss_strength;
+  float point_ss_fade_end;
+  float point_ss_material_max;
 };
 
 #ifndef __cplusplus
@@ -183,6 +197,19 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_SS_SPOT_STRENGTH     shader_injection.spot_ss_strength
 #define CUSTOM_SS_SPOT_FADE_END     shader_injection.spot_ss_fade_end
 #define CUSTOM_SS_SPOT_MATERIAL_MAX shader_injection.spot_ss_material_max
+
+#define CUSTOM_POINT_CONTACT_HARDENING shader_injection.point_contact_hardening
+#define CUSTOM_POINT_SHADOW_SOFTNESS   shader_injection.point_shadow_softness
+#define CUSTOM_POINT_SHADOW_K          shader_injection.point_shadow_k
+#define CUSTOM_POINT_BLUR_PIXELS       shader_injection.point_shadow_blur_pixels
+#define CUSTOM_POINT_SHADOW_DARKNESS   shader_injection.point_shadow_darkness
+
+#define CUSTOM_SS_POINT_SHADOWS     shader_injection.point_screen_space_shadows
+#define CUSTOM_SS_POINT_REACH       shader_injection.point_ss_reach
+#define CUSTOM_SS_POINT_THICKNESS   shader_injection.point_ss_thickness
+#define CUSTOM_SS_POINT_STRENGTH    shader_injection.point_ss_strength
+#define CUSTOM_SS_POINT_FADE_END    shader_injection.point_ss_fade_end
+#define CUSTOM_SS_POINT_MATERIAL_MAX shader_injection.point_ss_material_max
 
 #define CUSTOM_MGSV_AO_STRENGTH  shader_injection.ao_strength
 #define CUSTOM_MGSV_AO_RADIUS    shader_injection.ao_radius
