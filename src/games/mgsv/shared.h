@@ -109,6 +109,18 @@ struct ShaderInjectData {
   float il_debug;
   // a-trous iteration: 0, 1, 2 with stride 1, 2, 4.
   float il_filter_step;
+  // Screen-space shadows on spot lights, as their own toggle rather than riding
+  // the sun's. Each spot draw rasterises its light volume, so this term runs once
+  // per light - around 25 times a frame - where the sun's runs once.
+  float spot_screen_space_shadows;
+  // Spot screen-space shadow tuning. Separate from the sun's because a spot
+  // covers a small part of the frame: reaching a caster needs a much longer ray
+  // there, and using the sun's dial moved the sun as well.
+  float spot_ss_reach;
+  float spot_ss_thickness;
+  float spot_ss_strength;
+  float spot_ss_fade_end;
+  float spot_ss_material_max;
 };
 
 #ifndef __cplusplus
@@ -164,6 +176,13 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_SS_STRENGTH     shader_injection.ss_shadow_strength
 #define CUSTOM_SS_FADE_END     shader_injection.ss_shadow_fade_end
 #define CUSTOM_SS_MATERIAL_MAX shader_injection.ss_shadow_material_max
+
+#define CUSTOM_SS_SPOT_SHADOWS shader_injection.spot_screen_space_shadows
+#define CUSTOM_SS_SPOT_REACH        shader_injection.spot_ss_reach
+#define CUSTOM_SS_SPOT_THICKNESS    shader_injection.spot_ss_thickness
+#define CUSTOM_SS_SPOT_STRENGTH     shader_injection.spot_ss_strength
+#define CUSTOM_SS_SPOT_FADE_END     shader_injection.spot_ss_fade_end
+#define CUSTOM_SS_SPOT_MATERIAL_MAX shader_injection.spot_ss_material_max
 
 #define CUSTOM_MGSV_AO_STRENGTH  shader_injection.ao_strength
 #define CUSTOM_MGSV_AO_RADIUS    shader_injection.ao_radius
