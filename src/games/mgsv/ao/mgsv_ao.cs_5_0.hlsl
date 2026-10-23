@@ -1,7 +1,7 @@
 // MGSV VBAO - visibility-bitmask ambient occlusion. Writes the un-occluded fraction.
 //
 // Screen Space Indirect Lighting with Visibility Bitmask, Therrien, Levesque and
-// Gilet, The Visual Computer 2023 - docs/vbao.pdf, Algorithm 1. This file keeps
+// Gilet, The Visual Computer 2023, Algorithm 1. This file keeps
 // the measure, the application and the quantiser from that work, with the
 // deviations listed in MGSV_AmbientOcclusion.md.
 //

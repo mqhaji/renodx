@@ -297,16 +297,16 @@ off skips the dispatch entirely, so the comparison is against the untouched game
 **Status: follows the paper's Algorithm 1 with five recorded deviations — the sector
 measure and the application are the paper's, so the visibility is computed in
 equal-measure sectors and multiplies the light.** The mapping, the deviations and their
-reasons, the verification, and what is still open are in the workspace note
-`MGSV_AmbientOcclusion.md`, beside `vbao.pdf` in the parent repository's `docs/` folder.
+reasons, the verification, and what is still open are in
+[MGSV_AmbientOcclusion.md](ao/MGSV_AmbientOcclusion.md).
 Do not change the back-sample sign, the sector rounding, or the slice weights without
 reading it first — each has already cost a round.
 
 **Status: follows the paper's Algorithm 1 with five recorded deviations — the sector
 measure and the application are the paper's, so the visibility is computed in
 equal-measure sectors and multiplies the light.** The mapping, the deviations and their
-reasons, the verification, and what is still open are in the workspace note
-`MGSV_AmbientOcclusion.md`, beside `vbao.pdf` in the parent repository's `docs/` folder.
+reasons, the verification, and what is still open are in
+[MGSV_AmbientOcclusion.md](ao/MGSV_AmbientOcclusion.md).
 Do not change the back-sample sign, the sector rounding, or the slice weights without
 reading it first — each has already cost a round.
 
@@ -425,7 +425,6 @@ not deployed or newly gameplay-tested. Inspect these outputs for the chosen conf
 ### Deploy
 
 With MGSV still stopped, copy the matching `renodx-mgsv.addon64` beside `mgsvtpp.exe`, then restart the game.
-The usual Steam folder is `C:\Program Files (x86)\Steam\steamapps\common\MGS_TPP`.
 Use one game addon and disable live shader overrides for validation. DLSS additionally needs a compatible
 `nvngx_dlss.dll` beside the executable; it is not bundled by the addon. Replace either DLL only while the game is stopped.
 
