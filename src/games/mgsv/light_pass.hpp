@@ -242,6 +242,10 @@ inline reshade::api::resource_view GetFallbackUav(reshade::api::command_list* cm
   return fallback_uav;
 }
 
+// Submits one light-modifying compute pass. The descriptor slots this layout touches are
+// pushed per dispatch and put back afterwards, so the next pass starts from the state it
+// found. This is not a save of the engine's layout state; the engine rebinds its own
+// descriptors for its next draw.
 inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* pass,
                               const std::array<reshade::api::resource_view, 7>& sources,
                               reshade::api::resource_view target,
