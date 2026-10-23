@@ -9,6 +9,9 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 - **Motion blur** with HDR-aware rendering
 - **Depth-of-field effects** with an HDR pre-final scene copy
 - **Optional temporal anti-aliasing** with native projection jitter and high-precision velocity
+- **Contact-hardening and screen-space shadows** for the sun, spot lights and point lights
+- **Ambient occlusion** from the visibility-bitmask paper, applied after the game's subsurface scatter
+- **Screen-space indirect lighting** with temporal accumulation, a-trous denoise and a depth-joint resolve
 - **User-configurable settings** via the ReShade overlay UI
 
 ---
@@ -151,6 +154,10 @@ unit-length motion clamp to be bypassed by a default-Off TAA diagnostic.
 | 0xCA7F0E3D | LUT Builder (Pass 2) | Color grading LUT construction | ✓ | Yes | Generic LUT builder |
 | 0x900968FF | FXAA Pass | Antialiasing | ✓ | Yes | Final screen-space AA |
 | 0xE04D1471 | Tonemap (LUT/Grading) | Late LUT & color grading | ✓ | Yes | Primary color grading output |
+| 0x5AFD2E17 | SunLight_DL_CS_ES | Sun shadow and lighting | ✓ | No | PCSS contact hardening and screen-space shadows |
+| 0x08292A5E | SSLighting2_Spot | Spot shadow and lighting | ✓ | No | PCSS contact hardening and screen-space shadows |
+| 0x1D4DB9C5 | SSLighting2_Spot (distance attenuation) | Spot permutation | ✓ | No | Same shadow code as 0x08292A5E |
+| 0x80F0A0BC | SSLighting2_Point | Point shadow and lighting | ✓ | No | Dual-paraboloid map; PCSS and screen-space shadows |
 
 **Legend:**
 - **Hash**: CRC32 of compiled DXBC bytecode
@@ -245,6 +252,91 @@ device destruction stops admission rather than unpatching/freeing trampolines. L
 
 See the [temporal reference](taa/README.md) for controls, motion/jitter ownership, SDK lifecycle, and limitations;
 the [roadmap](taa/ROADMAP.md) contains only outstanding work.
+
+---
+
+## Shadows
+
+The sun, spot and point light shaders carry two optional terms.
+
+**Contact hardening** replaces the fixed-radius PCF with a PCSS blocker search: the penumbra grows with the
+separation between caster and receiver, so contact edges stay sharp and farther shadows soften. Each light type has
+its own toggle and softness; response, blur radius and darkness are in the Advanced group.
+
+- Sun: cascade shadow atlas.
+- Spot: one projective map per light; also exposes cone-edge falloff.
+- Point: dual-paraboloid atlas. Softness is approximate near the hemisphere seam because texel size compresses
+  toward the rim.
+
+**Screen-space shadows** march the depth buffer toward the light and attenuate where the ray passes behind a nearer
+surface. They run for the sun once per frame and for each spot and point draw. Strength and reach are per light
+type; thickness, fade end and the material limit are in Advanced. The material limit gates both receiver and caster
+so characters do not shadow themselves while still casting onto the ground.
+
+Settings live under **Shadows** and **Screen-Space Shadows**, each with a collapsed Advanced group. The Advanced
+groups are visible only while the matching feature is enabled; turning a toggle off runs the vanilla filter.
+
+---
+
+## Ambient Occlusion
+
+The two passes at `0x6DAF0C4A` and `0xB2601810` are the game's screen-space
+**subsurface-scatter** chain, not ambient occlusion. Replacing stage 2 removed the
+scattering that makes skin read as skin, which is the bug this module used to hit. Both
+passes are now left vanilla.
+
+AO runs as its own dispatch, hooked after stage 2: it scales the light buffer the scatter
+pass just wrote, in place, rgb only, with alpha preserved. The scatter has already
+happened when it reads the buffer, so the occlusion cannot remove it, and no retail
+shader is replaced. The pass is a visibility-bitmask AO written from *Screen Space
+Indirect Lighting with Visibility Bitmask* (Therrien, Levesque, Gilet, The Visual
+Computer 2023).
+
+Settings are in the **Ambient Occlusion** section. **AO (added after the game's scatter)**
+off skips the dispatch entirely, so the comparison is against the untouched game.
+
+**Status: follows the paper's Algorithm 1 with five recorded deviations — the sector
+measure and the application are the paper's, so the visibility is computed in
+equal-measure sectors and multiplies the light.** The mapping, the deviations and their
+reasons, the verification, and what is still open are in
+[MGSV_AmbientOcclusion.md](ao/MGSV_AmbientOcclusion.md).
+Do not change the back-sample sign, the sector rounding, or the slice weights without
+reading it first — each has already cost a round.
+
+**Status: follows the paper's Algorithm 1 with five recorded deviations — the sector
+measure and the application are the paper's, so the visibility is computed in
+equal-measure sectors and multiplies the light.** The mapping, the deviations and their
+reasons, the verification, and what is still open are in
+[MGSV_AmbientOcclusion.md](ao/MGSV_AmbientOcclusion.md).
+Do not change the back-sample sign, the sector rounding, or the slice weights without
+reading it first — each has already cost a round.
+
+---
+
+## Indirect Lighting
+
+The addon runs a screen-space diffuse gather after the scatter hook. It bounces the light the
+retail deferred passes already produced; it is not a second lighting model.
+
+The chain is four passes:
+
+1. **Gather** — samples the light at jittered disk positions, rejecting occluded and
+   back-facing samples. Radiance comes from the deferred composite's albedo and specular
+   inputs, so highlights and emissive surfaces contribute.
+2. **Accumulate** — reprojects the previous result with the game's velocity buffer, rejects
+   depth/normal mismatches, and tracks history length and luminance moments.
+3. **Denoise** — one to three a-trous iterations weighted by depth, normal and measured
+   per-pixel variance.
+4. **Add** — depth-joint resolve at full resolution, then adds the filtered radiance to the
+   light.
+
+Settings are in **Indirect Lighting**: toggle, amount and radius; samples, resolution,
+denoise passes, history and debug views are in Advanced. Gather, history and denoiser run at
+full, half or quarter resolution; the default is quarter. The tuned defaults are amount 80,
+radius 80, 8 samples and 3 denoise passes.
+
+The gather runs before the AO resolve, so AO scales the combined direct and indirect light.
+AO and indirect lighting are independent toggles.
 
 ---
 
@@ -361,7 +453,6 @@ not deployed or newly gameplay-tested. Inspect these outputs for the chosen conf
 ### Deploy
 
 With MGSV still stopped, copy the matching `renodx-mgsv.addon64` beside `mgsvtpp.exe`, then restart the game.
-The usual Steam folder is `C:\Program Files (x86)\Steam\steamapps\common\MGS_TPP`.
 Use one game addon and disable live shader overrides for validation. DLSS additionally needs a compatible
 `nvngx_dlss.dll` beside the executable; it is not bundled by the addon. Replace either DLL only while the game is stopped.
 

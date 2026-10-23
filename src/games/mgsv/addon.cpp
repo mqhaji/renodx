@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2024 Musa Haji
+ * Copyright (C) 2026 ZioPao
  * SPDX-License-Identifier: MIT
  */
 
@@ -13,6 +14,8 @@
 #include <embed/shaders.h>
 
 #include <d3d11.h>
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -673,6 +676,7 @@ bool OnUpgradeRTVReplaceShaderDraw(reshade::api::command_list* cmd_list) {
           .code = __##value,                                         \
           .on_draw = [](auto* cmd_list) {                            \
             UpgradeDeferredTonemapOutputRTVs(cmd_list, value, name); \
+            CaptureCompositeInputs(cmd_list);                       \
             return true;                                             \
           },                                                         \
       },                                                             \
@@ -748,9 +752,297 @@ bool OnUpgradeRTVReplaceShaderDraw(reshade::api::command_list* cmd_list) {
 
 ShaderInjectData shader_injection;
 float output_mode = 1.f;
+// Whether the march may fetch distant steps from the reduced depth chain. Host-side, so
+// "off" never builds the chain and the shader falls back to the exact fetch.
+float ao_depth_mips_enabled = 0.f;
 renodx::utils::settings::Setting* tone_map_peak_nits_setting = nullptr;
 renodx::utils::settings::Setting* tone_map_game_nits_setting = nullptr;
 renodx::utils::settings::Setting* tone_map_ui_nits_setting = nullptr;
+
+// The 1x1 stand-in bound at t2 whenever the depth mip chain is not built. A null view
+// would read as a missing binding, so the slot always has to resolve to something.
+reshade::api::resource ao_fallback_resource = {0};
+reshade::api::resource_view ao_fallback_view = {0};
+
+void DestroyAoFallbackView(reshade::api::device* device) {
+  if (ao_fallback_view.handle != 0) {
+    device->destroy_resource_view(ao_fallback_view);
+    ao_fallback_view = {0};
+  }
+  if (ao_fallback_resource.handle != 0) {
+    device->destroy_resource(ao_fallback_resource);
+    ao_fallback_resource = {0};
+  }
+}
+
+reshade::api::resource_view GetAoFallbackView(reshade::api::command_list* cmd_list) {
+  if (ao_fallback_view.handle != 0) return ao_fallback_view;
+  auto* device = cmd_list->get_device();
+  const reshade::api::resource_desc desc(
+      1u, 1u, 1u, 1u,
+      reshade::api::format::r16g16b16a16_float,
+      1u,
+      reshade::api::memory_heap::gpu_only,
+      reshade::api::resource_usage::shader_resource
+          | reshade::api::resource_usage::copy_dest);
+  if (device->create_resource(desc, nullptr, desc.usage, &ao_fallback_resource)
+      && device->create_resource_view(
+          ao_fallback_resource,
+          reshade::api::resource_usage::shader_resource,
+          reshade::api::resource_view_desc(reshade::api::format::r16g16b16a16_float),
+          &ao_fallback_view)) {
+    reshade::log::message(reshade::log::level::info, "mgsv: AO fallback view created");
+    return ao_fallback_view;
+  }
+  DestroyAoFallbackView(device);
+  reshade::log::message(reshade::log::level::error, "mgsv: AO fallback view failed");
+  return {0};
+}
+
+// The AO march's depth mip chain.
+//
+// The march samples the depth buffer at its own sample positions, so an occluder that falls
+// between two of them is invisible however many slices are added - measured as the reason the
+// effect wanted a high step count. Every level here holds the *nearest* of the four texels
+// below it, so a distant step can fetch one texel that already covers the footprint its
+// spacing would otherwise skip over. XeGTAO's depth mip sampling is the same idea.
+//
+// Raw depth is reduced, not linearised. The pass linearises as z / (depth - w), so a larger
+// raw value is nearer and background sits at the small end; a max-reduce is therefore already
+// the conservative direction and keeps the projection constants out of the prefilter.
+//
+// Level k covers W >> (k + 1), so the chain starts at half resolution and stops at a
+// sixteenth - the span a step of tens of pixels needs, without paying for levels the march
+// never reaches.
+constexpr uint32_t kDepthMipLevels = 4;
+
+struct DepthMipChain {
+  reshade::api::resource resource = {0};
+  reshade::api::resource_view view = {0};  // all levels, bound at t2
+  std::array<reshade::api::resource_view, kDepthMipLevels> level_views = {};         // u0
+  std::array<reshade::api::resource_view, kDepthMipLevels> level_source_views = {};  // t0
+  reshade::api::pipeline_layout layout = {0};
+  reshade::api::pipeline pipeline = {0};
+  uint32_t width = 0;
+  uint32_t height = 0;
+  bool ready = false;
+};
+DepthMipChain depth_mip_chain;
+
+void DestroyDepthMipChain(reshade::api::device* device) {
+  depth_mip_chain.ready = false;
+  for (auto& view : depth_mip_chain.level_views) {
+    if (view.handle != 0) {
+      device->destroy_resource_view(view);
+      view = {0};
+    }
+  }
+  for (auto& view : depth_mip_chain.level_source_views) {
+    if (view.handle != 0) {
+      device->destroy_resource_view(view);
+      view = {0};
+    }
+  }
+  if (depth_mip_chain.view.handle != 0) {
+    device->destroy_resource_view(depth_mip_chain.view);
+    depth_mip_chain.view = {0};
+  }
+  if (depth_mip_chain.resource.handle != 0) {
+    device->destroy_resource(depth_mip_chain.resource);
+    depth_mip_chain.resource = {0};
+  }
+  if (depth_mip_chain.pipeline.handle != 0) {
+    device->destroy_pipeline(depth_mip_chain.pipeline);
+    depth_mip_chain.pipeline = {0};
+  }
+  if (depth_mip_chain.layout.handle != 0) {
+    device->destroy_pipeline_layout(depth_mip_chain.layout);
+    depth_mip_chain.layout = {0};
+  }
+  depth_mip_chain.width = 0;
+  depth_mip_chain.height = 0;
+}
+
+bool EnsureDepthMipChain(reshade::api::device* device, uint32_t width, uint32_t height) {
+  if (depth_mip_chain.ready
+      && depth_mip_chain.width == width
+      && depth_mip_chain.height == height) {
+    return true;
+  }
+  DestroyDepthMipChain(device);
+
+  const reshade::api::resource_desc desc(
+      std::max(width / 2u, 1u), std::max(height / 2u, 1u), 1u, kDepthMipLevels,
+      reshade::api::format::r32_float,
+      1u,
+      reshade::api::memory_heap::gpu_only,
+      reshade::api::resource_usage::shader_resource
+          | reshade::api::resource_usage::unordered_access
+          | reshade::api::resource_usage::copy_source
+          | reshade::api::resource_usage::copy_dest);
+  if (!device->create_resource(desc, nullptr, desc.usage, &depth_mip_chain.resource)) {
+    reshade::log::message(reshade::log::level::error, "mgsv: depth mip chain allocation failed");
+    return false;
+  }
+  if (!device->create_resource_view(
+          depth_mip_chain.resource,
+          reshade::api::resource_usage::shader_resource,
+          reshade::api::resource_view_desc(reshade::api::format::r32_float),
+          &depth_mip_chain.view)) {
+    reshade::log::message(reshade::log::level::error, "mgsv: depth mip chain read view failed");
+    return false;
+  }
+  for (uint32_t level = 0; level < kDepthMipLevels; ++level) {
+    const reshade::api::resource_view_desc level_desc(
+        reshade::api::format::r32_float, level, 1u, 0u, 1u);
+    if (!device->create_resource_view(
+            depth_mip_chain.resource,
+            reshade::api::resource_usage::unordered_access,
+            level_desc,
+            &depth_mip_chain.level_views[level])) {
+      reshade::log::message(reshade::log::level::error, "mgsv: depth mip chain write view failed");
+      return false;
+    }
+    if (!device->create_resource_view(
+            depth_mip_chain.resource,
+            reshade::api::resource_usage::shader_resource,
+            level_desc,
+            &depth_mip_chain.level_source_views[level])) {
+      reshade::log::message(reshade::log::level::error, "mgsv: depth mip chain level view failed");
+      return false;
+    }
+  }
+
+  std::array<reshade::api::pipeline_layout_param, 2> params = {};
+  params[0].type = reshade::api::pipeline_layout_param_type::push_descriptors;
+  params[0].push_descriptors.count = 1u;
+  params[0].push_descriptors.type = reshade::api::descriptor_type::shader_resource_view;
+  params[0].push_descriptors.dx_register_index = 0u;
+  params[0].push_descriptors.dx_register_space = 0u;
+  params[1].type = reshade::api::pipeline_layout_param_type::push_descriptors;
+  params[1].push_descriptors.count = 1u;
+  params[1].push_descriptors.type = reshade::api::descriptor_type::unordered_access_view;
+  params[1].push_descriptors.dx_register_index = 0u;
+  params[1].push_descriptors.dx_register_space = 0u;
+  if (!device->create_pipeline_layout(
+          static_cast<uint32_t>(params.size()), params.data(), &depth_mip_chain.layout)) {
+    reshade::log::message(reshade::log::level::error, "mgsv: depth mip chain layout failed");
+    return false;
+  }
+
+  reshade::api::shader_desc shader_description = {
+      .code = __mgsv_ao_depth_mips.data(),
+      .code_size = __mgsv_ao_depth_mips.size(),
+  };
+  const reshade::api::pipeline_subobject subobject = {
+      .type = reshade::api::pipeline_subobject_type::compute_shader,
+      .count = 1,
+      .data = &shader_description,
+  };
+  if (!device->create_pipeline(depth_mip_chain.layout, 1, &subobject, &depth_mip_chain.pipeline)) {
+    reshade::log::message(reshade::log::level::error, "mgsv: depth mip chain pipeline failed");
+    return false;
+  }
+
+  depth_mip_chain.width = width;
+  depth_mip_chain.height = height;
+  depth_mip_chain.ready = true;
+  reshade::log::message(reshade::log::level::info, "mgsv: depth mip chain created");
+  return true;
+}
+
+// Builds the chain immediately before the AO dispatch, from the depth the AO is about to read.
+//
+// The prefilter binds its own layout, so the caller's descriptors are untouched.
+bool BuildDepthMips(reshade::api::command_list* cmd_list, reshade::api::resource_view depth_view) {
+  shader_injection.ao_depth_mips = 0.f;
+  if (shader_injection.ao_enabled == 0.f || ao_depth_mips_enabled == 0.f) return true;
+
+  auto* device = cmd_list->get_device();
+  if (depth_view.handle == 0) return true;
+
+  const auto depth_desc = device->get_resource_desc(device->get_resource_from_view(depth_view));
+  if (depth_desc.type != reshade::api::resource_type::texture_2d) return true;
+  const uint32_t width = depth_desc.texture.width;
+  const uint32_t height = depth_desc.texture.height;
+  if (width < 2u || height < 2u) return true;
+
+  if (!EnsureDepthMipChain(device, width, height)) return true;
+
+  const auto previous_source = renodx::utils::state::GetBoundResourceView(
+      cmd_list,
+      reshade::api::shader_stage::compute,
+      reshade::api::descriptor_type::shader_resource_view,
+      0u);
+  const auto previous_target = renodx::utils::state::GetBoundResourceView(
+      cmd_list,
+      reshade::api::shader_stage::compute,
+      reshade::api::descriptor_type::unordered_access_view,
+      0u);
+
+  cmd_list->bind_pipeline(reshade::api::pipeline_stage::all_compute, depth_mip_chain.pipeline);
+  for (uint32_t level = 0; level < kDepthMipLevels; ++level) {
+    const reshade::api::resource_view source =
+        level == 0 ? depth_view : depth_mip_chain.level_source_views[level - 1];
+    const reshade::api::resource_view target = depth_mip_chain.level_views[level];
+    const reshade::api::descriptor_table_update updates[] = {
+        {.table = {},
+         .binding = 0u,
+         .array_offset = 0u,
+         .count = 1u,
+         .type = reshade::api::descriptor_type::shader_resource_view,
+         .descriptors = &source},
+        {.table = {},
+         .binding = 0u,
+         .array_offset = 0u,
+         .count = 1u,
+         .type = reshade::api::descriptor_type::unordered_access_view,
+         .descriptors = &target},
+    };
+    cmd_list->push_descriptors(
+        reshade::api::shader_stage::all_compute, depth_mip_chain.layout, 0u, updates[0]);
+    cmd_list->push_descriptors(
+        reshade::api::shader_stage::all_compute, depth_mip_chain.layout, 1u, updates[1]);
+
+    const uint32_t level_width = std::max(width >> (level + 1u), 1u);
+    const uint32_t level_height = std::max(height >> (level + 1u), 1u);
+    cmd_list->dispatch((level_width + 7u) / 8u, (level_height + 7u) / 8u, 1u);
+  }
+
+  if (previous_source.handle != 0) {
+    const reshade::api::descriptor_table_update restore = {
+        .table = {},
+        .binding = 0u,
+        .array_offset = 0u,
+        .count = 1u,
+        .type = reshade::api::descriptor_type::shader_resource_view,
+        .descriptors = &previous_source,
+    };
+    cmd_list->push_descriptors(
+        reshade::api::shader_stage::all_compute, depth_mip_chain.layout, 0u, restore);
+  }
+  if (previous_target.handle != 0) {
+    const reshade::api::descriptor_table_update restore = {
+        .table = {},
+        .binding = 0u,
+        .array_offset = 0u,
+        .count = 1u,
+        .type = reshade::api::descriptor_type::unordered_access_view,
+        .descriptors = &previous_target,
+    };
+    cmd_list->push_descriptors(
+        reshade::api::shader_stage::all_compute, depth_mip_chain.layout, 1u, restore);
+  }
+
+  shader_injection.ao_depth_mips = 1.f;
+  return true;
+}
+
+reshade::api::resource_view GetDepthMipView(reshade::api::command_list* cmd_list) {
+  if (depth_mip_chain.ready) return depth_mip_chain.view;
+  return GetAoFallbackView(cmd_list);
+}
+
 
 bool IsHDROutputSelected() { return output_mode != 0.f; }
 
@@ -765,6 +1057,540 @@ void SyncOutputMode() {
     shader_injection.diffuse_white_nits = 80.f;
     shader_injection.graphics_white_nits = 80.f;
     shader_injection.swap_chain_output_preset = 0.f;
+  }
+}
+
+// Screen-space passes over the deferred G-buffer, dispatched after the game's
+// subsurface-scatter pass.
+//
+// The retail passes at 0x6DAF0C4A / 0xB2601810 are the scatter chain, not AO, and
+// replacing either of them is what removed the scattering that makes skin read as
+// skin. Both passes below therefore run on their own dispatches, after stage 2 has
+// written the scattered light. No retail shader is replaced: the hook only borrows
+// their frame position, and the passes share the captured views and nothing else.
+
+// The views stage 2 had bound: captured before its dispatch and consumed after it.
+// `light` is the retail stage's own output target; `light_source` is the light it reads,
+// which the gather samples. They are different resources, so reading one while writing
+// the other is not a hazard.
+struct LightFrame {
+  reshade::api::resource_view depth = {0};
+  reshade::api::resource_view normal = {0};
+  reshade::api::resource_view light = {0};
+  reshade::api::resource_view light_source = {0};
+  uint32_t width = 0;
+  uint32_t height = 0;
+  bool valid = false;
+};
+LightFrame light_frame;
+
+// Both passes bind the same shape - three SRVs, one UAV, the injection constants - so the
+// layout is shared and each pass owns only its pipeline.
+reshade::api::pipeline_layout light_pass_layout = {0};
+
+struct LightPass {
+  reshade::api::pipeline pipeline = {0};
+  uint32_t width = 0;
+  uint32_t height = 0;
+  bool ready = false;
+};
+LightPass ao_pass;
+LightPass ao_resolve_pass;
+LightPass il_pass;
+LightPass il_composite_pass;
+LightPass il_add_pass;
+LightPass il_accumulate_pass;
+
+// A texture an addon pass owns, with the SRV/UAV pair that pass needs. Shared by the AO and the
+// indirect lighting chains, which is why the name is not tied to either.
+struct LightTarget {
+  reshade::api::resource resource = {0};
+  reshade::api::resource_view view = {0};
+  reshade::api::resource_view uav = {0};
+  uint32_t width = 0;
+  uint32_t height = 0;
+  reshade::api::format format = reshade::api::format::unknown;
+};
+
+// Ambient occlusion: the un-occluded factor at AO resolution, resolved to the light afterwards.
+LightTarget ao_target;
+
+// Indirect lighting: one target per stage, because a pass cannot read what it writes.
+LightTarget il_bounce_target;    // the gather
+LightTarget il_filtered_target;  // the a-trous output the resolve reads
+// Ping-ponged temporal state. The frame reads one and writes the other, then swaps.
+LightTarget il_history_targets[2];
+LightTarget il_history_aux_targets[2];
+LightTarget il_moments_targets[2];
+LightTarget il_accumulated_target;
+uint32_t il_history_index = 0;
+
+uint32_t il_history_width = 0;
+uint32_t il_history_height = 0;
+bool il_history_valid = false;
+
+bool EnsureLightTarget(reshade::api::device* device, LightTarget* target, uint32_t width, uint32_t height,
+                    reshade::api::format format = reshade::api::format::r16g16b16a16_float) {
+  if (target->uav.handle != 0 && target->width == width && target->height == height
+      && target->format == format) {
+    return true;
+  }
+
+  if (target->uav.handle != 0) {
+    device->destroy_resource_view(target->uav);
+    target->uav = {0};
+  }
+  if (target->view.handle != 0) {
+    device->destroy_resource_view(target->view);
+    target->view = {0};
+  }
+  if (target->resource.handle != 0) {
+    device->destroy_resource(target->resource);
+    target->resource = {0};
+  }
+  target->width = 0;
+  target->height = 0;
+  target->format = format;
+
+  const reshade::api::resource_desc desc(
+      width, height, 1u, 1u, format,
+      1u,
+      reshade::api::memory_heap::gpu_only,
+      // Only the compute passes touch these targets. The copy usages belonged to the diagnostic
+      // readback, which is gone.
+      reshade::api::resource_usage::shader_resource
+          | reshade::api::resource_usage::unordered_access);
+  if (!device->create_resource(desc, nullptr, desc.usage, &target->resource)
+      || !device->create_resource_view(
+          target->resource,
+          reshade::api::resource_usage::shader_resource,
+          reshade::api::resource_view_desc(format),
+          &target->view)
+      || !device->create_resource_view(
+          target->resource,
+          reshade::api::resource_usage::unordered_access,
+          reshade::api::resource_view_desc(format),
+          &target->uav)) {
+    reshade::log::message(reshade::log::level::error, "mgsv: IL target failed");
+    return false;
+  }
+
+  target->width = width;
+  target->height = height;
+  return true;
+}
+
+void DestroyLightTarget(reshade::api::device* device, LightTarget* target) {
+  if (target->uav.handle != 0) {
+    device->destroy_resource_view(target->uav);
+    target->uav = {0};
+  }
+  if (target->view.handle != 0) {
+    device->destroy_resource_view(target->view);
+    target->view = {0};
+  }
+  if (target->resource.handle != 0) {
+    device->destroy_resource(target->resource);
+    target->resource = {0};
+  }
+  target->width = 0;
+  target->height = 0;
+}
+
+bool EnsureLightPassLayout(reshade::api::device* device) {
+  if (light_pass_layout.handle != 0) return true;
+
+  std::array<reshade::api::pipeline_layout_param, 3> params = {};
+  params[0].type = reshade::api::pipeline_layout_param_type::push_descriptors;
+  params[0].push_descriptors.count = 7u;  // t0 depth, t1 normal, t2 pass input, t3 albedo, t4 specular, t5 history aux, t6 moments
+  params[0].push_descriptors.type = reshade::api::descriptor_type::texture_shader_resource_view;
+  params[0].push_descriptors.dx_register_index = 0u;
+  params[0].push_descriptors.dx_register_space = 0u;
+  params[1].type = reshade::api::pipeline_layout_param_type::push_descriptors;
+  params[1].push_descriptors.count = 4u;  // u0 result, u1 display, u2 history aux, u3 moments
+  params[1].push_descriptors.type = reshade::api::descriptor_type::texture_unordered_access_view;
+  params[1].push_descriptors.dx_register_index = 0u;
+  params[1].push_descriptors.dx_register_space = 0u;
+  params[2].type = reshade::api::pipeline_layout_param_type::push_constants;
+  params[2].push_constants.count = static_cast<uint32_t>(sizeof(shader_injection) / sizeof(uint32_t));
+  params[2].push_constants.dx_register_index = 13u;
+  params[2].push_constants.dx_register_space = 0u;
+  params[2].push_constants.visibility = reshade::api::shader_stage::compute;
+  if (!device->create_pipeline_layout(
+          static_cast<uint32_t>(params.size()), params.data(), &light_pass_layout)) {
+    reshade::log::message(reshade::log::level::error, "mgsv: light pass layout failed");
+    return false;
+  }
+  return true;
+}
+
+bool EnsureLightPass(reshade::api::device* device, LightPass* pass, const char* name,
+                     std::span<const uint8_t> code, uint32_t width, uint32_t height) {
+  if (pass->ready && pass->width == width && pass->height == height) return true;
+
+  pass->ready = false;
+  if (pass->pipeline.handle != 0) {
+    device->destroy_pipeline(pass->pipeline);
+    pass->pipeline = {0};
+  }
+  pass->width = 0;
+  pass->height = 0;
+  if (!EnsureLightPassLayout(device)) return false;
+
+  reshade::api::shader_desc shader_description = {
+      .code = code.data(),
+      .code_size = code.size(),
+  };
+  const reshade::api::pipeline_subobject subobject = {
+      .type = reshade::api::pipeline_subobject_type::compute_shader,
+      .count = 1,
+      .data = &shader_description,
+  };
+  if (!device->create_pipeline(light_pass_layout, 1, &subobject, &pass->pipeline)) return false;
+
+  pass->width = width;
+  pass->height = height;
+  pass->ready = true;
+  reshade::log::message(reshade::log::level::info, name);
+  return true;
+}
+
+// The albedo and specular G-buffers, remembered from the deferred composite that consumes
+// the light: t8 is inAlbedo and t10 is inLightSpecular in every one of those shaders.
+// That pass runs after this one, so the values are one frame old; both are spatially
+// coherent enough that this is invisible outside disocclusions.
+reshade::api::resource_view albedo_view = {0};
+reshade::api::resource_view specular_view = {0};
+
+bool CaptureCompositeInputs(reshade::api::command_list* cmd_list) {
+  const auto albedo = renodx::utils::state::GetBoundResourceView(
+      cmd_list, reshade::api::shader_stage::pixel,
+      reshade::api::descriptor_type::shader_resource_view, 8u);
+  const auto specular = renodx::utils::state::GetBoundResourceView(
+      cmd_list, reshade::api::shader_stage::pixel,
+      reshade::api::descriptor_type::shader_resource_view, 10u);
+  if (albedo.handle == 0 || specular.handle == 0) return true;
+  albedo_view = albedo;
+  specular_view = specular;
+
+  static bool logged = false;
+  if (!logged) {
+    logged = true;
+    const auto* device = cmd_list->get_device();
+    const std::string text =
+        "mgsv: composite views albedo=" + std::to_string(static_cast<uint32_t>(device->get_resource_view_desc(albedo).format))
+        + " specular=" + std::to_string(static_cast<uint32_t>(device->get_resource_view_desc(specular).format));
+    reshade::log::message(reshade::log::level::info, text.c_str());
+  }
+  return true;
+}
+
+// Runs before the retail scatter stage. This is the only point where its bindings - the
+// depth and normal both passes need, the light they write, and the light the gather
+// samples - are known to be live.
+bool CaptureLightFrame(reshade::api::command_list* cmd_list) {
+  light_frame.valid = false;
+
+  const bool want_ao = shader_injection.ao_enabled != 0.f;
+  const bool want_il = shader_injection.il_enabled != 0.f;
+  if (!want_ao && !want_il) return true;
+
+  const auto depth_view = renodx::utils::state::GetBoundResourceView(
+      cmd_list, reshade::api::shader_stage::compute,
+      reshade::api::descriptor_type::shader_resource_view, 1u);
+  const auto normal_view = renodx::utils::state::GetBoundResourceView(
+      cmd_list, reshade::api::shader_stage::compute,
+      reshade::api::descriptor_type::shader_resource_view, 2u);
+  const auto light_view = renodx::utils::state::GetBoundResourceView(
+      cmd_list, reshade::api::shader_stage::compute,
+      reshade::api::descriptor_type::unordered_access_view, 0u);
+  if (depth_view.handle == 0 || normal_view.handle == 0 || light_view.handle == 0) return true;
+
+  auto* device = cmd_list->get_device();
+  const auto light_desc = device->get_resource_desc(device->get_resource_from_view(light_view));
+  if (light_desc.type != reshade::api::resource_type::texture_2d) return true;
+
+  // The gather needs one more view: the light the retail stage reads. A missing binding
+  // only costs the gather, so the AO still captures and still runs.
+  const auto light_source = want_il
+                                ? renodx::utils::state::GetBoundResourceView(
+                                      cmd_list, reshade::api::shader_stage::compute,
+                                      reshade::api::descriptor_type::shader_resource_view, 4u)
+                                : reshade::api::resource_view{0};
+
+  light_frame = {
+      .depth = depth_view,
+      .normal = normal_view,
+      .light = light_view,
+      .light_source = light_source,
+      .width = light_desc.texture.width,
+      .height = light_desc.texture.height,
+      .valid = true,
+  };
+  return true;
+}
+
+// One dispatch of a light-modifying pass, with the descriptors it owns saved and put back
+// so the engine's next command sees the state it left.
+void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* pass,
+                       const std::array<reshade::api::resource_view, 7>& sources,
+                       reshade::api::resource_view target,
+                       reshade::api::resource_view second_target,
+                       reshade::api::resource_view third_target,
+                       reshade::api::resource_view fourth_target,
+                       uint32_t width, uint32_t height) {
+  std::array<reshade::api::resource_view, 7> saved_sources = {};
+  for (uint32_t slot = 0; slot < saved_sources.size(); ++slot) {
+    saved_sources[slot] = renodx::utils::state::GetBoundResourceView(
+        cmd_list, reshade::api::shader_stage::compute,
+        reshade::api::descriptor_type::shader_resource_view, slot);
+  }
+  const auto saved_target = renodx::utils::state::GetBoundResourceView(
+      cmd_list, reshade::api::shader_stage::compute,
+      reshade::api::descriptor_type::unordered_access_view, 0u);
+
+  cmd_list->bind_pipeline(reshade::api::pipeline_stage::all_compute, pass->pipeline);
+  // UAVs before SRVs. Binding an SRV whose resource is still bound as a UAV makes D3D11
+  // silently drop the SRV, so a stale UAV from the previous dispatch would zero every read.
+  const std::array<reshade::api::resource_view, 4> targets = {target, second_target, third_target, fourth_target};
+  cmd_list->push_descriptors(
+      reshade::api::shader_stage::all_compute, light_pass_layout, 1u,
+      {.table = {0u},
+       .binding = 0u,
+       .array_offset = 0u,
+       .count = 4u,
+       .type = reshade::api::descriptor_type::texture_unordered_access_view,
+       .descriptors = targets.data()});
+  cmd_list->push_descriptors(
+      reshade::api::shader_stage::all_compute, light_pass_layout, 0u,
+      {.table = {0u},
+       .binding = 0u,
+       .array_offset = 0u,
+       .count = static_cast<uint32_t>(sources.size()),
+       .type = reshade::api::descriptor_type::texture_shader_resource_view,
+       .descriptors = sources.data()});
+  cmd_list->push_constants(
+      reshade::api::shader_stage::all_compute, light_pass_layout, 2u, 0u,
+      static_cast<uint32_t>(sizeof(shader_injection) / sizeof(uint32_t)), &shader_injection);
+  // Each pass owns its dispatch, so the tiling is the shader's own 8x8 blocks: one pixel
+  // per thread, no retail dispatch shape to match.
+  cmd_list->dispatch((width + 7u) / 8u, (height + 7u) / 8u, 1u);
+
+  for (uint32_t slot = 0; slot < saved_sources.size(); ++slot) {
+    if (saved_sources[slot].handle == 0) continue;
+    cmd_list->push_descriptors(
+        reshade::api::shader_stage::all_compute, light_pass_layout, 0u,
+        {.table = {0u},
+         .binding = slot,
+         .array_offset = 0u,
+         .count = 1u,
+         .type = reshade::api::descriptor_type::texture_shader_resource_view,
+         .descriptors = &saved_sources[slot]});
+  }
+  if (saved_target.handle != 0) {
+    cmd_list->push_descriptors(
+        reshade::api::shader_stage::all_compute, light_pass_layout, 1u,
+        {.table = {0u},
+         .binding = 0u,
+         .array_offset = 0u,
+         .count = 1u,
+         .type = reshade::api::descriptor_type::texture_unordered_access_view,
+         .descriptors = &saved_target});
+  }
+}
+
+void DestroyLightPasses(reshade::api::device* device) {
+  for (auto* pass : {&ao_pass, &ao_resolve_pass, &il_pass, &il_composite_pass, &il_add_pass,
+                      &il_accumulate_pass}) {
+    pass->ready = false;
+    if (pass->pipeline.handle != 0) {
+      device->destroy_pipeline(pass->pipeline);
+      pass->pipeline = {0};
+    }
+    pass->width = 0;
+    pass->height = 0;
+  }
+  if (light_pass_layout.handle != 0) {
+    device->destroy_pipeline_layout(light_pass_layout);
+    light_pass_layout = {0};
+  }
+}
+
+// Runs after the retail scatter stage, so the light already holds the scattered value.
+// The gather runs first and adds the bounce; the AO runs last and scales the light, so the
+// occlusion attenuates the bounce as well as the direct light.
+//
+// The order matters for a second reason: the gather samples a pre-AO snapshot and compares
+// the neighbourhood against the centre. Running the AO in between would make that
+// difference the AO's own darkening, and the gather would add it straight back.
+void ApplyLightPasses(reshade::api::command_list* cmd_list) {
+  if (!light_frame.valid) return;
+  const LightFrame frame = light_frame;
+  light_frame.valid = false;
+  auto* device = cmd_list->get_device();
+
+  // The gather samples the light the retail scatter pass itself reads. No copy: additive
+  // mode only adds, so it never needs a matching pre-AO snapshot to compare against.
+  const auto light_source = frame.light_source;
+  if (shader_injection.il_enabled != 0.f
+      && light_source.handle != 0
+      && albedo_view.handle != 0
+      && specular_view.handle != 0) {
+    // 0 = full, 1 = half, 2 = quarter: the gather, history, moments and a-trous all follow.
+    const uint32_t il_scale = shader_injection.il_resolution > 1.5f
+                                  ? 4u
+                                  : (shader_injection.il_resolution > 0.5f ? 2u : 1u);
+    shader_injection.il_scale = static_cast<float>(il_scale);
+    const uint32_t il_width = (frame.width + il_scale - 1u) / il_scale;
+    const uint32_t il_height = (frame.height + il_scale - 1u) / il_scale;
+
+    // The history is only valid while its size matches and the GI chain has run continuously.
+    if (il_history_width != il_width || il_history_height != il_height) {
+      il_history_width = il_width;
+      il_history_height = il_height;
+      il_history_valid = false;
+    }
+
+    if (EnsureLightTarget(device, &il_bounce_target, il_width, il_height)
+        && EnsureLightTarget(device, &il_filtered_target, il_width, il_height)
+        && EnsureLightTarget(device, &il_history_targets[0], il_width, il_height)
+        && EnsureLightTarget(device, &il_history_targets[1], il_width, il_height)
+        && EnsureLightTarget(device, &il_history_aux_targets[0], il_width, il_height)
+        && EnsureLightTarget(device, &il_history_aux_targets[1], il_width, il_height)
+        && EnsureLightTarget(device, &il_moments_targets[0], il_width, il_height,
+                                reshade::api::format::r16g16_float)
+        && EnsureLightTarget(device, &il_moments_targets[1], il_width, il_height,
+                                reshade::api::format::r16g16_float)
+        && EnsureLightTarget(device, &il_accumulated_target, il_width, il_height)
+        && EnsureLightPass(device, &il_pass, "mgsv: IL pass created", __mgsv_il, il_width, il_height)
+        && EnsureLightPass(device, &il_composite_pass, "mgsv: IL composite created",
+                           __mgsv_il_composite, il_width, il_height)
+        && EnsureLightPass(device, &il_add_pass, "mgsv: IL add created",
+                           __mgsv_il_add, frame.width, frame.height)
+        && EnsureLightPass(device, &il_accumulate_pass, "mgsv: IL accumulate created",
+                           __mgsv_il_accumulate, il_width, il_height)) {
+      const std::array<reshade::api::resource_view, 7> gather_sources = {
+          frame.depth,                 // t0
+          frame.normal,                // t1
+          light_source,                // t2
+          albedo_view,                 // t3
+          specular_view,               // t4
+          GetAoFallbackView(cmd_list), // t5, unused
+          GetAoFallbackView(cmd_list), // t6, unused
+      };
+      DispatchLightPass(cmd_list, &il_pass, gather_sources, il_bounce_target.uav,
+                        il_filtered_target.uav, il_accumulated_target.uav,
+                        il_moments_targets[il_history_index].uav, il_width, il_height);
+
+      // Temporal accumulation against the previous result. The velocity view comes from the
+      // TAA capture, which is backend-independent and already written by this point in the
+      // frame; when it is missing (reconstruction off) the blend collapses to zero.
+      const auto velocity_view = taa::input_capture::resources.velocity_srv;
+      shader_injection.il_history_valid = il_history_valid && velocity_view.handle != 0 ? 1.f : 0.f;
+      const std::array<reshade::api::resource_view, 7> accumulate_sources = {
+          il_bounce_target.view,                      // t0
+          il_history_targets[il_history_index].view,  // t1
+          velocity_view,                              // t2
+          frame.depth,                                // t3
+          frame.normal,                               // t4
+          il_history_aux_targets[il_history_index].view, // t5
+          il_moments_targets[il_history_index].view,     // t6
+      };
+      const uint32_t write_index = il_history_index ^ 1u;
+      DispatchLightPass(cmd_list, &il_accumulate_pass, accumulate_sources,
+                        il_history_targets[write_index].uav, il_accumulated_target.uav,
+                        il_history_aux_targets[write_index].uav,
+                        il_moments_targets[write_index].uav, il_width, il_height);
+      il_history_index = write_index;
+      il_history_valid = true;
+
+
+      // A-trous: stride 1, 2, 4 per iteration. The targets alternate so no dispatch reads what
+      // it writes, and il_bounce_target stays the gather so the host probe keeps measuring it.
+      const uint32_t filter_passes =
+          static_cast<uint32_t>(std::clamp(shader_injection.il_filter_radius, 1.f, 3.f));
+      reshade::api::resource_view filter_input = il_accumulated_target.view;
+      for (uint32_t step = 0; step < filter_passes; ++step) {
+        const auto filter_output = (step % 2) == 0 ? il_filtered_target.uav : il_accumulated_target.uav;
+        const std::array<reshade::api::resource_view, 7> filter_sources = {
+            filter_input,                              // t0
+            frame.depth,                               // t1
+            frame.normal,                              // t2
+            il_moments_targets[il_history_index].view, // t3, has-signal and variance
+            GetAoFallbackView(cmd_list),               // t4, unused
+            GetAoFallbackView(cmd_list),               // t5, unused
+            GetAoFallbackView(cmd_list),               // t6, unused
+        };
+        shader_injection.il_filter_step = static_cast<float>(step);
+        DispatchLightPass(cmd_list, &il_composite_pass, filter_sources, filter_output,
+                          il_bounce_target.uav, il_history_aux_targets[il_history_index].uav,
+                          il_history_targets[il_history_index].uav, il_width, il_height);
+        filter_input = (step % 2) == 0 ? il_filtered_target.view : il_accumulated_target.view;
+      }
+      shader_injection.il_filter_step = 0.f;
+      // An even pass count ends in the accumulate target, so the resolve and the probe follow
+      // whichever target holds the last iteration instead of assuming it is il_filtered_target.
+      const bool filtered_in_filtered = (filter_passes % 2) != 0;
+      const auto il_filtered_view = filtered_in_filtered ? il_filtered_target.view
+                                                         : il_accumulated_target.view;
+
+      const std::array<reshade::api::resource_view, 7> add_sources = {
+          il_filtered_view,            // t0
+          frame.depth,                 // t1, joint bilateral upsample
+          GetAoFallbackView(cmd_list), // t2, unused
+          GetAoFallbackView(cmd_list), // t3, unused
+          GetAoFallbackView(cmd_list), // t4, unused
+          GetAoFallbackView(cmd_list), // t5, unused
+          GetAoFallbackView(cmd_list), // t6, unused
+      };
+      DispatchLightPass(cmd_list, &il_add_pass, add_sources, frame.light,
+                        il_accumulated_target.uav, il_bounce_target.uav,
+                        il_moments_targets[il_history_index].uav, frame.width, frame.height);
+
+    }
+  }
+
+  if (shader_injection.ao_enabled != 0.f) {
+    // 0 = full, 1 = half, 2 = quarter: the AO factor and its resolve follow this.
+    const uint32_t ao_scale = shader_injection.ao_resolution > 1.5f
+                                  ? 4u
+                                  : (shader_injection.ao_resolution > 0.5f ? 2u : 1u);
+    shader_injection.ao_scale = static_cast<float>(ao_scale);
+    const uint32_t ao_width = (frame.width + ao_scale - 1u) / ao_scale;
+    const uint32_t ao_height = (frame.height + ao_scale - 1u) / ao_scale;
+
+    if (EnsureLightTarget(device, &ao_target, ao_width, ao_height)
+        && EnsureLightPass(device, &ao_pass, "mgsv: AO pass created", __mgsv_ao, ao_width,
+                           ao_height)
+        && EnsureLightPass(device, &ao_resolve_pass, "mgsv: AO resolve created",
+                           __mgsv_ao_resolve, frame.width, frame.height)) {
+      BuildDepthMips(cmd_list, frame.depth);
+      const std::array<reshade::api::resource_view, 7> sources = {
+          frame.depth,                 // t0
+          frame.normal,                // t1
+          GetDepthMipView(cmd_list),   // t2, the addon's chain or the stand-in
+          GetAoFallbackView(cmd_list), // t3, unused by the AO
+          GetAoFallbackView(cmd_list), // t4, unused by the AO
+          GetAoFallbackView(cmd_list), // t5, unused by the AO
+          GetAoFallbackView(cmd_list), // t6, unused by the AO
+      };
+      DispatchLightPass(cmd_list, &ao_pass, sources, ao_target.uav, il_accumulated_target.uav,
+                        il_bounce_target.uav, il_moments_targets[il_history_index].uav,
+                        ao_width, ao_height);
+
+      const std::array<reshade::api::resource_view, 7> resolve_sources = {
+          ao_target.view,              // t0
+          frame.depth,                 // t1, joint bilateral upsample
+          GetAoFallbackView(cmd_list), // t2, unused
+          GetAoFallbackView(cmd_list), // t3, unused
+          GetAoFallbackView(cmd_list), // t4, unused
+          GetAoFallbackView(cmd_list), // t5, unused
+          GetAoFallbackView(cmd_list), // t6, unused
+      };
+      DispatchLightPass(cmd_list, &ao_resolve_pass, resolve_sources, frame.light,
+                        il_accumulated_target.uav, il_bounce_target.uav,
+                        il_moments_targets[il_history_index].uav, frame.width, frame.height);
+    }
   }
 }
 
@@ -784,7 +1610,6 @@ renodx::mods::shader::CustomShaders custom_shaders = []() {
       // Deferred rendering paths perform the actual filmic tonemap before the
       // later LUT/color-grading pass. Mark their full-size output so the extra
       // CopyRenderBuffer draws used by rain/fog paths propagate the HDR clone.
-      UpgradeDeferredTonemapOutputRTV(0x410AE8C5, "DeferredRenderingFilmic"),
       UpgradeDeferredTonemapOutputRTV(0xC973024D, "DeferredRenderingFilmic_VolFog"),
       UpgradeDeferredTonemapOutputRTV(0xBDE1F4CD, "DR_TonemapRainFilter"),
       UpgradeDeferredTonemapOutputRTV(0x6E29F0AB, "DR_TonemapRainFilter_NoIR"),
@@ -805,6 +1630,25 @@ renodx::mods::shader::CustomShaders custom_shaders = []() {
 
       // The named Tonemap shader is the late LUT/color-grading pass in MGSV.
       UpgradeTonemapOutputRTV(0xE04D1471),
+
+      UpgradeDeferredTonemapOutputRTV(0x410AE8C5, "DeferredRenderingFilmic"),
+
+      // The two passes at 0x6DAF0C4A / 0xB2601810 are the game's screen-space
+      // subsurface-scatter chain, not AO, so neither is replaced: replacing stage 2 is
+      // what removed the scattering that makes skin read as skin. This entry only hooks
+      // stage 2, to capture its bindings before the dispatch and to run the mod's own
+      // passes after it. The engine's own shader runs untouched.
+      {0xB2601810,
+       [] {
+         return renodx::mods::shader::CustomShader{
+             .crc32 = 0xB2601810,
+             // Nothing is injected into the retail pipeline; each pass pushes its own
+             // constants into the shared layout.
+             .on_inject = [](reshade::api::command_list*) { return false; },
+             .on_draw = &CaptureLightFrame,
+             .on_drawn = &ApplyLightPasses,
+         };
+       }()},
 
       __ALL_CUSTOM_SHADERS,
   };
@@ -882,7 +1726,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "ColorGradeExposure",
         .binding = &shader_injection.tone_map_exposure,
-        .default_value = 1.f,
+        .default_value = 1.02f,
         .label = "Exposure",
         .section = "Color Grading",
         .max = 2.f,
@@ -892,7 +1736,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "ColorGradeHighlights",
         .binding = &shader_injection.tone_map_highlights,
-        .default_value = 50.f,
+        .default_value = 100.f,
         .label = "Highlights",
         .section = "Color Grading",
         .max = 100.f,
@@ -902,7 +1746,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "ColorGradeHighlightContrast",
         .binding = &shader_injection.tone_map_contrast_highlights,
-        .default_value = 55.f,
+        .default_value = 50.f,
         .label = "Highlight Contrast",
         .section = "Color Grading",
         .max = 100.f,
@@ -912,7 +1756,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "ColorGradeShadows",
         .binding = &shader_injection.tone_map_shadows,
-        .default_value = 50.f,
+        .default_value = 41.f,
         .label = "Shadows",
         .section = "Color Grading",
         .max = 100.f,
@@ -922,7 +1766,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "ColorGradeShadowContrast",
         .binding = &shader_injection.tone_map_contrast_shadows,
-        .default_value = 50.f,
+        .default_value = 52.f,
         .label = "Shadow Contrast",
         .section = "Color Grading",
         .max = 100.f,
@@ -952,7 +1796,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "ColorGradeHighlightSaturation",
         .binding = &shader_injection.tone_map_highlight_saturation,
-        .default_value = 50.f,
+        .default_value = 48.f,
         .label = "Highlight Saturation",
         .section = "Color Grading",
         .tooltip = "Adds or removes highlight color.",
@@ -1047,6 +1891,529 @@ renodx::utils::settings::Settings settings = {
         .section = "Effects",
         .max = 100.f,
         .parse = [](float value) { return value * 0.02f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSunContactHardening",
+        .binding = &shader_injection.sun_contact_hardening,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 1.f,
+        .label = "Contact-Hardening Sun Shadows",
+        .section = "Shadows",
+        .tooltip = "Sharpens sun shadows close to their caster and softens them with distance.",
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSunShadowSoftness",
+        .binding = &shader_injection.sun_shadow_softness,
+        .default_value = 115.f,
+        .label = "Sun Shadow Softness",
+        .section = "Shadows",
+        .tooltip = "Maximum softness of a shadow, in millimetres.",
+        .max = 150.f,
+        .parse = [](float value) { return value * 0.001f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotContactHardening",
+        .binding = &shader_injection.spot_contact_hardening,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 1.f,
+        .label = "Contact-Hardening Spot Shadows",
+        .section = "Shadows",
+        .tooltip = "Same treatment for spot lights.",
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotShadowSoftness",
+        .binding = &shader_injection.spot_shadow_softness,
+        .default_value = 160.f,
+        .label = "Spot Shadow Softness",
+        .section = "Shadows",
+        .tooltip = "Maximum softness of a spot shadow, in millimetres.",
+        .max = 300.f,
+        .parse = [](float value) { return value * 0.001f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointContactHardening",
+        .binding = &shader_injection.point_contact_hardening,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 1.f,
+        .label = "Contact-Hardening Point Shadows",
+        .section = "Shadows",
+        .tooltip = "Same treatment for point lights, such as fire barrels and lamps. Their shadow map is dual-paraboloid, so the softness is approximate near the hemisphere seam.",
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointShadowSoftness",
+        .binding = &shader_injection.point_shadow_softness,
+        .default_value = 100.f,
+        .label = "Point Shadow Softness",
+        .section = "Shadows",
+        .tooltip = "Maximum softness of a point shadow, in millimetres.",
+        .max = 300.f,
+        .parse = [](float value) { return value * 0.001f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSunShadowK",
+        .binding = &shader_injection.sun_shadow_k,
+        .default_value = 60.f,
+        .label = "Sun Penumbra Response",
+        .section = "Shadows (Advanced)",
+        .tooltip = "How fast a shadow reaches full softness with caster separation.",
+        .max = 100.f,
+        .is_visible = [] { return shader_injection.sun_contact_hardening != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSunShadowBlurPixels",
+        .binding = &shader_injection.sun_shadow_blur_pixels,
+        .default_value = 35.f,
+        .label = "Sun Penumbra Blur Radius",
+        .section = "Shadows (Advanced)",
+        .tooltip = "Pixel spacing of the penumbra blur.",
+        .max = 50.f,
+        .is_visible = [] { return shader_injection.sun_contact_hardening != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotShadowK",
+        .binding = &shader_injection.spot_shadow_k,
+        .default_value = 4.f,
+        .label = "Spot Penumbra Response",
+        .section = "Shadows (Advanced)",
+        .tooltip = "How fast a spot shadow reaches full softness.",
+        .max = 40.f,
+        .is_visible = [] { return shader_injection.spot_contact_hardening != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotShadowBlurPixels",
+        .binding = &shader_injection.spot_shadow_blur_pixels,
+        .default_value = 24.f,
+        .label = "Spot Penumbra Blur Radius",
+        .section = "Shadows (Advanced)",
+        .tooltip = "Spacing of the penumbra mask's neighbours, in screen pixels.",
+        .max = 50.f,
+        .is_visible = [] { return shader_injection.spot_contact_hardening != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotShadowDarkness",
+        .binding = &shader_injection.spot_shadow_darkness,
+        .default_value = 100.f,
+        .label = "Spot Shadow Darkness",
+        .section = "Shadows (Advanced)",
+        .tooltip = "Shadow occlusion scale; higher is darker.",
+        .max = 300.f,
+        .parse = [](float value) { return value * 0.01f; },
+        .is_visible = [] { return shader_injection.spot_contact_hardening != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotConeFalloff",
+        .binding = &shader_injection.spot_cone_falloff,
+        .default_value = 100.f,
+        .label = "Spot Cone Falloff",
+        .section = "Shadows (Advanced)",
+        .tooltip = "How much the cone-edge falloff darkens the shadow.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.01f; },
+        .is_visible = [] { return shader_injection.spot_contact_hardening != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointShadowK",
+        .binding = &shader_injection.point_shadow_k,
+        .default_value = 20.f,
+        .label = "Point Penumbra Response",
+        .section = "Shadows (Advanced)",
+        .tooltip = "How fast a point shadow reaches full softness with caster separation. The paraboloid depth is linear, so this is a direct ratio.",
+        .max = 100.f,
+        .is_visible = [] { return shader_injection.point_contact_hardening != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointShadowBlurPixels",
+        .binding = &shader_injection.point_shadow_blur_pixels,
+        .default_value = 24.f,
+        .label = "Point Penumbra Blur Radius",
+        .section = "Shadows (Advanced)",
+        .tooltip = "Spacing of the penumbra mask's neighbours, in screen pixels.",
+        .max = 50.f,
+        .is_visible = [] { return shader_injection.point_contact_hardening != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointShadowDarkness",
+        .binding = &shader_injection.point_shadow_darkness,
+        .default_value = 100.f,
+        .label = "Point Shadow Darkness",
+        .section = "Shadows (Advanced)",
+        .tooltip = "Shadow occlusion scale; higher is darker.",
+        .max = 300.f,
+        .parse = [](float value) { return value * 0.01f; },
+        .is_visible = [] { return shader_injection.point_contact_hardening != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxScreenSpaceShadows",
+        .binding = &shader_injection.screen_space_shadows,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 1.f,
+        .label = "Screen-Space Shadows",
+        .section = "Screen-Space Shadows",
+        .tooltip = "Marches the depth buffer toward the sun and darkens what it reaches.",
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxScreenSpaceShadowStrength",
+        .binding = &shader_injection.ss_shadow_strength,
+        .default_value = 200.f,
+        .label = "Screen-Space Shadow Strength",
+        .section = "Screen-Space Shadows",
+        .tooltip = "Occlusion per unit of blocking; the main strength control.",
+        .max = 400.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxScreenSpaceShadowReach",
+        .binding = &shader_injection.ss_shadow_reach,
+        .default_value = 4.f,
+        .label = "Screen-Space Shadow Reach",
+        .section = "Screen-Space Shadows",
+        .tooltip = "How far the ray travels, as a percentage of screen height.",
+        .max = 10.f,
+        .parse = [](float value) { return value * 0.02f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotScreenSpaceShadows",
+        .binding = &shader_injection.spot_screen_space_shadows,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 1.f,
+        .label = "Spot Screen-Space Shadows",
+        .section = "Screen-Space Shadows",
+        .tooltip = "Runs once per spot draw, so it carries its own dials instead of the sun's.",
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotScreenSpaceShadowStrength",
+        .binding = &shader_injection.spot_ss_strength,
+        .default_value = 300.f,
+        .label = "Spot Screen-Space Strength",
+        .section = "Screen-Space Shadows",
+        .tooltip = "Occlusion per unit of blocking; the main strength control.",
+        .max = 400.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotScreenSpaceShadowReach",
+        .binding = &shader_injection.spot_ss_reach,
+        .default_value = 15.f,
+        .label = "Spot Screen-Space Reach",
+        .section = "Screen-Space Shadows",
+        .tooltip = "How far the ray travels toward the light, as a percentage of screen height.",
+        .max = 50.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointScreenSpaceShadows",
+        .binding = &shader_injection.point_screen_space_shadows,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 1.f,
+        .label = "Point Screen-Space Shadows",
+        .section = "Screen-Space Shadows",
+        .tooltip = "The screen-space term on point lights. On by default, like the spot term; several point draws per frame each run the march.",
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointScreenSpaceShadowStrength",
+        .binding = &shader_injection.point_ss_strength,
+        .default_value = 200.f,
+        .label = "Point Screen-Space Strength",
+        .section = "Screen-Space Shadows",
+        .tooltip = "Occlusion per unit of blocking on point lights.",
+        .max = 400.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointScreenSpaceShadowReach",
+        .binding = &shader_injection.point_ss_reach,
+        .default_value = 6.f,
+        .label = "Point Screen-Space Reach",
+        .section = "Screen-Space Shadows",
+        .tooltip = "How far the ray travels toward the point light, as a percentage of screen height.",
+        .max = 50.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxScreenSpaceShadowThickness",
+        .binding = &shader_injection.ss_shadow_thickness,
+        .default_value = 2.f,
+        .label = "Screen-Space Shadow Thickness",
+        .section = "Screen-Space Shadows (Advanced)",
+        .tooltip = "How close a surface must be to the ray to count as a blocker.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.001f; },
+        .is_visible = [] { return shader_injection.screen_space_shadows != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxScreenSpaceShadowFadeEnd",
+        .binding = &shader_injection.ss_shadow_fade_end,
+        .default_value = 500.f,
+        .label = "Screen-Space Shadow Fade End",
+        .section = "Screen-Space Shadows (Advanced)",
+        .tooltip = "Distance in metres at which the term is gone.",
+        .max = 500.f,
+        .is_visible = [] { return shader_injection.screen_space_shadows != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotScreenSpaceShadowThickness",
+        .binding = &shader_injection.spot_ss_thickness,
+        .default_value = 10.f,
+        .label = "Spot Screen-Space Thickness",
+        .section = "Screen-Space Shadows (Advanced)",
+        .tooltip = "How much nearer than the receiver a surface must be to count as a blocker.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.001f; },
+        .is_visible = [] { return shader_injection.spot_screen_space_shadows != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotScreenSpaceShadowFadeEnd",
+        .binding = &shader_injection.spot_ss_fade_end,
+        .default_value = 500.f,
+        .label = "Spot Screen-Space Fade End",
+        .section = "Screen-Space Shadows (Advanced)",
+        .tooltip = "Distance in metres at which the term is gone.",
+        .max = 500.f,
+        .is_visible = [] { return shader_injection.spot_screen_space_shadows != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointScreenSpaceShadowThickness",
+        .binding = &shader_injection.point_ss_thickness,
+        .default_value = 20.f,
+        .label = "Point Screen-Space Thickness",
+        .section = "Screen-Space Shadows (Advanced)",
+        .tooltip = "How much nearer than the receiver a surface must be to count as a blocker.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.001f; },
+        .is_visible = [] { return shader_injection.point_screen_space_shadows != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointScreenSpaceShadowFadeEnd",
+        .binding = &shader_injection.point_ss_fade_end,
+        .default_value = 40.f,
+        .label = "Point Screen-Space Fade End",
+        .section = "Screen-Space Shadows (Advanced)",
+        .tooltip = "Distance in metres at which the term is gone. Point lights are local, so this is shorter than the sun's.",
+        .max = 500.f,
+        .is_visible = [] { return shader_injection.point_screen_space_shadows != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxScreenSpaceShadowMaterialMax",
+        .binding = &shader_injection.ss_shadow_material_max,
+        .default_value = 100.f,
+        .label = "Screen-Space Shadow Material Limit",
+        .section = "Screen-Space Shadows (Advanced)",
+        .tooltip = "Material index below which the term applies.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.01f; },
+        // Hidden from the UI: a scene-specific caster/receiver split, not a look.
+        .is_visible = [] { return false; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotScreenSpaceShadowMaterialLimit",
+        .binding = &shader_injection.spot_ss_material_max,
+        .default_value = 100.f,
+        .label = "Spot Screen-Space Material Limit",
+        .section = "Screen-Space Shadows (Advanced)",
+        .tooltip = "Material index below which the term applies.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.01f; },
+        // Hidden from the UI: a scene-specific caster/receiver split, not a look.
+        .is_visible = [] { return false; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointScreenSpaceShadowMaterialLimit",
+        .binding = &shader_injection.point_ss_material_max,
+        .default_value = 100.f,
+        .label = "Point Screen-Space Material Limit",
+        .section = "Screen-Space Shadows (Advanced)",
+        .tooltip = "Material index below which the term applies.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.01f; },
+        // Hidden from the UI: a scene-specific caster/receiver split, not a look.
+        .is_visible = [] { return false; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "AoReplace",
+        .binding = &shader_injection.ao_enabled,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 1.f,
+        .label = "AO (added after the game's scatter)",
+        .section = "Ambient Occlusion",
+        .tooltip = "Adds visibility-bitmask AO from the depth and normal buffers.",
+    },
+    new renodx::utils::settings::Setting{
+        .key = "AoStrength",
+        .binding = &shader_injection.ao_strength,
+        .default_value = 100.f,
+        .label = "AO Amount",
+        .section = "Ambient Occlusion",
+        .tooltip = "How much of the computed occlusion is applied, as a percentage.",
+        .max = 400.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "AoRadius",
+        .binding = &shader_injection.ao_radius,
+        .default_value = 70.f,
+        .label = "AO Radius",
+        .section = "Ambient Occlusion",
+        .tooltip = "Sample radius as a fraction of the screen.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "AoThickness",
+        .binding = &shader_injection.ao_thickness,
+        .default_value = 800.f,
+        .label = "AO Thickness",
+        .section = "Ambient Occlusion",
+        .tooltip = "Occluder thickness relative to the radius.",
+        .max = 2000.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "AoFade",
+        .binding = &shader_injection.ao_fade,
+        .default_value = 100.f,
+        .label = "AO Fade Distance",
+        .section = "Ambient Occlusion",
+        .tooltip = "Distance at which the occlusion fades out.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "AoSlices",
+        .binding = &shader_injection.ao_slices,
+        .default_value = 2.f,
+        .label = "AO Slices",
+        .section = "Ambient Occlusion (Advanced)",
+        .tooltip = "Directions sampled per pixel.",
+        .max = 8.f,
+        .is_visible = [] { return shader_injection.ao_enabled != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "AoSteps",
+        .binding = &shader_injection.ao_steps,
+        .default_value = 6.f,
+        .label = "AO Steps",
+        .section = "Ambient Occlusion (Advanced)",
+        .tooltip = "Samples per slice. More steps resolve thin occluders more sharply.",
+        .max = 20.f,
+        .is_visible = [] { return shader_injection.ao_enabled != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "AoResolution",
+        .binding = &shader_injection.ao_resolution,
+        .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+        .default_value = 1.f,
+        .label = "AO Resolution",
+        .section = "Ambient Occlusion (Advanced)",
+        .tooltip = "Resolution the occlusion is computed at, before the depth-resolve.",
+        .labels = {"Full", "Half", "Quarter"},
+        .is_visible = [] { return shader_injection.ao_enabled != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "AoDepthMips",
+        .binding = &ao_depth_mips_enabled,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 1.f,
+        .label = "Coarse Depth",
+        .section = "Ambient Occlusion (Advanced)",
+        .tooltip = "Reads distant steps from a reduced depth chain.",
+        .is_visible = [] { return shader_injection.ao_enabled != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "IlEnabled",
+        .binding = &shader_injection.il_enabled,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 1.f,
+        .label = "Screen Space GI",
+        .section = "Indirect Lighting",
+        .tooltip = "Adds a screen-space diffuse gather after the AO.",
+    },
+    new renodx::utils::settings::Setting{
+        .key = "IlAmount",
+        .binding = &shader_injection.il_amount,
+        .default_value = 80.f,
+        .label = "GI Amount",
+        .section = "Indirect Lighting",
+        .tooltip = "How much of the gathered light is added, as a percentage.",
+        .max = 200.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "IlRadius",
+        .binding = &shader_injection.il_radius,
+        .default_value = 80.f,
+        .label = "GI Radius",
+        .section = "Indirect Lighting",
+        .tooltip = "Gather radius as a percentage of screen height.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "IlSamples",
+        .binding = &shader_injection.il_samples,
+        .default_value = 8.f,
+        .label = "GI Samples",
+        .section = "Indirect Lighting (Advanced)",
+        .tooltip = "Samples per pixel. More is less noise, at linear cost.",
+        .min = 2.f,
+        .max = 16.f,
+        .is_visible = [] { return shader_injection.il_enabled != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "IlResolution",
+        .binding = &shader_injection.il_resolution,
+        .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+        .default_value = 2.f,
+        .label = "GI Resolution",
+        .section = "Indirect Lighting (Advanced)",
+        .tooltip = "Resolution the gather and its denoiser run at.",
+        .labels = {"Full", "Half", "Quarter"},
+        .is_visible = [] { return shader_injection.il_enabled != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "IlFilterRadius",
+        .binding = &shader_injection.il_filter_radius,
+        .default_value = 3.f,
+        .label = "GI Denoise Passes",
+        .section = "Indirect Lighting (Advanced)",
+        .tooltip = "A-trous iterations the denoiser runs.",
+        .min = 1.f,
+        .max = 3.f,
+        .is_visible = [] { return shader_injection.il_enabled != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "IlHistory",
+        .binding = &shader_injection.il_history_blend,
+        .default_value = 90.f,
+        .label = "GI History",
+        .section = "Indirect Lighting (Advanced)",
+        .tooltip = "Ceiling on how much of the previous frame survives.",
+        .max = 95.f,
+        .parse = [](float value) { return value * 0.01f; },
+        .is_visible = [] { return shader_injection.il_enabled != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "IlDebug",
+        .binding = &shader_injection.il_debug,
+        .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+        .default_value = 0.f,
+        .label = "GI Debug",
+        .section = "Indirect Lighting (Advanced)",
+        .tooltip = "Shows a diagnostic view instead of the scene.",
+        .labels = {"Off", "GI only", "History delta", "History length", "Reprojection", "Variance"},
+        .is_visible = [] { return shader_injection.il_enabled != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "IlMinSamples",
+        .binding = &shader_injection.il_min_samples,
+        .default_value = 1.f,
+        .label = "GI Min Samples",
+        .section = "Indirect Lighting (Advanced)",
+        .tooltip = "Samples that must survive rejection before a pixel contributes.",
+        .min = 1.f,
+        .max = 16.f,
+        // Hidden from the UI: grazing surfaces need one sample to survive for the ground to
+        // contribute at all, and the shader clamps the value, so there is nothing to tune.
+        .is_visible = [] { return false; },
     },
     new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
@@ -1201,6 +2568,25 @@ void OnPresent(
   ResetTonemapCopyTracking();
 }
 
+void OnDestroyDevice(reshade::api::device* device) {
+  DestroyLightPasses(device);
+  DestroyDepthMipChain(device);
+  DestroyAoFallbackView(device);
+  albedo_view = {0};
+  specular_view = {0};
+  DestroyLightTarget(device, &il_bounce_target);
+  DestroyLightTarget(device, &il_filtered_target);
+  DestroyLightTarget(device, &il_history_targets[0]);
+  DestroyLightTarget(device, &il_history_targets[1]);
+  DestroyLightTarget(device, &il_history_aux_targets[0]);
+  DestroyLightTarget(device, &il_history_aux_targets[1]);
+  DestroyLightTarget(device, &il_moments_targets[0]);
+  DestroyLightTarget(device, &il_moments_targets[1]);
+  DestroyLightTarget(device, &ao_target);
+  DestroyLightTarget(device, &il_accumulated_target);
+  il_history_valid = false;
+}
+
 bool initialized = false;
 
 }  // namespace
@@ -1252,18 +2638,39 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
             .name = "lutbuilder_256x16_bgra8_typeless_hot_swap",
         });
 
+        // Keep the tuning and diagnostic groups out of the way on first open.
+        // Every other section stays expanded, so only the "(Advanced)" groups start collapsed.
+        renodx::utils::settings::open_sections_by_default = false;
+        renodx::utils::settings::default_open_sections = {
+            "Temporal Anti-Aliasing",
+            "Presets",
+            "Output",
+            "Tone Mapping",
+            "Color Grading",
+            "Effects",
+            "Shadows",
+            "Screen-Space Shadows",
+            "Ambient Occlusion",
+            "Indirect Lighting",
+            "Options",
+            "Links",
+            "About",
+        };
+
         initialized = true;
       }
 
       reshade::register_event<reshade::addon_event::copy_resource>(OnCopyTonemapOutputResource);
       reshade::register_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);  // auto detect peak and paper white
       reshade::register_event<reshade::addon_event::present>(OnPresent);
+  reshade::register_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
 
       break;
     case DLL_PROCESS_DETACH:
       reshade::unregister_event<reshade::addon_event::copy_resource>(OnCopyTonemapOutputResource);
       reshade::unregister_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);  // auto detect peak and paper white
       reshade::unregister_event<reshade::addon_event::present>(OnPresent);
+  reshade::unregister_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
       renodx::mods::swapchain::v2::set_color_space = true;
       reshade::unregister_addon(h_module);
       break;
