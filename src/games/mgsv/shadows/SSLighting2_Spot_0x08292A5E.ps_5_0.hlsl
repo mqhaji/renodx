@@ -1,4 +1,4 @@
-// MGSV spot light with shadow — CRC32 0x08292A5E, ps_5_0.
+// MGSV spot light with shadow Ã¢â‚¬â€ CRC32 0x08292A5E, ps_5_0.
 //
 // Original source: SSLighting2_Spot_ps.hlsl
 // Decompiled from the retail DXBC with 3Dmigoto (bin/cmd_Decompiler.exe).
@@ -44,6 +44,49 @@
 // #define CUSTOM_SPOT_CONE_FALLOFF      1.0
 
 #define SPOT_MIN_TEXELS    6.0   // floor on the maximum, texels
+
+// ---- Screen-space shadow complement -----------------------------------------
+//
+// The same term the sun shader carries, and the same addon dials drive it
+// (CUSTOM_SS_* in ../shared.h) - but its own toggle, CUSTOM_SS_SPOT_SHADOWS,
+// because it runs once per spot draw instead of once a frame. See ../addon.cpp.
+// The march is in view space and light-agnostic apart from one thing: the
+// direction toward the light, which for a spot is not constant across the
+// screen - see the block at the end of main().
+//
+// These constants are the sun shader's, unchanged. They size the march in screen
+// and world units that a spot shares: the reach is a fraction of screen height,
+// the thickness is a caster's size in metres, and a spot's own shadow map cannot
+// resolve anything finer than the sun's either. Only the addon dials are worth
+// re-tuning per light type, and those are settings, not defines.
+//
+// To iterate through the devkit instead, pin them here: that path replaces the
+// shader without supplying cb13, and D3D11 returns 0 for an unbound constant
+// buffer, so anything read from it - including the toggle - comes back as 0.
+//
+// #undef  CUSTOM_SS_SPOT_SHADOWS
+// #define CUSTOM_SS_SPOT_SHADOWS 1.0
+// #undef  CUSTOM_SS_SPOT_REACH
+// #define CUSTOM_SS_SPOT_REACH        0.05
+// #undef  CUSTOM_SS_SPOT_THICKNESS
+// #define CUSTOM_SS_SPOT_THICKNESS    0.005
+// #undef  CUSTOM_SS_SPOT_STRENGTH
+// #define CUSTOM_SS_SPOT_STRENGTH     2.0
+// #undef  CUSTOM_SS_SPOT_FADE_END
+// #define CUSTOM_SS_SPOT_FADE_END     122.9
+// #undef  CUSTOM_SS_SPOT_MATERIAL_MAX
+// #define CUSTOM_SS_SPOT_MATERIAL_MAX 0.25
+
+#define SS_STEPS        48     // depth-buffer march steps toward the light, sized to
+                               // the screen resolution of the reach: 2.5% of screen
+                               // height is 54 px at 2160p, so 48 steps is about a
+                               // pixel per step. NOT unrolled - see the sun shader.
+#define SS_NORMAL_BIAS  0.0    // start offset along the normal, metres
+#define SS_REACH_MAX_M  6.00   // world-space cap on the reach, metres
+#define SS_CASTER_MAX_M 0.25   // floor on the bounded separation between ray and
+                               // caster, metres
+#define SS_CASTER_PER_M 0.010  // metres of that bound per metre of depth, so the
+                               // bound is max(SS_CASTER_MAX_M, depth * this)
 
 // Vogel disk, precomputed. Only the per-pixel rotation varies, so baking the
 // golden angle into the table avoids a sincos per tap that the compiler cannot
@@ -624,6 +667,120 @@ void main(
   r2.xyz = r2.xyz;
   r2.xyzw = r2.xyzw;
   r2.xyzw = r2.xyzw;
+
+  // =========================================================================
+  // Screen-space shadow complement (spot light).
+  //
+  // The spot map cannot afford centimetre detail over a cone tens of metres
+  // deep - the same problem the cascade map has - so this supplies the
+  // high-frequency half: ray-march the depth buffer toward the light and
+  // attenuate where the ray passes behind a nearer surface.
+  //
+  // The port is the sun's block, with two differences that come from the light
+  // and not from taste:
+  //
+  //  1. The direction toward the light is per pixel. A spot has a position, not
+  //     a direction: m_lightParams[3].xyz is the light's view-space position and
+  //     the vanilla builds L from it as (lightPos - viewPos), so the march has
+  //     to normalise that per pixel instead of reading one direction from the
+  //     constant buffer.
+  //  2. The receiver's view position is rebuilt here rather than taken from the
+  //     vanilla's r5, because r5 has already been overwritten by the four shadow
+  //     taps by the time this runs. The rebuild is the sun's proven path -
+  //     depth, m_projectionParam for the linearisation, m_projection._m00/_m11
+  //     for the unprojection - and not m_projectionParam.xy, which measured with
+  //     a scale error in the sun port.
+  //
+  // Only the diffuse accumulation (r2, SV_Target0) is scaled, exactly as the
+  // sun does. The specular target (r0) is left alone; the sun's specular is too,
+  // so a spot highlight inside the contact region stays visible. Check that in
+  // the capture before deciding it is wrong.
+  //
+  // The target is additive, so this multiplies the light rather than writing an
+  // occlusion value - see the findings in docs/MGSV_ScreenSpaceShadows.md, where
+  // writing (1 - ssOcc) washed the frame out.
+  // =========================================================================
+  {
+    // The receiver UV. v2.xy/v2.z is not a normalised coordinate in this pass -
+    // measured outside [0,1] on every lit pixel - and the vanilla only survives
+    // because its G-buffer samplers are wrap. SV_Position over the viewport size
+    // is exact, and measured in range on 1.91M gate-passing pixels.
+    const float2 uv    = v0.xy / max(g_psScene.m_viewportSize.xy, float2(1.0, 1.0));
+    const float  d     = g_DepthTexture.SampleLevel(g_samplerPoint_Clamp_s, uv, 0).x;
+    const float  viewZ = g_psScene.m_projectionParam.z / max(d - g_psScene.m_projectionParam.w, 1e-6);
+
+    // The material band, sampled the way the vanilla samples it, so the band is
+    // the one that was measured: grass, terrain and rocks below 0.25, characters
+    // above it. It gates both the receiver here and the caster in the loop.
+    const float band = g_SpecularTexture.SampleLevel(g_samplerPoint_Wrap_s, uv, 0).z;
+
+    // The march is the expensive part of this shader, so it runs only where it
+    // can change the output: the setting is on, the receiver is a material the
+    // term is allowed on, the pixel is inside the fade, and this light is not
+    // already contributing zero here (zero scaled is still zero).
+    if (CUSTOM_SS_SPOT_SHADOWS != 0.f
+        && band < CUSTOM_SS_SPOT_MATERIAL_MAX
+        && viewZ < CUSTOM_SS_SPOT_FADE_END
+        && max(r2.x, max(r2.y, r2.z)) > 0.0) {
+      const float jitter    = PcssInterleavedGradientNoise(v0.xy);
+      // Full strength begins at 40 m. Fixed in the body, as in the sun shader:
+      // it had a knob and never needed one, since the end distance is what
+      // decides where the term is gone.
+      const float fadeStart = 40.0;
+      const float fade      = 1.0 - saturate((viewZ - fadeStart) / max(CUSTOM_SS_SPOT_FADE_END - fadeStart, 1e-3));
+
+      // March toward the light's own screen position. Projecting a world-space
+      // step instead - as the sun does - collapses here: a spot sits above the
+      // receiver, so its ray is near-perpendicular to the view axis and the
+      // projected clip.w drives the sample off-screen within a step or two. That
+      // measured as fewer than twelve of forty-eight steps on every lit pixel,
+      // and one occluded pixel in the whole frame. Stepping in UV has no such
+      // dependency, and the aspect comes from the projection matrix.
+      const float  aspect    = max(g_psScene.m_projection._m11 / max(abs(g_psScene.m_projection._m00), 1e-6), 1e-3);
+      const float4 clipLight = mul(float4(g_psLight.m_lightParams[3].xyz, 1.0), g_psScene.m_projection);
+
+      float occ = 0.0;
+      if (clipLight.w > 1e-4) {
+        const float2 suvLight = clipLight.xy / clipLight.w * float2(0.5, -0.5) + 0.5;
+        const float2 pSelf    = float2(uv.x * aspect, uv.y);
+        const float2 delta    = float2(suvLight.x * aspect, suvLight.y) - pSelf;
+        const float  lenUV    = length(delta);
+        if (lenUV > 1e-4) {
+          const float2 dir    = delta / lenUV;
+          // The reach is a fraction of screen height, capped so a far receiver
+          // cannot sweep the frame. A spot lights a small part of the image, so
+          // the shared dial leaves a patch only a few hundred pixels wide; the
+          // floor keeps the term visible without changing the sun. Measured at
+          // 39,721 affected pixels at 0.15 against 1 at 0.04.
+          const float  reach  = clamp(CUSTOM_SS_SPOT_REACH, 0.02f, 0.5f);
+          const float  stepUV = reach / (float)SS_STEPS;
+          for (int s = 0; s < SS_STEPS; ++s) {
+            // Quadratic step distribution: dense near the receiver, where
+            // contact-sized casters are, sparser further out where only large
+            // ones can register.
+            const float  f   = ((float)s + jitter) / (float)SS_STEPS;
+            const float2 p   = pSelf + dir * (stepUV * f);
+            const float2 suv = float2(p.x / aspect, p.y);
+            if (any(suv < 0.0) || any(suv > 1.0)) break;
+            const float sd = g_DepthTexture.SampleLevel(g_samplerPoint_Clamp_s, suv, 0).x;
+            const float sz = g_psScene.m_projectionParam.z / max(sd - g_psScene.m_projectionParam.w, 1e-6);
+            // Anything nearer than the receiver along the path to the light is a
+            // caster. The threshold is metres of view depth, so it does not
+            // depend on the angle between the ray and the view axis.
+            if (viewZ - sz > max(CUSTOM_SS_SPOT_THICKNESS, 0.001f)
+                && (CUSTOM_SS_SPOT_MATERIAL_MAX >= 0.999
+                    || g_SpecularTexture.SampleLevel(g_samplerPoint_Wrap_s, suv, 0).z < CUSTOM_SS_SPOT_MATERIAL_MAX)) {
+              occ += 1.0;
+            }
+          }
+        }
+      }
+
+      const float ssOcc = (occ / (float)SS_STEPS) * fade;
+      r2.xyz *= saturate(1.0 - ssOcc * CUSTOM_SS_SPOT_STRENGTH);
+    }
+  }
+
   o0.xyzw = r2.xyzw;
   o1.xyzw = r0.xyzw;
   return;
