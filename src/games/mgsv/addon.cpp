@@ -2082,7 +2082,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "FxSpotScreenSpaceShadowStrength",
         .binding = &shader_injection.spot_ss_strength,
-        .default_value = 200.f,
+        .default_value = 300.f,
         .label = "Spot Screen-Space Strength",
         .section = "Screen-Space Shadows",
         .tooltip = "Occlusion per unit of blocking; the main strength control.",
@@ -2121,7 +2121,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "FxPointScreenSpaceShadowReach",
         .binding = &shader_injection.point_ss_reach,
-        .default_value = 15.f,
+        .default_value = 6.f,
         .label = "Point Screen-Space Reach",
         .section = "Screen-Space Shadows",
         .tooltip = "How far the ray travels toward the point light, as a percentage of screen height.",
@@ -2152,7 +2152,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "FxSpotScreenSpaceShadowThickness",
         .binding = &shader_injection.spot_ss_thickness,
-        .default_value = 20.f,
+        .default_value = 10.f,
         .label = "Spot Screen-Space Thickness",
         .section = "Screen-Space Shadows (Advanced)",
         .tooltip = "How much nearer than the receiver a surface must be to count as a blocker.",
@@ -2311,7 +2311,7 @@ renodx::utils::settings::Settings settings = {
         .key = "AoDepthMips",
         .binding = &ao_depth_mips_enabled,
         .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
-        .default_value = 0.f,
+        .default_value = 1.f,
         .label = "Coarse Depth",
         .section = "Ambient Occlusion (Advanced)",
         .tooltip = "Reads distant steps from a reduced depth chain.",
@@ -2329,7 +2329,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "IlAmount",
         .binding = &shader_injection.il_amount,
-        .default_value = 100.f,
+        .default_value = 80.f,
         .label = "GI Amount",
         .section = "Indirect Lighting",
         .tooltip = "How much of the gathered light is added, as a percentage.",
