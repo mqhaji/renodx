@@ -9,6 +9,7 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 - **Motion blur** with HDR-aware rendering
 - **Depth-of-field effects** with an HDR pre-final scene copy
 - **Optional temporal anti-aliasing** with native projection jitter and high-precision velocity
+- **Contact-hardening and screen-space shadows** for the sun, spot lights and point lights
 - **Ambient occlusion** from the visibility-bitmask paper, applied after the game's subsurface scatter
 - **User-configurable settings** via the ReShade overlay UI
 
@@ -152,6 +153,10 @@ unit-length motion clamp to be bypassed by a default-Off TAA diagnostic.
 | 0xCA7F0E3D | LUT Builder (Pass 2) | Color grading LUT construction | ✓ | Yes | Generic LUT builder |
 | 0x900968FF | FXAA Pass | Antialiasing | ✓ | Yes | Final screen-space AA |
 | 0xE04D1471 | Tonemap (LUT/Grading) | Late LUT & color grading | ✓ | Yes | Primary color grading output |
+| 0x5AFD2E17 | SunLight_DL_CS_ES | Sun shadow and lighting | ✓ | No | PCSS contact hardening and screen-space shadows |
+| 0x08292A5E | SSLighting2_Spot | Spot shadow and lighting | ✓ | No | PCSS contact hardening and screen-space shadows |
+| 0x1D4DB9C5 | SSLighting2_Spot (distance attenuation) | Spot permutation | ✓ | No | Same shadow code as 0x08292A5E |
+| 0x80F0A0BC | SSLighting2_Point | Point shadow and lighting | ✓ | No | Dual-paraboloid map; PCSS and screen-space shadows |
 
 **Legend:**
 - **Hash**: CRC32 of compiled DXBC bytecode
@@ -246,6 +251,29 @@ device destruction stops admission rather than unpatching/freeing trampolines. L
 
 See the [temporal reference](taa/README.md) for controls, motion/jitter ownership, SDK lifecycle, and limitations;
 the [roadmap](taa/ROADMAP.md) contains only outstanding work.
+
+---
+
+## Shadows
+
+The sun, spot and point light shaders carry two optional terms.
+
+**Contact hardening** replaces the fixed-radius PCF with a PCSS blocker search: the penumbra grows with the
+separation between caster and receiver, so contact edges stay sharp and farther shadows soften. Each light type has
+its own toggle and softness; response, blur radius and darkness are in the Advanced group.
+
+- Sun: cascade shadow atlas.
+- Spot: one projective map per light; also exposes cone-edge falloff.
+- Point: dual-paraboloid atlas. Softness is approximate near the hemisphere seam because texel size compresses
+  toward the rim.
+
+**Screen-space shadows** march the depth buffer toward the light and attenuate where the ray passes behind a nearer
+surface. They run for the sun once per frame and for each spot and point draw. Strength and reach are per light
+type; thickness, fade end and the material limit are in Advanced. The material limit gates both receiver and caster
+so characters do not shadow themselves while still casting onto the ground.
+
+Settings live under **Shadows** and **Screen-Space Shadows**, each with a collapsed Advanced group. The Advanced
+groups are visible only while the matching feature is enabled; turning a toggle off runs the vanilla filter.
 
 ---
 
