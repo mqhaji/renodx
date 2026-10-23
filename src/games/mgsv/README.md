@@ -11,6 +11,7 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 - **Optional temporal anti-aliasing** with native projection jitter and high-precision velocity
 - **Contact-hardening and screen-space shadows** for the sun, spot lights and point lights
 - **Ambient occlusion** from the visibility-bitmask paper, applied after the game's subsurface scatter
+- **Screen-space indirect lighting** with temporal accumulation, a-trous denoise and a depth-joint resolve
 - **User-configurable settings** via the ReShade overlay UI
 
 ---
@@ -309,6 +310,33 @@ reasons, the verification, and what is still open are in
 [MGSV_AmbientOcclusion.md](ao/MGSV_AmbientOcclusion.md).
 Do not change the back-sample sign, the sector rounding, or the slice weights without
 reading it first — each has already cost a round.
+
+---
+
+## Indirect Lighting
+
+The addon runs a screen-space diffuse gather after the scatter hook. It bounces the light the
+retail deferred passes already produced; it is not a second lighting model.
+
+The chain is four passes:
+
+1. **Gather** — samples the light at jittered disk positions, rejecting occluded and
+   back-facing samples. Radiance comes from the deferred composite's albedo and specular
+   inputs, so highlights and emissive surfaces contribute.
+2. **Accumulate** — reprojects the previous result with the game's velocity buffer, rejects
+   depth/normal mismatches, and tracks history length and luminance moments.
+3. **Denoise** — one to three a-trous iterations weighted by depth, normal and measured
+   per-pixel variance.
+4. **Add** — depth-joint resolve at full resolution, then adds the filtered radiance to the
+   light.
+
+Settings are in **Indirect Lighting**: toggle, amount and radius; samples, resolution,
+denoise passes, history and debug views are in Advanced. Gather, history and denoiser run at
+full, half or quarter resolution; the default is quarter. The tuned defaults are amount 80,
+radius 80, 8 samples and 3 denoise passes.
+
+The gather runs before the AO resolve, so AO scales the combined direct and indirect light.
+AO and indirect lighting are independent toggles.
 
 ---
 
