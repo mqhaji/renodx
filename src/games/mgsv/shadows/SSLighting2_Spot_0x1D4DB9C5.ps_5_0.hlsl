@@ -1,4 +1,4 @@
-// MGSV spot light with shadow ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â CRC32 0x1D4DB9C5, ps_5_0.
+// MGSV spot light with shadow ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â CRC32 0x1D4DB9C5, ps_5_0.
 //
 // This is the same shader as 0x08292A5E with one permutation: the distance
 // attenuation. The engine emits both, and a scene can use one or the other, so
@@ -739,49 +739,57 @@ void main(
       const float fadeStart = 40.0;
       const float fade      = 1.0 - saturate((viewZ - fadeStart) / max(CUSTOM_SS_SPOT_FADE_END - fadeStart, 1e-3));
 
-      // March toward the light's own screen position. Projecting a world-space
-      // step instead - as the sun does - collapses here: a spot sits above the
-      // receiver, so its ray is near-perpendicular to the view axis and the
-      // projected clip.w drives the sample off-screen within a step or two. That
-      // measured as fewer than twelve of forty-eight steps on every lit pixel,
-      // and one occluded pixel in the whole frame. Stepping in UV has no such
-      // dependency, and the aspect comes from the projection matrix.
-      const float  aspect    = max(g_psScene.m_projection._m11 / max(abs(g_psScene.m_projection._m00), 1e-6), 1e-3);
-      const float4 clipLight = mul(float4(g_psLight.m_lightParams[3].xyz, 1.0), g_psScene.m_projection);
+      const float2 ndc     = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+      const float3 viewPos = float3(ndc.x * viewZ / g_psScene.m_projection._m00,
+                                    ndc.y * viewZ / g_psScene.m_projection._m11,
+                                    viewZ);
+
+      const float3 lightDir = normalize(g_psLight.m_lightParams[3].xyz - viewPos);
+
+      const float3 gbufN  = g_NormalTexture.SampleLevel(g_samplerPoint_Clamp_s, uv, 0).xyz;
+      const float3 normal = normalize(float3(gbufN.xy * 2.0 - 1.0, gbufN.z * gbufN.z * 2.0 - 1.0));
+
+      // The sun's march, unchanged: a world-space ray whose clip coordinates are
+      // affine in the step parameter. It degenerates only when clip.w reaches
+      // zero, which a near-perpendicular spot ray can do, so that case breaks out
+      // rather than dividing.
+      const float marchStep = min(CUSTOM_SS_SPOT_REACH * viewZ / abs(g_psScene.m_projection._m11), SS_REACH_MAX_M) / (float)SS_STEPS;
+      const float3 rayDir    = lightDir * marchStep;
+      const float3 rayStart  = viewPos + normal * SS_NORMAL_BIAS;
+      const float4 clipStart = mul(float4(rayStart, 1.0), g_psScene.m_projection);
+      const float4 clipStep  = mul(float4(rayDir,   0.0), g_psScene.m_projection);
+
+      // Once occluded past this many steps the output is already black, so later
+      // steps cannot change it.
+      const float occSaturated = SS_STEPS / max(CUSTOM_SS_SPOT_STRENGTH * fade, 1e-6);
 
       float occ = 0.0;
-      if (clipLight.w > 1e-4) {
-        const float2 suvLight = clipLight.xy / clipLight.w * float2(0.5, -0.5) + 0.5;
-        const float2 pSelf    = float2(uv.x * aspect, uv.y);
-        const float2 delta    = float2(suvLight.x * aspect, suvLight.y) - pSelf;
-        const float  lenUV    = length(delta);
-        if (lenUV > 1e-4) {
-          const float2 dir    = delta / lenUV;
-          // The reach is a fraction of screen height, capped so a far receiver
-          // cannot sweep the frame. A spot lights a small part of the image, so
-          // the shared dial leaves a patch only a few hundred pixels wide; the
-          // floor keeps the term visible without changing the sun. Measured at
-          // 39,721 affected pixels at 0.15 against 1 at 0.04.
-          const float  reach  = clamp(CUSTOM_SS_SPOT_REACH, 0.02f, 0.5f);
-          const float  stepUV = reach / (float)SS_STEPS;
-          for (int s = 0; s < SS_STEPS; ++s) {
-            // Quadratic step distribution: dense near the receiver, where
-            // contact-sized casters are, sparser further out where only large
-            // ones can register.
-            const float  f   = ((float)s + jitter) / (float)SS_STEPS;
-            const float2 p   = pSelf + dir * (stepUV * f);
-            const float2 suv = float2(p.x / aspect, p.y);
-            if (any(suv < 0.0) || any(suv > 1.0)) break;
-            const float sd = g_DepthTexture.SampleLevel(g_samplerPoint_Clamp_s, suv, 0).x;
-            const float sz = g_psScene.m_projectionParam.z / max(sd - g_psScene.m_projectionParam.w, 1e-6);
-            // Anything nearer than the receiver along the path to the light is a
-            // caster. The threshold is metres of view depth, so it does not
-            // depend on the angle between the ray and the view axis.
-            if (viewZ - sz > max(CUSTOM_SS_SPOT_THICKNESS, 0.001f)
-                && (CUSTOM_SS_SPOT_MATERIAL_MAX >= 0.999
-                    || g_SpecularTexture.SampleLevel(g_samplerPoint_Wrap_s, suv, 0).z < CUSTOM_SS_SPOT_MATERIAL_MAX)) {
-              occ += 1.0;
-            }
+      for (int s = 0; s < SS_STEPS; ++s) {
+        // Quadratic step distribution: dense near the receiver, where
+        // contact-sized casters are, sparser further out where only large ones
+        // can register.
+        const float  u    = ((float)s + jitter) / (float)SS_STEPS;
+        const float  t    = (0.25 * u + 0.75 * u * u) * (float)SS_STEPS;
+        const float4 clip = clipStart + clipStep * t;
+        if (clip.w <= 1e-6) break;
+        const float2 suv  = clip.xy / clip.w * float2(0.5, -0.5) + 0.5;
+        if (any(suv < 0.0) || any(suv > 1.0)) break;
+        if (occ >= occSaturated) break;
+        const float sd = g_DepthTexture.SampleLevel(g_samplerPoint_Clamp_s, suv, 0).x;
+        const float sz = g_psScene.m_projectionParam.z / max(sd - g_psScene.m_projectionParam.w, 1e-6);
+        // The caster has to be near the ray, not merely in front of it: too close
+        // and it is the receiver's own surface, too far and it is unrelated
+        // geometry the ray's screen path happens to cross.
+        const float sep = rayStart.z + rayDir.z * t - sz;
+        if (sep > CUSTOM_SS_SPOT_THICKNESS
+            && sep < max(SS_CASTER_MAX_M, viewZ * SS_CASTER_PER_M)) {
+          // Excluding a character as a receiver only stops his body shadowing
+          // itself; he still casts onto the ground. The material at the ray's
+          // screen position is the caster's and is the only thing that can
+          // identify him, which is why the caster is gated too.
+          if (CUSTOM_SS_SPOT_MATERIAL_MAX >= 0.999
+              || g_SpecularTexture.SampleLevel(g_samplerPoint_Wrap_s, suv, 0).z < CUSTOM_SS_SPOT_MATERIAL_MAX) {
+            occ += 1.0;
           }
         }
       }
