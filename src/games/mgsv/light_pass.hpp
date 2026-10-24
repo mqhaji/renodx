@@ -1,3 +1,9 @@
+/*
+ * Copyright (C) 2026 Musa Haji
+ * Copyright (C) 2026 ZioPao
+ * SPDX-License-Identifier: MIT
+ */
+
 #pragma once
 
 #include <algorithm>
@@ -183,63 +189,93 @@ inline void DestroyLightPassLayout(reshade::api::device* device) {
   }
 }
 
-// One 1x1 texture, used for descriptors a pass must bind but does not read or write.
-inline reshade::api::resource fallback_resource = {0};
-inline reshade::api::resource_view fallback_view = {0};
-inline reshade::api::resource_view fallback_uav = {0};
+// 1x1 stand-ins for descriptors a pass must bind but does not read or write. The SRV and
+// UAV fallbacks are separate resources: a resource cannot be bound as both at once, and
+// each unused UAV slot needs its own texture.
+inline reshade::api::resource fallback_srv_resource = {0};
+inline reshade::api::resource_view fallback_srv = {0};
+inline std::array<reshade::api::resource, 3> fallback_uav_resources = {};
+inline std::array<reshade::api::resource_view, 3> fallback_uavs = {};
 
 inline void DestroyFallbackViews(reshade::api::device* device) {
-  if (fallback_uav.handle != 0) {
-    device->destroy_resource_view(fallback_uav);
-    fallback_uav = {0};
+  for (auto& view : fallback_uavs) {
+    if (view.handle != 0) {
+      device->destroy_resource_view(view);
+      view = {0};
+    }
   }
-  if (fallback_view.handle != 0) {
-    device->destroy_resource_view(fallback_view);
-    fallback_view = {0};
+  for (auto& resource : fallback_uav_resources) {
+    if (resource.handle != 0) {
+      device->destroy_resource(resource);
+      resource = {0};
+    }
   }
-  if (fallback_resource.handle != 0) {
-    device->destroy_resource(fallback_resource);
-    fallback_resource = {0};
+  if (fallback_srv.handle != 0) {
+    device->destroy_resource_view(fallback_srv);
+    fallback_srv = {0};
+  }
+  if (fallback_srv_resource.handle != 0) {
+    device->destroy_resource(fallback_srv_resource);
+    fallback_srv_resource = {0};
   }
 }
 
 inline bool EnsureFallbackViews(reshade::api::device* device) {
-  if (fallback_view.handle != 0 && fallback_uav.handle != 0) return true;
+  if (fallback_srv.handle != 0
+      && std::all_of(fallback_uavs.begin(), fallback_uavs.end(),
+                     [](const auto& view) { return view.handle != 0; })) {
+    return true;
+  }
   DestroyFallbackViews(device);
 
-  const reshade::api::resource_desc desc(
+  const reshade::api::resource_desc srv_desc(
       1u, 1u, 1u, 1u,
       reshade::api::format::r16g16b16a16_float,
       1u,
       reshade::api::memory_heap::gpu_only,
-      reshade::api::resource_usage::shader_resource
-          | reshade::api::resource_usage::unordered_access);
-  if (!device->create_resource(desc, nullptr, desc.usage, &fallback_resource)
+      reshade::api::resource_usage::shader_resource);
+  if (!device->create_resource(srv_desc, nullptr, srv_desc.usage, &fallback_srv_resource)
       || !device->create_resource_view(
-          fallback_resource,
+          fallback_srv_resource,
           reshade::api::resource_usage::shader_resource,
           reshade::api::resource_view_desc(reshade::api::format::r16g16b16a16_float),
-          &fallback_view)
-      || !device->create_resource_view(
-          fallback_resource,
-          reshade::api::resource_usage::unordered_access,
-          reshade::api::resource_view_desc(reshade::api::format::r16g16b16a16_float),
-          &fallback_uav)) {
+          &fallback_srv)) {
     DestroyFallbackViews(device);
     reshade::log::message(reshade::log::level::error, "mgsv: fallback view failed");
     return false;
+  }
+
+  const reshade::api::resource_desc uav_desc(
+      1u, 1u, 1u, 1u,
+      reshade::api::format::r16g16b16a16_float,
+      1u,
+      reshade::api::memory_heap::gpu_only,
+      reshade::api::resource_usage::unordered_access);
+  for (std::size_t index = 0; index < fallback_uavs.size(); ++index) {
+    if (!device->create_resource(uav_desc, nullptr, uav_desc.usage,
+                                 &fallback_uav_resources[index])
+        || !device->create_resource_view(
+            fallback_uav_resources[index],
+            reshade::api::resource_usage::unordered_access,
+            reshade::api::resource_view_desc(reshade::api::format::r16g16b16a16_float),
+            &fallback_uavs[index])) {
+      DestroyFallbackViews(device);
+      reshade::log::message(reshade::log::level::error, "mgsv: fallback UAV failed");
+      return false;
+    }
   }
   return true;
 }
 
 inline reshade::api::resource_view GetFallbackView(reshade::api::command_list* cmd_list) {
   if (!EnsureFallbackViews(cmd_list->get_device())) return {0};
-  return fallback_view;
+  return fallback_srv;
 }
 
-inline reshade::api::resource_view GetFallbackUav(reshade::api::command_list* cmd_list) {
+inline reshade::api::resource_view GetFallbackUav(reshade::api::command_list* cmd_list,
+                                                  std::size_t index) {
   if (!EnsureFallbackViews(cmd_list->get_device())) return {0};
-  return fallback_uav;
+  return fallback_uavs[index % fallback_uavs.size()];
 }
 
 // Submits one light-modifying compute pass. The descriptor slots this layout touches are
