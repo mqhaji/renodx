@@ -1,3 +1,9 @@
+/*
+ * Copyright (C) 2026 Musa Haji
+ * Copyright (C) 2026 ZioPao
+ * SPDX-License-Identifier: MIT
+ */
+
 #pragma once
 
 #include <algorithm>
