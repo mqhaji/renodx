@@ -1,3 +1,9 @@
+/*
+ * Copyright (C) 2026 Musa Haji
+ * Copyright (C) 2026 ZioPao
+ * SPDX-License-Identifier: MIT
+ */
+
 #pragma once
 
 #include <algorithm>
@@ -261,7 +267,9 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
       && EnsureLightPass(device, &resolve_pass, "mgsv: AO resolve created",
                          __mgsv_ao_resolve, frame.width, frame.height)) {
     BuildDepthMips(cmd_list, frame.depth);
-    const auto scratch = GetFallbackUav(cmd_list);
+    const auto scratch0 = GetFallbackUav(cmd_list, 0);
+    const auto scratch1 = GetFallbackUav(cmd_list, 1);
+    const auto scratch2 = GetFallbackUav(cmd_list, 2);
     const std::array<reshade::api::resource_view, 7> sources = {
         frame.depth,                 // t0
         frame.normal,                // t1
@@ -271,7 +279,7 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
         GetFallbackView(cmd_list),   // t5, unused by the AO
         GetFallbackView(cmd_list),   // t6, unused by the AO
     };
-    DispatchLightPass(cmd_list, &pass, sources, target.uav, scratch, scratch, scratch,
+    DispatchLightPass(cmd_list, &pass, sources, target.uav, scratch0, scratch1, scratch2,
                       ao_width, ao_height);
 
     const std::array<reshade::api::resource_view, 7> resolve_sources = {
@@ -283,8 +291,8 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
         GetFallbackView(cmd_list),   // t5, unused
         GetFallbackView(cmd_list),   // t6, unused
     };
-    DispatchLightPass(cmd_list, &resolve_pass, resolve_sources, frame.light, scratch, scratch,
-                      scratch, frame.width, frame.height);
+    DispatchLightPass(cmd_list, &resolve_pass, resolve_sources, frame.light, scratch0, scratch1,
+                      scratch2, frame.width, frame.height);
   }
 }
 
