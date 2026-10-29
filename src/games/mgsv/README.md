@@ -259,84 +259,44 @@ the [roadmap](taa/ROADMAP.md) contains only outstanding work.
 
 The sun, spot and point light shaders carry two optional terms.
 
-**Contact hardening** replaces the fixed-radius PCF with a PCSS blocker search: the penumbra grows with the
-separation between caster and receiver, so contact edges stay sharp and farther shadows soften. Each light type has
-its own toggle and softness; response, blur radius and darkness are in the Advanced group.
+**Contact hardening** replaces the fixed-radius PCF with a PCSS blocker search: the penumbra grows with the separation between caster and receiver, so contact edges stay sharp and farther shadows soften. Each light type has its own toggle and softness; response, blur radius and darkness are in the Advanced group.
 
 - Sun: cascade shadow atlas.
 - Spot: one projective map per light; also exposes cone-edge falloff.
-- Point: dual-paraboloid atlas. Softness is approximate near the hemisphere seam because texel size compresses
-  toward the rim.
+- Point: dual-paraboloid atlas. Softness is approximate near the hemisphere seam because texel size compresses toward the rim.
 
-**Screen-space shadows** march the depth buffer toward the light and attenuate where the ray passes behind a nearer
-surface. They run for the sun once per frame and for each spot and point draw. Strength and reach are per light
-type; thickness, fade end and the material limit are in Advanced. The material limit gates both receiver and caster
-so characters do not shadow themselves while still casting onto the ground.
+**Screen-space shadows** march the depth buffer toward the light and attenuate where the ray passes behind a nearer surface. They run for the sun once per frame and for each spot and point draw. Strength and reach are per light type; thickness, fade end and the material limit are in Advanced. The material limit gates both receiver and caster so characters do not shadow themselves while still casting onto the ground.
 
-Settings live under **Shadows** and **Screen-Space Shadows**, each with a collapsed Advanced group. The Advanced
-groups are visible only while the matching feature is enabled; turning a toggle off runs the vanilla filter.
+Settings are under **Contact-Hardening Shadows** and **Screen-Space Shadows**, each with an Advanced section. Controls for each feature are shown while it is enabled. Disabling contact hardening restores the game's shadow filter; disabling screen-space shadows removes only the added screen-space effect.
 
 ---
 
 ## Ambient Occlusion
 
-The two passes at `0x6DAF0C4A` and `0xB2601810` are the game's screen-space
-**subsurface-scatter** chain, not ambient occlusion. Replacing stage 2 removed the
-scattering that makes skin read as skin, which is the bug this module used to hit. Both
-passes are now left vanilla.
+The two compute passes at `0x6DAF0C4A` and `0xB2601810` perform the game's screen-space **subsurface scattering**, which contributes to skin shading. Neither shader is replaced.
 
-AO runs as its own dispatch, hooked after stage 2: it scales the light buffer the scatter
-pass just wrote, in place, rgb only, with alpha preserved. The scatter has already
-happened when it reads the buffer, so the occlusion cannot remove it, and no retail
-shader is replaced. The pass is a visibility-bitmask AO written from *Screen Space
-Indirect Lighting with Visibility Bitmask* (Therrien, Levesque, Gilet, The Visual
-Computer 2023).
+After stage 2, the addon calculates AO in a separate texture, then applies it to the light buffer. It darkens RGB and preserves alpha. This keeps the game's scattering passes intact, but still darkens their result, including directly lit surfaces.
 
-Settings are in the **Ambient Occlusion** section. **AO (added after the game's scatter)**
-off skips the dispatch entirely, so the comparison is against the untouched game.
+The technique is based on *Screen Space Indirect Lighting with Visibility Bitmask* (Therrien, Levesque, Gilet, The Visual Computer 2023), with five documented differences. See [MGSV_AmbientOcclusion.md](ao/MGSV_AmbientOcclusion.md) for the paper comparison, earlier measurements, and remaining questions. Read those notes before changing the back-sample direction, sector rounding, or slice weights.
 
-**Status: follows the paper's Algorithm 1 with five recorded deviations — the sector
-measure and the application are the paper's, so the visibility is computed in
-equal-measure sectors and multiplies the light.** The mapping, the deviations and their
-reasons, the verification, and what is still open are in
-[MGSV_AmbientOcclusion.md](ao/MGSV_AmbientOcclusion.md).
-Do not change the back-sample sign, the sector rounding, or the slice weights without
-reading it first — each has already cost a round.
-
-**Status: follows the paper's Algorithm 1 with five recorded deviations — the sector
-measure and the application are the paper's, so the visibility is computed in
-equal-measure sectors and multiplies the light.** The mapping, the deviations and their
-reasons, the verification, and what is still open are in
-[MGSV_AmbientOcclusion.md](ao/MGSV_AmbientOcclusion.md).
-Do not change the back-sample sign, the sector rounding, or the slice weights without
-reading it first — each has already cost a round.
+Use **Visibility-Bitmask Ambient Occlusion** in the **Ambient Occlusion** section to enable or disable this effect. Turning it off skips only the added AO passes; indirect lighting and other enhancements keep their own settings.
 
 ---
 
 ## Indirect Lighting
 
-The addon runs a screen-space diffuse gather after the scatter hook. It bounces the light the
-retail deferred passes already produced; it is not a second lighting model.
+The addon estimates bounced light from surfaces visible on screen, using the game's existing lighting. It runs after the game's subsurface scattering and cannot include off-screen surfaces.
 
-The chain is four passes:
+The chain has four stages; denoising records one dispatch per iteration:
 
-1. **Gather** — samples the light at jittered disk positions, rejecting occluded and
-   back-facing samples. Radiance comes from the deferred composite's albedo and specular
-   inputs, so highlights and emissive surfaces contribute.
-2. **Accumulate** — reprojects the previous result with the game's velocity buffer, rejects
-   depth/normal mismatches, and tracks history length and luminance moments.
-3. **Denoise** — one to three a-trous iterations weighted by depth, normal and measured
-   per-pixel variance.
-4. **Add** — depth-joint resolve at full resolution, then adds the filtered radiance to the
-   light.
+1. **Gather** — samples nearby surfaces in a disk, rejecting out-of-bounds and back-facing samples. Radiance comes from the deferred composite's albedo and specular inputs, so highlights and emissive surfaces contribute.
+2. **Accumulate** — reprojects the previous result with the game's velocity buffer, rejects depth/normal mismatches, and tracks history length and luminance moments.
+3. **Denoise** — one to three a-trous iterations weighted by depth, normal and measured per-pixel variance.
+4. **Add** — uses depth to upsample the filtered result to full resolution, then adds it to the light buffer.
 
-Settings are in **Indirect Lighting**: toggle, amount and radius; samples, resolution,
-denoise passes, history and debug views are in Advanced. Gather, history and denoiser run at
-full, half or quarter resolution; the default is quarter. The tuned defaults are amount 80,
-radius 80, 8 samples and 3 denoise passes.
+Settings are in **Indirect Lighting**: the toggle, **Indirect Lighting Strength**, and **Indirect Lighting Sampling Radius**. Sample count, resolution, denoise iterations, history weight, and debug views are in **Indirect Lighting (Advanced)**. Gather, history, and denoising use the selected Full, Half, or Quarter resolution; the default is Quarter. The defaults are strength 80, sampling radius 80, 8 samples, and 3 denoise iterations.
 
-The gather runs before the AO resolve, so AO scales the combined direct and indirect light.
-AO and indirect lighting are independent toggles.
+Indirect lighting is added before AO is applied, so AO darkens both direct and indirect light. AO and indirect lighting are independent toggles.
 
 ---
 
@@ -473,6 +433,25 @@ Use one game addon and disable live shader overrides for validation. DLSS additi
    transitions, and resolution changes. Keep known warble/ghosting distinct from startup or history-reset failures.
 4. Follow the [detailed temporal validation matrix](taa/README.md#manual-validation) for coverage and lifecycle checks.
    No automatic diagnostic capture is present, and this documentation cleanup adds no runtime test result.
+
+### Manual Lighting Verification
+
+Follow the build and deployment steps above. Use the matching `renodx-mgsv.addon64` with live shader overrides disabled.
+
+**In-game checks**
+
+- Compare AO only, indirect lighting only, both enabled, and both disabled. Keep other settings unchanged.
+- Test **AO Depth Mip Sampling** on and off, and test Full, Half, and Quarter resolution for each effect.
+- Test **Indirect Lighting Denoise Iterations** at 1, 2, and 3, especially 2, which previously had an input/output conflict.
+- Check skin shading, rain, fog, night vision, menus, and resolution changes. Test Preset Off and repeated effect toggles.
+- Hold the camera still and compare indirect-lighting noise and stability with the previous build. The input-handling changes do not alter the shader's history-rejection rules or tuning.
+
+**Developer checks**
+
+- Look for `MgsvLighting:` in `ReShade.log`. Texture and pipeline creation is logged whenever it actually happens, with dimensions; changing indirect-lighting dimensions also logs history invalidation before resource setup. Strength and radius changes do not rebuild resources and are not logged. Missing-input and setup-failure messages are limited to one report per diagnostic per addon load, as are the initial “commands recorded” summaries. Those summaries do not track later options or prove GPU execution or valid temporal history. These messages cover AO and indirect lighting, not execution of the shadow shaders.
+- In a D3D11 GPU capture, confirm that the game's scatter dispatch is followed by indirect lighting, then AO, when enabled. Check that the final indirect-lighting pass reads the last denoise result and never binds that texture as an output.
+- Use API tracing or callback instrumentation to compare the bound depth, normal, and light views before and after the added passes. A GPU capture alone does not show when the CPU callback reads these bindings.
+- Use the D3D11 debug layer, when available, to check for conflicting input and output bindings.
 
 ---
 

@@ -8,7 +8,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
+
+#include <embed/shaders.h>
 
 #include "../light_pass.hpp"
 
@@ -22,13 +25,13 @@ inline LightTarget target;
 // The AO march's depth mip chain. Every level holds the nearest of the four texels
 // below it, so a distant step can fetch one texel that covers the footprint its
 // spacing would otherwise skip over.
-constexpr uint32_t kDepthMipLevels = 4;
+constexpr uint32_t DEPTH_MIP_LEVELS = 4;
 
 struct DepthMipChain {
   reshade::api::resource resource = {0};
   reshade::api::resource_view view = {0};
-  std::array<reshade::api::resource_view, kDepthMipLevels> level_views = {};
-  std::array<reshade::api::resource_view, kDepthMipLevels> level_source_views = {};
+  std::array<reshade::api::resource_view, DEPTH_MIP_LEVELS> level_views = {};
+  std::array<reshade::api::resource_view, DEPTH_MIP_LEVELS> level_source_views = {};
   reshade::api::pipeline_layout layout = {0};
   reshade::api::pipeline pipeline = {0};
   uint32_t width = 0;
@@ -81,7 +84,7 @@ inline bool EnsureDepthMipChain(reshade::api::device* device, uint32_t width, ui
   DestroyDepthMipChain(device);
 
   const reshade::api::resource_desc desc(
-      std::max(width / 2u, 1u), std::max(height / 2u, 1u), 1u, kDepthMipLevels,
+      std::max(width / 2u, 1u), std::max(height / 2u, 1u), 1u, DEPTH_MIP_LEVELS,
       reshade::api::format::r32_float,
       1u,
       reshade::api::memory_heap::gpu_only,
@@ -90,7 +93,8 @@ inline bool EnsureDepthMipChain(reshade::api::device* device, uint32_t width, ui
           | reshade::api::resource_usage::copy_source
           | reshade::api::resource_usage::copy_dest);
   if (!device->create_resource(desc, nullptr, desc.usage, &depth_mip_chain.resource)) {
-    reshade::log::message(reshade::log::level::error, "mgsv: depth mip chain allocation failed");
+    static std::atomic_flag reported = {};
+    LogLightOnce(&reported, reshade::log::level::error, "AO depth mip texture allocation failed; source_size=", width, "x", height);
     return false;
   }
   if (!device->create_resource_view(
@@ -98,10 +102,11 @@ inline bool EnsureDepthMipChain(reshade::api::device* device, uint32_t width, ui
           reshade::api::resource_usage::shader_resource,
           reshade::api::resource_view_desc(reshade::api::format::r32_float),
           &depth_mip_chain.view)) {
-    reshade::log::message(reshade::log::level::error, "mgsv: depth mip chain read view failed");
+    static std::atomic_flag reported = {};
+    LogLightOnce(&reported, reshade::log::level::error, "AO depth mip input view creation failed");
     return false;
   }
-  for (uint32_t level = 0; level < kDepthMipLevels; ++level) {
+  for (uint32_t level = 0; level < DEPTH_MIP_LEVELS; ++level) {
     const reshade::api::resource_view_desc level_desc(
         reshade::api::format::r32_float, level, 1u, 0u, 1u);
     if (!device->create_resource_view(
@@ -109,7 +114,8 @@ inline bool EnsureDepthMipChain(reshade::api::device* device, uint32_t width, ui
             reshade::api::resource_usage::unordered_access,
             level_desc,
             &depth_mip_chain.level_views[level])) {
-      reshade::log::message(reshade::log::level::error, "mgsv: depth mip chain write view failed");
+      static std::atomic_flag reported = {};
+      LogLightOnce(&reported, reshade::log::level::error, "AO depth mip output view creation failed; level=", level);
       return false;
     }
     if (!device->create_resource_view(
@@ -117,7 +123,8 @@ inline bool EnsureDepthMipChain(reshade::api::device* device, uint32_t width, ui
             reshade::api::resource_usage::shader_resource,
             level_desc,
             &depth_mip_chain.level_source_views[level])) {
-      reshade::log::message(reshade::log::level::error, "mgsv: depth mip chain level view failed");
+      static std::atomic_flag reported = {};
+      LogLightOnce(&reported, reshade::log::level::error, "AO depth mip level input view creation failed; level=", level);
       return false;
     }
   }
@@ -135,7 +142,8 @@ inline bool EnsureDepthMipChain(reshade::api::device* device, uint32_t width, ui
   params[1].push_descriptors.dx_register_space = 0u;
   if (!device->create_pipeline_layout(
           static_cast<uint32_t>(params.size()), params.data(), &depth_mip_chain.layout)) {
-    reshade::log::message(reshade::log::level::error, "mgsv: depth mip chain layout failed");
+    static std::atomic_flag reported = {};
+    LogLightOnce(&reported, reshade::log::level::error, "AO depth mip pipeline layout creation failed");
     return false;
   }
 
@@ -149,14 +157,16 @@ inline bool EnsureDepthMipChain(reshade::api::device* device, uint32_t width, ui
       .data = &shader_description,
   };
   if (!device->create_pipeline(depth_mip_chain.layout, 1, &subobject, &depth_mip_chain.pipeline)) {
-    reshade::log::message(reshade::log::level::error, "mgsv: depth mip chain pipeline failed");
+    static std::atomic_flag reported = {};
+    LogLightOnce(&reported, reshade::log::level::error, "AO depth mip pipeline creation failed");
     return false;
   }
 
   depth_mip_chain.width = width;
   depth_mip_chain.height = height;
   depth_mip_chain.ready = true;
-  reshade::log::message(reshade::log::level::info, "mgsv: depth mip chain created");
+  LogLight(reshade::log::level::info, "created AO depth mip chain; source_size=", width, "x", height,
+           " levels=", DEPTH_MIP_LEVELS);
   return true;
 }
 
@@ -176,28 +186,32 @@ inline bool BuildDepthMips(reshade::api::command_list* cmd_list, reshade::api::r
   if (!EnsureDepthMipChain(device, width, height)) return false;
 
   cmd_list->bind_pipeline(reshade::api::pipeline_stage::all_compute, depth_mip_chain.pipeline);
-  for (uint32_t level = 0; level < kDepthMipLevels; ++level) {
+  for (uint32_t level = 0; level < DEPTH_MIP_LEVELS; ++level) {
     const reshade::api::resource_view source =
         level == 0 ? depth_view : depth_mip_chain.level_source_views[level - 1];
     const reshade::api::resource_view target = depth_mip_chain.level_views[level];
     const reshade::api::descriptor_table_update updates[] = {
-        {.table = {},
-         .binding = 0u,
-         .array_offset = 0u,
-         .count = 1u,
-         .type = reshade::api::descriptor_type::shader_resource_view,
-         .descriptors = &source},
-        {.table = {},
-         .binding = 0u,
-         .array_offset = 0u,
-         .count = 1u,
-         .type = reshade::api::descriptor_type::unordered_access_view,
-         .descriptors = &target},
+        {
+            .table = {},
+            .binding = 0u,
+            .array_offset = 0u,
+            .count = 1u,
+            .type = reshade::api::descriptor_type::shader_resource_view,
+            .descriptors = &source,
+        },
+        {
+            .table = {},
+            .binding = 0u,
+            .array_offset = 0u,
+            .count = 1u,
+            .type = reshade::api::descriptor_type::unordered_access_view,
+            .descriptors = &target,
+        },
     };
     cmd_list->push_descriptors(
         reshade::api::shader_stage::all_compute, depth_mip_chain.layout, 1u, updates[1]);
     cmd_list->push_descriptors(
-      reshade::api::shader_stage::all_compute, depth_mip_chain.layout, 0u, updates[0]);
+        reshade::api::shader_stage::all_compute, depth_mip_chain.layout, 0u, updates[0]);
 
     const uint32_t level_width = std::max(width >> (level + 1u), 1u);
     const uint32_t level_height = std::max(height >> (level + 1u), 1u);
@@ -217,9 +231,12 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
   ShaderInjectData constants = shader_injection;
 
   // 0 = full, 1 = half, 2 = quarter: the AO factor and its resolve follow this.
-  const uint32_t ao_scale = constants.ao_resolution > 1.5f
-                                ? 4u
-                                : (constants.ao_resolution > 0.5f ? 2u : 1u);
+  uint32_t ao_scale = 1u;
+  if (constants.ao_resolution > 1.5f) {
+    ao_scale = 4u;
+  } else if (constants.ao_resolution > 0.5f) {
+    ao_scale = 2u;
+  }
   constants.ao_scale = static_cast<float>(ao_scale);
   const uint32_t ao_width = (frame.width + ao_scale - 1u) / ao_scale;
   const uint32_t ao_height = (frame.height + ao_scale - 1u) / ao_scale;
@@ -234,28 +251,42 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
     const auto scratch1 = GetFallbackUav(cmd_list, 1);
     const auto scratch2 = GetFallbackUav(cmd_list, 2);
     const std::array<reshade::api::resource_view, 7> sources = {
-        frame.depth,                 // t0
-        frame.normal,                // t1
-        GetDepthMipView(cmd_list),   // t2, the addon's chain or the stand-in
-        GetFallbackView(cmd_list),   // t3, unused by the AO
-        GetFallbackView(cmd_list),   // t4, unused by the AO
-        GetFallbackView(cmd_list),   // t5, unused by the AO
-        GetFallbackView(cmd_list),   // t6, unused by the AO
+        frame.depth,                // t0
+        frame.normal,               // t1
+        GetDepthMipView(cmd_list),  // t2, the addon's chain or the stand-in
+        GetFallbackView(cmd_list),  // t3, unused by the AO
+        GetFallbackView(cmd_list),  // t4, unused by the AO
+        GetFallbackView(cmd_list),  // t5, unused by the AO
+        GetFallbackView(cmd_list),  // t6, unused by the AO
     };
     DispatchLightPass(cmd_list, &pass, constants, sources, target.uav, scratch0, scratch1, scratch2,
                       ao_width, ao_height);
 
     const std::array<reshade::api::resource_view, 7> resolve_sources = {
-        target.view,                 // t0
-        frame.depth,                 // t1, joint bilateral upsample
-        GetFallbackView(cmd_list),   // t2, unused
-        GetFallbackView(cmd_list),   // t3, unused
-        GetFallbackView(cmd_list),   // t4, unused
-        GetFallbackView(cmd_list),   // t5, unused
-        GetFallbackView(cmd_list),   // t6, unused
+        target.view,                // t0
+        frame.depth,                // t1, joint bilateral upsample
+        GetFallbackView(cmd_list),  // t2, unused
+        GetFallbackView(cmd_list),  // t3, unused
+        GetFallbackView(cmd_list),  // t4, unused
+        GetFallbackView(cmd_list),  // t5, unused
+        GetFallbackView(cmd_list),  // t6, unused
     };
     DispatchLightPass(cmd_list, &resolve_pass, constants, resolve_sources, frame.light, scratch0, scratch1,
                       scratch2, frame.width, frame.height);
+    static std::atomic_flag recorded = {};
+    LogLightOnce(&recorded, reshade::log::level::info,
+                 "AO commands recorded; output=", frame.width, "x", frame.height,
+                 " effect=", ao_width, "x", ao_height, " depth_mips=", constants.ao_depth_mips,
+                 "; this is not GPU completion");
+    if (depth_mips_enabled != 0.f && constants.ao_depth_mips == 0.f) {
+      static std::atomic_flag mip_failed = {};
+      LogLightOnce(&mip_failed, reshade::log::level::warning,
+                   "AO depth mip generation unavailable; AO is using full-resolution depth samples");
+    }
+  } else {
+    static std::atomic_flag failed = {};
+    LogLightOnce(&failed, reshade::log::level::warning,
+                 "AO setup failed; no AO commands recorded; effect=", ao_width, "x", ao_height);
   }
 }
 

@@ -8,9 +8,13 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 
+#include <embed/shaders.h>
+
 #include "../light_pass.hpp"
+#include "../taa/runtime/input_capture.hpp"
 
 namespace il {
 
@@ -33,22 +37,25 @@ inline bool history_valid = false;
 
 inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list) {
   auto* device = cmd_list->get_device();
-    ShaderInjectData constants = shader_injection;
+  ShaderInjectData constants = shader_injection;
 
-  // The gather samples the light the retail scatter pass itself reads. No copy: additive
-  // mode only adds, so it never needs a matching pre-AO snapshot to compare against.
   const auto light_source = frame.light_source;
 
   // 0 = full, 1 = half, 2 = quarter: the gather, history, moments and a-trous all follow.
-    const uint32_t scale = constants.il_resolution > 1.5f
-                             ? 4u
-                             : (constants.il_resolution > 0.5f ? 2u : 1u);
+  uint32_t scale = 1u;
+  if (constants.il_resolution > 1.5f) {
+    scale = 4u;
+  } else if (constants.il_resolution > 0.5f) {
+    scale = 2u;
+  }
   constants.il_scale = static_cast<float>(scale);
   const uint32_t width = (frame.width + scale - 1u) / scale;
   const uint32_t height = (frame.height + scale - 1u) / scale;
 
-  // The history is only valid while its size matches and the GI chain has run continuously.
   if (history_width != width || history_height != height) {
+    LogLight(reshade::log::level::info, "indirect lighting dimensions changed; previous_size=",
+             history_width, "x", history_height, " size=", width, "x", height,
+             " output=", frame.width, "x", frame.height, "; history invalidated, preparing resources");
     history_width = width;
     history_height = height;
     history_valid = false;
@@ -71,33 +78,41 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
       && EnsureLightPass(device, &add_pass, "mgsv: IL add created",
                          __mgsv_il_add, frame.width, frame.height)
       && EnsureLightPass(device, &accumulate_pass, "mgsv: IL accumulate created",
-                         __mgsv_il_accumulate, width, height)) {
+                         __mgsv_il_accumulate, width, height)
+      && EnsureFallbackViews(device)) {
+    // Use separate textures for unused outputs so they cannot unbind a pass input.
+    const auto fallback_uav0 = GetFallbackUav(cmd_list, 0u);
+    const auto fallback_uav1 = GetFallbackUav(cmd_list, 1u);
+    const auto fallback_uav2 = GetFallbackUav(cmd_list, 2u);
     const std::array<reshade::api::resource_view, 7> gather_sources = {
-        frame.depth,                 // t0
-        frame.normal,                // t1
-        light_source,                // t2
-        albedo_view,                 // t3
-        specular_view,               // t4
-        GetFallbackView(cmd_list),   // t5, unused
-        GetFallbackView(cmd_list),   // t6, unused
+        frame.depth,                // t0
+        frame.normal,               // t1
+        light_source,               // t2
+        frame.albedo,               // t3
+        frame.specular,             // t4
+        GetFallbackView(cmd_list),  // t5, unused
+        GetFallbackView(cmd_list),  // t6, unused
     };
     DispatchLightPass(cmd_list, &pass, constants, gather_sources, bounce_target.uav,
-                      filtered_target.uav, accumulated_target.uav,
-                      moments_targets[history_index].uav, width, height);
+                      fallback_uav0, fallback_uav1, fallback_uav2, width, height);
 
-    // Temporal accumulation against the previous result. The velocity view comes from the
-    // TAA capture, which is backend-independent and already written by this point in the
-    // frame; when it is missing (reconstruction off) the blend collapses to zero.
+    // Reuse the velocity view captured for temporal reconstruction. A missing view sets
+    // the history blend weight to zero; this check does not verify which frame the view belongs to.
     const auto velocity_view = taa::input_capture::resources.velocity_srv;
+    if (velocity_view.handle == 0u) {
+      static std::atomic_flag reported = {};
+      LogLightOnce(&reported, reshade::log::level::warning,
+                   "indirect lighting has no captured velocity view; history blend weight is zero");
+    }
     constants.il_history_valid = history_valid && velocity_view.handle != 0 ? 1.f : 0.f;
     const std::array<reshade::api::resource_view, 7> accumulate_sources = {
-        bounce_target.view,                      // t0
-        history_targets[history_index].view,     // t1
-        velocity_view,                           // t2
-        frame.depth,                             // t3
-        frame.normal,                            // t4
-        history_aux_targets[history_index].view, // t5
-        moments_targets[history_index].view,     // t6
+        bounce_target.view,                       // t0
+        history_targets[history_index].view,      // t1
+        velocity_view,                            // t2
+        frame.depth,                              // t3
+        frame.normal,                             // t4
+        history_aux_targets[history_index].view,  // t5
+        moments_targets[history_index].view,      // t6
     };
     const uint32_t write_index = history_index ^ 1u;
     DispatchLightPass(cmd_list, &accumulate_pass, constants, accumulate_sources,
@@ -107,48 +122,56 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
     history_index = write_index;
     history_valid = true;
 
-    // A-trous: stride 1, 2, 4 per iteration. The targets alternate so no dispatch reads what
-    // it writes, and bounce_target stays the gather.
+    // Denoise with sample spacing of 1, 2, then 4 pixels. Alternate input and output
+    // textures so each pass reads a different texture from the one it writes.
     const uint32_t filter_passes =
         static_cast<uint32_t>(std::clamp(constants.il_filter_radius, 1.f, 3.f));
     reshade::api::resource_view filter_input = accumulated_target.view;
     for (uint32_t step = 0; step < filter_passes; ++step) {
       const auto filter_output = (step % 2) == 0 ? filtered_target.uav : accumulated_target.uav;
       const std::array<reshade::api::resource_view, 7> filter_sources = {
-          filter_input,                              // t0
-          frame.depth,                               // t1
-          frame.normal,                              // t2
-          moments_targets[history_index].view,       // t3, has-signal and variance
-          GetFallbackView(cmd_list),                 // t4, unused
-          GetFallbackView(cmd_list),                 // t5, unused
-          GetFallbackView(cmd_list),                 // t6, unused
+          filter_input,                         // t0
+          frame.depth,                          // t1
+          frame.normal,                         // t2
+          moments_targets[history_index].view,  // t3, mean and mean-square luminance
+          GetFallbackView(cmd_list),            // t4, unused
+          GetFallbackView(cmd_list),            // t5, unused
+          GetFallbackView(cmd_list),            // t6, unused
       };
-    constants.il_filter_step = static_cast<float>(step);
-    DispatchLightPass(cmd_list, &composite_pass, constants, filter_sources, filter_output,
-                        bounce_target.uav, history_aux_targets[history_index].uav,
-                        history_targets[history_index].uav, width, height);
+      constants.il_filter_step = static_cast<float>(step);
+      DispatchLightPass(cmd_list, &composite_pass, constants, filter_sources, filter_output,
+                        fallback_uav0, fallback_uav1, fallback_uav2, width, height);
       filter_input = (step % 2) == 0 ? filtered_target.view : accumulated_target.view;
     }
     constants.il_filter_step = 0.f;
 
-    // An even pass count ends in the accumulate target, so the resolve follows whichever
-    // target holds the last iteration instead of assuming it is filtered_target.
+    // Use the last denoise result: filtered_target after 1 or 3 passes,
+    // accumulated_target after 2 passes.
     const bool filtered_in_filtered = (filter_passes % 2) != 0;
     const auto filtered_view = filtered_in_filtered ? filtered_target.view
                                                     : accumulated_target.view;
 
     const std::array<reshade::api::resource_view, 7> add_sources = {
-        filtered_view,             // t0
-        frame.depth,               // t1, joint bilateral upsample
-        GetFallbackView(cmd_list), // t2, unused
-        GetFallbackView(cmd_list), // t3, unused
-        GetFallbackView(cmd_list), // t4, unused
-        GetFallbackView(cmd_list), // t5, unused
-        GetFallbackView(cmd_list), // t6, unused
+        filtered_view,              // t0
+        frame.depth,                // t1, joint bilateral upsample
+        GetFallbackView(cmd_list),  // t2, unused
+        GetFallbackView(cmd_list),  // t3, unused
+        GetFallbackView(cmd_list),  // t4, unused
+        GetFallbackView(cmd_list),  // t5, unused
+        GetFallbackView(cmd_list),  // t6, unused
     };
     DispatchLightPass(cmd_list, &add_pass, constants, add_sources, frame.light,
-                      accumulated_target.uav, bounce_target.uav,
-                      moments_targets[history_index].uav, frame.width, frame.height);
+                      fallback_uav0, fallback_uav1, fallback_uav2, frame.width, frame.height);
+    static std::atomic_flag recorded = {};
+    LogLightOnce(&recorded, reshade::log::level::info,
+                 "indirect lighting commands recorded; output=", frame.width, "x", frame.height,
+                 " effect=", width, "x", height, " denoise_iterations=", filter_passes,
+                 " velocity_present=", velocity_view.handle != 0u, "; this is not GPU completion");
+  } else {
+    static std::atomic_flag failed = {};
+    LogLightOnce(&failed, reshade::log::level::warning,
+                 "indirect lighting setup failed; no indirect lighting commands recorded; effect=",
+                 width, "x", height);
   }
 }
 

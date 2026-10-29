@@ -8,24 +8,45 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <span>
+#include <sstream>
+#include <utility>
 
 #include <include/reshade.hpp>
 
 #include "../../utils/settings.hpp"
 #include "./shared.h"
 
-extern ShaderInjectData shader_injection;
+inline ShaderInjectData shader_injection;
 
+template <typename... Args>
+inline void LogLight(reshade::log::level level, Args&&... args) {
+  std::ostringstream text;
+  text << "MgsvLighting: ";
+  (text << ... << std::forward<Args>(args));
+  reshade::log::message(level, text.str().c_str());
+}
+
+// Report each diagnostic once per addon load, even when multiple contexts record it.
+template <typename... Args>
+inline void LogLightOnce(std::atomic_flag* reported, reshade::log::level level, Args&&... args) {
+  if (reported->test(std::memory_order_relaxed)
+      || reported->test_and_set(std::memory_order_relaxed)) return;
+  LogLight(level, std::forward<Args>(args)...);
+}
+
+// Borrowed views and output dimensions used during one lighting callback.
 struct LightFrame {
   reshade::api::resource_view depth = {0};
   reshade::api::resource_view normal = {0};
   reshade::api::resource_view light = {0};
   reshade::api::resource_view light_source = {0};
+  reshade::api::resource_view albedo = {0};
+  reshade::api::resource_view specular = {0};
   uint32_t width = 0;
   uint32_t height = 0;
-  bool valid = false;
 };
 
 struct LightPass {
@@ -44,7 +65,6 @@ struct LightTarget {
   reshade::api::format format = reshade::api::format::unknown;
 };
 
-inline LightFrame light_frame;
 inline reshade::api::pipeline_layout light_pass_layout = {0};
 
 inline void DestroyLightTarget(reshade::api::device* device, LightTarget* target) {
@@ -72,6 +92,8 @@ inline bool EnsureLightTarget(reshade::api::device* device, LightTarget* target,
     return true;
   }
 
+  const uint32_t previous_width = target->width;
+  const uint32_t previous_height = target->height;
   if (target->uav.handle != 0) {
     device->destroy_resource_view(target->uav);
     target->uav = {0};
@@ -105,12 +127,18 @@ inline bool EnsureLightTarget(reshade::api::device* device, LightTarget* target,
           reshade::api::resource_usage::unordered_access,
           reshade::api::resource_view_desc(format),
           &target->uav)) {
-    reshade::log::message(reshade::log::level::error, "mgsv: light target failed");
+    static std::atomic_flag reported = {};
+    LogLightOnce(&reported, reshade::log::level::error,
+                 "failed to create lighting texture; size=", width, "x", height,
+                 " format=", static_cast<uint32_t>(format));
     return false;
   }
 
   target->width = width;
   target->height = height;
+  LogLight(reshade::log::level::info, "created lighting texture; previous_size=",
+           previous_width, "x", previous_height, " size=", width, "x", height,
+           " format=", static_cast<uint32_t>(format));
   return true;
 }
 
@@ -119,12 +147,12 @@ inline bool EnsureLightPassLayout(reshade::api::device* device) {
 
   std::array<reshade::api::pipeline_layout_param, 3> params = {};
   params[0].type = reshade::api::pipeline_layout_param_type::push_descriptors;
-  params[0].push_descriptors.count = 7u;  // t0 depth, t1 normal, t2 pass input, t3 albedo, t4 specular, t5 history aux, t6 moments
+  params[0].push_descriptors.count = 7u;  // t0-t6; input roles vary by pass
   params[0].push_descriptors.type = reshade::api::descriptor_type::texture_shader_resource_view;
   params[0].push_descriptors.dx_register_index = 0u;
   params[0].push_descriptors.dx_register_space = 0u;
   params[1].type = reshade::api::pipeline_layout_param_type::push_descriptors;
-  params[1].push_descriptors.count = 4u;  // u0 result, u1 display, u2 history aux, u3 moments
+  params[1].push_descriptors.count = 4u;  // u0-u3; only accumulation uses all four outputs
   params[1].push_descriptors.type = reshade::api::descriptor_type::texture_unordered_access_view;
   params[1].push_descriptors.dx_register_index = 0u;
   params[1].push_descriptors.dx_register_space = 0u;
@@ -135,7 +163,8 @@ inline bool EnsureLightPassLayout(reshade::api::device* device) {
   params[2].push_constants.visibility = reshade::api::shader_stage::compute;
   if (!device->create_pipeline_layout(
           static_cast<uint32_t>(params.size()), params.data(), &light_pass_layout)) {
-    reshade::log::message(reshade::log::level::error, "mgsv: light pass layout failed");
+    static std::atomic_flag reported = {};
+    LogLightOnce(&reported, reshade::log::level::error, "failed to create lighting pipeline layout");
     return false;
   }
   return true;
@@ -163,12 +192,16 @@ inline bool EnsureLightPass(reshade::api::device* device, LightPass* pass, const
       .count = 1,
       .data = &shader_description,
   };
-  if (!device->create_pipeline(light_pass_layout, 1, &subobject, &pass->pipeline)) return false;
+  if (!device->create_pipeline(light_pass_layout, 1, &subobject, &pass->pipeline)) {
+    static std::atomic_flag reported = {};
+    LogLightOnce(&reported, reshade::log::level::error, "failed to create lighting pipeline; pass=", name);
+    return false;
+  }
 
   pass->width = width;
   pass->height = height;
   pass->ready = true;
-  reshade::log::message(reshade::log::level::info, name);
+  LogLight(reshade::log::level::info, name, "; dispatch_size=", width, "x", height);
   return true;
 }
 
@@ -189,9 +222,9 @@ inline void DestroyLightPassLayout(reshade::api::device* device) {
   }
 }
 
-// 1x1 stand-ins for descriptors a pass must bind but does not read or write. The SRV and
-// UAV fallbacks are separate resources: a resource cannot be bound as both at once, and
-// each unused UAV slot needs its own texture.
+// 1x1 placeholders for unused input and output slots in the shared layout.
+// Keep the input texture separate from the output textures, with one texture per
+// output slot, so binding a placeholder cannot unbind another input or output.
 inline reshade::api::resource fallback_srv_resource = {0};
 inline reshade::api::resource_view fallback_srv = {0};
 inline std::array<reshade::api::resource, 3> fallback_uav_resources = {};
@@ -222,8 +255,7 @@ inline void DestroyFallbackViews(reshade::api::device* device) {
 
 inline bool EnsureFallbackViews(reshade::api::device* device) {
   if (fallback_srv.handle != 0
-      && std::all_of(fallback_uavs.begin(), fallback_uavs.end(),
-                     [](const auto& view) { return view.handle != 0; })) {
+      && std::ranges::all_of(fallback_uavs, [](const auto& view) { return view.handle != 0; })) {
     return true;
   }
   DestroyFallbackViews(device);
@@ -241,7 +273,8 @@ inline bool EnsureFallbackViews(reshade::api::device* device) {
           reshade::api::resource_view_desc(reshade::api::format::r16g16b16a16_float),
           &fallback_srv)) {
     DestroyFallbackViews(device);
-    reshade::log::message(reshade::log::level::error, "mgsv: fallback view failed");
+    static std::atomic_flag reported = {};
+    LogLightOnce(&reported, reshade::log::level::error, "failed to create placeholder input texture");
     return false;
   }
 
@@ -260,7 +293,8 @@ inline bool EnsureFallbackViews(reshade::api::device* device) {
             reshade::api::resource_view_desc(reshade::api::format::r16g16b16a16_float),
             &fallback_uavs[index])) {
       DestroyFallbackViews(device);
-      reshade::log::message(reshade::log::level::error, "mgsv: fallback UAV failed");
+      static std::atomic_flag reported = {};
+      LogLightOnce(&reported, reshade::log::level::error, "failed to create placeholder output texture; index=", index);
       return false;
     }
   }
@@ -293,20 +327,24 @@ inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* p
       target, second_target, third_target, fourth_target};
   cmd_list->push_descriptors(
       reshade::api::shader_stage::all_compute, light_pass_layout, 1u,
-      {.table = {0u},
-       .binding = 0u,
-       .array_offset = 0u,
-       .count = 4u,
-       .type = reshade::api::descriptor_type::texture_unordered_access_view,
-       .descriptors = targets.data()});
+      {
+          .table = {0u},
+          .binding = 0u,
+          .array_offset = 0u,
+          .count = 4u,
+          .type = reshade::api::descriptor_type::texture_unordered_access_view,
+          .descriptors = targets.data(),
+      });
   cmd_list->push_descriptors(
       reshade::api::shader_stage::all_compute, light_pass_layout, 0u,
-      {.table = {0u},
-       .binding = 0u,
-       .array_offset = 0u,
-       .count = static_cast<uint32_t>(sources.size()),
-       .type = reshade::api::descriptor_type::texture_shader_resource_view,
-       .descriptors = sources.data()});
+      {
+          .table = {0u},
+          .binding = 0u,
+          .array_offset = 0u,
+          .count = static_cast<uint32_t>(sources.size()),
+          .type = reshade::api::descriptor_type::texture_shader_resource_view,
+          .descriptors = sources.data(),
+      });
   cmd_list->push_constants(
       reshade::api::shader_stage::all_compute, light_pass_layout, 2u, 0u,
       static_cast<uint32_t>(sizeof(constants) / sizeof(uint32_t)), &constants);
@@ -316,7 +354,7 @@ inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* p
 inline void InsertSettingsBeforeSection(renodx::utils::settings::Settings& settings,
                                         const char* section,
                                         const renodx::utils::settings::Settings& additions) {
-  const auto position = std::find_if(settings.begin(), settings.end(), [section](auto* setting) {
+  const auto position = std::ranges::find_if(settings, [section](auto* setting) {
     return setting->section == section;
   });
   settings.insert(position, additions.begin(), additions.end());

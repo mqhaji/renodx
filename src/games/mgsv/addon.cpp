@@ -14,11 +14,12 @@
 #include <embed/shaders.h>
 
 #include <d3d11.h>
-#include <algorithm>
-#include <array>
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
+
+#include <wrl/client.h>
 
 #include <deps/imgui/imgui.h>
 #include <include/reshade.hpp>
@@ -56,8 +57,10 @@ renodx::utils::resource::ResourceUpgradeInfo scene_tonemap_upgrade_info = {
     .usage_set = static_cast<uint32_t>(
         reshade::api::resource_usage::shader_resource
         | reshade::api::resource_usage::render_target),
-    .dimensions = {.width = renodx::utils::resource::ResourceUpgradeInfo::BACK_BUFFER,
-                   .height = renodx::utils::resource::ResourceUpgradeInfo::BACK_BUFFER},
+    .dimensions = {
+        .width = renodx::utils::resource::ResourceUpgradeInfo::BACK_BUFFER,
+        .height = renodx::utils::resource::ResourceUpgradeInfo::BACK_BUFFER,
+    },
     .usage_include = reshade::api::resource_usage::render_target,
     .name = "tonemap_bgra8_typeless_hot_swap",
 };
@@ -83,8 +86,10 @@ renodx::utils::resource::ResourceUpgradeInfo taa_velocity_upgrade_info = {
     .usage_set = static_cast<uint32_t>(
         reshade::api::resource_usage::shader_resource
         | reshade::api::resource_usage::render_target),
-    .dimensions = {.width = renodx::utils::resource::ResourceUpgradeInfo::BACK_BUFFER,
-                   .height = renodx::utils::resource::ResourceUpgradeInfo::BACK_BUFFER},
+    .dimensions = {
+        .width = renodx::utils::resource::ResourceUpgradeInfo::BACK_BUFFER,
+        .height = renodx::utils::resource::ResourceUpgradeInfo::BACK_BUFFER,
+    },
     .usage_include = reshade::api::resource_usage::render_target,
     .name = "taa_velocity_bgra8_typeless_hot_swap",
 };
@@ -97,8 +102,10 @@ renodx::utils::resource::ResourceUpgradeInfo dof_final_copy_upgrade_info = {
     .usage_set = static_cast<uint32_t>(
         reshade::api::resource_usage::shader_resource
         | reshade::api::resource_usage::render_target),
-    .dimensions = {.width = renodx::utils::resource::ResourceUpgradeInfo::BACK_BUFFER,
-                   .height = renodx::utils::resource::ResourceUpgradeInfo::BACK_BUFFER},
+    .dimensions = {
+        .width = renodx::utils::resource::ResourceUpgradeInfo::BACK_BUFFER,
+        .height = renodx::utils::resource::ResourceUpgradeInfo::BACK_BUFFER,
+    },
     .usage_include = reshade::api::resource_usage::render_target,
     .name = "dof_final_copy_bgra8_typeless_hot_swap",
 };
@@ -751,8 +758,6 @@ bool OnUpgradeRTVReplaceShaderDraw(reshade::api::command_list* cmd_list) {
       },                                                                                              \
   }
 
-ShaderInjectData shader_injection;
-
 #include "./light_pass.hpp"
 float output_mode = 1.f;
 renodx::utils::settings::Setting* tone_map_peak_nits_setting = nullptr;
@@ -775,23 +780,11 @@ void SyncOutputMode() {
   }
 }
 
-// Screen-space passes over the deferred G-buffer, dispatched after the game's
-// subsurface-scatter pass.
-//
-// The retail passes at 0x6DAF0C4A / 0xB2601810 are the scatter chain, not AO, and
-// replacing either of them is what removed the scattering that makes skin read as
-// skin. Both passes below therefore run on their own dispatches, after stage 2 has
-// written the scattered light. No retail shader is replaced: the hook only borrows
-// their frame position, and the passes share the captured views and nothing else.
+// Add indirect lighting and AO after the game's subsurface-scattering passes.
+// Indirect lighting runs first, so AO darkens both the direct and added light.
 
-// The views stage 2 had bound: captured before its dispatch and consumed after it.
-// `light` is the retail stage's own output target; `light_source` is the light it reads,
-// which the gather samples. They are different resources, so reading one while writing
-// the other is not a hazard.
-// The albedo and specular G-buffers, remembered from the deferred composite that consumes
-// the light: t8 is inAlbedo and t10 is inLightSpecular in every one of those shaders.
-// That pass runs after this one, so the values are one frame old; both are spatially
-// coherent enough that this is invisible outside disocclusions.
+// Remember the deferred composite's albedo (t8) and specular-light (t10) views.
+// These borrowed handles do not retain the views or copy their contents.
 reshade::api::resource_view albedo_view = {0};
 reshade::api::resource_view specular_view = {0};
 
@@ -818,76 +811,130 @@ bool CaptureCompositeInputs(reshade::api::command_list* cmd_list) {
   return true;
 }
 
-// Runs before the retail scatter stage. This is the only point where its bindings - the
-// depth and normal both passes need, the light they write, and the light the gather
-// samples - are known to be live.
-bool CaptureLightFrame(reshade::api::command_list* cmd_list) {
-  light_frame.valid = false;
-
-  const bool want_ao = shader_injection.ao_enabled != 0.f;
-  const bool want_il = shader_injection.il_enabled != 0.f;
-  if (!want_ao && !want_il) return true;
-
-  const auto depth_view = renodx::utils::state::GetBoundResourceView(
-      cmd_list, reshade::api::shader_stage::compute,
-      reshade::api::descriptor_type::shader_resource_view, 1u);
-  const auto normal_view = renodx::utils::state::GetBoundResourceView(
-      cmd_list, reshade::api::shader_stage::compute,
-      reshade::api::descriptor_type::shader_resource_view, 2u);
-  const auto light_view = renodx::utils::state::GetBoundResourceView(
-      cmd_list, reshade::api::shader_stage::compute,
-      reshade::api::descriptor_type::unordered_access_view, 0u);
-  if (depth_view.handle == 0 || normal_view.handle == 0 || light_view.handle == 0) return true;
-
-  auto* device = cmd_list->get_device();
-  const auto light_desc = device->get_resource_desc(device->get_resource_from_view(light_view));
-  if (light_desc.type != reshade::api::resource_type::texture_2d) return true;
-
-  // The gather needs one more view: the light the retail stage reads. A missing binding
-  // only costs the gather, so the AO still captures and still runs.
-  const auto light_source = want_il
-                                ? renodx::utils::state::GetBoundResourceView(
-                                      cmd_list, reshade::api::shader_stage::compute,
-                                      reshade::api::descriptor_type::shader_resource_view, 4u)
-                                : reshade::api::resource_view{0};
-
-  light_frame = {
-      .depth = depth_view,
-      .normal = normal_view,
-      .light = light_view,
-      .light_source = light_source,
-      .width = light_desc.texture.width,
-      .height = light_desc.texture.height,
-      .valid = true,
-  };
-  return true;
-}
-
 #include "./ao/ao.hpp"
 #include "./il/il.hpp"
 
-// Runs after the retail scatter stage, so the light already holds the scattered value.
-// The gather runs first and adds the bounce; the AO runs last and scales the light, so the
-// occlusion attenuates the bounce as well as the direct light.
+// Called immediately after the game's scatter dispatch is recorded, not after GPU completion.
+// Dispatch leaves its bindings unchanged, so read them here before recording our own passes.
 void ApplyLightPasses(reshade::api::command_list* cmd_list) {
-  if (!light_frame.valid) return;
-  const LightFrame frame = light_frame;
-  light_frame.valid = false;
+  if (cmd_list == nullptr || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return;
 
-  const bool run_il = shader_injection.il_enabled != 0.f
-                      && frame.light_source.handle != 0
-                      && albedo_view.handle != 0
-                      && specular_view.handle != 0;
-  const bool run_ao = shader_injection.ao_enabled != 0.f;
-  if (!run_il && !run_ao) return;
+  const bool ao_enabled = shader_injection.ao_enabled != 0.f;
+  const bool il_enabled = shader_injection.il_enabled != 0.f;
+  if (!ao_enabled && !il_enabled) {
+    static std::atomic_flag reported = {};
+    LogLightOnce(&reported, reshade::log::level::info, "scatter hook reached; AO and indirect lighting are disabled");
+    return;
+  }
 
-  // Lighting dispatches can displace graphics bindings as well as compute state.
-  // Restore the whole chain's entry state, including slots that were unbound.
+  auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
+  if (context == nullptr) return;
+
+  // Keep these views alive until this callback returns, even if later bindings replace them.
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> normal;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> light_source;
+  Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> light;
+  context->CSGetShaderResources(1u, 1u, depth.GetAddressOf());
+  context->CSGetShaderResources(2u, 1u, normal.GetAddressOf());
+  context->CSGetUnorderedAccessViews(0u, 1u, light.GetAddressOf());
+  if (depth == nullptr || normal == nullptr || light == nullptr) {
+    static std::atomic_flag reported = {};
+    LogLightOnce(&reported, reshade::log::level::warning, "skipping lighting: missing scatter bindings depth=",
+                 depth != nullptr, " normal=", normal != nullptr, " light=", light != nullptr);
+    return;
+  }
+
+  D3D11_UNORDERED_ACCESS_VIEW_DESC light_view_desc = {};
+  light->GetDesc(&light_view_desc);
+  if (light_view_desc.ViewDimension != D3D11_UAV_DIMENSION_TEXTURE2D
+      || light_view_desc.Texture2D.MipSlice != 0u) {
+    static std::atomic_flag reported = {};
+    LogLightOnce(&reported, reshade::log::level::warning,
+                 "skipping lighting: light output must be a 2D view of mip 0; dimension=",
+                 static_cast<uint32_t>(light_view_desc.ViewDimension));
+    return;
+  }
+
+  Microsoft::WRL::ComPtr<ID3D11Resource> light_resource;
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> light_texture;
+  light->GetResource(light_resource.GetAddressOf());
+  if (FAILED(light_resource.As(&light_texture))) {
+    static std::atomic_flag reported = {};
+    LogLightOnce(&reported, reshade::log::level::warning,
+                 "skipping lighting: light output is not a 2D texture");
+    return;
+  }
+
+  D3D11_TEXTURE2D_DESC light_desc = {};
+  light_texture->GetDesc(&light_desc);
+  if (light_desc.Width == 0u || light_desc.Height == 0u
+      || light_desc.ArraySize != 1u || light_desc.SampleDesc.Count != 1u) {
+    static std::atomic_flag reported = {};
+    LogLightOnce(&reported, reshade::log::level::warning,
+                 "skipping lighting: unsupported light output size=", light_desc.Width, "x", light_desc.Height,
+                 " array_size=", light_desc.ArraySize, " samples=", light_desc.SampleDesc.Count);
+    return;
+  }
+
+  const auto is_supported_input = [&](ID3D11ShaderResourceView* view, ID3D11Resource* excluded_resource = nullptr) {
+    if (view == nullptr) return false;
+    D3D11_SHADER_RESOURCE_VIEW_DESC view_desc = {};
+    view->GetDesc(&view_desc);
+    if (view_desc.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D
+        || view_desc.Texture2D.MostDetailedMip != 0u) return false;
+
+    Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    view->GetResource(resource.GetAddressOf());
+    if (resource.Get() == excluded_resource || FAILED(resource.As(&texture))) return false;
+
+    D3D11_TEXTURE2D_DESC desc = {};
+    texture->GetDesc(&desc);
+    return desc.Width == light_desc.Width && desc.Height == light_desc.Height
+           && desc.ArraySize == 1u && desc.SampleDesc.Count == 1u;
+  };
+  if (!is_supported_input(depth.Get()) || !is_supported_input(normal.Get())) {
+    static std::atomic_flag reported = {};
+    LogLightOnce(&reported, reshade::log::level::warning,
+                 "skipping lighting: depth or normal view has an unsupported layout or size; output=",
+                 light_desc.Width, "x", light_desc.Height);
+    return;
+  }
+
+  // Missing inputs or a light source that overlaps the output skip indirect lighting, not AO.
+  if (il_enabled) {
+    context->CSGetShaderResources(4u, 1u, light_source.GetAddressOf());
+  }
+  const bool run_il = il_enabled && is_supported_input(light_source.Get(), light_resource.Get())
+                      && albedo_view.handle != 0u && specular_view.handle != 0u;
+  if (il_enabled && !run_il) {
+    static std::atomic_flag reported = {};
+    LogLightOnce(&reported, reshade::log::level::warning,
+                 "skipping indirect lighting: check light source layout, size, and output overlap; source_present=",
+                 light_source != nullptr, " albedo_present=", albedo_view.handle != 0u,
+                 " specular_present=", specular_view.handle != 0u, "; AO enabled=", ao_enabled);
+  }
+  if (!run_il && !ao_enabled) return;
+
+  const LightFrame frame = {
+      .depth = {reinterpret_cast<uintptr_t>(depth.Get())},
+      .normal = {reinterpret_cast<uintptr_t>(normal.Get())},
+      .light = {reinterpret_cast<uintptr_t>(light.Get())},
+      .light_source = {reinterpret_cast<uintptr_t>(light_source.Get())},
+      .albedo = albedo_view,
+      .specular = specular_view,
+      .width = light_desc.Width,
+      .height = light_desc.Height,
+  };
+
+  // Lighting commands can also unbind graphics resources. Save the affected state once
+  // and restore it after both effects, including slots that were originally empty.
   const auto previous_state = taa::d3d11_compute_state::Capture(cmd_list);
   if (run_il) {
     il::Apply(frame, cmd_list);
   }
-  if (run_ao) {
+  if (ao_enabled) {
     ao::Apply(frame, cmd_list);
   }
   taa::d3d11_compute_state::Restore(cmd_list, previous_state);
@@ -932,22 +979,19 @@ renodx::mods::shader::CustomShaders custom_shaders = []() {
 
       UpgradeDeferredTonemapOutputRTV(0x410AE8C5, "DeferredRenderingFilmic"),
 
-      // The two passes at 0x6DAF0C4A / 0xB2601810 are the game's screen-space
-      // subsurface-scatter chain, not AO, so neither is replaced: replacing stage 2 is
-      // what removed the scattering that makes skin read as skin. This entry only hooks
-      // stage 2, to capture its bindings before the dispatch and to run the mod's own
-      // passes after it. The engine's own shader runs untouched.
-      {0xB2601810,
-       [] {
-         return renodx::mods::shader::CustomShader{
-             .crc32 = 0xB2601810,
-             // Nothing is injected into the retail pipeline; each pass pushes its own
-             // constants into the shared layout.
-             .on_inject = [](reshade::api::command_list*) { return false; },
-             .on_draw = &CaptureLightFrame,
-             .on_drawn = &ApplyLightPasses,
-         };
-       }()},
+      // Keep both subsurface-scattering shaders (0x6DAF0C4A and 0xB2601810) unchanged.
+      // Record the added lighting passes after stage 2 to preserve the game's subsurface scattering.
+      {
+          0xB2601810,
+          [] {
+            return renodx::mods::shader::CustomShader{
+                .crc32 = 0xB2601810,
+                // Do not inject constants into the game's shader. Each added pass binds its own.
+                .on_inject = [](reshade::api::command_list*) { return false; },
+                .on_drawn = &ApplyLightPasses,
+            };
+          }(),
+      },
 
       __ALL_CUSTOM_SHADERS,
   };
