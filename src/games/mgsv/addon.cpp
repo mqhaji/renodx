@@ -1016,7 +1016,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "ColorGradeExposure",
         .binding = &shader_injection.tone_map_exposure,
-        .default_value = 1.02f,
+        .default_value = 1.f,
         .label = "Exposure",
         .section = "Color Grading",
         .max = 2.f,
@@ -1026,7 +1026,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "ColorGradeHighlights",
         .binding = &shader_injection.tone_map_highlights,
-        .default_value = 100.f,
+        .default_value = 50.f,
         .label = "Highlights",
         .section = "Color Grading",
         .max = 100.f,
@@ -1036,7 +1036,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "ColorGradeHighlightContrast",
         .binding = &shader_injection.tone_map_contrast_highlights,
-        .default_value = 50.f,
+        .default_value = 55.f,
         .label = "Highlight Contrast",
         .section = "Color Grading",
         .max = 100.f,
@@ -1046,7 +1046,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "ColorGradeShadows",
         .binding = &shader_injection.tone_map_shadows,
-        .default_value = 41.f,
+        .default_value = 50.f,
         .label = "Shadows",
         .section = "Color Grading",
         .max = 100.f,
@@ -1056,7 +1056,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "ColorGradeShadowContrast",
         .binding = &shader_injection.tone_map_contrast_shadows,
-        .default_value = 52.f,
+        .default_value = 50.f,
         .label = "Shadow Contrast",
         .section = "Color Grading",
         .max = 100.f,
@@ -1086,7 +1086,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "ColorGradeHighlightSaturation",
         .binding = &shader_injection.tone_map_highlight_saturation,
-        .default_value = 48.f,
+        .default_value = 50.f,
         .label = "Highlight Saturation",
         .section = "Color Grading",
         .tooltip = "Adds or removes highlight color.",
@@ -1626,6 +1626,14 @@ void OnPresetOff() {
       {"FxBoostSun", 0.f},
       {"FxFilmGrain", 0.f},
       {"FxMotionBlur", 100.f},
+      {"FxSunContactHardening", 0.f},
+      {"FxSpotContactHardening", 0.f},
+      {"FxPointContactHardening", 0.f},
+      {"FxScreenSpaceShadows", 0.f},
+      {"FxSpotScreenSpaceShadows", 0.f},
+      {"FxPointScreenSpaceShadows", 0.f},
+      {"AoReplace", 0.f},
+      {"IlEnabled", 0.f},
   });
   SyncOutputMode();
 }
