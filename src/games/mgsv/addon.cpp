@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2024 Musa Haji
+ * Copyright (C) 2026 ZioPao
  * SPDX-License-Identifier: MIT
  */
 
@@ -13,6 +14,8 @@
 #include <embed/shaders.h>
 
 #include <d3d11.h>
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -673,6 +676,7 @@ bool OnUpgradeRTVReplaceShaderDraw(reshade::api::command_list* cmd_list) {
           .code = __##value,                                         \
           .on_draw = [](auto* cmd_list) {                            \
             UpgradeDeferredTonemapOutputRTVs(cmd_list, value, name); \
+            CaptureCompositeInputs(cmd_list);                       \
             return true;                                             \
           },                                                         \
       },                                                             \
@@ -747,6 +751,8 @@ bool OnUpgradeRTVReplaceShaderDraw(reshade::api::command_list* cmd_list) {
   }
 
 ShaderInjectData shader_injection;
+
+#include "./light_pass.hpp"
 float output_mode = 1.f;
 renodx::utils::settings::Setting* tone_map_peak_nits_setting = nullptr;
 renodx::utils::settings::Setting* tone_map_game_nits_setting = nullptr;
@@ -768,6 +774,116 @@ void SyncOutputMode() {
   }
 }
 
+// Screen-space passes over the deferred G-buffer, dispatched after the game's
+// subsurface-scatter pass.
+//
+// The retail passes at 0x6DAF0C4A / 0xB2601810 are the scatter chain, not AO, and
+// replacing either of them is what removed the scattering that makes skin read as
+// skin. Both passes below therefore run on their own dispatches, after stage 2 has
+// written the scattered light. No retail shader is replaced: the hook only borrows
+// their frame position, and the passes share the captured views and nothing else.
+
+// The views stage 2 had bound: captured before its dispatch and consumed after it.
+// `light` is the retail stage's own output target; `light_source` is the light it reads,
+// which the gather samples. They are different resources, so reading one while writing
+// the other is not a hazard.
+// The albedo and specular G-buffers, remembered from the deferred composite that consumes
+// the light: t8 is inAlbedo and t10 is inLightSpecular in every one of those shaders.
+// That pass runs after this one, so the values are one frame old; both are spatially
+// coherent enough that this is invisible outside disocclusions.
+reshade::api::resource_view albedo_view = {0};
+reshade::api::resource_view specular_view = {0};
+
+bool CaptureCompositeInputs(reshade::api::command_list* cmd_list) {
+  const auto albedo = renodx::utils::state::GetBoundResourceView(
+      cmd_list, reshade::api::shader_stage::pixel,
+      reshade::api::descriptor_type::shader_resource_view, 8u);
+  const auto specular = renodx::utils::state::GetBoundResourceView(
+      cmd_list, reshade::api::shader_stage::pixel,
+      reshade::api::descriptor_type::shader_resource_view, 10u);
+  if (albedo.handle == 0 || specular.handle == 0) return true;
+  albedo_view = albedo;
+  specular_view = specular;
+
+  static bool logged = false;
+  if (!logged) {
+    logged = true;
+    const auto* device = cmd_list->get_device();
+    const std::string text =
+        "mgsv: composite views albedo=" + std::to_string(static_cast<uint32_t>(device->get_resource_view_desc(albedo).format))
+        + " specular=" + std::to_string(static_cast<uint32_t>(device->get_resource_view_desc(specular).format));
+    reshade::log::message(reshade::log::level::info, text.c_str());
+  }
+  return true;
+}
+
+// Runs before the retail scatter stage. This is the only point where its bindings - the
+// depth and normal both passes need, the light they write, and the light the gather
+// samples - are known to be live.
+bool CaptureLightFrame(reshade::api::command_list* cmd_list) {
+  light_frame.valid = false;
+
+  const bool want_ao = shader_injection.ao_enabled != 0.f;
+  const bool want_il = shader_injection.il_enabled != 0.f;
+  if (!want_ao && !want_il) return true;
+
+  const auto depth_view = renodx::utils::state::GetBoundResourceView(
+      cmd_list, reshade::api::shader_stage::compute,
+      reshade::api::descriptor_type::shader_resource_view, 1u);
+  const auto normal_view = renodx::utils::state::GetBoundResourceView(
+      cmd_list, reshade::api::shader_stage::compute,
+      reshade::api::descriptor_type::shader_resource_view, 2u);
+  const auto light_view = renodx::utils::state::GetBoundResourceView(
+      cmd_list, reshade::api::shader_stage::compute,
+      reshade::api::descriptor_type::unordered_access_view, 0u);
+  if (depth_view.handle == 0 || normal_view.handle == 0 || light_view.handle == 0) return true;
+
+  auto* device = cmd_list->get_device();
+  const auto light_desc = device->get_resource_desc(device->get_resource_from_view(light_view));
+  if (light_desc.type != reshade::api::resource_type::texture_2d) return true;
+
+  // The gather needs one more view: the light the retail stage reads. A missing binding
+  // only costs the gather, so the AO still captures and still runs.
+  const auto light_source = want_il
+                                ? renodx::utils::state::GetBoundResourceView(
+                                      cmd_list, reshade::api::shader_stage::compute,
+                                      reshade::api::descriptor_type::shader_resource_view, 4u)
+                                : reshade::api::resource_view{0};
+
+  light_frame = {
+      .depth = depth_view,
+      .normal = normal_view,
+      .light = light_view,
+      .light_source = light_source,
+      .width = light_desc.texture.width,
+      .height = light_desc.texture.height,
+      .valid = true,
+  };
+  return true;
+}
+
+#include "./ao/ao.hpp"
+#include "./il/il.hpp"
+
+// Runs after the retail scatter stage, so the light already holds the scattered value.
+// The gather runs first and adds the bounce; the AO runs last and scales the light, so the
+// occlusion attenuates the bounce as well as the direct light.
+void ApplyLightPasses(reshade::api::command_list* cmd_list) {
+  if (!light_frame.valid) return;
+  const LightFrame frame = light_frame;
+  light_frame.valid = false;
+
+  if (shader_injection.il_enabled != 0.f
+      && frame.light_source.handle != 0
+      && albedo_view.handle != 0
+      && specular_view.handle != 0) {
+    il::Apply(frame, cmd_list);
+  }
+  if (shader_injection.ao_enabled != 0.f) {
+    ao::Apply(frame, cmd_list);
+  }
+}
+
 renodx::mods::shader::CustomShaders custom_shaders = []() {
   renodx::mods::shader::CustomShaders shaders = {
       UpgradeRTVReplaceShaderCallback(0xE2D609B1, ArmDofFinalCopyRenderBufferWindow),            // DOF_ScatterCompositeNear
@@ -784,7 +900,6 @@ renodx::mods::shader::CustomShaders custom_shaders = []() {
       // Deferred rendering paths perform the actual filmic tonemap before the
       // later LUT/color-grading pass. Mark their full-size output so the extra
       // CopyRenderBuffer draws used by rain/fog paths propagate the HDR clone.
-      UpgradeDeferredTonemapOutputRTV(0x410AE8C5, "DeferredRenderingFilmic"),
       UpgradeDeferredTonemapOutputRTV(0xC973024D, "DeferredRenderingFilmic_VolFog"),
       UpgradeDeferredTonemapOutputRTV(0xBDE1F4CD, "DR_TonemapRainFilter"),
       UpgradeDeferredTonemapOutputRTV(0x6E29F0AB, "DR_TonemapRainFilter_NoIR"),
@@ -805,6 +920,25 @@ renodx::mods::shader::CustomShaders custom_shaders = []() {
 
       // The named Tonemap shader is the late LUT/color-grading pass in MGSV.
       UpgradeTonemapOutputRTV(0xE04D1471),
+
+      UpgradeDeferredTonemapOutputRTV(0x410AE8C5, "DeferredRenderingFilmic"),
+
+      // The two passes at 0x6DAF0C4A / 0xB2601810 are the game's screen-space
+      // subsurface-scatter chain, not AO, so neither is replaced: replacing stage 2 is
+      // what removed the scattering that makes skin read as skin. This entry only hooks
+      // stage 2, to capture its bindings before the dispatch and to run the mod's own
+      // passes after it. The engine's own shader runs untouched.
+      {0xB2601810,
+       [] {
+         return renodx::mods::shader::CustomShader{
+             .crc32 = 0xB2601810,
+             // Nothing is injected into the retail pipeline; each pass pushes its own
+             // constants into the shared layout.
+             .on_inject = [](reshade::api::command_list*) { return false; },
+             .on_draw = &CaptureLightFrame,
+             .on_drawn = &ApplyLightPasses,
+         };
+       }()},
 
       __ALL_CUSTOM_SHADERS,
   };
@@ -882,7 +1016,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "ColorGradeExposure",
         .binding = &shader_injection.tone_map_exposure,
-        .default_value = 1.f,
+        .default_value = 1.02f,
         .label = "Exposure",
         .section = "Color Grading",
         .max = 2.f,
@@ -892,7 +1026,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "ColorGradeHighlights",
         .binding = &shader_injection.tone_map_highlights,
-        .default_value = 50.f,
+        .default_value = 100.f,
         .label = "Highlights",
         .section = "Color Grading",
         .max = 100.f,
@@ -902,7 +1036,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "ColorGradeHighlightContrast",
         .binding = &shader_injection.tone_map_contrast_highlights,
-        .default_value = 55.f,
+        .default_value = 50.f,
         .label = "Highlight Contrast",
         .section = "Color Grading",
         .max = 100.f,
@@ -912,7 +1046,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "ColorGradeShadows",
         .binding = &shader_injection.tone_map_shadows,
-        .default_value = 50.f,
+        .default_value = 41.f,
         .label = "Shadows",
         .section = "Color Grading",
         .max = 100.f,
@@ -922,7 +1056,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "ColorGradeShadowContrast",
         .binding = &shader_injection.tone_map_contrast_shadows,
-        .default_value = 50.f,
+        .default_value = 52.f,
         .label = "Shadow Contrast",
         .section = "Color Grading",
         .max = 100.f,
@@ -952,7 +1086,7 @@ renodx::utils::settings::Settings settings = {
     new renodx::utils::settings::Setting{
         .key = "ColorGradeHighlightSaturation",
         .binding = &shader_injection.tone_map_highlight_saturation,
-        .default_value = 50.f,
+        .default_value = 48.f,
         .label = "Highlight Saturation",
         .section = "Color Grading",
         .tooltip = "Adds or removes highlight color.",
@@ -1047,6 +1181,342 @@ renodx::utils::settings::Settings settings = {
         .section = "Effects",
         .max = 100.f,
         .parse = [](float value) { return value * 0.02f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSunContactHardening",
+        .binding = &shader_injection.sun_contact_hardening,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 1.f,
+        .label = "Contact-Hardening Sun Shadows",
+        .section = "Shadows",
+        .tooltip = "Sharpens sun shadows close to their caster and softens them with distance.",
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSunShadowSoftness",
+        .binding = &shader_injection.sun_shadow_softness,
+        .default_value = 115.f,
+        .label = "Sun Shadow Softness",
+        .section = "Shadows",
+        .tooltip = "Maximum softness of a shadow, in millimetres.",
+        .max = 150.f,
+        .parse = [](float value) { return value * 0.001f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotContactHardening",
+        .binding = &shader_injection.spot_contact_hardening,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 1.f,
+        .label = "Contact-Hardening Spot Shadows",
+        .section = "Shadows",
+        .tooltip = "Same treatment for spot lights.",
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotShadowSoftness",
+        .binding = &shader_injection.spot_shadow_softness,
+        .default_value = 160.f,
+        .label = "Spot Shadow Softness",
+        .section = "Shadows",
+        .tooltip = "Maximum softness of a spot shadow, in millimetres.",
+        .max = 300.f,
+        .parse = [](float value) { return value * 0.001f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointContactHardening",
+        .binding = &shader_injection.point_contact_hardening,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 1.f,
+        .label = "Contact-Hardening Point Shadows",
+        .section = "Shadows",
+        .tooltip = "Same treatment for point lights, such as fire barrels and lamps. Their shadow map is dual-paraboloid, so the softness is approximate near the hemisphere seam.",
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointShadowSoftness",
+        .binding = &shader_injection.point_shadow_softness,
+        .default_value = 100.f,
+        .label = "Point Shadow Softness",
+        .section = "Shadows",
+        .tooltip = "Maximum softness of a point shadow, in millimetres.",
+        .max = 300.f,
+        .parse = [](float value) { return value * 0.001f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSunShadowK",
+        .binding = &shader_injection.sun_shadow_k,
+        .default_value = 60.f,
+        .label = "Sun Penumbra Response",
+        .section = "Shadows (Advanced)",
+        .tooltip = "How fast a shadow reaches full softness with caster separation.",
+        .max = 100.f,
+        .is_visible = [] { return shader_injection.sun_contact_hardening != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSunShadowBlurPixels",
+        .binding = &shader_injection.sun_shadow_blur_pixels,
+        .default_value = 35.f,
+        .label = "Sun Penumbra Blur Radius",
+        .section = "Shadows (Advanced)",
+        .tooltip = "Pixel spacing of the penumbra blur.",
+        .max = 50.f,
+        .is_visible = [] { return shader_injection.sun_contact_hardening != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotShadowK",
+        .binding = &shader_injection.spot_shadow_k,
+        .default_value = 4.f,
+        .label = "Spot Penumbra Response",
+        .section = "Shadows (Advanced)",
+        .tooltip = "How fast a spot shadow reaches full softness.",
+        .max = 40.f,
+        .is_visible = [] { return shader_injection.spot_contact_hardening != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotShadowBlurPixels",
+        .binding = &shader_injection.spot_shadow_blur_pixels,
+        .default_value = 24.f,
+        .label = "Spot Penumbra Blur Radius",
+        .section = "Shadows (Advanced)",
+        .tooltip = "Spacing of the penumbra mask's neighbours, in screen pixels.",
+        .max = 50.f,
+        .is_visible = [] { return shader_injection.spot_contact_hardening != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotShadowDarkness",
+        .binding = &shader_injection.spot_shadow_darkness,
+        .default_value = 100.f,
+        .label = "Spot Shadow Darkness",
+        .section = "Shadows (Advanced)",
+        .tooltip = "Shadow occlusion scale; higher is darker.",
+        .max = 300.f,
+        .parse = [](float value) { return value * 0.01f; },
+        .is_visible = [] { return shader_injection.spot_contact_hardening != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotConeFalloff",
+        .binding = &shader_injection.spot_cone_falloff,
+        .default_value = 100.f,
+        .label = "Spot Cone Falloff",
+        .section = "Shadows (Advanced)",
+        .tooltip = "How much the cone-edge falloff darkens the shadow.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.01f; },
+        .is_visible = [] { return shader_injection.spot_contact_hardening != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointShadowK",
+        .binding = &shader_injection.point_shadow_k,
+        .default_value = 20.f,
+        .label = "Point Penumbra Response",
+        .section = "Shadows (Advanced)",
+        .tooltip = "How fast a point shadow reaches full softness with caster separation. The paraboloid depth is linear, so this is a direct ratio.",
+        .max = 100.f,
+        .is_visible = [] { return shader_injection.point_contact_hardening != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointShadowBlurPixels",
+        .binding = &shader_injection.point_shadow_blur_pixels,
+        .default_value = 24.f,
+        .label = "Point Penumbra Blur Radius",
+        .section = "Shadows (Advanced)",
+        .tooltip = "Spacing of the penumbra mask's neighbours, in screen pixels.",
+        .max = 50.f,
+        .is_visible = [] { return shader_injection.point_contact_hardening != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointShadowDarkness",
+        .binding = &shader_injection.point_shadow_darkness,
+        .default_value = 100.f,
+        .label = "Point Shadow Darkness",
+        .section = "Shadows (Advanced)",
+        .tooltip = "Shadow occlusion scale; higher is darker.",
+        .max = 300.f,
+        .parse = [](float value) { return value * 0.01f; },
+        .is_visible = [] { return shader_injection.point_contact_hardening != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxScreenSpaceShadows",
+        .binding = &shader_injection.screen_space_shadows,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 1.f,
+        .label = "Screen-Space Shadows",
+        .section = "Screen-Space Shadows",
+        .tooltip = "Marches the depth buffer toward the sun and darkens what it reaches.",
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxScreenSpaceShadowStrength",
+        .binding = &shader_injection.ss_shadow_strength,
+        .default_value = 200.f,
+        .label = "Screen-Space Shadow Strength",
+        .section = "Screen-Space Shadows",
+        .tooltip = "Occlusion per unit of blocking; the main strength control.",
+        .max = 400.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxScreenSpaceShadowReach",
+        .binding = &shader_injection.ss_shadow_reach,
+        .default_value = 4.f,
+        .label = "Screen-Space Shadow Reach",
+        .section = "Screen-Space Shadows",
+        .tooltip = "How far the ray travels, as a percentage of screen height.",
+        .max = 10.f,
+        .parse = [](float value) { return value * 0.02f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotScreenSpaceShadows",
+        .binding = &shader_injection.spot_screen_space_shadows,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 1.f,
+        .label = "Spot Screen-Space Shadows",
+        .section = "Screen-Space Shadows",
+        .tooltip = "Runs once per spot draw, so it carries its own dials instead of the sun's.",
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotScreenSpaceShadowStrength",
+        .binding = &shader_injection.spot_ss_strength,
+        .default_value = 300.f,
+        .label = "Spot Screen-Space Strength",
+        .section = "Screen-Space Shadows",
+        .tooltip = "Occlusion per unit of blocking; the main strength control.",
+        .max = 400.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotScreenSpaceShadowReach",
+        .binding = &shader_injection.spot_ss_reach,
+        .default_value = 15.f,
+        .label = "Spot Screen-Space Reach",
+        .section = "Screen-Space Shadows",
+        .tooltip = "How far the ray travels toward the light, as a percentage of screen height.",
+        .max = 50.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointScreenSpaceShadows",
+        .binding = &shader_injection.point_screen_space_shadows,
+        .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+        .default_value = 1.f,
+        .label = "Point Screen-Space Shadows",
+        .section = "Screen-Space Shadows",
+        .tooltip = "The screen-space term on point lights. On by default, like the spot term; several point draws per frame each run the march.",
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointScreenSpaceShadowStrength",
+        .binding = &shader_injection.point_ss_strength,
+        .default_value = 200.f,
+        .label = "Point Screen-Space Strength",
+        .section = "Screen-Space Shadows",
+        .tooltip = "Occlusion per unit of blocking on point lights.",
+        .max = 400.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointScreenSpaceShadowReach",
+        .binding = &shader_injection.point_ss_reach,
+        .default_value = 6.f,
+        .label = "Point Screen-Space Reach",
+        .section = "Screen-Space Shadows",
+        .tooltip = "How far the ray travels toward the point light, as a percentage of screen height.",
+        .max = 50.f,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxScreenSpaceShadowThickness",
+        .binding = &shader_injection.ss_shadow_thickness,
+        .default_value = 2.f,
+        .label = "Screen-Space Shadow Thickness",
+        .section = "Screen-Space Shadows (Advanced)",
+        .tooltip = "How close a surface must be to the ray to count as a blocker.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.001f; },
+        .is_visible = [] { return shader_injection.screen_space_shadows != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxScreenSpaceShadowFadeEnd",
+        .binding = &shader_injection.ss_shadow_fade_end,
+        .default_value = 500.f,
+        .label = "Screen-Space Shadow Fade End",
+        .section = "Screen-Space Shadows (Advanced)",
+        .tooltip = "Distance in metres at which the term is gone.",
+        .max = 500.f,
+        .is_visible = [] { return shader_injection.screen_space_shadows != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotScreenSpaceShadowThickness",
+        .binding = &shader_injection.spot_ss_thickness,
+        .default_value = 10.f,
+        .label = "Spot Screen-Space Thickness",
+        .section = "Screen-Space Shadows (Advanced)",
+        .tooltip = "How much nearer than the receiver a surface must be to count as a blocker.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.001f; },
+        .is_visible = [] { return shader_injection.spot_screen_space_shadows != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotScreenSpaceShadowFadeEnd",
+        .binding = &shader_injection.spot_ss_fade_end,
+        .default_value = 500.f,
+        .label = "Spot Screen-Space Fade End",
+        .section = "Screen-Space Shadows (Advanced)",
+        .tooltip = "Distance in metres at which the term is gone.",
+        .max = 500.f,
+        .is_visible = [] { return shader_injection.spot_screen_space_shadows != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointScreenSpaceShadowThickness",
+        .binding = &shader_injection.point_ss_thickness,
+        .default_value = 20.f,
+        .label = "Point Screen-Space Thickness",
+        .section = "Screen-Space Shadows (Advanced)",
+        .tooltip = "How much nearer than the receiver a surface must be to count as a blocker.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.001f; },
+        .is_visible = [] { return shader_injection.point_screen_space_shadows != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointScreenSpaceShadowFadeEnd",
+        .binding = &shader_injection.point_ss_fade_end,
+        .default_value = 40.f,
+        .label = "Point Screen-Space Fade End",
+        .section = "Screen-Space Shadows (Advanced)",
+        .tooltip = "Distance in metres at which the term is gone. Point lights are local, so this is shorter than the sun's.",
+        .max = 500.f,
+        .is_visible = [] { return shader_injection.point_screen_space_shadows != 0.f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxScreenSpaceShadowMaterialMax",
+        .binding = &shader_injection.ss_shadow_material_max,
+        .default_value = 100.f,
+        .label = "Screen-Space Shadow Material Limit",
+        .section = "Screen-Space Shadows (Advanced)",
+        .tooltip = "Material index below which the term applies.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.01f; },
+        // Hidden from the UI: a scene-specific caster/receiver split, not a look.
+        .is_visible = [] { return false; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxSpotScreenSpaceShadowMaterialLimit",
+        .binding = &shader_injection.spot_ss_material_max,
+        .default_value = 100.f,
+        .label = "Spot Screen-Space Material Limit",
+        .section = "Screen-Space Shadows (Advanced)",
+        .tooltip = "Material index below which the term applies.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.01f; },
+        // Hidden from the UI: a scene-specific caster/receiver split, not a look.
+        .is_visible = [] { return false; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxPointScreenSpaceShadowMaterialLimit",
+        .binding = &shader_injection.point_ss_material_max,
+        .default_value = 100.f,
+        .label = "Point Screen-Space Material Limit",
+        .section = "Screen-Space Shadows (Advanced)",
+        .tooltip = "Material index below which the term applies.",
+        .max = 100.f,
+        .parse = [](float value) { return value * 0.01f; },
+        // Hidden from the UI: a scene-specific caster/receiver split, not a look.
+        .is_visible = [] { return false; },
     },
     new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::BUTTON,
@@ -1201,6 +1671,15 @@ void OnPresent(
   ResetTonemapCopyTracking();
 }
 
+void OnDestroyDevice(reshade::api::device* device) {
+  ao::Destroy(device);
+  il::Destroy(device);
+  DestroyLightPassLayout(device);
+  DestroyFallbackViews(device);
+  albedo_view = {0};
+  specular_view = {0};
+}
+
 bool initialized = false;
 
 }  // namespace
@@ -1214,6 +1693,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       if (!reshade::register_addon(h_module)) return FALSE;
 
       taa::settings::AppendSettings(settings, &shader_injection);
+      ao::AppendSettings(settings);
+      il::AppendSettings(settings);
 
       if (!initialized) {
         renodx::mods::swapchain::force_borderless = true;
@@ -1252,18 +1733,39 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
             .name = "lutbuilder_256x16_bgra8_typeless_hot_swap",
         });
 
+        // Keep the tuning and diagnostic groups out of the way on first open.
+        // Every other section stays expanded, so only the "(Advanced)" groups start collapsed.
+        renodx::utils::settings::open_sections_by_default = false;
+        renodx::utils::settings::default_open_sections = {
+            "Temporal Anti-Aliasing",
+            "Presets",
+            "Output",
+            "Tone Mapping",
+            "Color Grading",
+            "Effects",
+            "Shadows",
+            "Screen-Space Shadows",
+            "Ambient Occlusion",
+            "Indirect Lighting",
+            "Options",
+            "Links",
+            "About",
+        };
+
         initialized = true;
       }
 
       reshade::register_event<reshade::addon_event::copy_resource>(OnCopyTonemapOutputResource);
       reshade::register_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);  // auto detect peak and paper white
       reshade::register_event<reshade::addon_event::present>(OnPresent);
+  reshade::register_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
 
       break;
     case DLL_PROCESS_DETACH:
       reshade::unregister_event<reshade::addon_event::copy_resource>(OnCopyTonemapOutputResource);
       reshade::unregister_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);  // auto detect peak and paper white
       reshade::unregister_event<reshade::addon_event::present>(OnPresent);
+  reshade::unregister_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
       renodx::mods::swapchain::v2::set_color_space = true;
       reshade::unregister_addon(h_module);
       break;

@@ -35,6 +35,106 @@ struct ShaderInjectData {
 
   float swap_chain_output_preset;
   float custom_motion_blur;
+
+  // Contact-hardening shadows. Appended after every existing field so no
+  // established offset moves.
+  float sun_contact_hardening;
+  float sun_shadow_softness;
+  float sun_shadow_k;
+  float sun_shadow_blur_pixels;
+
+  // Spot lights. Separate values because the scale differs: a spot's cone is
+  // tens of metres where the sun's cascade is hundreds, so the same separation
+  // produces a much larger ratio.
+  float spot_contact_hardening;
+  float spot_shadow_softness;
+  float spot_shadow_k;
+  float spot_shadow_blur_pixels;
+  float spot_shadow_darkness;
+  float spot_cone_falloff;
+
+  // Screen-space shadows. Appended after every existing field so no established
+  // offset moves.
+  float screen_space_shadows;
+  float ss_shadow_reach;
+  float ss_shadow_thickness;
+  float ss_shadow_strength;
+  float ss_shadow_fade_end;
+  float ss_shadow_material_max;
+
+  // Ambient occlusion, applied after the game's subsurface-scatter pass.
+  //
+  // ao_enabled is read *host-side*, by the dispatch callbacks, so the toggle needs no
+  // shader compile and the compute shader keeps no constant buffer dependency.
+  // The rest are used by the AO shader itself.
+  float ao_enabled;
+  float ao_strength;
+  float ao_radius;
+  float ao_slices;
+  float ao_steps;
+  float ao_thickness;
+  float ao_fade;
+  // Host-side: 1 while the depth mip chain is built for this frame. The pass reads coarse
+  // levels only when it is set, so an unbindable chain degrades to the exact fetch instead
+  // of reading a fallback texel.
+  float ao_depth_mips;
+  // Host-side: how many screen pixels one AO pixel covers (1 = full, 2 = half). The factor is
+  // resolved back to full resolution by a depth-joint upsample.
+  float ao_scale;
+  // Host-side: 0 = full, 1 = half.
+  float ao_resolution;
+  // Screen-space diffuse gather, dispatched after the AO.
+  //
+  // il_enabled is host-side, like ao_enabled; the rest are read by the gather.
+  float il_enabled;
+  // Fraction of the neighbourhood's mean radiance added to the light.
+  float il_amount;
+  // Gather radius as a fraction of screen height.
+  float il_radius;
+  // Samples per pixel.
+  float il_samples;
+  // Full-resolution pixels per gather pixel: 1 at full resolution, 2 at half.
+  float il_scale;
+  // Bilateral kernel radius: 1 gives 3x3, 2 gives 5x5, 3 gives 7x7.
+  float il_filter_radius;
+  // Host-side: 0 runs the gather at full resolution, 1 at half.
+  float il_resolution;
+  // Temporal blend: how much of the accumulated history survives each frame, and the host-side
+  // flag that clears it on the first frame after a reset.
+  float il_history_blend;
+  float il_history_valid;
+  // Contributors required before a pixel is allowed to add any bounce.
+  float il_min_samples;
+  // 1 writes the gather's term alone into the light, for judging it.
+  float il_debug;
+  // a-trous iteration: 0, 1, 2 with stride 1, 2, 4.
+  float il_filter_step;
+  // Screen-space shadows on spot lights, as their own toggle rather than riding
+  // the sun's. Each spot draw rasterises its light volume, so this term runs once
+  // per light - around 25 times a frame - where the sun's runs once.
+  float spot_screen_space_shadows;
+  // Spot screen-space shadow tuning. Separate from the sun's because a spot
+  // covers a small part of the frame: reaching a caster needs a much longer ray
+  // there, and using the sun's dial moved the sun as well.
+  float spot_ss_reach;
+  float spot_ss_thickness;
+  float spot_ss_strength;
+  float spot_ss_fade_end;
+  float spot_ss_material_max;
+  // Point lights. Appended after every existing field so no established offset
+  // moves; the point shader consumes the same nibble as the spot but the
+  // paraboloid map needs its own softness and march.
+  float point_contact_hardening;
+  float point_shadow_softness;
+  float point_shadow_k;
+  float point_shadow_blur_pixels;
+  float point_shadow_darkness;
+  float point_screen_space_shadows;
+  float point_ss_reach;
+  float point_ss_thickness;
+  float point_ss_strength;
+  float point_ss_fade_end;
+  float point_ss_material_max;
 };
 
 #ifndef __cplusplus
@@ -71,6 +171,65 @@ cbuffer cb13 : register(b13) {
 
 #define CUSTOM_TAA                    shader_injection.custom_taa
 #define CUSTOM_UNCLAMP_MOTION_VECTORS shader_injection.unclamp_motion_vectors
+
+#define CUSTOM_SUN_CONTACT_HARDENING shader_injection.sun_contact_hardening
+#define CUSTOM_SUN_SHADOW_SOFTNESS   shader_injection.sun_shadow_softness
+#define CUSTOM_SUN_SHADOW_K          shader_injection.sun_shadow_k
+#define CUSTOM_SUN_BLUR_PIXELS       shader_injection.sun_shadow_blur_pixels
+
+#define CUSTOM_SPOT_CONTACT_HARDENING shader_injection.spot_contact_hardening
+#define CUSTOM_SPOT_SHADOW_SOFTNESS   shader_injection.spot_shadow_softness
+#define CUSTOM_SPOT_SHADOW_K          shader_injection.spot_shadow_k
+#define CUSTOM_SPOT_BLUR_PIXELS       shader_injection.spot_shadow_blur_pixels
+#define CUSTOM_SPOT_SHADOW_DARKNESS   shader_injection.spot_shadow_darkness
+#define CUSTOM_SPOT_CONE_FALLOFF      shader_injection.spot_cone_falloff
+
+#define CUSTOM_SS_SHADOWS      shader_injection.screen_space_shadows
+#define CUSTOM_SS_REACH        shader_injection.ss_shadow_reach
+#define CUSTOM_SS_THICKNESS    shader_injection.ss_shadow_thickness
+#define CUSTOM_SS_STRENGTH     shader_injection.ss_shadow_strength
+#define CUSTOM_SS_FADE_END     shader_injection.ss_shadow_fade_end
+#define CUSTOM_SS_MATERIAL_MAX shader_injection.ss_shadow_material_max
+
+#define CUSTOM_SS_SPOT_SHADOWS shader_injection.spot_screen_space_shadows
+#define CUSTOM_SS_SPOT_REACH        shader_injection.spot_ss_reach
+#define CUSTOM_SS_SPOT_THICKNESS    shader_injection.spot_ss_thickness
+#define CUSTOM_SS_SPOT_STRENGTH     shader_injection.spot_ss_strength
+#define CUSTOM_SS_SPOT_FADE_END     shader_injection.spot_ss_fade_end
+#define CUSTOM_SS_SPOT_MATERIAL_MAX shader_injection.spot_ss_material_max
+
+#define CUSTOM_POINT_CONTACT_HARDENING shader_injection.point_contact_hardening
+#define CUSTOM_POINT_SHADOW_SOFTNESS   shader_injection.point_shadow_softness
+#define CUSTOM_POINT_SHADOW_K          shader_injection.point_shadow_k
+#define CUSTOM_POINT_BLUR_PIXELS       shader_injection.point_shadow_blur_pixels
+#define CUSTOM_POINT_SHADOW_DARKNESS   shader_injection.point_shadow_darkness
+
+#define CUSTOM_SS_POINT_SHADOWS     shader_injection.point_screen_space_shadows
+#define CUSTOM_SS_POINT_REACH       shader_injection.point_ss_reach
+#define CUSTOM_SS_POINT_THICKNESS   shader_injection.point_ss_thickness
+#define CUSTOM_SS_POINT_STRENGTH    shader_injection.point_ss_strength
+#define CUSTOM_SS_POINT_FADE_END    shader_injection.point_ss_fade_end
+#define CUSTOM_SS_POINT_MATERIAL_MAX shader_injection.point_ss_material_max
+
+#define CUSTOM_MGSV_AO_STRENGTH  shader_injection.ao_strength
+#define CUSTOM_MGSV_AO_RADIUS    shader_injection.ao_radius
+#define CUSTOM_MGSV_AO_SLICES    shader_injection.ao_slices
+#define CUSTOM_MGSV_AO_STEPS     shader_injection.ao_steps
+#define CUSTOM_MGSV_AO_THICKNESS shader_injection.ao_thickness
+#define CUSTOM_MGSV_AO_FADE      shader_injection.ao_fade
+#define CUSTOM_MGSV_AO_DEPTH_MIPS shader_injection.ao_depth_mips
+#define CUSTOM_MGSV_AO_SCALE      shader_injection.ao_scale
+
+#define CUSTOM_MGSV_IL_AMOUNT shader_injection.il_amount
+#define CUSTOM_MGSV_IL_RADIUS shader_injection.il_radius
+#define CUSTOM_MGSV_IL_SAMPLES shader_injection.il_samples
+#define CUSTOM_MGSV_IL_MIN_SAMPLES shader_injection.il_min_samples
+#define CUSTOM_MGSV_IL_SCALE       shader_injection.il_scale
+#define CUSTOM_MGSV_IL_FILTER_RADIUS shader_injection.il_filter_radius
+#define CUSTOM_MGSV_IL_HISTORY       shader_injection.il_history_blend
+#define CUSTOM_MGSV_IL_HISTORY_VALID shader_injection.il_history_valid
+#define CUSTOM_MGSV_IL_DEBUG  shader_injection.il_debug
+#define CUSTOM_MGSV_IL_FILTER_STEP shader_injection.il_filter_step
 
 #include "../../shaders/renodx.hlsl"
 
