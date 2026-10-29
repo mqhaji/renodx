@@ -29,6 +29,7 @@
 #include "../../utils/random.hpp"
 #include "../../utils/settings.hpp"
 #include "./shared.h"
+#include "./taa/runtime/d3d11_compute_state.hpp"
 #include "./taa/taa.hpp"
 
 namespace renodx::mods::swapchain {
@@ -873,15 +874,23 @@ void ApplyLightPasses(reshade::api::command_list* cmd_list) {
   const LightFrame frame = light_frame;
   light_frame.valid = false;
 
-  if (shader_injection.il_enabled != 0.f
-      && frame.light_source.handle != 0
-      && albedo_view.handle != 0
-      && specular_view.handle != 0) {
+  const bool run_il = shader_injection.il_enabled != 0.f
+                      && frame.light_source.handle != 0
+                      && albedo_view.handle != 0
+                      && specular_view.handle != 0;
+  const bool run_ao = shader_injection.ao_enabled != 0.f;
+  if (!run_il && !run_ao) return;
+
+  // Lighting dispatches can displace graphics bindings as well as compute state.
+  // Restore the whole chain's entry state, including slots that were unbound.
+  const auto previous_state = taa::d3d11_compute_state::Capture(cmd_list);
+  if (run_il) {
     il::Apply(frame, cmd_list);
   }
-  if (shader_injection.ao_enabled != 0.f) {
+  if (run_ao) {
     ao::Apply(frame, cmd_list);
   }
+  taa::d3d11_compute_state::Restore(cmd_list, previous_state);
 }
 
 renodx::mods::shader::CustomShaders custom_shaders = []() {
