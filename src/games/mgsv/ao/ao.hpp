@@ -176,17 +176,6 @@ inline bool BuildDepthMips(reshade::api::command_list* cmd_list, reshade::api::r
 
   if (!EnsureDepthMipChain(device, width, height)) return true;
 
-  const auto previous_source = renodx::utils::state::GetBoundResourceView(
-      cmd_list,
-      reshade::api::shader_stage::compute,
-      reshade::api::descriptor_type::shader_resource_view,
-      0u);
-  const auto previous_target = renodx::utils::state::GetBoundResourceView(
-      cmd_list,
-      reshade::api::shader_stage::compute,
-      reshade::api::descriptor_type::unordered_access_view,
-      0u);
-
   cmd_list->bind_pipeline(reshade::api::pipeline_stage::all_compute, depth_mip_chain.pipeline);
   for (uint32_t level = 0; level < kDepthMipLevels; ++level) {
     const reshade::api::resource_view source =
@@ -207,38 +196,13 @@ inline bool BuildDepthMips(reshade::api::command_list* cmd_list, reshade::api::r
          .descriptors = &target},
     };
     cmd_list->push_descriptors(
-        reshade::api::shader_stage::all_compute, depth_mip_chain.layout, 0u, updates[0]);
-    cmd_list->push_descriptors(
         reshade::api::shader_stage::all_compute, depth_mip_chain.layout, 1u, updates[1]);
+    cmd_list->push_descriptors(
+      reshade::api::shader_stage::all_compute, depth_mip_chain.layout, 0u, updates[0]);
 
     const uint32_t level_width = std::max(width >> (level + 1u), 1u);
     const uint32_t level_height = std::max(height >> (level + 1u), 1u);
     cmd_list->dispatch((level_width + 7u) / 8u, (level_height + 7u) / 8u, 1u);
-  }
-
-  if (previous_source.handle != 0) {
-    const reshade::api::descriptor_table_update restore = {
-        .table = {},
-        .binding = 0u,
-        .array_offset = 0u,
-        .count = 1u,
-        .type = reshade::api::descriptor_type::shader_resource_view,
-        .descriptors = &previous_source,
-    };
-    cmd_list->push_descriptors(
-        reshade::api::shader_stage::all_compute, depth_mip_chain.layout, 0u, restore);
-  }
-  if (previous_target.handle != 0) {
-    const reshade::api::descriptor_table_update restore = {
-        .table = {},
-        .binding = 0u,
-        .array_offset = 0u,
-        .count = 1u,
-        .type = reshade::api::descriptor_type::unordered_access_view,
-        .descriptors = &previous_target,
-    };
-    cmd_list->push_descriptors(
-        reshade::api::shader_stage::all_compute, depth_mip_chain.layout, 1u, restore);
   }
 
   shader_injection.ao_depth_mips = 1.f;

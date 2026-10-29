@@ -278,10 +278,8 @@ inline reshade::api::resource_view GetFallbackUav(reshade::api::command_list* cm
   return fallback_uavs[index % fallback_uavs.size()];
 }
 
-// Submits one light-modifying compute pass. The descriptor slots this layout touches are
-// pushed per dispatch and put back afterwards, so the next pass starts from the state it
-// found. This is not a save of the engine's layout state; the engine rebinds its own
-// descriptors for its next draw.
+// Bind every input and output for this pass. ApplyLightPasses restores game state
+// after the complete lighting chain, not between individual dispatches.
 inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* pass,
                               const std::array<reshade::api::resource_view, 7>& sources,
                               reshade::api::resource_view target,
@@ -289,19 +287,6 @@ inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* p
                               reshade::api::resource_view third_target,
                               reshade::api::resource_view fourth_target,
                               uint32_t width, uint32_t height) {
-  std::array<reshade::api::resource_view, 7> saved_sources = {};
-  for (uint32_t slot = 0; slot < saved_sources.size(); ++slot) {
-    saved_sources[slot] = renodx::utils::state::GetBoundResourceView(
-        cmd_list, reshade::api::shader_stage::compute,
-        reshade::api::descriptor_type::shader_resource_view, slot);
-  }
-  std::array<reshade::api::resource_view, 4> saved_targets = {};
-  for (uint32_t slot = 0; slot < saved_targets.size(); ++slot) {
-    saved_targets[slot] = renodx::utils::state::GetBoundResourceView(
-        cmd_list, reshade::api::shader_stage::compute,
-        reshade::api::descriptor_type::unordered_access_view, slot);
-  }
-
   cmd_list->bind_pipeline(reshade::api::pipeline_stage::all_compute, pass->pipeline);
   const std::array<reshade::api::resource_view, 4> targets = {
       target, second_target, third_target, fourth_target};
@@ -325,29 +310,6 @@ inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* p
       reshade::api::shader_stage::all_compute, light_pass_layout, 2u, 0u,
       static_cast<uint32_t>(sizeof(shader_injection) / sizeof(uint32_t)), &shader_injection);
   cmd_list->dispatch((width + 7u) / 8u, (height + 7u) / 8u, 1u);
-
-  for (uint32_t slot = 0; slot < saved_sources.size(); ++slot) {
-    if (saved_sources[slot].handle == 0) continue;
-    cmd_list->push_descriptors(
-        reshade::api::shader_stage::all_compute, light_pass_layout, 0u,
-        {.table = {0u},
-         .binding = slot,
-         .array_offset = 0u,
-         .count = 1u,
-         .type = reshade::api::descriptor_type::texture_shader_resource_view,
-         .descriptors = &saved_sources[slot]});
-  }
-  for (uint32_t slot = 0; slot < saved_targets.size(); ++slot) {
-    if (saved_targets[slot].handle == 0) continue;
-    cmd_list->push_descriptors(
-        reshade::api::shader_stage::all_compute, light_pass_layout, 1u,
-        {.table = {0u},
-         .binding = slot,
-         .array_offset = 0u,
-         .count = 1u,
-         .type = reshade::api::descriptor_type::texture_unordered_access_view,
-         .descriptors = &saved_targets[slot]});
-  }
 }
 
 inline void InsertSettingsBeforeSection(renodx::utils::settings::Settings& settings,
