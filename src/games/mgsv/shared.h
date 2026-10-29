@@ -36,16 +36,13 @@ struct ShaderInjectData {
   float swap_chain_output_preset;
   float custom_motion_blur;
 
-  // Contact-hardening shadows. Appended after every existing field so no
-  // established offset moves.
+  // Contact-hardening shadows for the directional light (sun or moon).
   float sun_contact_hardening;
   float sun_shadow_softness;
   float sun_shadow_k;
   float sun_shadow_blur_pixels;
 
-  // Spot lights. Separate values because the scale differs: a spot's cone is
-  // tens of metres where the sun's cascade is hundreds, so the same separation
-  // produces a much larger ratio.
+  // Spotlights use their own softness and response settings.
   float spot_contact_hardening;
   float spot_shadow_softness;
   float spot_shadow_k;
@@ -53,8 +50,7 @@ struct ShaderInjectData {
   float spot_shadow_darkness;
   float spot_cone_falloff;
 
-  // Screen-space shadows. Appended after every existing field so no established
-  // offset moves.
+  // Extra directional shadows from objects visible on screen.
   float screen_space_shadows;
   float ss_shadow_reach;
   float ss_shadow_thickness;
@@ -62,11 +58,7 @@ struct ShaderInjectData {
   float ss_shadow_fade_end;
   float ss_shadow_material_max;
 
-  // Ambient occlusion, applied after the game's subsurface-scatter pass.
-  //
-  // ao_enabled is read *host-side*, by the dispatch callbacks, so the toggle needs no
-  // shader compile and the compute shader keeps no constant buffer dependency.
-  // The rest are used by the AO shader itself.
+  // AO runs after the game's subsurface scattering. The CPU controls dispatch.
   float ao_enabled;
   float ao_strength;
   float ao_radius;
@@ -74,56 +66,44 @@ struct ShaderInjectData {
   float ao_steps;
   float ao_thickness;
   float ao_fade;
-  // Host-side: 1 while the depth mip chain is built for this frame. The pass reads coarse
-  // levels only when it is set, so an unbindable chain degrades to the exact fetch instead
-  // of reading a fallback texel.
+  // Set by the CPU when depth mips are available; otherwise sample full-resolution depth.
   float ao_depth_mips;
-  // Host-side: how many screen pixels one AO pixel covers (1 = full, 2 = half). The factor is
-  // resolved back to full resolution by a depth-joint upsample.
+  // Full-resolution pixels per AO pixel along each axis: 1, 2, or 4.
   float ao_scale;
-  // Host-side: 0 = full, 1 = half.
+  // Resolution choice: 0 = full, 1 = half, 2 = quarter.
   float ao_resolution;
-  // Screen-space diffuse gather, dispatched after the AO.
-  //
-  // il_enabled is host-side, like ao_enabled; the rest are read by the gather.
+  // Indirect lighting runs before AO. The CPU controls dispatch.
   float il_enabled;
-  // Fraction of the neighbourhood's mean radiance added to the light.
+  // Multiplier on the filtered bounced light added to the scene.
   float il_amount;
   // Gather radius as a fraction of screen height.
   float il_radius;
-  // Samples per pixel.
+  // Candidate samples per gather pixel.
   float il_samples;
-  // Full-resolution pixels per gather pixel: 1 at full resolution, 2 at half.
+  // Full-resolution pixels per gather pixel along each axis: 1, 2, or 4.
   float il_scale;
-  // Bilateral kernel radius: 1 gives 3x3, 2 gives 5x5, 3 gives 7x7.
+  // Number of denoising passes, using sample spacing of 1, 2, then 4 pixels.
   float il_filter_radius;
-  // Host-side: 0 runs the gather at full resolution, 1 at half.
+  // Resolution choice: 0 = full, 1 = half, 2 = quarter.
   float il_resolution;
-  // Temporal blend: how much of the accumulated history survives each frame, and the host-side
-  // flag that clears it on the first frame after a reset.
+  // Maximum history weight and the CPU's history-availability flag.
   float il_history_blend;
   float il_history_valid;
-  // Contributors required before a pixel is allowed to add any bounce.
+  // Accepted samples needed for a valid gather result.
   float il_min_samples;
-  // 1 writes the gather's term alone into the light, for judging it.
+  // Debug view: 0 = off, 1 = indirect light, 2 through 5 = history and noise diagnostics.
   float il_debug;
-  // a-trous iteration: 0, 1, 2 with stride 1, 2, 4.
+  // Current denoising pass: 0, 1, or 2.
   float il_filter_step;
-  // Screen-space shadows on spot lights, as their own toggle rather than riding
-  // the sun's. Each spot draw rasterises its light volume, so this term runs once
-  // per light - around 25 times a frame - where the sun's runs once.
+  // Extra spotlight shadows run separately for each light.
   float spot_screen_space_shadows;
-  // Spot screen-space shadow tuning. Separate from the sun's because a spot
-  // covers a small part of the frame: reaching a caster needs a much longer ray
-  // there, and using the sun's dial moved the sun as well.
+  // Spotlight tuning is independent of directional shadows.
   float spot_ss_reach;
   float spot_ss_thickness;
   float spot_ss_strength;
   float spot_ss_fade_end;
   float spot_ss_material_max;
-  // Point lights. Appended after every existing field so no established offset
-  // moves; the point shader consumes the same nibble as the spot but the
-  // paraboloid map needs its own softness and march.
+  // Point-light shadow filtering and screen-space shadows.
   float point_contact_hardening;
   float point_shadow_softness;
   float point_shadow_k;
@@ -172,10 +152,10 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_TAA                    shader_injection.custom_taa
 #define CUSTOM_UNCLAMP_MOTION_VECTORS shader_injection.unclamp_motion_vectors
 
-#define CUSTOM_SUN_CONTACT_HARDENING shader_injection.sun_contact_hardening
-#define CUSTOM_SUN_SHADOW_SOFTNESS   shader_injection.sun_shadow_softness
-#define CUSTOM_SUN_SHADOW_K          shader_injection.sun_shadow_k
-#define CUSTOM_SUN_BLUR_PIXELS       shader_injection.sun_shadow_blur_pixels
+#define CUSTOM_DIRECTIONAL_CONTACT_HARDENING         shader_injection.sun_contact_hardening
+#define CUSTOM_DIRECTIONAL_SHADOW_SOFTNESS           shader_injection.sun_shadow_softness
+#define CUSTOM_DIRECTIONAL_PENUMBRA_RESPONSE         shader_injection.sun_shadow_k
+#define CUSTOM_DIRECTIONAL_PENUMBRA_SMOOTHING_RADIUS shader_injection.sun_shadow_blur_pixels
 
 #define CUSTOM_SPOT_CONTACT_HARDENING shader_injection.spot_contact_hardening
 #define CUSTOM_SPOT_SHADOW_SOFTNESS   shader_injection.spot_shadow_softness
@@ -191,7 +171,7 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_SS_FADE_END     shader_injection.ss_shadow_fade_end
 #define CUSTOM_SS_MATERIAL_MAX shader_injection.ss_shadow_material_max
 
-#define CUSTOM_SS_SPOT_SHADOWS shader_injection.spot_screen_space_shadows
+#define CUSTOM_SS_SPOT_SHADOWS      shader_injection.spot_screen_space_shadows
 #define CUSTOM_SS_SPOT_REACH        shader_injection.spot_ss_reach
 #define CUSTOM_SS_SPOT_THICKNESS    shader_injection.spot_ss_thickness
 #define CUSTOM_SS_SPOT_STRENGTH     shader_injection.spot_ss_strength
@@ -204,32 +184,32 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_POINT_BLUR_PIXELS       shader_injection.point_shadow_blur_pixels
 #define CUSTOM_POINT_SHADOW_DARKNESS   shader_injection.point_shadow_darkness
 
-#define CUSTOM_SS_POINT_SHADOWS     shader_injection.point_screen_space_shadows
-#define CUSTOM_SS_POINT_REACH       shader_injection.point_ss_reach
-#define CUSTOM_SS_POINT_THICKNESS   shader_injection.point_ss_thickness
-#define CUSTOM_SS_POINT_STRENGTH    shader_injection.point_ss_strength
-#define CUSTOM_SS_POINT_FADE_END    shader_injection.point_ss_fade_end
+#define CUSTOM_SS_POINT_SHADOWS      shader_injection.point_screen_space_shadows
+#define CUSTOM_SS_POINT_REACH        shader_injection.point_ss_reach
+#define CUSTOM_SS_POINT_THICKNESS    shader_injection.point_ss_thickness
+#define CUSTOM_SS_POINT_STRENGTH     shader_injection.point_ss_strength
+#define CUSTOM_SS_POINT_FADE_END     shader_injection.point_ss_fade_end
 #define CUSTOM_SS_POINT_MATERIAL_MAX shader_injection.point_ss_material_max
 
-#define CUSTOM_MGSV_AO_STRENGTH  shader_injection.ao_strength
-#define CUSTOM_MGSV_AO_RADIUS    shader_injection.ao_radius
-#define CUSTOM_MGSV_AO_SLICES    shader_injection.ao_slices
-#define CUSTOM_MGSV_AO_STEPS     shader_injection.ao_steps
-#define CUSTOM_MGSV_AO_THICKNESS shader_injection.ao_thickness
-#define CUSTOM_MGSV_AO_FADE      shader_injection.ao_fade
+#define CUSTOM_MGSV_AO_STRENGTH   shader_injection.ao_strength
+#define CUSTOM_MGSV_AO_RADIUS     shader_injection.ao_radius
+#define CUSTOM_MGSV_AO_SLICES     shader_injection.ao_slices
+#define CUSTOM_MGSV_AO_STEPS      shader_injection.ao_steps
+#define CUSTOM_MGSV_AO_THICKNESS  shader_injection.ao_thickness
+#define CUSTOM_MGSV_AO_FADE       shader_injection.ao_fade
 #define CUSTOM_MGSV_AO_DEPTH_MIPS shader_injection.ao_depth_mips
 #define CUSTOM_MGSV_AO_SCALE      shader_injection.ao_scale
 
-#define CUSTOM_MGSV_IL_AMOUNT shader_injection.il_amount
-#define CUSTOM_MGSV_IL_RADIUS shader_injection.il_radius
-#define CUSTOM_MGSV_IL_SAMPLES shader_injection.il_samples
-#define CUSTOM_MGSV_IL_MIN_SAMPLES shader_injection.il_min_samples
-#define CUSTOM_MGSV_IL_SCALE       shader_injection.il_scale
+#define CUSTOM_MGSV_IL_AMOUNT        shader_injection.il_amount
+#define CUSTOM_MGSV_IL_RADIUS        shader_injection.il_radius
+#define CUSTOM_MGSV_IL_SAMPLES       shader_injection.il_samples
+#define CUSTOM_MGSV_IL_MIN_SAMPLES   shader_injection.il_min_samples
+#define CUSTOM_MGSV_IL_SCALE         shader_injection.il_scale
 #define CUSTOM_MGSV_IL_FILTER_RADIUS shader_injection.il_filter_radius
 #define CUSTOM_MGSV_IL_HISTORY       shader_injection.il_history_blend
 #define CUSTOM_MGSV_IL_HISTORY_VALID shader_injection.il_history_valid
-#define CUSTOM_MGSV_IL_DEBUG  shader_injection.il_debug
-#define CUSTOM_MGSV_IL_FILTER_STEP shader_injection.il_filter_step
+#define CUSTOM_MGSV_IL_DEBUG         shader_injection.il_debug
+#define CUSTOM_MGSV_IL_FILTER_STEP   shader_injection.il_filter_step
 
 #include "../../shaders/renodx.hlsl"
 
