@@ -115,8 +115,8 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
 // uniform, and the gradient that the hardening is made of disappears.
 // Tunables come from the addon, through cb13.
 //
-//   CUSTOM_SUN_CONTACT_HARDENING  the on/off toggle (off by default)
-//   CUSTOM_SUN_SHADOW_SOFTNESS    the widest penumbra, metres
+//   CUSTOM_DIRECTIONAL_CONTACT_HARDENING  the on/off toggle
+//   CUSTOM_DIRECTIONAL_SHADOW_SOFTNESS    the widest penumbra, metres
 //
 // Both are declared in ../shared.h and set from the Shadows section of the
 // overlay. To iterate through the devkit instead, pin them here: the devkit
@@ -124,14 +124,14 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
 // 0 for an unbound constant buffer, so anything read from cb13 - including the
 // gate - comes back as 0 and the effect disappears.
 //
-// #undef  CUSTOM_SUN_CONTACT_HARDENING
-// #define CUSTOM_SUN_CONTACT_HARDENING 1.0
-// #undef  CUSTOM_SUN_SHADOW_SOFTNESS
-// #define CUSTOM_SUN_SHADOW_SOFTNESS   0.05
-// #undef  CUSTOM_SUN_SHADOW_K
-// #define CUSTOM_SUN_SHADOW_K          24.0
-// #undef  CUSTOM_SUN_BLUR_PIXELS
-// #define CUSTOM_SUN_BLUR_PIXELS       24.0
+// #undef  CUSTOM_DIRECTIONAL_CONTACT_HARDENING
+// #define CUSTOM_DIRECTIONAL_CONTACT_HARDENING 1.0
+// #undef  CUSTOM_DIRECTIONAL_SHADOW_SOFTNESS
+// #define CUSTOM_DIRECTIONAL_SHADOW_SOFTNESS   0.05
+// #undef  CUSTOM_DIRECTIONAL_PENUMBRA_RESPONSE
+// #define CUSTOM_DIRECTIONAL_PENUMBRA_RESPONSE 24.0
+// #undef  CUSTOM_DIRECTIONAL_PENUMBRA_SMOOTHING_RADIUS
+// #define CUSTOM_DIRECTIONAL_PENUMBRA_SMOOTHING_RADIUS 24.0
 
 #define PCSS_PENUMBRA_MIN_WORLD  0.0   // penumbra at penumbra01 = 0, metres. Zero, not a
                                        // centimetre. A caster with no separation has to
@@ -616,7 +616,7 @@ void main(
   // a look, not a fix - so the game's intended appearance stays the default. r0.x
   // already holds the vanilla result above, so skipping the block leaves it alone.
   // =========================================================================
-  if (CUSTOM_SUN_CONTACT_HARDENING != 0.f) {
+  if (CUSTOM_DIRECTIONAL_CONTACT_HARDENING != 0.f) {
     const float  texel     = 1.0 / g_psScene.m_shadowMapResolutions.x;
     const float  atlasSize = g_psScene.m_shadowMapResolutions.x;
     const float2 baseUV    = r4.yz;
@@ -708,7 +708,7 @@ void main(
     // The span is taken for the largest grid, which is conservative for the
     // smaller ones: it can only narrow the blur, never let a tap leave the tile.
     const float2 maskSpanPerPixel = 2.0 * (abs(uvStepX) + abs(uvStepY));
-    const float maskBlur = min(CUSTOM_SUN_BLUR_PIXELS,
+    const float maskBlur = min(CUSTOM_DIRECTIONAL_PENUMBRA_SMOOTHING_RADIUS,
                                min(tileSlack.x, tileSlack.y) / max(maskSpanPerPixel.x, maskSpanPerPixel.y));
 
     // Nine taps. The mask is the low-frequency half of the effect, and each tap
@@ -723,7 +723,7 @@ void main(
       const float  occN    = g_ShadowTexture.SampleCmpLevelZero(g_samplerComparisonLess_Linear_Clmap_s, uvN, zN).x;
       const float  casterN = g_ShadowTexture.SampleLevel(g_samplerPoint_Clamp_s, uvN, 0).x;
       const float  relN    = (zN - casterN) / max(casterN, 1e-9);
-      penumbra01 += occN * saturate(CUSTOM_SUN_SHADOW_K * relN * relN);
+      penumbra01 += occN * saturate(CUSTOM_DIRECTIONAL_PENUMBRA_RESPONSE * relN * relN);
     }
     penumbra01 /= 9.0;
 
@@ -749,7 +749,7 @@ void main(
     // The maximum is floored in texels as well as metres, so that stretching the
     // cascade range (a shadow-map mod) cannot shrink the effect out of sight. At
     // the stock range the floor never binds and this is the setting's value alone.
-    const float penumbraMaxWorld = max(CUSTOM_SUN_SHADOW_SOFTNESS,
+    const float penumbraMaxWorld = max(CUSTOM_DIRECTIONAL_SHADOW_SOFTNESS,
                                        PCSS_PENUMBRA_MIN_TEXELS_FOR_MAX * texelWorld);
     const float penumbraWorld = lerp(PCSS_PENUMBRA_MIN_WORLD, penumbraMaxWorld, penumbra01);
     const float penumbra = clamp(penumbraWorld / texelWorld, PCSS_FILTER_MIN_TEXELS, PCSS_FILTER_MAX_TEXELS);
