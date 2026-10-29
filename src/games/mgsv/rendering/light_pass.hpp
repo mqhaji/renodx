@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <sstream>
@@ -16,10 +17,9 @@
 
 #include <include/reshade.hpp>
 
-#include "../../utils/settings.hpp"
-#include "./shared.h"
+#include "../shared.h"
 
-inline ShaderInjectData shader_injection;
+namespace mgsv::rendering {
 
 template <typename... Args>
 inline void LogLight(reshade::log::level level, Args&&... args) {
@@ -37,7 +37,7 @@ inline void LogLightOnce(std::atomic_flag* reported, reshade::log::level level, 
   LogLight(level, std::forward<Args>(args)...);
 }
 
-// Borrowed views and output dimensions used during one lighting callback.
+// Borrowed bindings for one lighting callback, not a retained or validated frame snapshot.
 struct LightFrame {
   reshade::api::resource_view depth = {0};
   reshade::api::resource_view normal = {0};
@@ -157,7 +157,7 @@ inline bool EnsureLightPassLayout(reshade::api::device* device) {
   params[1].push_descriptors.dx_register_index = 0u;
   params[1].push_descriptors.dx_register_space = 0u;
   params[2].type = reshade::api::pipeline_layout_param_type::push_constants;
-  params[2].push_constants.count = static_cast<uint32_t>(sizeof(shader_injection) / sizeof(uint32_t));
+  params[2].push_constants.count = static_cast<uint32_t>(sizeof(ShaderInjectData) / sizeof(uint32_t));
   params[2].push_constants.dx_register_index = 13u;
   params[2].push_constants.dx_register_space = 0u;
   params[2].push_constants.visibility = reshade::api::shader_stage::compute;
@@ -324,7 +324,11 @@ inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* p
                               uint32_t width, uint32_t height) {
   cmd_list->bind_pipeline(reshade::api::pipeline_stage::all_compute, pass->pipeline);
   const std::array<reshade::api::resource_view, 4> targets = {
-      target, second_target, third_target, fourth_target};
+      target,  // u0
+      second_target,
+      third_target,
+      fourth_target,
+  };
   cmd_list->push_descriptors(
       reshade::api::shader_stage::all_compute, light_pass_layout, 1u,
       {
@@ -351,11 +355,4 @@ inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* p
   cmd_list->dispatch((width + 7u) / 8u, (height + 7u) / 8u, 1u);
 }
 
-inline void InsertSettingsBeforeSection(renodx::utils::settings::Settings& settings,
-                                        const char* section,
-                                        const renodx::utils::settings::Settings& additions) {
-  const auto position = std::ranges::find_if(settings, [section](auto* setting) {
-    return setting->section == section;
-  });
-  settings.insert(position, additions.begin(), additions.end());
-}
+}  // namespace mgsv::rendering

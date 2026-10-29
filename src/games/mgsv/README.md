@@ -171,10 +171,10 @@ unit-length motion clamp to be bypassed by a default-Off TAA diagnostic.
 
 ### Marking Phase (Per-Draw)
 
-When a shader in the `custom_shaders` array is intercepted:
+When a shader in the assembled `custom_shaders` map is intercepted:
 
 1. **Get RTVs**: Retrieve bound render targets via `GetRenderTargets(cmd_list)`
-2. **Mark Target**: Call `MarkSceneTonemapCloneTarget()`, `MarkMotionBlurCloneTarget()`, or `MarkCloneTarget()` for a sequence-proven copy destination
+2. **Mark Target**: Use `rendering::resource_upgrades::MarkSceneTonemapCloneTarget()` or `MarkCloneTarget()` with the appropriate role for a sequence-proven destination
    - Checks if the underlying resource matches upgrade criteria (format, size, usage)
    - Records upgrade info pointer in resource metadata
 3. **Activate Clone**: Call `ActivateCloneHotSwapIfTracked(device, rtv)`
@@ -273,9 +273,9 @@ Settings are under **Contact-Hardening Shadows** and **Screen-Space Shadows**, e
 
 ## Ambient Occlusion
 
-The two compute passes at `0x6DAF0C4A` and `0xB2601810` perform the game's screen-space **subsurface scattering**, which contributes to skin shading. Neither shader is replaced.
+The two compute passes at `0x6DAF0C4A` and `0xB2601810` perform the game's screen-space **subsurface scattering**, which contributes to skin shading. The first has a generated replacement from its port; the second has a callback-only registration that runs added lighting afterward. This structural cleanup preserves those registrations and does not replace scattering with AO.
 
-After stage 2, the addon calculates AO in a separate texture, then applies it to the light buffer. It darkens RGB and preserves alpha. This keeps the game's scattering passes intact, but still darkens their result, including directly lit surfaces.
+After stage 2, the addon calculates AO in a separate texture, then applies it to the light buffer. It darkens RGB and preserves alpha. The existing scattering registrations are preserved and AO runs afterward, darkening their result, including directly lit surfaces.
 
 The technique is based on *Screen Space Indirect Lighting with Visibility Bitmask* (Therrien, Levesque, Gilet, The Visual Computer 2023), with five documented differences. See [MGSV_AmbientOcclusion.md](ao/MGSV_AmbientOcclusion.md) for the paper comparison, earlier measurements, and remaining questions. Read those notes before changing the back-sample direction, sector rounding, or slice weights.
 
@@ -302,70 +302,21 @@ Indirect lighting is added before AO is applied, so AO darkens both direct and i
 
 ## Code Structure
 
-### State Variables
+The shared precision upgrades are a rendering foundation, not an HDR-output feature. Output, reconstruction, and lighting effects use that foundation but own different controls and resources.
 
-```cpp
-bool dof_final_copy_upgrade_allowed;
-reshade::api::resource dof_final_copy_active_resource;
-std::vector<reshade::api::resource> motion_blur_active_resources;
-bool motion_blur_copy_upgrade_allowed;
-bool motion_blur_copy_back_pending;
-bool tonemap_copy_resource_propagation_allowed;
-reshade::api::resource tonemap_copy_resource_source;
-```
+| Location | Responsibility |
+|---|---|
+| `addon.cpp` | Owns shader data, output state and assembled registries; addon setup, event registration and lifecycle order |
+| `settings.hpp` | Core output, tone-mapping, grading and existing-effect controls; Reset All and Preset Off policy |
+| `shadows/settings.hpp` | Contact-hardening and screen-space-shadow controls |
+| `rendering/resource_upgrades.hpp` | Scene, DoF, motion-blur, and velocity resource roles and clone handling |
+| `rendering/light_pass.hpp` | AO/GI texture-allocation helpers, shared pipeline layout, placeholder textures, dispatch helpers, and logging |
+| `rendering/d3d11_compute_state.hpp` | Graphics-state preservation used by lighting and reconstruction |
+| `game/integration.hpp` / `game/shaders.hpp` | Game input bindings and effect insertion / shader registrations |
+| `output/output.hpp` | SDR/HDR output selection and brightness synchronization |
+| `ao/`, `il/`, `taa/` | Feature resources, execution, and controls; AO/GI sliders stay in their feature headers |
 
-### Key Functions
-
-**Marking Functions:**
-- `MarkSceneTonemapCloneTarget(rtv, device)` — Mark target for scene tonemap upgrade
-- `MarkMotionBlurCloneTarget(rtv, device)` — Mark target for motion blur upgrade
-- `MarkCloneTarget(rtv, upgrade_info, device)` — Generic marking function
-
-**Activation Functions:**
-- `ActivateCloneHotSwapIfTracked(device, rtv)` — Activate clone if marked
-- `PixelShaderResourceMatchesCloneTarget(cmd_list, upgrade_info)` — Check PS slot 0
-- `UpgradeCopyRenderBufferTarget(cmd_list)` — Upgrade an armed DoF or motion-blur copy target
-
-**Arming/Cleanup:**
-- `ArmDofFinalCopyRenderBufferWindow(cmd_list)` — Arm the next qualifying DoF copy
-- `ArmMotionBlurCopyRenderBufferWindow(cmd_list)` — Arm the next motion-blur input copy
-- `DeactivateDofFinalCopyRenderBufferTarget()` — Disable the frame-local DoF-copy target
-- `DeactivateMotionBlurTargets()` — Disable motion targets after copy-back
-- `ResetTonemapCopyTracking()` — Called on present
-
-### Macros
-
-```cpp
-// Activate clone on all RTVs (standard pattern)
-#define UpgradeRTVReplaceShader(value) { ... }
-
-// Activate clone + call callback (used for DOF arming)
-#define UpgradeRTVReplaceShaderCallback(value, callback) { ... }
-
-// Mark + activate for tonemap (full marking + activation)
-#define UpgradeTonemapOutputRTV(value) { ... }
-
-// Mark + activate for deferred tonemap (RTV0 only)
-#define UpgradeDeferredTonemapOutputRTV(value, name) { ... }
-
-// Arm the next motion-blur input copy from a tile-preparation marker
-#define TrackMotionBlurTilePrep(value) { ... }
-
-// Route only sequence-proven DoF/motion-blur copies through HDR targets
-#define UpgradeCopyRenderBufferRTV(value) { ... }
-
-// Motion blur variant
-#define UpgradeMotionBlurRTV(value) { ... }
-```
-
-### Custom Shaders Array
-
-The `custom_shaders` array defines the shader interception pipeline. **Order matters**:
-1. DoF windows, motion-blur sequence markers, and scoped `CopyRenderBuffer` handling
-2. Deferred tone mapping upgrades
-3. LUT builder and FXAA upgrades
-4. Final LUT/color-grading upgrade
-5. `__ALL_CUSTOM_SHADERS` (must be last — includes all embedded shader codes)
+See [the architecture guide](docs/ARCHITECTURE.md) for the dependency map and remaining limitations. Shader registration is a hash lookup, not the order in which render passes execute. The standard `mgsv` build target discovers the shaders and generates their embedded headers without requiring local development tests.
 
 ---
 
@@ -395,9 +346,7 @@ The `custom_shaders` array defines the shader interception pipeline. **Order mat
 
 ### Build
 
-With MGSV fully stopped, use CMake Tools in VS Code and build only `mgsv`. Use the repository's Clang debug profile for
-development; the preceding gameplay cleanup used the approved MSVC/Ninja Release comparison profile and passed, but was
-not deployed or newly gameplay-tested. Inspect these outputs for the chosen configuration:
+With MGSV fully stopped, use CMake Tools in VS Code and build only `mgsv`. Use the repository's Clang debug profile for development; the structural cleanup was also checked with the existing approved MSVC/Ninja Release comparison profile. Build and offline-test success do not establish temporal visual stability. Inspect these outputs for the chosen configuration:
 
 - `build/Release/renodx-mgsv.addon64` (or the matching configuration directory)
 - `build/mgsv.include/embed/mgsv_taa.cso`

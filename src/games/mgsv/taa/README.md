@@ -247,6 +247,6 @@ or recurring capture/dispatch warnings remain actionable. There are no per-frame
 | `taa.hpp`, `settings.hpp` | Lifecycle, draw/insertion routing, preset-local controls and transitions |
 | `runtime/state.hpp`, `runtime/camera_state.hpp`, `runtime/projection_jitter.hpp` | Sample/reset state, canonical camera history/publication, validated native corrections |
 | `runtime/descriptor_tracker.hpp`, `runtime/input_capture.hpp`, `runtime/frame_inputs.hpp` | Per-list bindings, resource lifetime, validated game-native metadata |
-| `runtime/coordinator.hpp`, `runtime/d3d11_compute_state.hpp` | Submission/query ownership, shared immediate bridge, dispatch/copy-back, state restoration, coherent commit |
+| `runtime/coordinator.hpp`, `../rendering/d3d11_compute_state.hpp` | Submission/query ownership, shared immediate bridge, dispatch/copy-back, shared state restoration, coherent commit |
 | `analytical/runtime.hpp`, `shaders/` | Analytical history/resolve and native velocity replacements |
 | `fsr3/`, `dlss/` | Method lifecycle and linear color/motion/output adapters; AMD host/backend and NGX integration |
