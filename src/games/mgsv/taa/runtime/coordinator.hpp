@@ -19,11 +19,11 @@
 #include <detours.h>
 #include <wrl/client.h>
 
+#include "../../rendering/d3d11_compute_state.hpp"
 #include "../analytical/runtime.hpp"
 #include "../dlss/runtime.hpp"
 #include "../fsr3/runtime.hpp"
 #include "./camera_state.hpp"
-#include "./d3d11_compute_state.hpp"
 #include "./descriptor_tracker.hpp"
 #include "./input_capture.hpp"
 #include "./logging.hpp"
@@ -68,7 +68,6 @@ inline std::atomic<reshade::api::device*> submission_bridge_device = nullptr;
 inline std::atomic<uint32_t> execution_hook_calls_in_flight = 0u;
 inline std::atomic<bool> logged_immediate_dispatch = false;
 inline std::atomic<bool> submission_failure_pending = false;
-
 
 inline bool EnlistProcessThreads(std::vector<HANDLE>* handles) {
   const DWORD current_process = GetCurrentProcessId();
@@ -181,7 +180,7 @@ inline void ReleaseInactiveResources(
 }
 
 inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
-  const auto previous_compute_state = d3d11_compute_state::Capture(inputs.cmd_list);
+  const auto previous_compute_state = mgsv::rendering::d3d11_compute_state::Capture(inputs.cmd_list);
   inputs.cmd_list->barrier(
       inputs.velocity_resource,
       reshade::api::resource_usage::render_target,
@@ -224,7 +223,7 @@ inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
       inputs.velocity_resource,
       reshade::api::resource_usage::shader_resource,
       reshade::api::resource_usage::render_target);
-  d3d11_compute_state::Restore(inputs.cmd_list, previous_compute_state);
+  mgsv::rendering::d3d11_compute_state::Restore(inputs.cmd_list, previous_compute_state);
   if (!succeeded) return false;
 
   if (!camera_state::Commit(inputs.camera)) {
@@ -609,9 +608,9 @@ inline void MaybeRunLocked(
     }
     PendingTemporalDispatch pending = {
         .deferred_context = inputs.cmd_list,
-        .color_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.color_srv.handle),  // NOLINT(performance-no-int-to-ptr)
-        .velocity_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.velocity_srv.handle),  // NOLINT(performance-no-int-to-ptr)
-        .depth_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.depth_srv.handle),  // NOLINT(performance-no-int-to-ptr)
+        .color_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.color_srv.handle),                      // NOLINT(performance-no-int-to-ptr)
+        .velocity_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.velocity_srv.handle),                // NOLINT(performance-no-int-to-ptr)
+        .depth_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.depth_srv.handle),                      // NOLINT(performance-no-int-to-ptr)
         .object_velocity_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.object_velocity_srv.handle),  // NOLINT(performance-no-int-to-ptr)
         .inputs = inputs,
         .temporal_generation = state::frame_state.temporal_generation,

@@ -12,15 +12,30 @@
 #include <cstdint>
 
 #include <embed/shaders.h>
+#include <include/reshade.hpp>
 
-#include "../light_pass.hpp"
+#include "../../../utils/settings.hpp"
+#include "../rendering/light_pass.hpp"
+#include "../shared.h"
 
-namespace ao {
+namespace mgsv::ao {
+
+using rendering::DestroyLightPass;
+using rendering::DestroyLightTarget;
+using rendering::DispatchLightPass;
+using rendering::EnsureLightPass;
+using rendering::EnsureLightTarget;
+using rendering::GetFallbackUav;
+using rendering::GetFallbackView;
+using rendering::LightPass;
+using rendering::LightTarget;
+using rendering::LogLight;
+using rendering::LogLightOnce;
 
 inline float depth_mips_enabled = 0.f;
-inline LightPass pass;
+inline LightPass visibility_pass;
 inline LightPass resolve_pass;
-inline LightTarget target;
+inline LightTarget visibility_target;
 
 // The AO march's depth mip chain. Every level holds the nearest of the four texels
 // below it, so a distant step can fetch one texel that covers the footprint its
@@ -226,9 +241,9 @@ inline reshade::api::resource_view GetDepthMipView(reshade::api::command_list* c
   return GetFallbackView(cmd_list);
 }
 
-inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list) {
+inline void Apply(const rendering::LightFrame& frame, reshade::api::command_list* cmd_list,
+                  ShaderInjectData constants) {
   auto* device = cmd_list->get_device();
-  ShaderInjectData constants = shader_injection;
 
   // 0 = full, 1 = half, 2 = quarter: the AO factor and its resolve follow this.
   uint32_t ao_scale = 1u;
@@ -241,8 +256,8 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
   const uint32_t ao_width = (frame.width + ao_scale - 1u) / ao_scale;
   const uint32_t ao_height = (frame.height + ao_scale - 1u) / ao_scale;
 
-  if (EnsureLightTarget(device, &target, ao_width, ao_height)
-      && EnsureLightPass(device, &pass, "mgsv: AO pass created", __mgsv_ao, ao_width,
+  if (EnsureLightTarget(device, &visibility_target, ao_width, ao_height)
+      && EnsureLightPass(device, &visibility_pass, "mgsv: AO pass created", __mgsv_ao, ao_width,
                          ao_height)
       && EnsureLightPass(device, &resolve_pass, "mgsv: AO resolve created",
                          __mgsv_ao_resolve, frame.width, frame.height)) {
@@ -253,17 +268,17 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
     const std::array<reshade::api::resource_view, 7> sources = {
         frame.depth,                // t0
         frame.normal,               // t1
-        GetDepthMipView(cmd_list),  // t2, the addon's chain or the stand-in
+        GetDepthMipView(cmd_list),  // t2, the depth chain or placeholder
         GetFallbackView(cmd_list),  // t3, unused by the AO
         GetFallbackView(cmd_list),  // t4, unused by the AO
         GetFallbackView(cmd_list),  // t5, unused by the AO
         GetFallbackView(cmd_list),  // t6, unused by the AO
     };
-    DispatchLightPass(cmd_list, &pass, constants, sources, target.uav, scratch0, scratch1, scratch2,
+    DispatchLightPass(cmd_list, &visibility_pass, constants, sources, visibility_target.uav, scratch0, scratch1, scratch2,
                       ao_width, ao_height);
 
     const std::array<reshade::api::resource_view, 7> resolve_sources = {
-        target.view,                // t0
+        visibility_target.view,     // t0, calculated visibility
         frame.depth,                // t1, joint bilateral upsample
         GetFallbackView(cmd_list),  // t2, unused
         GetFallbackView(cmd_list),  // t3, unused
@@ -292,20 +307,20 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
 
 inline void Destroy(reshade::api::device* device) {
   DestroyDepthMipChain(device);
-  DestroyLightPass(device, &pass);
+  DestroyLightPass(device, &visibility_pass);
   DestroyLightPass(device, &resolve_pass);
-  DestroyLightTarget(device, &target);
+  DestroyLightTarget(device, &visibility_target);
 }
 
-inline bool settings_appended = false;
-
-inline void AppendSettings(renodx::utils::settings::Settings& settings) {
-  if (settings_appended) return;
-  settings_appended = true;
+// Passed shader storage must outlive the descriptors; assemble once per registry/storage pair.
+inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderInjectData* shader_injection) {
+  if (std::ranges::any_of(*registry, [](const auto* setting) {
+        return setting->key == "FxAmbientOcclusion";
+      })) return;
   renodx::utils::settings::Settings additions = {
       new renodx::utils::settings::Setting{
           .key = "FxAmbientOcclusion",
-          .binding = &shader_injection.ao_enabled,
+          .binding = &shader_injection->ao_enabled,
           .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
           .default_value = 1.f,
           .label = "Visibility-Bitmask Ambient Occlusion",
@@ -314,78 +329,78 @@ inline void AppendSettings(renodx::utils::settings::Settings& settings) {
       },
       new renodx::utils::settings::Setting{
           .key = "FxAmbientOcclusionStrength",
-          .binding = &shader_injection.ao_strength,
+          .binding = &shader_injection->ao_strength,
           .default_value = 100.f,
           .label = "AO Strength",
           .section = "Ambient Occlusion",
           .tooltip = "Controls how strongly the added shading darkens the scene. Values above 100 increase the darkening.",
           .max = 400.f,
           .parse = [](float value) { return value * 0.01f; },
-          .is_visible = [] { return shader_injection.ao_enabled != 0.f; },
+          .is_visible = [shader_injection] { return shader_injection->ao_enabled != 0.f; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxAmbientOcclusionSamplingRadius",
-          .binding = &shader_injection.ao_radius,
+          .binding = &shader_injection->ao_radius,
           .default_value = 70.f,
           .label = "AO Sampling Radius",
           .section = "Ambient Occlusion",
           .tooltip = "Controls how far around each pixel the effect searches for nearby surfaces. Higher values create broader shading.",
           .max = 100.f,
           .parse = [](float value) { return value * 0.01f; },
-          .is_visible = [] { return shader_injection.ao_enabled != 0.f; },
+          .is_visible = [shader_injection] { return shader_injection->ao_enabled != 0.f; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxAmbientOcclusionThicknessScale",
-          .binding = &shader_injection.ao_thickness,
+          .binding = &shader_injection->ao_thickness,
           .default_value = 800.f,
           .label = "AO Thickness Scale",
           .section = "Ambient Occlusion",
           .tooltip = "Controls how thick objects are assumed to be. Higher values block more light but can over-darken thin objects.",
           .max = 2000.f,
           .parse = [](float value) { return value * 0.01f; },
-          .is_visible = [] { return shader_injection.ao_enabled != 0.f; },
+          .is_visible = [shader_injection] { return shader_injection->ao_enabled != 0.f; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxAmbientOcclusionDepthFadeScale",
-          .binding = &shader_injection.ao_fade,
+          .binding = &shader_injection->ao_fade,
           .default_value = 100.f,
           .label = "AO Depth Fade Scale",
           .section = "Ambient Occlusion",
           .tooltip = "Controls how quickly the shading fades with depth. Higher values keep it visible farther from the camera.",
           .max = 100.f,
           .parse = [](float value) { return value * 0.01f; },
-          .is_visible = [] { return shader_injection.ao_enabled != 0.f; },
+          .is_visible = [shader_injection] { return shader_injection->ao_enabled != 0.f; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxAmbientOcclusionSliceCount",
-          .binding = &shader_injection.ao_slices,
+          .binding = &shader_injection->ao_slices,
           .default_value = 2.f,
           .label = "AO Slice Count",
           .section = "Ambient Occlusion (Advanced)",
           .tooltip = "Controls how many directions around each pixel are checked. Higher values improve coverage but cost more GPU time.",
           .max = 8.f,
-          .is_visible = [] { return shader_injection.ao_enabled != 0.f; },
+          .is_visible = [shader_injection] { return shader_injection->ao_enabled != 0.f; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxAmbientOcclusionSamplesPerSide",
-          .binding = &shader_injection.ao_steps,
+          .binding = &shader_injection->ao_steps,
           .default_value = 6.f,
           .label = "AO Samples per Side",
           .section = "Ambient Occlusion (Advanced)",
           .tooltip = "Controls how many depth samples are taken on each side of every slice. Higher values help find thin objects but cost more GPU time.",
           .max = 20.f,
-          .is_visible = [] { return shader_injection.ao_enabled != 0.f; },
+          .is_visible = [shader_injection] { return shader_injection->ao_enabled != 0.f; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxAmbientOcclusionResolution",
-          .binding = &shader_injection.ao_resolution,
+          .binding = &shader_injection->ao_resolution,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
           .default_value = 1.f,
           .label = "AO Resolution",
           .section = "Ambient Occlusion (Advanced)",
           .tooltip = "Sets the resolution used to calculate the shading. Lower resolutions are faster but can lose detail.",
           .labels = {"Full", "Half", "Quarter"},
-          .is_visible = [] { return shader_injection.ao_enabled != 0.f; },
+          .is_visible = [shader_injection] { return shader_injection->ao_enabled != 0.f; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxAmbientOcclusionDepthMipSampling",
@@ -395,10 +410,13 @@ inline void AppendSettings(renodx::utils::settings::Settings& settings) {
           .label = "AO Depth Mip Sampling",
           .section = "Ambient Occlusion (Advanced)",
           .tooltip = "Uses lower-resolution depth for distant samples to help catch objects between sampling steps.",
-          .is_visible = [] { return shader_injection.ao_enabled != 0.f; },
+          .is_visible = [shader_injection] { return shader_injection->ao_enabled != 0.f; },
       },
   };
-  InsertSettingsBeforeSection(settings, "Options", additions);
+  registry->insert(std::ranges::find_if(*registry, [](const auto* setting) {
+                     return setting->section == "Options";
+                   }),
+                   additions.begin(), additions.end());
 }
 
-}  // namespace ao
+}  // namespace mgsv::ao

@@ -434,7 +434,7 @@ inline bool GetPublishedJitterForViewport(
 
 inline void ApplyPublishedJitterToActiveProjection(
     const uint8_t* viewport,
-  state::ProjectionJitterPath jitter_path) {
+    state::ProjectionJitterPath jitter_path) {
   // No execution gate here: native callbacks may run under it already. The
   // writer lock excludes reset, camera replacement, scale changes and the
   // camera+sample commit; no native calls or logging occur while it is held.
@@ -892,8 +892,170 @@ inline bool InitializeNativeDiagnosticAddresses(HMODULE module) {
   // All checked RVAs (including the four-entry table) are below SizeOfImage.
   // Exact prologues include RIP displacements: other EXE builds fail closed.
   if (!MatchesBytes(base + 0x30AC50u, std::array<uint8_t, 16>{
-                                          0x48, 0x89, 0x5C, 0x24, 0x08, 0x44, 0x89, 0x4C, 0x24, 0x20, 0x44, 0x89, 0x44, 0x24, 0x18, 0x48})
-      || !MatchesBytes(base + 0x30B680u, std::array<uint8_t, 16>{0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x10, 0x48, 0x89, 0x70, 0x18, 0x48, 0x89, 0x78, 0x20, 0x55}) || !MatchesBytes(base + 0x27EF80u, std::array<uint8_t, 16>{0x48, 0x89, 0x5C, 0x24, 0x08, 0x55, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x81, 0xEC, 0x80}) || !MatchesBytes(base + 0x275280u, std::array<uint8_t, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x81, 0xEC}) || !MatchesBytes(base + 0x2A4C00u, LOCAL_LIGHT_MAIN_EXEC_PROLOGUE) || !MatchesBytes(base + 0x2D18D0u, std::array<uint8_t, 16>{0x40, 0x57, 0x48, 0x83, 0xEC, 0x30, 0x48, 0xC7, 0x44, 0x24, 0x20, 0xFE, 0xFF, 0xFF, 0xFF, 0x48}) || !MatchesBytes(base + 0x2D3380u, std::array<uint8_t, 16>{0x40, 0x57, 0x48, 0x83, 0xEC, 0x30, 0x48, 0xC7, 0x44, 0x24, 0x20, 0xFE, 0xFF, 0xFF, 0xFF, 0x48}) || !MatchesBytes(base + 0x2E7330u, std::array<uint8_t, 16>{0x4C, 0x8B, 0xDC, 0x48, 0x81, 0xEC, 0xA8, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x05, 0xEF, 0x1F, 0x86}) || !MatchesBytes(base + 0x2E4C70u, std::array<uint8_t, 16>{0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x10, 0x57, 0x48, 0x81, 0xEC, 0xC0, 0x00, 0x00, 0x00, 0x0F}) || !MatchesBytes(base + 0x2D7AA0u, std::array<uint8_t, 16>{0x48, 0x81, 0xEC, 0x88, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x05, 0x82, 0x18, 0x87, 0x02, 0x48, 0x33}) || DecodeRelativeCall(base + 0x30B078u) != base + 0x30B680u || DecodeRelativeCall(base + 0x1F2524u) != base + 0x27EF80u || DecodeRelativeCall(base + 0x2755C5u) != base + 0x2D18D0u || DecodeRelativeCall(base + 0x2A533Du) != base + 0x2D3380u || DecodeRelativeCall(base + 0x2E747Fu) != base + 0x2D7AA0u || DecodeRelativeCall(base + 0x2E4DD2u) != base + 0x2D7AA0u || std::memcmp(base + 0x21102B8u, SH_VERTEX_COUNTS.data(), sizeof(SH_VERTEX_COUNTS)) != 0) return false;
+                                          0x48,
+                                          0x89,
+                                          0x5C,
+                                          0x24,
+                                          0x08,
+                                          0x44,
+                                          0x89,
+                                          0x4C,
+                                          0x24,
+                                          0x20,
+                                          0x44,
+                                          0x89,
+                                          0x44,
+                                          0x24,
+                                          0x18,
+                                          0x48,
+                                      })
+      || !MatchesBytes(base + 0x30B680u, std::array<uint8_t, 16>{
+                                             0x48,
+                                             0x8B,
+                                             0xC4,
+                                             0x48,
+                                             0x89,
+                                             0x58,
+                                             0x10,
+                                             0x48,
+                                             0x89,
+                                             0x70,
+                                             0x18,
+                                             0x48,
+                                             0x89,
+                                             0x78,
+                                             0x20,
+                                             0x55,
+                                         })
+      || !MatchesBytes(base + 0x27EF80u, std::array<uint8_t, 16>{
+                                             0x48,
+                                             0x89,
+                                             0x5C,
+                                             0x24,
+                                             0x08,
+                                             0x55,
+                                             0x56,
+                                             0x57,
+                                             0x41,
+                                             0x56,
+                                             0x41,
+                                             0x57,
+                                             0x48,
+                                             0x81,
+                                             0xEC,
+                                             0x80,
+                                         })
+      || !MatchesBytes(base + 0x275280u, std::array<uint8_t, 16>{
+                                             0x40,
+                                             0x53,
+                                             0x55,
+                                             0x56,
+                                             0x57,
+                                             0x41,
+                                             0x54,
+                                             0x41,
+                                             0x55,
+                                             0x41,
+                                             0x56,
+                                             0x41,
+                                             0x57,
+                                             0x48,
+                                             0x81,
+                                             0xEC,
+                                         })
+      || !MatchesBytes(base + 0x2A4C00u, LOCAL_LIGHT_MAIN_EXEC_PROLOGUE) || !MatchesBytes(base + 0x2D18D0u, std::array<uint8_t, 16>{
+                                                                                                                0x40,
+                                                                                                                0x57,
+                                                                                                                0x48,
+                                                                                                                0x83,
+                                                                                                                0xEC,
+                                                                                                                0x30,
+                                                                                                                0x48,
+                                                                                                                0xC7,
+                                                                                                                0x44,
+                                                                                                                0x24,
+                                                                                                                0x20,
+                                                                                                                0xFE,
+                                                                                                                0xFF,
+                                                                                                                0xFF,
+                                                                                                                0xFF,
+                                                                                                                0x48,
+                                                                                                            })
+      || !MatchesBytes(base + 0x2D3380u, std::array<uint8_t, 16>{
+                                             0x40,
+                                             0x57,
+                                             0x48,
+                                             0x83,
+                                             0xEC,
+                                             0x30,
+                                             0x48,
+                                             0xC7,
+                                             0x44,
+                                             0x24,
+                                             0x20,
+                                             0xFE,
+                                             0xFF,
+                                             0xFF,
+                                             0xFF,
+                                             0x48,
+                                         })
+      || !MatchesBytes(base + 0x2E7330u, std::array<uint8_t, 16>{
+                                             0x4C,
+                                             0x8B,
+                                             0xDC,
+                                             0x48,
+                                             0x81,
+                                             0xEC,
+                                             0xA8,
+                                             0x00,
+                                             0x00,
+                                             0x00,
+                                             0x48,
+                                             0x8B,
+                                             0x05,
+                                             0xEF,
+                                             0x1F,
+                                             0x86,
+                                         })
+      || !MatchesBytes(base + 0x2E4C70u, std::array<uint8_t, 16>{
+                                             0x48,
+                                             0x8B,
+                                             0xC4,
+                                             0x48,
+                                             0x89,
+                                             0x58,
+                                             0x10,
+                                             0x57,
+                                             0x48,
+                                             0x81,
+                                             0xEC,
+                                             0xC0,
+                                             0x00,
+                                             0x00,
+                                             0x00,
+                                             0x0F,
+                                         })
+      || !MatchesBytes(base + 0x2D7AA0u, std::array<uint8_t, 16>{
+                                             0x48,
+                                             0x81,
+                                             0xEC,
+                                             0x88,
+                                             0x00,
+                                             0x00,
+                                             0x00,
+                                             0x48,
+                                             0x8B,
+                                             0x05,
+                                             0x82,
+                                             0x18,
+                                             0x87,
+                                             0x02,
+                                             0x48,
+                                             0x33,
+                                         })
+      || DecodeRelativeCall(base + 0x30B078u) != base + 0x30B680u || DecodeRelativeCall(base + 0x1F2524u) != base + 0x27EF80u || DecodeRelativeCall(base + 0x2755C5u) != base + 0x2D18D0u || DecodeRelativeCall(base + 0x2A533Du) != base + 0x2D3380u || DecodeRelativeCall(base + 0x2E747Fu) != base + 0x2D7AA0u || DecodeRelativeCall(base + 0x2E4DD2u) != base + 0x2D7AA0u || std::memcmp(base + 0x21102B8u, SH_VERTEX_COUNTS.data(), sizeof(SH_VERTEX_COUNTS)) != 0) {
+    return false;
+  }
   native_base = base;
   sun_pass = reinterpret_cast<SunPass>(base + 0x30AC50u);
   sun_volume = reinterpret_cast<SunVolume>(base + 0x30B680u);

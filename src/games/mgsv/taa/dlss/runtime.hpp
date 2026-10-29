@@ -833,7 +833,6 @@ inline bool Dispatch(const ValidatedFrameInputs& inputs, MethodOutput& output) {
     return false;
   }
 
-  
   const bool compatible = inputs.color_format == reshade::api::format::r16g16b16a16_float
                           && (inputs.depth_format == reshade::api::format::r32_float
                               || inputs.depth_format == reshade::api::format::r32_float_x8_uint);
