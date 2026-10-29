@@ -33,16 +33,17 @@ inline bool history_valid = false;
 
 inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list) {
   auto* device = cmd_list->get_device();
+    ShaderInjectData constants = shader_injection;
 
   // The gather samples the light the retail scatter pass itself reads. No copy: additive
   // mode only adds, so it never needs a matching pre-AO snapshot to compare against.
   const auto light_source = frame.light_source;
 
   // 0 = full, 1 = half, 2 = quarter: the gather, history, moments and a-trous all follow.
-  const uint32_t scale = shader_injection.il_resolution > 1.5f
+    const uint32_t scale = constants.il_resolution > 1.5f
                              ? 4u
-                             : (shader_injection.il_resolution > 0.5f ? 2u : 1u);
-  shader_injection.il_scale = static_cast<float>(scale);
+                             : (constants.il_resolution > 0.5f ? 2u : 1u);
+  constants.il_scale = static_cast<float>(scale);
   const uint32_t width = (frame.width + scale - 1u) / scale;
   const uint32_t height = (frame.height + scale - 1u) / scale;
 
@@ -80,7 +81,7 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
         GetFallbackView(cmd_list),   // t5, unused
         GetFallbackView(cmd_list),   // t6, unused
     };
-    DispatchLightPass(cmd_list, &pass, gather_sources, bounce_target.uav,
+    DispatchLightPass(cmd_list, &pass, constants, gather_sources, bounce_target.uav,
                       filtered_target.uav, accumulated_target.uav,
                       moments_targets[history_index].uav, width, height);
 
@@ -88,7 +89,7 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
     // TAA capture, which is backend-independent and already written by this point in the
     // frame; when it is missing (reconstruction off) the blend collapses to zero.
     const auto velocity_view = taa::input_capture::resources.velocity_srv;
-    shader_injection.il_history_valid = history_valid && velocity_view.handle != 0 ? 1.f : 0.f;
+    constants.il_history_valid = history_valid && velocity_view.handle != 0 ? 1.f : 0.f;
     const std::array<reshade::api::resource_view, 7> accumulate_sources = {
         bounce_target.view,                      // t0
         history_targets[history_index].view,     // t1
@@ -99,7 +100,7 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
         moments_targets[history_index].view,     // t6
     };
     const uint32_t write_index = history_index ^ 1u;
-    DispatchLightPass(cmd_list, &accumulate_pass, accumulate_sources,
+    DispatchLightPass(cmd_list, &accumulate_pass, constants, accumulate_sources,
                       history_targets[write_index].uav, accumulated_target.uav,
                       history_aux_targets[write_index].uav,
                       moments_targets[write_index].uav, width, height);
@@ -109,7 +110,7 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
     // A-trous: stride 1, 2, 4 per iteration. The targets alternate so no dispatch reads what
     // it writes, and bounce_target stays the gather.
     const uint32_t filter_passes =
-        static_cast<uint32_t>(std::clamp(shader_injection.il_filter_radius, 1.f, 3.f));
+        static_cast<uint32_t>(std::clamp(constants.il_filter_radius, 1.f, 3.f));
     reshade::api::resource_view filter_input = accumulated_target.view;
     for (uint32_t step = 0; step < filter_passes; ++step) {
       const auto filter_output = (step % 2) == 0 ? filtered_target.uav : accumulated_target.uav;
@@ -122,13 +123,13 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
           GetFallbackView(cmd_list),                 // t5, unused
           GetFallbackView(cmd_list),                 // t6, unused
       };
-      shader_injection.il_filter_step = static_cast<float>(step);
-      DispatchLightPass(cmd_list, &composite_pass, filter_sources, filter_output,
+    constants.il_filter_step = static_cast<float>(step);
+    DispatchLightPass(cmd_list, &composite_pass, constants, filter_sources, filter_output,
                         bounce_target.uav, history_aux_targets[history_index].uav,
                         history_targets[history_index].uav, width, height);
       filter_input = (step % 2) == 0 ? filtered_target.view : accumulated_target.view;
     }
-    shader_injection.il_filter_step = 0.f;
+    constants.il_filter_step = 0.f;
 
     // An even pass count ends in the accumulate target, so the resolve follows whichever
     // target holds the last iteration instead of assuming it is filtered_target.
@@ -145,7 +146,7 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
         GetFallbackView(cmd_list), // t5, unused
         GetFallbackView(cmd_list), // t6, unused
     };
-    DispatchLightPass(cmd_list, &add_pass, add_sources, frame.light,
+    DispatchLightPass(cmd_list, &add_pass, constants, add_sources, frame.light,
                       accumulated_target.uav, bounce_target.uav,
                       moments_targets[history_index].uav, frame.width, frame.height);
   }

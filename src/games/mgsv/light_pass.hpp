@@ -281,6 +281,7 @@ inline reshade::api::resource_view GetFallbackUav(reshade::api::command_list* cm
 // Bind every input and output for this pass. ApplyLightPasses restores game state
 // after the complete lighting chain, not between individual dispatches.
 inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* pass,
+                              const ShaderInjectData& constants,
                               const std::array<reshade::api::resource_view, 7>& sources,
                               reshade::api::resource_view target,
                               reshade::api::resource_view second_target,
@@ -308,7 +309,7 @@ inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* p
        .descriptors = sources.data()});
   cmd_list->push_constants(
       reshade::api::shader_stage::all_compute, light_pass_layout, 2u, 0u,
-      static_cast<uint32_t>(sizeof(shader_injection) / sizeof(uint32_t)), &shader_injection);
+      static_cast<uint32_t>(sizeof(constants) / sizeof(uint32_t)), &constants);
   cmd_list->dispatch((width + 7u) / 8u, (height + 7u) / 8u, 1u);
 }
 

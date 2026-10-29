@@ -162,19 +162,18 @@ inline bool EnsureDepthMipChain(reshade::api::device* device, uint32_t width, ui
 
 // Builds the chain immediately before the AO dispatch, from the depth the AO is about to read.
 inline bool BuildDepthMips(reshade::api::command_list* cmd_list, reshade::api::resource_view depth_view) {
-  shader_injection.ao_depth_mips = 0.f;
-  if (shader_injection.ao_enabled == 0.f || depth_mips_enabled == 0.f) return true;
+  if (depth_mips_enabled == 0.f) return false;
 
   auto* device = cmd_list->get_device();
-  if (depth_view.handle == 0) return true;
+  if (depth_view.handle == 0) return false;
 
   const auto depth_desc = device->get_resource_desc(device->get_resource_from_view(depth_view));
-  if (depth_desc.type != reshade::api::resource_type::texture_2d) return true;
+  if (depth_desc.type != reshade::api::resource_type::texture_2d) return false;
   const uint32_t width = depth_desc.texture.width;
   const uint32_t height = depth_desc.texture.height;
-  if (width < 2u || height < 2u) return true;
+  if (width < 2u || height < 2u) return false;
 
-  if (!EnsureDepthMipChain(device, width, height)) return true;
+  if (!EnsureDepthMipChain(device, width, height)) return false;
 
   cmd_list->bind_pipeline(reshade::api::pipeline_stage::all_compute, depth_mip_chain.pipeline);
   for (uint32_t level = 0; level < kDepthMipLevels; ++level) {
@@ -205,7 +204,6 @@ inline bool BuildDepthMips(reshade::api::command_list* cmd_list, reshade::api::r
     cmd_list->dispatch((level_width + 7u) / 8u, (level_height + 7u) / 8u, 1u);
   }
 
-  shader_injection.ao_depth_mips = 1.f;
   return true;
 }
 
@@ -216,12 +214,13 @@ inline reshade::api::resource_view GetDepthMipView(reshade::api::command_list* c
 
 inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list) {
   auto* device = cmd_list->get_device();
+  ShaderInjectData constants = shader_injection;
 
   // 0 = full, 1 = half, 2 = quarter: the AO factor and its resolve follow this.
-  const uint32_t ao_scale = shader_injection.ao_resolution > 1.5f
+  const uint32_t ao_scale = constants.ao_resolution > 1.5f
                                 ? 4u
-                                : (shader_injection.ao_resolution > 0.5f ? 2u : 1u);
-  shader_injection.ao_scale = static_cast<float>(ao_scale);
+                                : (constants.ao_resolution > 0.5f ? 2u : 1u);
+  constants.ao_scale = static_cast<float>(ao_scale);
   const uint32_t ao_width = (frame.width + ao_scale - 1u) / ao_scale;
   const uint32_t ao_height = (frame.height + ao_scale - 1u) / ao_scale;
 
@@ -230,7 +229,7 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
                          ao_height)
       && EnsureLightPass(device, &resolve_pass, "mgsv: AO resolve created",
                          __mgsv_ao_resolve, frame.width, frame.height)) {
-    BuildDepthMips(cmd_list, frame.depth);
+    constants.ao_depth_mips = BuildDepthMips(cmd_list, frame.depth) ? 1.f : 0.f;
     const auto scratch0 = GetFallbackUav(cmd_list, 0);
     const auto scratch1 = GetFallbackUav(cmd_list, 1);
     const auto scratch2 = GetFallbackUav(cmd_list, 2);
@@ -243,7 +242,7 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
         GetFallbackView(cmd_list),   // t5, unused by the AO
         GetFallbackView(cmd_list),   // t6, unused by the AO
     };
-    DispatchLightPass(cmd_list, &pass, sources, target.uav, scratch0, scratch1, scratch2,
+    DispatchLightPass(cmd_list, &pass, constants, sources, target.uav, scratch0, scratch1, scratch2,
                       ao_width, ao_height);
 
     const std::array<reshade::api::resource_view, 7> resolve_sources = {
@@ -255,7 +254,7 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
         GetFallbackView(cmd_list),   // t5, unused
         GetFallbackView(cmd_list),   // t6, unused
     };
-    DispatchLightPass(cmd_list, &resolve_pass, resolve_sources, frame.light, scratch0, scratch1,
+    DispatchLightPass(cmd_list, &resolve_pass, constants, resolve_sources, frame.light, scratch0, scratch1,
                       scratch2, frame.width, frame.height);
   }
 }
