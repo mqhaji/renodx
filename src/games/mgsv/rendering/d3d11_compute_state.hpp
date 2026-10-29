@@ -1,6 +1,6 @@
 #pragma once
 
-/* D3D11 compute-state preservation shared by temporal reconstruction methods. */
+// Compute and affected graphics-state preservation for reconstruction and added lighting.
 
 #include <array>
 #include <cstdint>
@@ -12,9 +12,9 @@
 
 #include <include/reshade.hpp>
 
-#include "../../../../utils/state.hpp"
+#include "../../../utils/state.hpp"
 
-namespace taa::d3d11_compute_state {
+namespace mgsv::rendering::d3d11_compute_state {
 
 struct State {
   std::array<std::pair<reshade::api::pipeline_stage, reshade::api::pipeline>, 4> pipelines = {};
@@ -51,6 +51,8 @@ struct State {
   bool native_descriptors_captured = false;
 };
 
+// Also unbinds output-merger targets so compute outputs can be bound safely.
+// Restore must follow the added work, including when that work is skipped after capture.
 inline State Capture(reshade::api::command_list* cmd_list) {
   State result = {};
   const auto* tracked_state = renodx::utils::state::GetCurrentState(cmd_list);
@@ -100,7 +102,7 @@ inline State Capture(reshade::api::command_list* cmd_list) {
       static_cast<UINT>(unordered_access_views.size()),
       unordered_access_views.data());
   context->CSGetConstantBuffers(0u, static_cast<UINT>(constant_buffers.size()), constant_buffers.data());
-  // Preserve graphics bindings that temporal compute work can displace.
+  // Preserve graphics bindings that compute outputs can displace.
   context->OMGetRenderTargets(
       static_cast<UINT>(render_targets.size()),
       render_targets.data(),
@@ -283,4 +285,4 @@ inline void Restore(reshade::api::command_list* cmd_list, const State& state) {
   context->OMSetDepthStencilState(state.depth_stencil_state.Get(), state.stencil_reference);
 }
 
-}  // namespace taa::d3d11_compute_state
+}  // namespace mgsv::rendering::d3d11_compute_state

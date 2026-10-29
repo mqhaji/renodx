@@ -1,6 +1,6 @@
 # MGSV subsurface scatter and ambient occlusion - findings
 
-Status: the two compute passes at `0x6DAF0C4A` / `0xB2601810` are the game's screen-space **subsurface-scattering** chain, not ambient occlusion. Both shaders remain unchanged. The addon calculates AO separately after them, then darkens the light buffer.
+Status: the two compute passes at `0x6DAF0C4A` / `0xB2601810` are the game's screen-space **subsurface-scattering** chain, not ambient occlusion. The first is registered with its compiled port; the second has a callback-only entry. The addon calculates AO separately after them, then darkens the light buffer.
 
 Source: Therrien, Levesque and Gilet, *Screen Space Indirect Lighting with Visibility Bitmask*, The Visual Computer 2023, Algorithm 1, equations 1-4.
 
@@ -10,12 +10,13 @@ Code:
 |---|---|
 | `src/games/mgsv/ao/mgsv_ao.cs_5_0.hlsl` | calculates AO in a separate texture |
 | `src/games/mgsv/ao/mgsv_ao_resolve.cs_5_0.hlsl` | upsamples AO and applies it to the light buffer |
-| `src/games/mgsv/ao/0x6DAF0C4A.cs_5_0.hlsl` | 1:1 port of the scatter chain, horizontal - reference only |
-| `src/games/mgsv/ao/0xB2601810.cs_5_0.hlsl` | 1:1 port of the scatter chain, vertical + translucency blend - reference only |
+| `src/games/mgsv/ao/0x6DAF0C4A.cs_5_0.hlsl` | horizontal scatter port, included in generated replacements |
+| `src/games/mgsv/ao/0xB2601810.cs_5_0.hlsl` | vertical scatter port; explicit callback-only registration takes precedence in the tested build |
 | `src/games/mgsv/ao/ssss.hlsli` | the shared core of those two ports |
-| `src/games/mgsv/addon.cpp` | the hook and the AO dispatch |
+| `src/games/mgsv/game/integration.hpp` | material capture and the lighting hook |
+| `src/games/mgsv/game/shaders.hpp` | explicit and generated shader registrations |
 
-The two ports are not registered by the addon. They exist to be loaded through DevKit live shaders and compared against retail.
+Both ports are compiled into the generated shader set. The effective first-stage entry supplies replacement code, while the explicit second-stage entry is callback-only. Older notes describing both ports as unregistered reference files were inaccurate; the structural cleanup does not change the registrations to match those notes.
 
 ## The scatter chain
 

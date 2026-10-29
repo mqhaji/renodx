@@ -306,14 +306,14 @@ inline std::array<float, 2> JitterForSample(uint32_t sample_index, uint32_t widt
       // Native-resolution TAA uses ceil(8 * 1^2) = 8 phases. Skip Halton index
       // zero because it is the unit-square origin rather than a distributed tap.
       const uint32_t halton_index = (sample_index % HALTON_SEQUENCE_LENGTH) + 1u;
-        std::array<float, 2> result = {
+      std::array<float, 2> result = {
           halton_sample(halton_index, 2u) - 0.5f,
           halton_sample(halton_index, 3u) - 0.5f,
       };
-        // Matrix patching converts UV jitter to projection space by multiplying by two.
-        result[0] /= static_cast<float>(width);
-        result[1] /= static_cast<float>(height);
-        return result;
+      // Matrix patching converts UV jitter to projection space by multiplying by two.
+      result[0] /= static_cast<float>(width);
+      result[1] /= static_cast<float>(height);
+      return result;
     }
   }
 }

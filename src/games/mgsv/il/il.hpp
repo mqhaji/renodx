@@ -12,14 +12,29 @@
 #include <cstdint>
 
 #include <embed/shaders.h>
+#include <include/reshade.hpp>
 
-#include "../light_pass.hpp"
-#include "../taa/runtime/input_capture.hpp"
+#include "../../../utils/settings.hpp"
+#include "../rendering/light_pass.hpp"
+#include "../shared.h"
 
-namespace il {
+namespace mgsv::il {
 
-inline LightPass pass;
-inline LightPass composite_pass;
+using rendering::DestroyLightPass;
+using rendering::DestroyLightTarget;
+using rendering::DispatchLightPass;
+using rendering::EnsureFallbackViews;
+using rendering::EnsureLightPass;
+using rendering::EnsureLightTarget;
+using rendering::GetFallbackUav;
+using rendering::GetFallbackView;
+using rendering::LightPass;
+using rendering::LightTarget;
+using rendering::LogLight;
+using rendering::LogLightOnce;
+
+inline LightPass gather_pass;
+inline LightPass denoise_pass;
 inline LightPass add_pass;
 inline LightPass accumulate_pass;
 
@@ -35,9 +50,9 @@ inline uint32_t history_width = 0;
 inline uint32_t history_height = 0;
 inline bool history_valid = false;
 
-inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list) {
+inline void Apply(const rendering::LightFrame& frame, reshade::api::command_list* cmd_list,
+                  ShaderInjectData constants, reshade::api::resource_view velocity_view) {
   auto* device = cmd_list->get_device();
-  ShaderInjectData constants = shader_injection;
 
   const auto light_source = frame.light_source;
 
@@ -72,8 +87,8 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
       && EnsureLightTarget(device, &moments_targets[1], width, height,
                            reshade::api::format::r16g16_float)
       && EnsureLightTarget(device, &accumulated_target, width, height)
-      && EnsureLightPass(device, &pass, "mgsv: IL pass created", __mgsv_il, width, height)
-      && EnsureLightPass(device, &composite_pass, "mgsv: IL composite created",
+      && EnsureLightPass(device, &gather_pass, "mgsv: IL pass created", __mgsv_il, width, height)
+      && EnsureLightPass(device, &denoise_pass, "mgsv: IL composite created",
                          __mgsv_il_composite, width, height)
       && EnsureLightPass(device, &add_pass, "mgsv: IL add created",
                          __mgsv_il_add, frame.width, frame.height)
@@ -93,12 +108,11 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
         GetFallbackView(cmd_list),  // t5, unused
         GetFallbackView(cmd_list),  // t6, unused
     };
-    DispatchLightPass(cmd_list, &pass, constants, gather_sources, bounce_target.uav,
+    DispatchLightPass(cmd_list, &gather_pass, constants, gather_sources, bounce_target.uav,
                       fallback_uav0, fallback_uav1, fallback_uav2, width, height);
 
-    // Reuse the velocity view captured for temporal reconstruction. A missing view sets
-    // the history blend weight to zero; this check does not verify which frame the view belongs to.
-    const auto velocity_view = taa::input_capture::resources.velocity_srv;
+    // A missing velocity view sets the history blend weight to zero. This does not verify
+    // which frame the view belongs to or prevent all history reads in the shader.
     if (velocity_view.handle == 0u) {
       static std::atomic_flag reported = {};
       LogLightOnce(&reported, reshade::log::level::warning,
@@ -139,7 +153,7 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
           GetFallbackView(cmd_list),            // t6, unused
       };
       constants.il_filter_step = static_cast<float>(step);
-      DispatchLightPass(cmd_list, &composite_pass, constants, filter_sources, filter_output,
+      DispatchLightPass(cmd_list, &denoise_pass, constants, filter_sources, filter_output,
                         fallback_uav0, fallback_uav1, fallback_uav2, width, height);
       filter_input = (step % 2) == 0 ? filtered_target.view : accumulated_target.view;
     }
@@ -176,8 +190,8 @@ inline void Apply(const LightFrame& frame, reshade::api::command_list* cmd_list)
 }
 
 inline void Destroy(reshade::api::device* device) {
-  DestroyLightPass(device, &pass);
-  DestroyLightPass(device, &composite_pass);
+  DestroyLightPass(device, &gather_pass);
+  DestroyLightPass(device, &denoise_pass);
   DestroyLightPass(device, &add_pass);
   DestroyLightPass(device, &accumulate_pass);
   DestroyLightTarget(device, &bounce_target);
@@ -192,15 +206,15 @@ inline void Destroy(reshade::api::device* device) {
   history_valid = false;
 }
 
-inline bool settings_appended = false;
-
-inline void AppendSettings(renodx::utils::settings::Settings& settings) {
-  if (settings_appended) return;
-  settings_appended = true;
+// Passed shader storage must outlive the descriptors; assemble once per registry/storage pair.
+inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderInjectData* shader_injection) {
+  if (std::ranges::any_of(*registry, [](const auto* setting) {
+        return setting->key == "FxIndirectLighting";
+      })) return;
   renodx::utils::settings::Settings additions = {
       new renodx::utils::settings::Setting{
           .key = "FxIndirectLighting",
-          .binding = &shader_injection.il_enabled,
+          .binding = &shader_injection->il_enabled,
           .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
           .default_value = 1.f,
           .label = "Screen-Space Indirect Lighting",
@@ -209,84 +223,84 @@ inline void AppendSettings(renodx::utils::settings::Settings& settings) {
       },
       new renodx::utils::settings::Setting{
           .key = "FxIndirectLightingStrength",
-          .binding = &shader_injection.il_amount,
+          .binding = &shader_injection->il_amount,
           .default_value = 80.f,
           .label = "Indirect Lighting Strength",
           .section = "Indirect Lighting",
           .tooltip = "Controls how much bounced light is added to the scene.",
           .max = 200.f,
           .parse = [](float value) { return value * 0.01f; },
-          .is_visible = [] { return shader_injection.il_enabled != 0.f; },
+          .is_visible = [shader_injection] { return shader_injection->il_enabled != 0.f; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxIndirectLightingSamplingRadius",
-          .binding = &shader_injection.il_radius,
+          .binding = &shader_injection->il_radius,
           .default_value = 80.f,
           .label = "Indirect Lighting Sampling Radius",
           .section = "Indirect Lighting",
           .tooltip = "Controls how far the effect searches for surfaces contributing light, as a percentage of screen height.",
           .max = 100.f,
           .parse = [](float value) { return value * 0.01f; },
-          .is_visible = [] { return shader_injection.il_enabled != 0.f; },
+          .is_visible = [shader_injection] { return shader_injection->il_enabled != 0.f; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxIndirectLightingSampleCount",
-          .binding = &shader_injection.il_samples,
+          .binding = &shader_injection->il_samples,
           .default_value = 8.f,
           .label = "Indirect Lighting Sample Count",
           .section = "Indirect Lighting (Advanced)",
           .tooltip = "Controls how many nearby samples are checked per pixel. Higher values can reduce noise but cost more GPU time.",
           .min = 2.f,
           .max = 16.f,
-          .is_visible = [] { return shader_injection.il_enabled != 0.f; },
+          .is_visible = [shader_injection] { return shader_injection->il_enabled != 0.f; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxIndirectLightingResolution",
-          .binding = &shader_injection.il_resolution,
+          .binding = &shader_injection->il_resolution,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
           .default_value = 2.f,
           .label = "Indirect Lighting Resolution",
           .section = "Indirect Lighting (Advanced)",
           .tooltip = "Sets the resolution used to calculate and smooth bounced light. Lower resolutions are faster but can lose detail.",
           .labels = {"Full", "Half", "Quarter"},
-          .is_visible = [] { return shader_injection.il_enabled != 0.f; },
+          .is_visible = [shader_injection] { return shader_injection->il_enabled != 0.f; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxIndirectLightingDenoiseIterations",
-          .binding = &shader_injection.il_filter_radius,
+          .binding = &shader_injection->il_filter_radius,
           .default_value = 3.f,
           .label = "Indirect Lighting Denoise Iterations",
           .section = "Indirect Lighting (Advanced)",
           .tooltip = "Controls how many smoothing passes are applied. More passes reduce noise but can soften detail and cost more GPU time.",
           .min = 1.f,
           .max = 3.f,
-          .is_visible = [] { return shader_injection.il_enabled != 0.f; },
+          .is_visible = [shader_injection] { return shader_injection->il_enabled != 0.f; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxIndirectLightingHistoryWeight",
-          .binding = &shader_injection.il_history_blend,
+          .binding = &shader_injection->il_history_blend,
           .default_value = 90.f,
           .label = "Indirect Lighting History Weight",
           .section = "Indirect Lighting (Advanced)",
           .tooltip = "Limits how much previous frames contribute when history is usable. Higher values can reduce noise but leave longer trails.",
           .max = 95.f,
           .parse = [](float value) { return value * 0.01f; },
-          .is_visible = [] { return shader_injection.il_enabled != 0.f; },
+          .is_visible = [shader_injection] { return shader_injection->il_enabled != 0.f; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxIndirectLightingDebugView",
-          .binding = &shader_injection.il_debug,
+          .binding = &shader_injection->il_debug,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
           .default_value = 0.f,
           .label = "Indirect Lighting Debug View",
           .section = "Indirect Lighting (Advanced)",
           .tooltip = "Replaces the normal lighting output with a view used to inspect the effect.",
           .labels = {"Off", "Indirect Lighting Only", "History Difference", "History Length", "Reprojection Diagnostics", "Relative Variance"},
-          .is_visible = [] { return shader_injection.il_enabled != 0.f; },
+          .is_visible = [shader_injection] { return shader_injection->il_enabled != 0.f; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxIndirectLightingMinimumValidSamples",
-          .binding = &shader_injection.il_min_samples,
+          .binding = &shader_injection->il_min_samples,
           .default_value = 1.f,
           .label = "Indirect Lighting Minimum Valid Samples",
           .section = "Indirect Lighting (Advanced)",
@@ -298,7 +312,10 @@ inline void AppendSettings(renodx::utils::settings::Settings& settings) {
           .is_visible = [] { return false; },
       },
   };
-  InsertSettingsBeforeSection(settings, "Options", additions);
+  registry->insert(std::ranges::find_if(*registry, [](const auto* setting) {
+                     return setting->section == "Options";
+                   }),
+                   additions.begin(), additions.end());
 }
 
-}  // namespace il
+}  // namespace mgsv::il
