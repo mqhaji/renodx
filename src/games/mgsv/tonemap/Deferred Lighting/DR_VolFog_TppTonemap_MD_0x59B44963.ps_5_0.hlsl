@@ -105,8 +105,13 @@ void main(
   r0.z = inOcclusion.Sample(g_samplerLinear_Wrap_s, r0.zw).x;
   r4.xyz = r0.zzz;
   r2.xyz = r3.xyz * r2.xyz;
-  r1.yzw = r2.xyz + r1.yzw;
-  r1.yzw = r1.yzw * r4.xyz;
+  // Custom AO already attenuates diffuse upstream; keep native AO on specular only.
+  if (CUSTOM_MGSV_AO_ENABLED != 0.f) {
+    r1.yzw = r2.xyz + r1.yzw * r4.xyz;
+  } else {
+    r1.yzw = r2.xyz + r1.yzw;
+    r1.yzw = r1.yzw * r4.xyz;
+  }
   r1.yzw = r1.yzw;
   r1.yzw = r1.yzw;
   r2.xyzw = v1.xyxy;
