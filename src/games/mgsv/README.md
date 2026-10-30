@@ -233,8 +233,7 @@ and are not changed by RenoDX preset selection.
 
 - **DLSS Model** defaults/resets to F (6), subject to feature-DLL support. DLSS performs only a vendor check at startup;
   DLL/NGX/query-hook work waits for explicit or restored DLSS selection.
-- Both diagnostic UI macros remain enabled. All eleven Analytical projection sliders default/reset to `1x`; FSR3/DLSS
-  use `1x` on the original six and `0x` on the five experimental paths. Those five paths still need visual validation.
+- Both diagnostic UI macros remain enabled. The ten remaining Analytical projection sliders default/reset to `1x`; FSR3/DLSS use `1x` on the original six and four enabled experimental paths. Alternate Stream correction is disabled for every method, its slider is removed, and old `FxTaaAlternateCameraJitterScale` keys are ignored. The four enabled experimental paths still need visual validation.
 - Analytical exposes Halton/Off jitter and resolve tuning. FSR3/DLSS enforce eight-phase Halton without changing the
   saved Analytical preference. **Unclamp Motion Vectors** remains a shared default-Off diagnostic.
 - The legacy FSR compute-only path and toggle are removed after successful user validation with Legacy Off. All methods

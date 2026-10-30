@@ -26,9 +26,8 @@ No viewport/culling changes, broad constant-buffer mutation, or camera-only prod
 
 ## 2. Native projection coverage and transitions
 
-- Validate the five implemented Analytical-only paths independently before any SDK promotion: sunlight/SH live draw
-  counts and target grid, terrain inverse-plane versus raster consistency, general-light final consumers, and alternate
-  world/UI/glyph separation. Their `1x` defaults do not constitute runtime validation.
+- Validate the four enabled experimental paths independently: sunlight/SH live draw counts and target grid, terrain inverse-plane versus raster consistency, and general-light final consumers. Analytical `1x` defaults and fixed SDK `1x` scales do not constitute runtime validation.
+- Keep Alternate Stream correction disabled in every method after the settled `0x`/`1x` waveform reproduction. Verify the all-method disable in game; any future reintroduction requires proven world/UI/glyph separation and waveform stability. Track the older Preset M rail flicker separately.
 - **Deferred SH packet remains blocked:** prove producer generation/sample through consumption at `0x27F450`.
   Latest-camera VP equality is insufficient; preserve inverse-lighting math and avoid guessed packet fields/pointer caches.
 - **Thermography:** scene-depth ownership and missing jitter were confirmed, and setter returns `0x214531` and

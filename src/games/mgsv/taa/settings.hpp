@@ -539,20 +539,6 @@ inline void AppendSettings(
           .on_change_value = [](float, float current) { transitions::SetProjectionJitterScale(state::ProjectionJitterPath::LIGHT_PACKET, current, "light packet jitter changed"); },
           .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
       },
-      new renodx::utils::settings::Setting{
-          .key = "FxTaaAlternateCameraJitterScale",
-          .binding = &settings_state->projection_jitter_scales[static_cast<std::size_t>(state::ProjectionJitterPath::ALTERNATE_CAMERA)],
-          .value_type = renodx::utils::settings::SettingValueType::FLOAT,
-          .default_value = state::DEFAULT_PROJECTION_JITTER_SCALE,
-          .label = "Alternate Stream Projection Jitter",
-          .section = "Temporal Anti-Aliasing",
-          .tooltip = "Experimental: translates a private VP copy at engine constant 0x47 staging only for an exact main-camera/P/V/grid match. Never changes context P or null-camera state.",
-          .min = -2.f,
-          .max = 2.f,
-          .format = "%.2fx",
-          .on_change_value = [](float, float current) { transitions::SetProjectionJitterScale(state::ProjectionJitterPath::ALTERNATE_CAMERA, current, "alternate stream jitter changed"); },
-          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
-      },
 #endif
       new renodx::utils::settings::Setting{
           .value_type = renodx::utils::settings::SettingValueType::CUSTOM,

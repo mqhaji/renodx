@@ -266,6 +266,7 @@ inline void SetProjectionJitterScale(
     state::ProjectionJitterPath path,
     float value,
     const char* reason) {
+  if (static_cast<std::size_t>(path) >= state::PROJECTION_JITTER_SLIDER_COUNT) return;
   const RuntimeTransitionGuard transition_guard;
   const coordinator::ExecutionGuard execution_guard;
   const camera_state::PublicationWriterGuard publication_guard;
