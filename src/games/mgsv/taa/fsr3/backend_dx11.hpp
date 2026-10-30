@@ -6,7 +6,7 @@
 
 #include "ffx/api/internal/ffx_interface.h"
 
-namespace taa::fsr3::dx11 {
+namespace mgsv::reconstruction::fsr3::dx11 {
 
 size_t GetScratchMemorySize(size_t max_contexts);
 
@@ -26,4 +26,4 @@ FfxApiResource GetResource(
     FfxApiResourceDescription description,
     FfxApiResourceState state = FFX_API_RESOURCE_STATE_COMPUTE_READ);
 
-}  // namespace taa::fsr3::dx11
+}  // namespace mgsv::reconstruction::fsr3::dx11

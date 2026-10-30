@@ -36,7 +36,7 @@
 #error ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS must be 0 or 1
 #endif
 
-namespace taa::state {
+namespace mgsv::reconstruction::state {
 
 // Stable persisted values. Append future reconstruction methods instead of
 // reordering these entries so presets remain forward-compatible.
@@ -103,12 +103,6 @@ struct FrameState {
   bool mb_tile_prep_fired = false;
 };
 
-inline float jitter_pattern = static_cast<float>(DEFAULT_JITTER_PATTERN);
-#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
-inline float diagnostic_view = DEFAULT_DIAGNOSTIC_VIEW;
-inline float velocity_visualization_range = DEFAULT_VELOCITY_VISUALIZATION_RANGE;
-inline float object_motion_mode = static_cast<float>(DEFAULT_OBJECT_MOTION_MODE);
-#endif
 #if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
 inline constexpr std::array DEFAULT_PROJECTION_JITTER_SCALES = {
     DEFAULT_PROJECTION_JITTER_SCALE,
@@ -124,11 +118,7 @@ inline constexpr std::array DEFAULT_PROJECTION_JITTER_SCALES = {
     DEFAULT_PROJECTION_JITTER_SCALE,
 };
 static_assert(DEFAULT_PROJECTION_JITTER_SCALES.size() == PROJECTION_JITTER_SLIDER_COUNT);
-inline auto projection_jitter_scales = DEFAULT_PROJECTION_JITTER_SCALES;
 #endif
-inline float clip_tightness = DEFAULT_CLIP_TIGHTNESS;
-inline float history_clip_strength = DEFAULT_HISTORY_CLIP_STRENGTH;
-inline float current_frame_blend = DEFAULT_CURRENT_FRAME_BLEND;
 inline std::atomic<TemporalMode> runtime_temporal_mode = TemporalMode::OFF;
 inline std::atomic<uint32_t> runtime_jitter_pattern = DEFAULT_JITTER_PATTERN;
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
@@ -344,4 +334,4 @@ inline void CommitTemporalFrame() {
   current_sample_index.store(frame_state.sample_index, std::memory_order_release);
 }
 
-}  // namespace taa::state
+}  // namespace mgsv::reconstruction::state

@@ -13,10 +13,11 @@ Code:
 | `src/games/mgsv/ao/0x6DAF0C4A.cs_5_0.hlsl` | horizontal scatter port, included in generated replacements |
 | `src/games/mgsv/ao/0xB2601810.cs_5_0.hlsl` | vertical scatter port; explicit callback-only registration takes precedence in the tested build |
 | `src/games/mgsv/ao/ssss.hlsli` | the shared core of those two ports |
-| `src/games/mgsv/game/integration.hpp` | material capture and the lighting hook |
-| `src/games/mgsv/game/shaders.hpp` | explicit and generated shader registrations |
+| `src/games/mgsv/game/shaders.hpp` | material capture and the lighting hook before explicit and generated shader registrations, in the same game namespace |
 
 Both ports are compiled into the generated shader set. The effective first-stage entry supplies replacement code, while the explicit second-stage entry is callback-only. Older notes describing both ports as unregistered reference files were inaccurate; the structural cleanup does not change the registrations to match those notes.
+
+The former `game/integration.hpp` contents are consolidated into `game/shaders.hpp`, not a separate integration layer or forwarding header. The lighting callback still passes GI the borrowed raw velocity handle from reconstruction capture, records GI before AO, and restores the surrounding state afterward. This move changes no AO math, resource formats, settings, ownership or precision-activation gates; the measurements below are historical, not new validation of the consolidation.
 
 ## The scatter chain
 
