@@ -33,7 +33,7 @@ The **Temporal Anti-Aliasing** section in the ReShade addon overlay contains the
 | **TAA History Clip Strength** | Analytical color-box clipping; default `1.00`. |
 | **TAA Current Frame Blend** | Maximum adaptive filtered-current contribution; default `0.15`. |
 | **Unclamp Motion Vectors** | Shared diagnostic, default Off. Also affects native motion blur. |
-| **Projection Jitter Path sliders** | Eleven Analytical-only controls, range `-2x..2x`, all default/reset to `1x`. |
+| **Projection Jitter Path sliders** | Ten Analytical-only controls, range `-2x..2x`, all default/reset to `1x`. Alternate Stream correction is disabled and has no slider. |
 | **TAA Diagnostic View / Velocity View Range / Object Motion Source** | Analytical diagnostics; default Temporal Resolve, `8 px`, Auto-Corrected Native Object Velocity. |
 
 Method, model, tuning, and projection scales are global, appear above the preset slider, and are not changed by RenoDX
@@ -41,10 +41,7 @@ preset selection. **Off (Vanilla FXAA)** restores vanilla FXAA and the unjittere
 Changing history-affecting controls resets accumulation; visualization range alone does not.
 Relaxing analytical clipping or current-frame blending can reduce shimmer at the cost of ghosting.
 
-Both `ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS` and `ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS` remain `1` in
-`runtime/state.hpp`; debug UI is available during gameplay. FSR3/DLSS ignore slider values and use `1x` on the original
-six paths and the five experimental paths. Projection-macro-0 builds also use `1x` on all these paths.
-Motion-macro-0 builds use Temporal Resolve, `8 px`, and corrected native object motion.
+Both `ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS` and `ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS` remain `1` in `runtime/state.hpp`; debug UI is available during gameplay. FSR3/DLSS ignore slider values and use `1x` on the original six paths and four enabled experimental paths. Projection-macro-0 builds retain the same scale policy. Alternate Stream always returns `0x`, including builds without diagnostic UI; old `FxTaaAlternateCameraJitterScale` keys are ignored without rewriting INIs. Motion-macro-0 builds use Temporal Resolve, `8 px`, and corrected native object motion.
 
 The FSR Legacy Compute State toggle **and compute-only implementation are removed** following the user's successful
 Legacy Off validation. All methods use the existing extended compute/graphics/OM preservation, including depth-stencil
@@ -126,9 +123,7 @@ Off/reset cannot undo previously admitted/submitted work; rapid-transition GPU o
 
 ### Experimental projection paths
 
-These five controls are implemented and default to `1x` for Analytical. FSR3/DLSS also use fixed `1x` on these
-paths by explicit user choice; this policy is **not a declaration of visual validation**.
-Addresses and offsets below are hexadecimal RVAs/offsets; executable validation remains mandatory.
+The four remaining experimental controls default to `1x` for Analytical. FSR3/DLSS also use fixed `1x` on these paths; this policy is **not a declaration of visual validation**. Alternate Stream correction is disabled for every method. Addresses and offsets below are hexadecimal RVAs/offsets; executable validation remains mandatory.
 
 | Control / persisted key | Correction and restriction |
 |---|---|
@@ -136,16 +131,16 @@ Addresses and offsets below are hexadecimal RVAs/offsets; executable validation 
 | SH Fallback / `FxTaaShFallbackJitterScale` | `27EF80`, return `1F2529`: successful output XY only; kinds 0..3 use validated 8/6/18/8 vertex counts. Preserve Z/W, visibility, depth bounds. |
 | Terrain Decal / `FxTaaTerrainDecalJitterScale` | `275280 -> 2D18D0`, return `2755CA`: native-owned packet P at `+160` before attachment; affects inverse-plane reconstruction, not separately captured raster P. |
 | General Light Packet / `FxTaaLightPacketJitterScale` | `2A4C00 -> 2D3380`, return `2A5342`: native-owned VP at `+130` before attachment; preserve clip-W and selection data. |
-| Alternate Stream / `FxTaaAlternateCameraJitterScale` | `2E7330/2E4C70 -> 2D7AA0`, returns `2E7484/2E4DD7`: private VP copy at engine constant `0x47` staging, never context P/V mutation. |
+| Alternate Stream / disabled | `2E7330/2E4C70 -> 2D7AA0`, returns `2E7484/2E4DD7`: native constant `0x47` staging passes through unchanged. Hook installation/lifetime remains unchanged; the slider and its storage are removed. |
+
+The user confirmed that, after accumulation settled, Analytical Alternate Stream `0x` removed waveform instability and `1x` restored it. This is the basis for disabling only this path; it is not proof of the underlying consumer mismatch or a fix for the separate Preset M rail flicker reproduced with an older binary. The all-method disable still needs fresh in-game validation.
 
 Clip translation changes XY by the jitter offset times W, leaving Z/W unchanged. SH validates original success, kind,
 bounds, and all finite results before storing. Packet attachment must retain native-owned storage, never a stack payload
 or copied refcount header. Alternate constant `0x47` means bank 7/vectors 4..7, not physical D3D `b7`; null-camera updates
 can leave old context P/V intact, so persistent context edits are unsafe.
 
-The deferred **SH packet** route (`27F450`) is not implemented or exposed: producer-generation ownership is unresolved.
-Live draw-grid correlation, terrain inverse/raster consistency, general-light final consumers, and alternate world/UI
-separation remain outstanding. Their enabled SDK policy does not resolve these coverage gaps.
+The deferred **SH packet** route (`27F450`) is not implemented or exposed: producer-generation ownership is unresolved. Live draw-grid correlation, terrain inverse/raster consistency, and general-light final consumers remain outstanding. Their enabled SDK policy does not resolve these coverage gaps. Alternate Stream must remain disabled unless its world/UI consumers and waveform stability are proven separately.
 
 ## Motion and reconstruction
 
@@ -216,8 +211,7 @@ are released; DLSS suspension is a transition-crash mitigation, not identificati
 - Thermography now receives scene jitter at its two native projection setters. Matched RenderDoc body/highlight
   draws agree on clip positions after correction; the user reports clean NVG rendering with original shaders.
   The native `NewThermography` branch was observed live; the alternate branch still needs gameplay coverage.
-- Five experimental projection paths still need runtime coverage/transition validation. There is no proven native
-  camera-cut signal; do not restore the removed clip-space heuristic that falsely reset SDK history every frame.
+- Four enabled experimental projection paths still need runtime coverage/transition validation; Alternate Stream remains disabled after the reproducible waveform test. There is no proven native camera-cut signal; do not restore the removed clip-space heuristic that falsely reset SDK history every frame.
 - FSR external masks/exposure and analytical previous-depth/disocclusion/lock history remain absent. Thin detail,
   transparency, rain, emissives, and disocclusions require continued validation. No method applies sharpening here.
 
@@ -233,8 +227,7 @@ Build/deploy only with MGSV fully stopped; use one matching addon and no live sh
 [addon build instructions](../README.md#building--deployment). Inspect generated Analytical, FSR3, DLSS boundary, and
 native velocity shader artifacts. Restart for addon/DLL replacement; do not attempt live native-hook unloading.
 
-1. Check fresh/reset settings: FSR3 method, DLSS F hint, eleven scales `1x`, debug UI enabled. Confirm preset changes do
-  not alter temporal settings. Off must restore vanilla FXAA/projection without persistent shift or stale history.
+1. Check fresh/reset settings: FSR3 method, DLSS F hint, ten scales `1x`, debug UI enabled, and no Alternate Stream slider. Confirm preset changes do not alter temporal settings and an old saved Alternate Stream value cannot reactivate correction. Off must restore vanilla FXAA/projection without persistent shift or stale history.
 2. Check FSR3/Analytical selection, hidden SDK tuning/jitter controls, and one accumulation seed per intended reset.
    Lower-resolution DoF candidates and static menus straddling Present must not cause recurring resets/warnings.
 3. Cover static detail, idle/skinned motion, hair, wires, foliage, pans, aiming/binoculars, cuts, menus, pause/resume,
@@ -251,6 +244,7 @@ native velocity shader artifacts. Restart for addon/DLL replacement; do not atte
    and fresh seeds, then model/resize recreation separately. One successful switch does not prove crash mitigation.
 6. Keep Unclamp Off for baseline gameplay; any clamp or motion-source comparison must also check native motion blur
    and animation trails. Do not repeat the already-negative Auto/Direct sweep as a new warble investigation.
+7. In the same scene used for the settled Alternate Stream comparison, check the waveform under Analytical, FSR3, and DLSS after each mode settles. Test stationary and moving cameras, menus, and mode round trips. Record the older Preset M rail flicker separately; this change does not claim to fix it.
 
 Normal logs cover startup/availability, selection, first publication, context/feature creation, accumulation seeds,
 suspension/resume, disable, and one expected lower-resolution-candidate notice. Repeated seeds with unchanged settings

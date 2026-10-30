@@ -72,8 +72,8 @@ enum class ProjectionJitterPath : std::uint8_t {
   COUNT,
 };
 
-// Only the paths preceding thermography have diagnostic sliders.
-inline constexpr std::size_t PROJECTION_JITTER_SLIDER_COUNT = static_cast<std::size_t>(ProjectionJitterPath::THERMOGRAPHY);
+// Alternate Stream is disabled; Thermography always follows scene jitter.
+inline constexpr std::size_t PROJECTION_JITTER_SLIDER_COUNT = static_cast<std::size_t>(ProjectionJitterPath::ALTERNATE_CAMERA);
 inline constexpr float DEFAULT_DIAGNOSTIC_VIEW = 0.f;
 inline constexpr float DEFAULT_VELOCITY_VISUALIZATION_RANGE = 8.f;
 inline constexpr uint32_t DEFAULT_OBJECT_MOTION_MODE = 0u;
@@ -115,7 +115,6 @@ inline constexpr std::array DEFAULT_PROJECTION_JITTER_SCALES = {
     DEFAULT_PROJECTION_JITTER_SCALE,
     DEFAULT_PROJECTION_JITTER_SCALE,
     DEFAULT_PROJECTION_JITTER_SCALE,
-    DEFAULT_PROJECTION_JITTER_SCALE,
 };
 static_assert(DEFAULT_PROJECTION_JITTER_SCALES.size() == PROJECTION_JITTER_SLIDER_COUNT);
 #endif
@@ -138,9 +137,8 @@ inline std::array<std::atomic<float>, PROJECTION_JITTER_SLIDER_COUNT> runtime_pr
     std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
     std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
     std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
-    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
 };
-static_assert(PROJECTION_JITTER_SLIDER_COUNT == 11u, "Initialize every runtime jitter scale when adding paths");
+static_assert(PROJECTION_JITTER_SLIDER_COUNT == 10u, "Initialize every runtime jitter scale when adding slider paths");
 #endif
 inline std::atomic<float> runtime_clip_tightness = DEFAULT_CLIP_TIGHTNESS;
 inline std::atomic<float> runtime_history_clip_strength = DEFAULT_HISTORY_CLIP_STRENGTH;
@@ -256,6 +254,8 @@ inline void SetProjectionJitterScale(ProjectionJitterPath path, float value) {
 #endif
 
 inline float GetProjectionJitterScale(ProjectionJitterPath path) {
+  // Alternate Stream jitter reproducibly destabilizes the waveform; keep native staging unchanged in every mode.
+  if (path == ProjectionJitterPath::ALTERNATE_CAMERA) return 0.f;
   // Thermography must match scene depth rather than a user-adjustable diagnostic scale.
   if (static_cast<std::size_t>(path) >= PROJECTION_JITTER_SLIDER_COUNT) return DEFAULT_PROJECTION_JITTER_SCALE;
 #if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
