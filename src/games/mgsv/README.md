@@ -18,6 +18,8 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 
 ## Architecture
 
+See the [current ownership map](docs/ARCHITECTURE.md), [AO findings](lighting/ao/MGSV_AmbientOcclusion.md), [indirect-lighting notes](lighting/il/MGSV_IndirectLighting.md), and [reconstruction guide](reconstruction/README.md). Feature notes preserve historical measurements; they are not fresh validation of the current consolidation.
+
 ### Key Components
 
 **1. Resource Cloning & Hot-Swap**
@@ -95,7 +97,7 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 - `0xBFC7D3C2` — Render the two half-resolution motion-blur ping-pong passes
 - The post-motion-blur `0x83272BCB` draw — Copy the result back, then deactivate the motion-blur clones
 
-### taa_velocity_upgrade_info
+### velocity_upgrade_info
 
 **Purpose**: Preserves both the full-resolution deformation-aware object-velocity target and the final camera/object
 velocity composite at RGBA16F precision for temporal reprojection.
@@ -116,9 +118,11 @@ write. Runtime validation confirmed that both the object input and final velocit
 Three minimal pixel-shader replacements preserve the native encoding and `/64` scale while allowing the existing
 unit-length motion clamp to be bypassed by a default-Off TAA diagnostic.
 
-### LUT Builder (Inline Upgrade)
+### LUT Builder (`lut_builder_upgrade_info`)
 
 **Purpose**: Marks 256×16 LUT builder target as RGBA16F for internal precision.
+
+The descriptor lives in root `resource_upgrades.hpp`; `addon.cpp` still registers it once during setup.
 
 ```cpp
 // Old format: 8-bit BGRA typeless (SDR)
@@ -137,9 +141,9 @@ unit-length motion clamp to be bypassed by a default-Off TAA diagnostic.
 | 0xE2D609B1 | DOF_ScatterCompositeNear | Depth-of-field near pass | ✓ | Yes | Arms post-DOF tracking flag |
 | 0x7C017264 | DOF_ScatterCompositeFar | Depth-of-field far pass | ✓ | Yes | Refreshes the DoF-copy window |
 | 0xFC5542BB | DOF_ScatterCompositeFinal | DoF final composite | ✓ | Yes | Closes the DoF-copy window |
-| 0x9815404F | GBufferVelocity | Deformation-aware object velocity | ✓ | TAA | Minimal replacement; shared RGBA16F clone and optional motion unclamp |
-| 0x58C10658 | GBufferMaskedVelocity | Alpha-tested object velocity | ✓ | TAA | Minimal replacement preserving native alpha tests and optional motion unclamp |
-| 0xA13321B6 | MotionBlurCameraVelocity | Final full-resolution velocity | ✓ | TAA | Minimal replacement; RGBA16F `.ba` velocity and optional camera-motion unclamp |
+| 0x9815404F | GBufferVelocity | Deformation-aware object velocity | ✓ | Identified producer | RGBA16F precision independent of AA; native encoding and optional unclamp unchanged |
+| 0x58C10658 | GBufferMaskedVelocity | Alpha-tested object velocity | ✓ | Identified producer | Precision independent of AA; native alpha tests and optional unclamp unchanged |
+| 0xA13321B6 | MotionBlurCameraVelocity | Final full-resolution velocity | ✓ | Identified producer | Precision independent of AA; RGBA16F `.ba` velocity and optional unclamp unchanged |
 | 0xF05DCBFD | Motion-blur tile max | Velocity tile preparation | — | No | Arms the next motion-blur input copy |
 | 0x512E2B48 | Motion-blur tile refine | Velocity tile refinement | — | No | Refreshes the motion-blur input-copy gate |
 | 0x83272BCB | CopyRenderBuffer | Generic scene/intermediate copy | Conditional | Conditional | Upgraded only inside a proven DoF or motion-blur window |
@@ -185,11 +189,13 @@ When a shader in the assembled `custom_shaders` map is intercepted:
 ### Reset Phase (Per-Present)
 
 `ResetTonemapCopyTracking()` clears frame-local state:
-- `dof_final_copy_upgrade_allowed` → `false`
-- `motion_blur_copy_upgrade_allowed` → `false`
-- `motion_blur_copy_back_pending` → `false`
-- `tonemap_copy_resource_propagation_allowed` → `false`
-- `tonemap_copy_resource_source` → null
+- `dof_copy_state.upgrade_allowed` → `false`
+- `motion_blur_copy_state.upgrade_allowed` → `false`
+- `motion_blur_copy_state.copy_back_pending` → `false`
+- `tonemap_copy_state.propagation_allowed` → `false`
+- `tonemap_copy_state.source` → null
+
+These role states group the existing tracking fields without changing reset behavior. Present does not clear the motion-blur resource list; its existing copy-back cleanup remains separate.
 
 `OnPresent()` also disables hot-swap for the successfully activated DoF final-copy resource. Its clone target and allocation remain available for reuse.
 
@@ -249,8 +255,7 @@ FSR external reactive/transparency masks and a proven native camera-cut signal r
 **Restart MGSV to replace or remove the addon.** Native projection hooks and the module are pinned for process lifetime;
 device destruction stops admission rather than unpatching/freeing trampolines. Live native-hook unloading is unsupported.
 
-See the [temporal reference](taa/README.md) for controls, motion/jitter ownership, SDK lifecycle, and limitations;
-the [roadmap](taa/ROADMAP.md) contains only outstanding work.
+See the [temporal reference](reconstruction/README.md) for controls, motion/jitter ownership, SDK lifecycle, and limitations; the [roadmap](reconstruction/ROADMAP.md) contains only outstanding work.
 
 ---
 
@@ -276,7 +281,7 @@ The two compute passes at `0x6DAF0C4A` and `0xB2601810` perform the game's scree
 
 After stage 2, the addon calculates AO in a separate texture, then applies it to the light buffer. It darkens RGB and preserves alpha. The existing scattering registrations are preserved and AO runs afterward, darkening their result, including directly lit surfaces.
 
-The technique is based on *Screen Space Indirect Lighting with Visibility Bitmask* (Therrien, Levesque, Gilet, The Visual Computer 2023), with five documented differences. See [MGSV_AmbientOcclusion.md](ao/MGSV_AmbientOcclusion.md) for the paper comparison, earlier measurements, and remaining questions. Read those notes before changing the back-sample direction, sector rounding, or slice weights.
+The technique is based on *Screen Space Indirect Lighting with Visibility Bitmask* (Therrien, Levesque, Gilet, The Visual Computer 2023), with five documented differences. See [MGSV_AmbientOcclusion.md](lighting/ao/MGSV_AmbientOcclusion.md) for the paper comparison, earlier measurements, and remaining questions. Read those notes before changing the back-sample direction, sector rounding, or slice weights.
 
 Use **Visibility-Bitmask Ambient Occlusion** in the **Ambient Occlusion** section to enable or disable this effect. Turning it off skips only the added AO passes; indirect lighting and other enhancements keep their own settings.
 
@@ -305,27 +310,37 @@ The shared precision upgrades are a rendering foundation, not an HDR-output feat
 
 | Location | Responsibility |
 |---|---|
-| `addon.cpp` | Owns shader data, output and reconstruction settings state, and assembled registries; addon setup, event registration and lifecycle order |
+| `addon.cpp` | Owns shader data, output and reconstruction settings state, and assembled registries; utility setup, shared descriptor/draw registrations and lifecycle order |
+| `inputs.hpp` | Shared descriptor tracking; retained latest `Motion`, `lighting_motion` compatibility and `Materials`; first-present single-device/swapchain admission, generations and publication tickets |
 | `settings.hpp` | Core output, tone-mapping, grading and existing-effect controls; Reset All and Preset Off policy |
 | `shadows/settings.hpp` | Contact-hardening and screen-space-shadow controls |
-| `rendering/resource_upgrades.hpp` | Scene, DoF, motion-blur, and velocity resource roles and clone handling |
-| `rendering/light_pass.hpp` | AO/GI texture-allocation helpers, shared pipeline layout, placeholder textures, dispatch helpers, and logging |
-| `rendering/d3d11_compute_state.hpp` | Graphics-state preservation used by lighting and reconstruction |
-| `game/shaders.hpp` | Material capture and GI-then-AO lighting insertion before the shader registry, in the same game namespace |
-| `game/reconstruction.hpp` | MGSV draw classification, velocity-target preparation and reconstruction insertion routing |
+| `resource_upgrades.hpp` | Scene, DoF, motion-blur, and velocity roles/clone handling; retains `mgsv::rendering::resource_upgrades` |
+| `lighting/lighting.hpp` | `mgsv::lighting` support, admitted retained-input reads and GI-then-AO orchestration; AO/IL implementations/settings keep `mgsv::ao` and `mgsv::il` |
+| `d3d11_compute_state.hpp` | Shared native preservation; retains `mgsv::rendering::d3d11_compute_state` |
+| `shaders.hpp` | Registry and callback references; retains `mgsv::game::CreateShaders` |
 | `output/output.hpp` | SDR/HDR output selection and brightness synchronization |
-| `taa/settings.hpp` | Reconstruction descriptor assembly and migration; migration is invoked explicitly during addon setup |
-| `taa/runtime.hpp` | Addon-owned settings-state type and writes, mode/model/tuning transitions, and lifecycle/event wiring |
-| `taa/runtime/input_capture.hpp` | Per-command-list descriptor tracking followed by game-native input capture, in their existing namespaces |
-| `taa/runtime/frame_inputs.hpp` | Separate backend-facing validated input/output contract |
-| `taa/dlss/model.hpp` | Pure model metadata, default and lookup without SDK/runtime dependencies |
-| `ao/`, `il/`, `taa/` | Feature resources, execution, and controls; AO/GI sliders stay in their feature headers |
+| `reconstruction/settings.hpp` | Reconstruction descriptor assembly and migration; migration is invoked explicitly during addon setup |
+| `reconstruction/runtime.hpp` | Settings state/writes, transitions, lifecycle and merged MGSV routing in `mgsv::game::reconstruction` |
+| `reconstruction/input_capture.hpp` | Retained-motion adapter with camera/frame/sample annotations and insertion-time matching dimensions and single-mip/layer/sample checks |
+| `reconstruction/frame_inputs.hpp` | Backend input/output contract and shared 96-byte SDK `PrepareConstants` |
+| `reconstruction/prepare_inputs.hlsli`, `reconstruction/encode_output.hlsli` | Shared SDK boundary math; backend entry shaders, resources and lifetimes stay distinct |
+| `reconstruction/dlss/model.hpp` | Pure model metadata, default and lookup without SDK/runtime dependencies |
+| `lighting/ao/`, `lighting/il/` | AO/IL shaders and research notes; C++ resources, execution and controls live in `lighting/lighting.hpp` |
+| `reconstruction/analytical/` | Analytical runtime and `mgsv_taa.cs_5_0.hlsl` resolve shader |
+| `motion/`, `subsurface/` | Native velocity replacements and subsurface-scatter ports respectively |
+| `reflections/`, `gbuffer/` | Local-reflection pair and rain-material pair respectively |
+| `copy/`, `output/` | Shared copy shaders and final GammaControl output shader respectively |
+| `docs/` | Architecture, [engine pipeline reference](docs/Fox_Engine_Render_Pipeline_Reference.md), and [retail shader name map](docs/MGSV_PixelShader_NameMap.md) |
 
 See [the architecture guide](docs/ARCHITECTURE.md) for the dependency map and remaining limitations. Shader registration is a hash lookup, not the order in which render passes execute. The standard `mgsv` build target discovers the shaders and generates their embedded headers without requiring local development tests.
 
-The three consolidation groups reduce authored MGSV `.cpp`/`.hpp` files from 31 to 27 without changing logic: settings state, transitions and lifecycle share `taa/runtime.hpp`; game bindings and registrations share `game/shaders.hpp`; descriptor tracking and input capture share `taa/runtime/input_capture.hpp`. Removed headers have no forwarding replacements or aliases. Heavy backends, native hooks and input/output contracts remain separate. `taa/settings.hpp` now uses the runtime umbrella, not a lightweight settings-state include; only the model metadata remains SDK/runtime-independent.
+The consolidation reduced authored MGSV `.cpp`/`.hpp` files from 27 to 24; root `inputs.hpp` brings the current count to 25, excluding the FSR vendor subtree. Obsolete copies under the old `game/`, `rendering/`, `ao/` and `il/` roots are removed. Lighting support, AO, IL and their orchestration share `lighting/lighting.hpp`; the game draw router is merged into `reconstruction/runtime.hpp`. Root `shaders.hpp` holds registration and callback wiring, without forwarding replacements. Heavy backends and the intact FSR vendor subtree remain separate. `LightPass` caches only a pipeline, independent of effect dimensions; texture resize/history rules remain feature-owned.
 
-Ownership and existing limits are unchanged: GI still receives a borrowed raw velocity handle from reconstruction capture, and velocity precision preparation remains gated by reconstruction enablement. This consolidation adds no build, test, deployment, gameplay or performance result.
+Shared input ownership now exists, but qualified independent GI is **BLOCKED**. Identified precision preparation precedes AA-enable and descriptor-data returns under the existing execution guard. Effective reconstruction or GI can demand motion observations; Off+GI updates latest only and never changes the retained `lighting_motion` compatibility selection used by GI. Materials are retained pairs, not borrowed cache handles, and GI no longer reads reconstruction storage. The owner uses native getters plus explicit enabled-clone pinning under each clone's own live record, not exact parity with old descriptor-state handles. It has no per-context retained cache or demand-off clearing; references remain bounded until replacement/reset/retirement.
+
+First-present single-device/swapchain admission gates lighting allocations: work skips before the first selected Present and during retirement/resize. Shared selection also guards reconstruction's Present-time device binding. Shared motion publication does not reject mismatched depth/object extents before GI compatibility publication; matching dimensions and single-mip/layer/sample requirements remain reconstruction adapter checks at insertion. Retention is **not pixel-content, freshness or GPU-order proof**. Shader/history algorithms, defaults/settings order, SDK activation timing and registry precedence are unchanged.
+
+The [current ownership checkpoint](docs/ARCHITECTURE.md#current-ownership-checkpoint--offline-validation-completed) records the standalone build, all 21 local checks rerun against the latest code, and the successful user-reported gameplay smoke test on 2026-10-30. The log corroborates AO/GI recording, 4K DLSS/Analytical transitions, DLSS F/M changes and normal exit; FSR and cold Off+GI were not demonstrated in that run. Hardware fixtures cover actual immediate/deferred wrappers, clone metadata and readbacks for ownership only. Live producer/content/order proof and the cold-history defect still block qualified GI handoff.
 
 ---
 
@@ -389,7 +404,7 @@ Use one game addon and disable live shader overrides for validation. DLSS additi
    request-time activation and suspension/resume separately from model/resize recreation.
 3. Inspect static and moving detail, skinned characters, menus, DoF/motion blur, rain/transparency, night vision, camera
    transitions, and resolution changes. Keep known warble/ghosting distinct from startup or history-reset failures.
-4. Follow the [detailed temporal validation matrix](taa/README.md#manual-validation) for coverage and lifecycle checks.
+4. Follow the [detailed temporal validation matrix](reconstruction/README.md#manual-validation) for coverage and lifecycle checks.
    No automatic diagnostic capture is present, and this documentation cleanup adds no runtime test result.
 
 ### Manual Lighting Verification
@@ -406,6 +421,7 @@ Follow the build and deployment steps above. Use the matching `renodx-mgsv.addon
 
 **Developer checks**
 
+- Follow the [two-frame GI qualification plan](docs/ARCHITECTURE.md#manual-gi-qualification-plan--not-yet-completed): trace `0xB2601810` -> GI against `0xA13321B6` motion, all writes/clears/copies and sampled subresources, materials/native b0/depth, and first history contents over at least two frames, paired with an untraced control. This is outstanding work, not fixture coverage or approval to feed Off+GI latest motion into GI.
 - Look for `MgsvLighting:` in `ReShade.log`. Texture and pipeline creation is logged whenever it actually happens, with dimensions; changing indirect-lighting dimensions also logs history invalidation before resource setup. Strength and radius changes do not rebuild resources and are not logged. Missing-input and setup-failure messages are limited to one report per diagnostic per addon load, as are the initial “commands recorded” summaries. Those summaries do not track later options or prove GPU execution or valid temporal history. These messages cover AO and indirect lighting, not execution of the shadow shaders.
 - In a D3D11 GPU capture, confirm that the game's scatter dispatch is followed by indirect lighting, then AO, when enabled. Check that the final indirect-lighting pass reads the last denoise result and never binds that texture as an output.
 - Use API tracing or callback instrumentation to compare the bound depth, normal, and light views before and after the added passes. A GPU capture alone does not show when the CPU callback reads these bindings.

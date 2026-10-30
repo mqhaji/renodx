@@ -10,7 +10,7 @@ Game: MGSV: TPP retail `1.0.15.4`, DX11, ReShade 6.7.3 addon (`renodx-mgsv`, bra
 | `tmp/mgsv/original/0x5AFD2E17.cso` | dumped retail bytecode (gitignored) |
 | `tmp/mgsv/original/0x5AFD2E17.hlsl` | 3Dmigoto decompilation of the retail shader |
 | `tmp/mgsv/original/0x5AFD2E17.asm` | annotated disassembly of the retail shader |
-| `src/games/mgsv/MGSV_PixelShader_NameMap.md` | all 88 tracked pixel shaders mapped to source filenames |
+| `src/games/mgsv/docs/MGSV_PixelShader_NameMap.md` | all 88 tracked pixel shaders mapped to source filenames |
 | `src/games/mgsv/shadows/MGSV_SunShadow_ContactHardening.md` | this file |
 
 ---
