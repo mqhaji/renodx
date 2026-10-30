@@ -31,6 +31,7 @@
 #include "../runtime/frame_inputs.hpp"
 #include "../runtime/logging.hpp"
 #include "../runtime/state.hpp"
+#include "./model.hpp"
 
 #if defined(_WIN64)
 #if defined(_DEBUG)
@@ -41,52 +42,12 @@
 #pragma comment(lib, "version.lib")
 #endif
 
-namespace taa::dlss {
+namespace mgsv::reconstruction::dlss {
 
 inline constexpr char PROJECT_ID[] = "98dbfc11-0026-4cd1-b573-168ceb4c7bb5";
 inline constexpr char ENGINE_VERSION[] = "MGSV-RenoDX-1";
 inline constexpr uint32_t NVIDIA_VENDOR_ID = 0x10DEu;
 inline constexpr uint32_t THREAD_GROUP_SIZE = 8u;
-
-// These values match NVSDK_NGX_DLSS_Hint_Render_Preset. The current public
-// header no longer names A-D, but compatible feature DLLs still accept their
-// stable numeric preset identifiers.
-enum class Model : uint8_t {
-  DEFAULT = 0u,
-  A = 1u,
-  B = 2u,
-  C = 3u,
-  D = 4u,
-  E = 5u,
-  F = 6u,
-  J = 10u,
-  K = 11u,
-  L = 12u,
-  M = 13u,
-};
-
-struct ModelOption {
-  Model model;
-  const char* label;
-  const char* description;
-};
-
-inline constexpr std::array MODEL_OPTIONS = {
-    ModelOption{Model::DEFAULT, "DLL Default", "Uses the model selected by the feature DLL."},
-    ModelOption{Model::A, "Preset A", "History-conservative CNN; soft and prone to ghosting."},
-    ModelOption{Model::B, "Preset B", "CNN tuned for extremely low input resolution."},
-    ModelOption{Model::C, "Preset C", "Current-frame-biased CNN; sharper motion with more shimmer."},
-    ModelOption{Model::D, "Preset D", "History-heavy CNN; stable but more prone to ghosting."},
-    ModelOption{Model::E, "Preset E", "Balanced CNN model."},
-    ModelOption{Model::F, "Preset F", "Conservative, consistent CNN; the default selection."},
-    ModelOption{Model::J, "Preset J", "Sharp first-generation transformer with more flicker than K."},
-    ModelOption{Model::K, "Preset K", "Stable first-generation transformer and general native-resolution model."},
-    ModelOption{Model::L, "Preset L", "Second-generation transformer optimized for very small inputs."},
-    ModelOption{Model::M, "Preset M", "Aggressive second-generation transformer with strong detail recovery."},
-};
-
-inline constexpr Model DEFAULT_MODEL = Model::F;
-static_assert(static_cast<uint8_t>(DEFAULT_MODEL) == 6u);
 
 enum class Availability : uint8_t {
   UNCHECKED,
@@ -254,14 +215,6 @@ inline bool IsModelAvailable(Model model) {
   }
   if (major >= 2u) return model >= Model::A && model <= Model::F;
   return false;
-}
-
-inline const ModelOption* FindModelOption(Model model) {
-  const auto found = std::find_if(
-      MODEL_OPTIONS.begin(),
-      MODEL_OPTIONS.end(),
-      [model](const ModelOption& option) { return option.model == model; });
-  return found == MODEL_OPTIONS.end() ? nullptr : &*found;
 }
 
 inline Model NormalizeModel(float value) {
@@ -910,4 +863,4 @@ inline bool Dispatch(const ValidatedFrameInputs& inputs, MethodOutput& output) {
   return true;
 }
 
-}  // namespace taa::dlss
+}  // namespace mgsv::reconstruction::dlss

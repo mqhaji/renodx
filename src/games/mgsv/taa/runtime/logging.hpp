@@ -20,7 +20,7 @@
 #define MGSV_TAA_LOGGING 1
 #endif
 
-namespace taa::logging {
+namespace mgsv::reconstruction::logging {
 
 inline constexpr const char* TAG = "MgsvTaa: ";
 
@@ -73,4 +73,4 @@ inline bool ShouldLogFrame(uint64_t frame, uint64_t& last_logged, uint64_t inter
   return false;
 }
 
-}  // namespace taa::logging
+}  // namespace mgsv::reconstruction::logging

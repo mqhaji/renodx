@@ -13,7 +13,7 @@
 #include "../runtime/logging.hpp"
 #include "../runtime/state.hpp"
 
-namespace taa::analytical {
+namespace mgsv::reconstruction::analytical {
 
 struct HistoryTexture {
   reshade::api::resource resource = {0};
@@ -471,4 +471,4 @@ inline bool Dispatch(const ValidatedFrameInputs& inputs, MethodOutput& output) {
   return true;
 }
 
-}  // namespace taa::analytical
+}  // namespace mgsv::reconstruction::analytical

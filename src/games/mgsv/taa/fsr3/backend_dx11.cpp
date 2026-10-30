@@ -14,7 +14,7 @@
 #include <d3d11_1.h>
 #include <wrl/client.h>
 
-namespace taa::fsr3::dx11 {
+namespace mgsv::reconstruction::fsr3::dx11 {
 namespace {
 
 constexpr uint32_t MAX_MIP_VIEWS = 16u;
@@ -984,7 +984,7 @@ FfxApiResource GetResource(
   };
 }
 
-}  // namespace taa::fsr3::dx11
+}  // namespace mgsv::reconstruction::fsr3::dx11
 
 FfxErrorCode GetResourceSizeFromDescription(
     FfxDevice /*device*/,

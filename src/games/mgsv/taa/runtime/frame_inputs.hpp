@@ -8,7 +8,7 @@
 
 #include "./camera_state.hpp"
 
-namespace taa {
+namespace mgsv::reconstruction {
 
 struct ValidatedFrameInputs {
   reshade::api::command_list* cmd_list = nullptr;
@@ -41,4 +41,4 @@ struct MethodOutput {
   reshade::api::resource_usage final_usage = reshade::api::resource_usage::unordered_access;
 };
 
-}  // namespace taa
+}  // namespace mgsv::reconstruction
