@@ -268,8 +268,13 @@ void main(
   r0.xyz = inAlbedo.Sample(g_samplerLinear_Wrap_s, r0.xy).xyz;
   r0.xyz = r0.xyz;
   r0.xyz = r0.xyz * r4.xyz;
-  r0.xyz = r0.xyz + r3.xyz;
-  r0.xyz = r0.xyz * r2.xyz;
+  // Custom AO already attenuates diffuse upstream; keep native AO on specular only.
+  if (CUSTOM_MGSV_AO_ENABLED != 0.f) {
+    r0.xyz = r0.xyz + r3.xyz * r2.xyz;
+  } else {
+    r0.xyz = r0.xyz + r3.xyz;
+    r0.xyz = r0.xyz * r2.xyz;
+  }
   r0.xyz = r0.xyz;
   r0.xyz = r0.xyz;
   r1.xyw = r1.xyw;

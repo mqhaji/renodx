@@ -191,6 +191,7 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_SS_POINT_FADE_END     shader_injection.point_ss_fade_end
 #define CUSTOM_SS_POINT_MATERIAL_MAX shader_injection.point_ss_material_max
 
+#define CUSTOM_MGSV_AO_ENABLED    shader_injection.ao_enabled
 #define CUSTOM_MGSV_AO_STRENGTH   shader_injection.ao_strength
 #define CUSTOM_MGSV_AO_RADIUS     shader_injection.ao_radius
 #define CUSTOM_MGSV_AO_SLICES     shader_injection.ao_slices

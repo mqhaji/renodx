@@ -16,6 +16,7 @@ Scope: `src/games/mgsv/**`. This file adds MGSV-specific rules to the [root guid
 - Preset Off disables all eight enhancements: directional/spot/point contact hardening, their three screen-space shadow controls, AO, and indirect lighting. Reconstruction selection remains independent and sticky. Reset All restores defaults; Vanilla/0 tonemapping is not full Off.
 - Preserve saved keys, UI order, bindings, and reset behavior unless explicitly changing them. Key renames require deliberate handling of existing saved settings.
 - Use the single `ShaderInjectData` layout in `shared.h` with effect-local copies for scale, history flags, and filter steps. Never temporarily overwrite shared user settings or add a second settings/control buffer. Copying is not synchronization.
+- In shaders, access injected settings through the defines in `shared.h`, not direct `shader_injection` or injected cbuffer member references. Add a matching define when one is missing; do not change the shared layout just to expose a setting.
 - Bind feature controls to supplied stable storage; addon composition assembles them and core preset/reset code handles cross-feature policy. Do not add another global settings registry.
 
 ## Rendering safety

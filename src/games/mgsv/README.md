@@ -14,6 +14,14 @@ The MGSV RenoDX addon enhances **Metal Gear Solid V: The Phantom Pain** with HDR
 - **Screen-space indirect lighting** with temporal accumulation, a-trous denoise and a depth-joint resolve
 - **User-configurable settings** via the ReShade overlay UI
 
+### Native AO compatibility
+
+When custom ambient occlusion is enabled, the six deferred-composition replacements bypass the game's screen-space AO on the diffuse-light contribution, which already includes any added indirect light and custom AO. Native AO remains applied to specular lighting and the rain shaders' separate reflection term. With custom AO disabled, the original native AO application to both diffuse and specular is preserved, including when indirect lighting alone is enabled. Native AO computation still runs; this is a diffuse-composition stopgap, not a specular-occlusion replacement or a performance optimization.
+
+The bypass follows the custom AO setting, not per-frame dispatch success. If custom AO is enabled but its inputs or resources are unavailable, diffuse receives neither native nor custom screen-space AO for that invocation. Existing normal decoding, custom AO's attenuation of direct diffuse and added GI, and GI history behavior are unchanged.
+
+Validation: build the `mgsv` target with the game stopped and inspect the six deferred CSOs (`410AE8C5`, `C973024D`, `BDE1F4CD`, `6E29F0AB`, `2EA8F13F`, `59B44963`). In game, compare custom AO Off/On with indirect lighting independently Off/On, verify Preset Off restores native AO, and check dry, foggy, and rainy scenes in SDR and HDR. Specular-only contribution and rain-reflection occlusion should remain unchanged before tonemapping; diffuse should no longer receive both AO factors when custom AO is enabled. These runtime checks require manual verification.
+
 ---
 
 ## Architecture
