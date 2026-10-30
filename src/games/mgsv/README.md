@@ -306,17 +306,27 @@ The shared precision upgrades are a rendering foundation, not an HDR-output feat
 
 | Location | Responsibility |
 |---|---|
-| `addon.cpp` | Owns shader data, output state and assembled registries; addon setup, event registration and lifecycle order |
+| `addon.cpp` | Owns shader data, output and reconstruction settings state, and assembled registries; addon setup, event registration and lifecycle order |
 | `settings.hpp` | Core output, tone-mapping, grading and existing-effect controls; Reset All and Preset Off policy |
 | `shadows/settings.hpp` | Contact-hardening and screen-space-shadow controls |
 | `rendering/resource_upgrades.hpp` | Scene, DoF, motion-blur, and velocity resource roles and clone handling |
 | `rendering/light_pass.hpp` | AO/GI texture-allocation helpers, shared pipeline layout, placeholder textures, dispatch helpers, and logging |
 | `rendering/d3d11_compute_state.hpp` | Graphics-state preservation used by lighting and reconstruction |
-| `game/integration.hpp` / `game/shaders.hpp` | Game input bindings and effect insertion / shader registrations |
+| `game/shaders.hpp` | Material capture and GI-then-AO lighting insertion before the shader registry, in the same game namespace |
+| `game/reconstruction.hpp` | MGSV draw classification, velocity-target preparation and reconstruction insertion routing |
 | `output/output.hpp` | SDR/HDR output selection and brightness synchronization |
+| `taa/settings.hpp` | Reconstruction descriptor assembly and migration; migration is invoked explicitly during addon setup |
+| `taa/runtime.hpp` | Addon-owned settings-state type and writes, mode/model/tuning transitions, and lifecycle/event wiring |
+| `taa/runtime/input_capture.hpp` | Per-command-list descriptor tracking followed by game-native input capture, in their existing namespaces |
+| `taa/runtime/frame_inputs.hpp` | Separate backend-facing validated input/output contract |
+| `taa/dlss/model.hpp` | Pure model metadata, default and lookup without SDK/runtime dependencies |
 | `ao/`, `il/`, `taa/` | Feature resources, execution, and controls; AO/GI sliders stay in their feature headers |
 
 See [the architecture guide](docs/ARCHITECTURE.md) for the dependency map and remaining limitations. Shader registration is a hash lookup, not the order in which render passes execute. The standard `mgsv` build target discovers the shaders and generates their embedded headers without requiring local development tests.
+
+The three consolidation groups reduce authored MGSV `.cpp`/`.hpp` files from 31 to 27 without changing logic: settings state, transitions and lifecycle share `taa/runtime.hpp`; game bindings and registrations share `game/shaders.hpp`; descriptor tracking and input capture share `taa/runtime/input_capture.hpp`. Removed headers have no forwarding replacements or aliases. Heavy backends, native hooks and input/output contracts remain separate. `taa/settings.hpp` now uses the runtime umbrella, not a lightweight settings-state include; only the model metadata remains SDK/runtime-independent.
+
+Ownership and existing limits are unchanged: GI still receives a borrowed raw velocity handle from reconstruction capture, and velocity precision preparation remains gated by reconstruction enablement. This consolidation adds no build, test, deployment, gameplay or performance result.
 
 ---
 

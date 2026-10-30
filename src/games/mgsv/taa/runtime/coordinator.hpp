@@ -24,12 +24,11 @@
 #include "../dlss/runtime.hpp"
 #include "../fsr3/runtime.hpp"
 #include "./camera_state.hpp"
-#include "./descriptor_tracker.hpp"
 #include "./input_capture.hpp"
 #include "./logging.hpp"
 #include "./state.hpp"
 
-namespace taa::coordinator {
+namespace mgsv::reconstruction::coordinator {
 
 inline auto& execution_lock = state::execution_lock;
 inline reshade::api::device* runtime_device = nullptr;
@@ -642,4 +641,4 @@ inline void MaybeRunLocked(
   DispatchValidatedLocked(inputs);
 }
 
-}  // namespace taa::coordinator
+}  // namespace mgsv::reconstruction::coordinator

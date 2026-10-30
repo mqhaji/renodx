@@ -4,6 +4,22 @@ Native-resolution Analytical TAA, AMD FSR 3.1.5, and NVIDIA DLSS for Metal Gear 
 See the [addon README](../README.md) for HDR resource handling and build/deployment instructions,
 the [roadmap](ROADMAP.md) for outstanding work, and [FSR provenance](fsr3/README.md) for SDK versions and credits.
 
+## Code ownership
+
+Reconstruction C++ lives in `mgsv::reconstruction`; shader names, persisted keys and log labels remain unchanged. `runtime.hpp` consolidates settings state and writes, transitions, and lifecycle/event wiring from the removed `settings_state.hpp`, `runtime/transitions.hpp`, and `taa.hpp`. It defines float CPU preferences plus borrowed mode/model descriptor pointers in stable addon-global storage. This is a runtime umbrella, not a lightweight settings-state dependency. `dlss/model.hpp` remains the pure metadata header owning the `Model` enum, model metadata, the default and `FindModelOption`, without SDK/runtime dependencies.
+
+`settings.hpp` constructs controls against that state and the supplied registry without accessing persisted configuration; addon setup calls the existing migration immediately before assembly and loads settings before starting the runtime. `AppendSettings` rejects null arguments, either already-bound mode/model pointer, or a duplicate reconstruction registry key. A state cannot be bound again, even to another registry; its storage, descriptors and registry must remain stable and outlive their callbacks.
+
+The `transitions` namespace in `runtime.hpp` keeps requested settings separate from the effective runtime mode and shader binding. `TransitionTemporalMode` and `ApplySettingsSnapshot` take `const State&`: CPU preferences remain unchanged, but the pointed-to `Setting` and effective shader binding may change. This is not deep read-only access. Mode/model changes and tuning synchronization retain the existing lock order, history resets, lazy DLSS activation and suspension policy.
+
+Lifecycle `Use(DWORD, const State&)` binds a borrowed `const State*` once at attach. Fixed-signature ReShade callbacks and preset callbacks use that addon-owned state rather than the settings utility's global registry. The pointer is not cleared on detach; no new quiescence or detach-lifetime guarantee is introduced. Separate descriptor registries do not create separate reconstruction runtimes.
+
+MGSV shader identification and insertion routing are in `../game/reconstruction.hpp`, under `mgsv::game::reconstruction`. It directly calls `rendering::resource_upgrades::PrepareVelocityTarget` under the same temporal-enable gate, with no callback pointer or addon assignment. Logging and RTV helpers used only by `HandleDraw` are local lambdas. `runtime.hpp` keeps lifecycle/event wiring, while the existing coordinator, native hooks and backends keep capture validation, camera publication, submission and SDK ownership. Native projection code and input capture remain in `runtime/`; shared motion ownership and removal of the reconstruction-enable precision gate are separate work. This consolidation changes no shaders, history rules, defaults, lock order or SDK activation timing and claims no new build, test, deployment, gameplay or performance result.
+
+`runtime/input_capture.hpp` now contains `descriptor_tracker` before `input_capture`, preserving both namespaces and callback ownership. `runtime/frame_inputs.hpp` remains a separate backend-facing contract for `ValidatedFrameInputs` and `MethodOutput`, rather than pulling capture implementation into every backend. Heavy backend/SDK implementations, native hooks and submission coordination stay separate because their resource lifetimes and validation responsibilities differ from settings and lifecycle wiring. There are no forwarding headers or namespace aliases for the removed files. The other consolidation group puts material capture and the lighting callback before the registry in `../game/shaders.hpp`; GI still receives the same borrowed raw velocity handle from reconstruction capture, without its capture qualification.
+
+For this structural change, verify saved mode/model/tuning after restarting, cycle Off/Analytical/FSR/DLSS, and check that Preset Off and Reset All still leave reconstruction controls alone. A pending DLSS request must keep the shader binding Off until activation succeeds. Build and CPU settings checks do not establish in-game visual or SDK-lifecycle parity.
+
 ## Usage and defaults
 
 The **Temporal Anti-Aliasing** section in the ReShade addon overlay contains these controls:
@@ -244,9 +260,13 @@ or recurring capture/dispatch warnings remain actionable. There are no per-frame
 
 | Files | Responsibility |
 |---|---|
-| `taa.hpp`, `settings.hpp` | Lifecycle, draw/insertion routing, preset-local controls and transitions |
+| `runtime.hpp` | Settings-state type and writes, requested/effective mode and tuning transitions, lifecycle/event wiring and the once-bound borrowed state |
+| `settings.hpp` | Descriptor assembly and explicit migration; includes the runtime umbrella |
+| `dlss/model.hpp` | Model enum, metadata, default and lookup; no SDK/runtime dependency |
+| `../game/reconstruction.hpp` | MGSV draw classification, direct velocity preparation and insertion routing |
 | `runtime/state.hpp`, `runtime/camera_state.hpp`, `runtime/projection_jitter.hpp` | Sample/reset state, canonical camera history/publication, validated native corrections |
-| `runtime/descriptor_tracker.hpp`, `runtime/input_capture.hpp`, `runtime/frame_inputs.hpp` | Per-list bindings, resource lifetime, validated game-native metadata |
+| `runtime/input_capture.hpp` | Descriptor-tracker namespace followed by input-capture namespace; per-list bindings, resource lifetime and capture validation |
+| `runtime/frame_inputs.hpp` | Separate backend-facing validated game-native input and method-output contract |
 | `runtime/coordinator.hpp`, `../rendering/d3d11_compute_state.hpp` | Submission/query ownership, shared immediate bridge, dispatch/copy-back, shared state restoration, coherent commit |
 | `analytical/runtime.hpp`, `shaders/` | Analytical history/resolve and native velocity replacements |
 | `fsr3/`, `dlss/` | Method lifecycle and linear color/motion/output adapters; AMD host/backend and NGX integration |

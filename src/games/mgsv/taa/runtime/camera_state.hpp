@@ -11,7 +11,7 @@
 
 #include "./state.hpp"
 
-namespace taa::camera_state {
+namespace mgsv::reconstruction::camera_state {
 
 struct Matrix4d {
   std::array<std::array<double, 4>, 4> m = {};
@@ -278,4 +278,4 @@ inline bool Commit(const CameraFrame& frame) {
   return valid;
 }
 
-}  // namespace taa::camera_state
+}  // namespace mgsv::reconstruction::camera_state

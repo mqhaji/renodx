@@ -32,7 +32,7 @@
 #include "./logging.hpp"
 #include "./state.hpp"
 
-namespace taa::projection_jitter {
+namespace mgsv::reconstruction::projection_jitter {
 
 using SetViewMatrixState = void(__fastcall*)(const float* view_matrix);
 using RenderPluginCallback = void(__fastcall*)(void* plugin, void* render, void* viewport);
@@ -1206,4 +1206,4 @@ inline void Use(DWORD reason) {
   }
 }
 
-}  // namespace taa::projection_jitter
+}  // namespace mgsv::reconstruction::projection_jitter

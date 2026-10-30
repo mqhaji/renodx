@@ -24,7 +24,6 @@
 #include "../../utils/settings.hpp"
 #include "../../utils/swapchain.hpp"
 #include "./ao/ao.hpp"
-#include "./game/integration.hpp"
 #include "./game/shaders.hpp"
 #include "./il/il.hpp"
 #include "./output/output.hpp"
@@ -33,14 +32,15 @@
 #include "./settings.hpp"
 #include "./shadows/settings.hpp"
 #include "./shared.h"
+#include "./taa/runtime.hpp"
 #include "./taa/settings.hpp"
-#include "./taa/taa.hpp"
 
 namespace {
 
 // These objects outlive all settings and shader callbacks that borrow them.
 ShaderInjectData shader_injection = {};
 mgsv::output::State output_state;
+mgsv::reconstruction::settings::State reconstruction_settings;
 renodx::utils::settings::Settings settings;
 renodx::mods::shader::CustomShaders custom_shaders = mgsv::game::CreateShaders(&shader_injection);
 
@@ -101,7 +101,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
 
       mgsv::settings::AppendSettings(&settings, &shader_injection, &output_state);
       mgsv::shadows::AppendSettings(&settings, &shader_injection);
-      taa::settings::AppendSettings(settings, &shader_injection);
+      mgsv::reconstruction::settings::MigrateTemporalModeSetting();
+      mgsv::reconstruction::settings::AppendSettings(&settings, &shader_injection, &reconstruction_settings);
       mgsv::ao::AppendSettings(&settings, &shader_injection);
       mgsv::il::AppendSettings(&settings, &shader_injection);
 
@@ -113,7 +114,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
         renodx::mods::swapchain::v2::set_color_space = false;
 
         renodx::utils::settings::on_preset_changed_callbacks.emplace_back(
-            taa::settings::ApplySettingsSnapshot);
+            [] { mgsv::reconstruction::transitions::ApplySettingsSnapshot(reconstruction_settings); });
 
         // renodx::mods::shader::force_pipeline_cloning = true;
 
@@ -186,8 +187,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     mgsv::output::SyncOutputMode(&shader_injection, output_state);
   }
 
-  taa::prepare_velocity_target = mgsv::rendering::resource_upgrades::PrepareVelocityTarget;
-  taa::Use(fdw_reason);
+  mgsv::reconstruction::Use(fdw_reason, reconstruction_settings);
 
   renodx::utils::random::Use(fdw_reason, {&shader_injection.custom_random});
 

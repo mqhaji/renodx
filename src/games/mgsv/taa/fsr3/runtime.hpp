@@ -36,7 +36,7 @@
 #define FFX_FSR3UPSCALER_DISABLE_WATERMARK 1
 #endif
 
-namespace taa::fsr3 {
+namespace mgsv::reconstruction::fsr3 {
 
 inline constexpr uint32_t THREAD_GROUP_SIZE = 8u;
 
@@ -554,7 +554,7 @@ inline bool Dispatch(const ValidatedFrameInputs& inputs, MethodOutput& output) {
   return true;
 }
 
-}  // namespace taa::fsr3
+}  // namespace mgsv::reconstruction::fsr3
 
 // MGSV addons are intentionally built as a single translation unit. Keep the
 // pinned host and custom backend local to this game without modifying core CMake.
