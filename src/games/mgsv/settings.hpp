@@ -389,8 +389,7 @@ inline void ApplyPresetOff(renodx::utils::settings::Settings* registry, ShaderIn
       {"FxDirectionalScreenSpaceShadows", 0.f},
       {"FxSpotScreenSpaceShadows", 0.f},
       {"FxPointScreenSpaceShadows", 0.f},
-      {"FxAmbientOcclusion", 0.f},
-      {"FxIndirectLighting", 0.f},
+      {"FxLightingMode", 0.f},
   };
   {
     const std::unique_lock lock(renodx::utils::mutex::global_mutex);

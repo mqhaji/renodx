@@ -20,7 +20,7 @@
 #include "../shared.h"
 
 // To iterate through the devkit instead, pin them here: that path replaces the
-// shader without supplying cb13, and D3D11 returns 0 for an unbound constant
+// shader without supplying RenoDXSettings, and D3D11 returns 0 for an unbound constant
 // buffer, so anything read from it - including the gate - comes back as 0.
 //
 // #undef  CUSTOM_POINT_CONTACT_HARDENING

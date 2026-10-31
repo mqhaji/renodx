@@ -15,7 +15,7 @@
 // ---- Created with 3Dmigoto v1.3.16 on Thu Oct 15 03:15:09 2026
 
 // The addon's injected constants, which carry the contact-hardening toggle below.
-// Every MGSV replacement shares this header; it declares cbuffer cb13, a register
+// Every MGSV replacement shares this header; it declares cbuffer RenoDXSettings, a register
 // the vanilla shader does not use.
 #include "../shared.h"
 
@@ -113,15 +113,15 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
 // K, the penumbra response, is the Sun Shadow Softness section's Penumbra
 // Response setting now - too high and every pixel saturates, the penumbra goes
 // uniform, and the gradient that the hardening is made of disappears.
-// Tunables come from the addon, through cb13.
+// Tunables come from the addon, through RenoDXSettings.
 //
 //   CUSTOM_DIRECTIONAL_CONTACT_HARDENING  the on/off toggle
 //   CUSTOM_DIRECTIONAL_SHADOW_SOFTNESS    the widest penumbra, metres
 //
 // Both are declared in ../shared.h and set from the Shadows section of the
 // overlay. To iterate through the devkit instead, pin them here: the devkit
-// live-shader path replaces the shader without supplying cb13, and D3D11 returns
-// 0 for an unbound constant buffer, so anything read from cb13 - including the
+// live-shader path replaces the shader without supplying RenoDXSettings, and D3D11 returns
+// 0 for an unbound constant buffer, so anything read from RenoDXSettings - including the
 // gate - comes back as 0 and the effect disappears.
 //
 // #undef  CUSTOM_DIRECTIONAL_CONTACT_HARDENING
@@ -170,7 +170,7 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
                                        // gather PCF resolves cleanly.
 // ---- Screen-space shadow complement -----------------------------------------
 //
-// Tunables come from the addon, through cb13:
+// Tunables come from the addon, through RenoDXSettings:
 //
 //   CUSTOM_SS_SHADOWS       the on/off toggle (off by default)
 //   CUSTOM_SS_REACH         reach, as a fraction of screen height (ndc.y units)
@@ -184,11 +184,11 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
 //
 // All are declared in ../shared.h and set from the Shadows section of the
 // overlay. To iterate through the devkit instead, pin them here: the devkit
-// live-shader path replaces the shader without supplying cb13, and D3D11 returns
-// 0 for an unbound constant buffer, so anything read from cb13 - including the
+// live-shader path replaces the shader without supplying RenoDXSettings, and D3D11 returns
+// 0 for an unbound constant buffer, so anything read from RenoDXSettings - including the
 // toggle - comes back as 0 and the effect disappears.
 //
-// TEST BUILD - character casters only. The devkit live path supplies no cb13, so
+// TEST BUILD - character casters only. The devkit live path supplies no RenoDXSettings, so
 // the values are pinned here. MATERIAL_MAX splits the character band (>=) from
 // everything else (<); this build accepts a hit only when the *caster* is in the
 // character band, so any shadow that appears is Snake's and not the term working

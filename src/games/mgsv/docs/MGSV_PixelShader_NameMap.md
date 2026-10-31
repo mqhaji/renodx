@@ -1,7 +1,6 @@
 # MGSV pixel shader name map (retail 1.0.15.4, DX11)
 
-Produced from a live `renodx-devkit` snapshot of a running open-world frame: 88 tracked `ps_5_0`
-pixel shaders, each resolved to its original source filename.
+This historical live DevKit snapshot maps native shader hashes to source filenames from a running open-world frame. It is a discovery reference, not an exhaustive shader inventory or the addon's active replacement list; current registrations live in [shaders.hpp](../shaders.hpp).
 
 Method: the DXBC embeds `#line` directives pointing at the original build path, e.g.
 
@@ -9,9 +8,7 @@ Method: the DXBC embeds `#line` directives pointing at the original build path, 
 #line 101 "d:\work\master\git_clone\_intermediate\win64\GrModelShaders_dx11_win64\Release\SunLight_DL_CS_ES_ps.hlsl"
 ```
 
-`devkit_get_shader` with `view: "disassembly"` returns the DXBC disassembly including the buffer
-definitions, resource binding table with real names, input/output signatures, and 3Dmigoto-style
-source variable annotations.
+`devkit_get_shader` with `view: "disassembly"` returns the DXBC disassembly, buffer definitions, resource bindings, signatures, and source variable annotations.
 
 ## Naming conventions observed
 
@@ -173,18 +170,4 @@ source variable annotations.
 | `0x6DAF0C4A` | 5868 | 5 | Subsurface scatter, horizontal sweep |
 | `0xB2601810` | 6344 | 6 | Subsurface scatter, vertical sweep + translucency blend |
 
-Both are the screen-space subsurface scatter chain, not ambient occlusion; see [the scatter and AO findings](../lighting/ao/MGSV_AmbientOcclusion.md). The port sources now live under `../subsurface/`; current registration uses a generated first-stage replacement and a callback-only second stage. This historical retail name map does not claim either port is a 1:1 replacement.
-
-## Notes for future work
-
-- Local-light shadow receivers are **not** in this map because no shadowed local light was visible in the
-  captured scene. Engine code (`DgPluginLocalLightDx11.cpp:1456-1504`) enumerates 24 named variants:
-  `SSLighting2_Point_NoShadow`, `SSLighting2_Spot_NoShadow`, `SSLighting2_Spot_Mask_NShdw`,
-  `SSLighting2_Point_NoSpec_NoShadow`, `SSLighting2_Spot_NoSpec_NoShadow`,
-  `SSLighting2_Spot_Mask_NSpec_NShdw`, `SSLighting2_Point`, `SSLighting2_Spot`, `SSLighting2_Spot_Mask`,
-  `SSLighting2_Point_NoSpec`, `SSLighting2_Spot_NoSpec`, `SSLighting2_Spot_Mask_NSpec`,
-  `Lighting_Point_NA_NShdw`, `Lighting_Spot_NA_NShdw`, `Lighting_Spot_NA_Mask_NShdw`,
-  `Lighting_Point_NA_NoSpec_NShdw`, `Lighting_Spot_NA_NoSpec_NShdw`, `Lighting_Spot_NA_Mask_NSpec_NShdw`,
-  `Lighting_Point_NA`, `Lighting_Spot_NA`, `Lighting_Spot_NA_Mask`, `Lighting_Point_NA_NoSpec`,
-  `Lighting_Spot_NA_NoSpec`, `Lighting_Spot_NA_Mask_NSpec`, plus `SSLighting2_ComplexityView`.
-- Vertex shaders and the two compute shaders were not name-mapped; the same method works on them.
+Both belong to subsurface scattering, not AO. [Current registration](../shaders.hpp) uses a generated first-stage replacement and the native second stage with a callback; [port sources](../subsurface) exist for both. See the [lighting integration](../gtvbgi/README.md) for the subsequent custom chain. This table does not establish either port's fidelity or coverage of unrelated scene permutations.

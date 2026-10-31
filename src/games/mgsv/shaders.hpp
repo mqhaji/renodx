@@ -11,8 +11,8 @@
 #include <include/reshade.hpp>
 
 #include "../../mods/shader.hpp"
+#include "gtvbgi/lighting.hpp"
 #include "inputs.hpp"
-#include "lighting/lighting.hpp"
 #include "resource_upgrades.hpp"
 #include "shared.h"
 
