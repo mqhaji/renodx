@@ -1,4 +1,4 @@
-// MGSV VBAO - the full-resolution resolve.
+// MGSV GT-VBGI - full-resolution AO application.
 //
 // The AO pass computes the un-occluded fraction at a fraction of the pixels and writes it to its
 // own target; this pass brings it back to the screen and multiplies the light. A plain bilinear
@@ -9,37 +9,40 @@
 //
 // The light is read and written through the same UAV: a typed UAV load of the same texel is not
 // an aliasing hazard, while binding the light as an SRV and a UAV at once silently drops the SRV.
-// Alpha is written through untouched, because the retail chain reads it as its "pixel was shaded"
-// flag.
+// Preserve native alpha without treating it as generic geometry validity.
 
-#include "../../shared.h"
-#include "../../gbuffer.hlsli"
+#include "../shared.h"
+#include "../gbuffer.hlsli"
 
 Texture2D<float4> aoBuffer : register(t0);
 Texture2D<float4> depthBuffer : register(t1);
 RWTexture2D<float4> lightBuffer : register(u0);
 
 [numthreads(8, 8, 1)]
-void main(uint3 tid : SV_DispatchThreadID) {
+void main(uint3 tid: SV_DispatchThreadID) {
   const uint2 pixel = tid.xy;
   if (pixel.x >= cBufferWidth || pixel.y >= cBufferHeight) return;
 
   const float z = LinearZ(depthBuffer.Load(int3(pixel, 0)).x);
   if (!(z > 0.0) || z > 1.0e6) return;
 
-  const float scale = max(CUSTOM_MGSV_AO_SCALE, 1.0);
+  const float scale = max(CUSTOM_MGSV_GT_RESOLUTION_DIVISOR, 1.0);
   const float2 position = (float2(pixel) + 0.5) / scale - 0.5;
   const int2 base = (int2)floor(position);
   const float2 fraction = frac(position);
   const float inv_z = 1.0 / z;
+  uint ao_width, ao_height;
+  aoBuffer.GetDimensions(ao_width, ao_height);
 
   float factor = 0.0;
   float weight_sum = 0.0;
-  [unroll] for (int y = 0; y <= 1; ++y) {
-    [unroll] for (int x = 0; x <= 1; ++x) {
-      const int2 q = max(base + int2(x, y), int2(0, 0));
+  [unroll]
+  for (int y = 0; y <= 1; ++y) {
+    [unroll]
+    for (int x = 0; x <= 1; ++x) {
+      const int2 q = clamp(base + int2(x, y), int2(0, 0), int2(ao_width, ao_height) - 1);
       const float bilinear = (x != 0 ? fraction.x : 1.0 - fraction.x)
-                           * (y != 0 ? fraction.y : 1.0 - fraction.y);
+                             * (y != 0 ? fraction.y : 1.0 - fraction.y);
 
       // Depth of this tap, fetched at full resolution so the test is exact.
       const int2 full = clamp((int2)floor((float2(q) + 0.5) * scale), int2(0, 0),

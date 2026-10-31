@@ -1,5 +1,7 @@
 # Fox Engine Render Pipeline — Reverse Engineering Reference
 
+Historical notes from retail executable inspection and Frida instrumentation. Plugin structure and CPU recording do not establish GPU execution order. See the [addon architecture](ARCHITECTURE.md) for current RenoDX ownership and lighting placement.
+
 ## Table of Contents
 
 - [Frame Orchestration](#frame-orchestration)
@@ -16,13 +18,12 @@
 - [Key Function Addresses (Retail)](#key-function-addresses-retail)
 - [Proven Frida Techniques](#proven-frida-techniques)
 - [What Can Be Modified Live](#what-can-be-modified-live)
-- [FoxCMD Roadmap](#foxcmd-roadmap)
 
 ---
 
 ## Frame Orchestration
 
-**Confidence: 95%** — Decompiled from retail executable, cross-referenced with debug symbols. Flow confirmed via Frida instrumentation.
+Frame-builder flow was decompiled from the inspected retail executable, cross-referenced with debug symbols, and checked with Frida instrumentation.
 
 The top-level frame builder is `fox::gr::Render::BuildRenderingALL` (retail: `0x1437b9180`). Each frame executes in this order:
 
@@ -56,20 +57,17 @@ The `g_renderWork + 0x20` structure is a linked list of render work entries:
 
 ## Plugin Architecture
 
-**Confidence: 95%** — Dispatch flow decompiled from _Exec and ExecChildPlugin. Three-phase model confirmed via runtime logging.
+Dispatch flow was decompiled from _Exec and ExecChildPlugin; runtime logging supported the three-phase CPU model.
 
 ### Dispatch Flow
 
 Plugin execution is **hierarchical**, not flat. There are three distinct dispatch phases inside `buildRendering()`:
 
-**Phase 1 — Global pre-pass (no viewport):**
-Walks plugin list at `g_renderWork+8` index 0. For each plugin where `plugin[0x50] != 0` (enabled), calls `RenderPlugin::_Exec(plugin, renderWork, NULL)`.
+**Phase 1 — Global pre-pass (no viewport):** Walks plugin list at `g_renderWork+8` index 0. For each plugin where `plugin[0x50] != 0` (enabled), calls `RenderPlugin::_Exec(plugin, renderWork, NULL)`.
 
-**Phase 2 — Per-viewport initialization:**
-Walks viewports at `param_1+0xA0`. For each enabled viewport, walks the tier-indexed plugin list calling `RenderPlugin::_InitRender`. Viewport validity requires: offset `+0x6E2` bit 0 set, `+0x5D8` nonzero, `+0x5DC` nonzero.
+**Phase 2 — Per-viewport initialization:** Walks viewports at `param_1+0xA0`. For each enabled viewport, walks the tier-indexed plugin list calling `RenderPlugin::_InitRender`. Viewport validity requires: offset `+0x6E2` bit 0 set, `+0x5D8` nonzero, `+0x5DC` nonzero.
 
-**Phase 3 — Per-viewport plugin execution:**
-For each plugin in `list[tier_index]`:
+**Phase 3 — Per-viewport plugin execution:** For each plugin in `list[tier_index]`:
 - Check `plugin[0x50]` — master enable byte
 - Check viewport validation via `thunk_FUN_1437ac360`
 - Check viewport bitmask: `viewport[0x528 + plugin[0x4C] * 8] >> (plugin[0x48] & 0x3F) & 1`
@@ -175,15 +173,9 @@ Top-level plugins (dispatched via _Exec):
 
 ### Render Pipeline Execution Order
 
-The tree above also represents execution order. The deferred rendering pipeline flows:
+The hierarchy describes plugin responsibilities. Setup, Execute, child traversal, and deferred command recording must be distinguished from GPU execution; the tree alone does not establish draw order.
 
-1. **Geometry** — terrain depth, opaque meshes, masked meshes, clones, terrain, decals, material layers
-2. **Ambient Occlusion** — two SSAO passes (line integral + ambient obscurance)
-3. **Shading** — spherical harmonics (ambient), local lights, sun shadow, sunlight, subsurface scatter
-4. **Sky** — atmospheric sky layer
-5. **Transparency** — alpha models, wormhole effect
-6. **Post-processing** — reflections, optical camo, thermography, then tonemap → DOF → motion blur → color correction → FXAA
-7. **Overlays** — overlay models, 2D elements, debug primitives, screen capture
+The inspected native captures place geometry and motion before AO and lighting, then subsurface scattering before deferred composition/fog. Later grading follows LUT construction, late tonemap, FXAA, UI, and output. Transparency occurs on both sides of SSR, and reconstruction placement comes from addon source rather than these native-only captures. See the [lighting order and evidence limits](ARCHITECTURE.md#lighting-order).
 
 ### Wiki Entity ↔ Runtime Name Mapping
 
@@ -804,90 +796,7 @@ The projection matrix is copied from `GrViewport->ProjMatrix` to `ShaderManager+
 ## Notes
 
 - All addresses are for the **retail** MGSV:TPP executable unless otherwise noted
-- ASLR is active — all addresses are relative to module base; runtime instances change each launch
-- The scene graph and plugin lists are singly-linked lists (next pointer at +0x30 for plugins, first qword for scenes)
-- `g_renderWork` is the central render state structure; `+0x8` holds the plugin list array, `+0x20` holds the render work entry list
-- Terrain height modification updates in real-time — no reload required
-- Plugin filtering via `ExecChildPlugin` hook **must** call the skip path (`vtbl+0x58`) for filtered children to avoid crashes
-
----
-
-## FoxCMD Roadmap
-
-### Vision
-
-A standalone program (DLL + optional external GUI) that provides a programming interface to the Fox Engine's rendering pipeline. Replaces Frida as the runtime tool with a proper native mod.
-
-### Phase 1 — Native DLL (Port from Frida)
-
-Port all proven Frida hooks to a C++ DLL using MinHook:
-- `_Exec` hook → per-plugin enable/disable by name
-- `ExecChildPlugin` hook → child plugin filtering with cleanup path
-- `ChangeHeightMapRange` hook → terrain height manipulation
-- `StartWireframeCloneObject`/`EndWireframeCloneObject` → wireframe toggle
-- `IsEnableSky` hook → atmospheric sky toggle
-
-Load via IHHook or custom injector. All hooks translate ~1:1 from Frida `Interceptor.replace` to MinHook detours.
-
-### Phase 2 — Console Interface
-
-ImGui overlay rendered through a DX11 Present hook (device pointer at `s_D3D11Device` `0x142c6b860`):
-- Checkboxes for all 42 plugins (hierarchical tree view matching the plugin tree)
-- Sliders for terrain height range
-- Wireframe mode toggle (global / per-plugin)
-- Viewport parameter sliders (exposure, bloom, AO, fog)
-- Real-time readout of frame timing, plugin execution counts
-
-Alternative: external GUI communicating with the injected DLL via named pipes or shared memory.
-
-### Phase 3 — Custom Plugin Injection
-
-Allocate plugin nodes matching the engine's layout:
-- `+0x00` vtable (custom, with Setup/Execute/cleanup functions)
-- `+0x40` SharedString name
-- `+0x48`/`+0x4C` bitmask indices
-- `+0x50` enable byte
-- Link into the plugin list at the desired position
-
-Custom plugin's Execute function receives `RenderContext` and viewport — can issue DX11 draw calls. First target: SMAA post-process replacing FXAA's slot.
-
-**Prerequisite:** Reverse engineer how render targets are managed internally (current blocker — raw DX11 `OMGetRenderTargets` returns null during plugin execution).
-
-### Phase 4 — Advanced Features
-
-- Shader hot-reload (intercept shader compilation, inject modified HLSL)
-- Custom render pass insertion (shadow map visualization, G-buffer debug views)
-- Per-viewport plugin configuration (different settings per viewport)
-- Save/load configuration profiles
-- Plugin execution profiling (per-plugin GPU timestamps)
-
-### Architecture Notes
-
-```
-┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
-│   FoxCMD    │────▶│  Injected    │────▶│  Fox Engine      │
-│   GUI       │     │  DLL         │     │  Render Pipeline  │
-│  (ImGui or  │     │  (MinHook    │     │                   │
-│   External) │     │   detours)   │     │  _Exec            │
-└─────────────┘     └──────────────┘     │  ExecChildPlugin  │
-                                         │  RenderContext     │
-                                         │  ShaderManager     │
-                                         │  s_D3D11Device     │
-                                         └─────────────────┘
-```
-
-### Known Blockers
-
-1. **Render target access** — Engine uses internal RT abstraction. Raw DX11 OMGetRenderTargets returns null during plugin execution. Need to hook RT binding or reverse the engine's RT manager.
-2. **Plugin registration** — How the plugin linked list is built at startup. Need to understand node allocation and list insertion to safely add custom plugins.
-3. **Shader binding** — How plugins bind shaders for draw calls. StartWireframeCloneObject uses `vtbl+0x1F0` to set a shader — need to map the full shader management interface.
-
----
-
-## Notes
-
-- All addresses are for the **retail** MGSV:TPP executable unless otherwise noted
-- ASLR is active — all addresses are relative to module base; runtime instances change each launch
+- Addresses describe the inspected retail build. Apply module-base relocation at runtime; object instances change between launches.
 - The scene graph and plugin lists are singly-linked lists (next pointer at +0x30 for plugins, first qword for scenes)
 - `g_renderWork` is the central render state structure; `+0x8` holds the plugin list array, `+0x20` holds the render work entry list
 - Terrain height modification updates in real-time — no reload required

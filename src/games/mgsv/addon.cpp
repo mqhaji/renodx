@@ -21,6 +21,7 @@
 
 #include <deps/imgui/imgui.h>
 #include <include/reshade.hpp>
+#include <include/reshade_api.hpp>
 
 #include "../../mods/shader.hpp"
 #include "../../mods/swapchain_v2.hpp"
@@ -31,8 +32,8 @@
 #include "../../utils/shader.hpp"
 #include "../../utils/state.hpp"
 #include "../../utils/swapchain.hpp"
+#include "./gtvbgi/lighting.hpp"
 #include "./inputs.hpp"
-#include "./lighting/lighting.hpp"
 #include "./output/output.hpp"
 #include "./reconstruction/runtime.hpp"
 #include "./reconstruction/settings.hpp"
@@ -50,6 +51,25 @@ mgsv::output::State output_state;
 mgsv::reconstruction::settings::State reconstruction_settings;
 renodx::utils::settings::Settings settings;
 renodx::mods::shader::CustomShaders custom_shaders = mgsv::game::CreateShaders(&shader_injection);
+
+constexpr auto ADDON_SETTINGS = [](reshade::api::effect_runtime* /*runtime*/) {
+  if (!ImGui::TreeNode("Third-Party Licenses")) return;
+  if (ImGui::TreeNode("EA FAST Noise (BSD-3-Clause)")) {
+    ImGui::PushTextWrapPos();
+    ImGui::TextUnformatted(R"license(Copyright (c) 2023 Electronic Arts Inc. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+
+1.  Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+2.  Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+3.  Neither the name of Electronic Arts, Inc. ("EA") nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.)license");
+    ImGui::PopTextWrapPos();
+    ImGui::TreePop();
+  }
+  ImGui::TreePop();
+};
 
 void OnPresetOff() {
   mgsv::settings::ApplyPresetOff(&settings, &shader_injection, output_state);
@@ -118,6 +138,9 @@ void OnPresent(
     uint32_t dirty_rect_count,
     const reshade::api::rect* dirty_rects) {
   mgsv::inputs::OnPresent(queue, swapchain, source_rect, dest_rect, dirty_rect_count, dirty_rects);
+  if (mgsv::inputs::IsSelectedSwapchain(swapchain)) {
+    mgsv::lighting::noise_frame.fetch_add(1u, std::memory_order_relaxed);
+  }
   (void)source_rect;
   (void)dest_rect;
   (void)dirty_rect_count;
@@ -160,10 +183,10 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   switch (fdw_reason) {
     case DLL_PROCESS_ATTACH:
       if (!reshade::register_addon(h_module)) return FALSE;
+      reshade::register_overlay(nullptr, ADDON_SETTINGS);
 
       mgsv::settings::AppendSettings(&settings, &shader_injection, &output_state);
       mgsv::shadows::AppendSettings(&settings, &shader_injection);
-      mgsv::reconstruction::settings::MigrateTemporalModeSetting();
       mgsv::reconstruction::settings::AppendSettings(&settings, &shader_injection, &reconstruction_settings);
       mgsv::ao::AppendSettings(&settings, &shader_injection);
       mgsv::il::AppendSettings(&settings, &shader_injection);
@@ -203,7 +226,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
             "Effects",
             "Contact-Hardening Shadows",
             "Screen-Space Shadows",
-            "Ambient Occlusion",
             "Indirect Lighting",
             "Options",
             "Links",
@@ -221,6 +243,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
 
       break;
     case DLL_PROCESS_DETACH:
+      reshade::unregister_overlay(nullptr, ADDON_SETTINGS);
       reshade::unregister_event<reshade::addon_event::copy_resource>(mgsv::rendering::resource_upgrades::OnCopyTonemapOutputResource);
       reshade::unregister_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);
       reshade::unregister_event<reshade::addon_event::destroy_swapchain>(OnDestroySwapchain);

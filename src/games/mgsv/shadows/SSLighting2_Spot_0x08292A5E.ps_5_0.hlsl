@@ -21,13 +21,13 @@
 // The addon's injected settings, which carry the tunables below.
 #include "../shared.h"
 
-// Tunables come from the addon, through cb13; see ../shared.h. The spot's values
+// Tunables come from the addon, through RenoDXSettings; see ../shared.h. The spot's values
 // are separate from the sun's because the scales differ - a spot's cone is tens
 // of metres where the sun's cascade is hundreds, so the same caster separation
 // gives a far larger ratio.
 //
 // To iterate through the devkit instead, pin them here: that path replaces the
-// shader without supplying cb13, and D3D11 returns 0 for an unbound constant
+// shader without supplying RenoDXSettings, and D3D11 returns 0 for an unbound constant
 // buffer, so anything read from it - including the gate - comes back as 0.
 //
 // #undef  CUSTOM_SPOT_CONTACT_HARDENING
@@ -61,7 +61,7 @@
 // re-tuning per light type, and those are settings, not defines.
 //
 // To iterate through the devkit instead, pin them here: that path replaces the
-// shader without supplying cb13, and D3D11 returns 0 for an unbound constant
+// shader without supplying RenoDXSettings, and D3D11 returns 0 for an unbound constant
 // buffer, so anything read from it - including the toggle - comes back as 0.
 //
 // #undef  CUSTOM_SS_SPOT_SHADOWS

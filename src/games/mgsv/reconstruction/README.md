@@ -1,274 +1,156 @@
 # MGSV Temporal Anti-Aliasing
 
-Native-resolution Analytical TAA, AMD FSR 3.1.5, and NVIDIA DLSS for Metal Gear Solid V: The Phantom Pain. See the [addon README](../README.md) for HDR resource handling and build/deployment instructions, the [roadmap](ROADMAP.md) for outstanding work, and [FSR provenance](fsr3/README.md) for SDK versions and credits.
+Temporal reconstruction combines samples from several frames to smooth edges and recover detail. A small camera offset, called jitter, changes which parts of each edge are sampled. MGSV supports Analytical TAA, AMD FSR 3.1.5, and NVIDIA DLSS at the game's render resolution.
+
+See the [addon guide](../README.md) for precision upgrades and build instructions, the [roadmap](ROADMAP.md) for unfinished work, and [FSR credits](fsr3/README.md) for SDK versions and licenses.
 
 ## Code ownership
 
-Reconstruction C++ lives in `mgsv::reconstruction`; shader names, persisted keys and log labels remain unchanged. `runtime.hpp` consolidates settings state and writes, transitions, and lifecycle/event wiring from three earlier removed headers. It defines float CPU preferences plus borrowed mode/model descriptor pointers in stable addon-global storage. This is a runtime umbrella, not a lightweight settings-state dependency. `dlss/model.hpp` remains the pure metadata header owning the `Model` enum, model metadata, the default and `FindModelOption`, without SDK/runtime dependencies.
+[runtime.hpp](runtime.hpp) manages the requested settings, the method that can actually run, and when reconstruction is inserted. [settings.hpp](settings.hpp) connects the controls to storage that remains valid for the lifetime of the addon. While DLSS starts, the requested setting stays DLSS but rendering uses Off. Saved settings load without automatic conversions.
 
-`settings.hpp` constructs controls against that state and the supplied registry without accessing persisted configuration; addon setup calls the existing migration immediately before assembly and loads settings before starting the runtime. `AppendSettings` rejects null arguments, either already-bound mode/model pointer, or a duplicate reconstruction registry key. A state cannot be bound again, even to another registry; its storage, descriptors and registry must remain stable and outlive their callbacks.
+The shared [input owner](../inputs.hpp) keeps references to native material and motion textures and selects one device and swapchain. Velocity precision upgrades work even with reconstruction Off. [input_capture.hpp](input_capture.hpp) selects the motion and camera data for reconstruction and checks that their frame, size, and texture layouts match.
 
-The `transitions` namespace in `runtime.hpp` keeps requested settings separate from the effective runtime mode and shader binding. `TransitionTemporalMode` and `ApplySettingsSnapshot` take `const State&`: CPU preferences remain unchanged, but the pointed-to `Setting` and effective shader binding may change. This is not deep read-only access. Mode/model changes and tuning synchronization retain the existing lock order, history resets, lazy DLSS activation and suspension policy.
+[frame_inputs.hpp](frame_inputs.hpp) defines the common inputs, outputs, and 96-byte preparation constants. Each backend converts color and motion into its required form. The [state guard](../d3d11_compute_state.hpp) restores the game's graphics bindings after reconstruction.
 
-Lifecycle `Use(DWORD, const State&)` binds a borrowed `const State*` once at attach. Fixed-signature ReShade callbacks and preset callbacks use that addon-owned state rather than the settings utility's global registry. The pointer is not cleared on detach; no new quiescence or detach-lifetime guarantee is introduced. Separate descriptor registries do not create separate reconstruction runtimes.
-
-MGSV identification and insertion routing are merged into `runtime.hpp`, preserving `mgsv::game::reconstruction` and its callback API without a forwarding header. Identified object/masked/camera velocity RTV0 preparation calls `rendering::resource_upgrades::PrepareVelocityTarget` before AA-enable and descriptor-data returns under the same execution guard. Precision is not reconstruction-gated. Root `../inputs.hpp` owns native observations; effective reconstruction or GI can demand motion capture, while camera publication, sample progression, coordinator submission and SDK ownership remain reconstruction-specific. Shared first-present selection guards reconstruction's Present device binding against competing foreign Presents. SDK activation timing is unchanged.
-
-`../inputs.hpp` owns `mgsv::inputs::descriptor_tracker`, retained latest `Motion`, separate `lighting_motion` compatibility, `Materials`, first-present single-device/swapchain admission, generations and publication tickets. `../addon.cpp` owns shared descriptor/draw registrations and utility setup; reconstruction still registers its own coordinator/lifecycle callbacks. Native getters retain live bindings, with enabled producer/object clones explicitly pinned under each clone's own live record rather than requiring exact previous descriptor-state parity. There is no per-context retained cache or demand-off clearing; bounded references survive until replacement/reset/retirement. Generations and tickets protect metadata publication, not GPU contents or order.
-
-`input_capture.hpp` is now the temporal adapter: it retains its selected `Motion` and camera/frame/sample annotations, validates the generation, and requires matching color/velocity/depth/object dimensions and single-mip/layer/sample resources at insertion. These stricter temporal layout checks are adapter-only; the shared owner does not reject mismatched depth/object extents before GI compatibility publication. A newer latest observation must not replace the adapter's selected motion. Temporal resets clear adapter annotations/references, not the shared lighting compatibility selection.
-
-`frame_inputs.hpp` supplies `ValidatedFrameInputs`, `MethodOutput` and the common 96-byte `PrepareConstants`; `prepare_inputs.hlsli` and `encode_output.hlsli` share SDK adapter math while backend entry shaders, resources and teardown remain distinct. Material retention lives in `../inputs.hpp`; GI-then-AO orchestration lives in `../lighting/lighting.hpp`, with AO/IL implementations in their existing namespaces. Lighting pins a shared snapshot and passes its `lighting_motion.velocity`, not reconstruction storage. Off+GI latest observations, including failures, never change compatibility selection. Lighting allocation/dispatch skips before first selected Present and during retirement/resize. Root `../shaders.hpp` remains the registry; `../d3d11_compute_state.hpp` serves lighting and reconstruction without changing its namespace.
-
-Retention is **not pixel-content, freshness or GPU-order proof**. Qualified GI handoff remains **BLOCKED** on the live producer chain and existing cold-history defect. The [current ownership checkpoint](../docs/ARCHITECTURE.md#current-ownership-checkpoint--offline-validation-completed) records the standalone build, all 21 local checks rerun against the latest code, and the successful user-reported gameplay smoke test on 2026-10-30. The game log corroborates 4K DLSS/Analytical transitions and DLSS F/M changes, but not FSR or cold Off+GI coverage. Hardware fixtures use actual immediate/deferred wrappers, clone metadata and readbacks for ownership only. Shader/history algorithms, defaults/settings order and registry precedence are unchanged.
-
-The ten uniform projection controls use an ordered local descriptor table in `settings.hpp`, preserving their keys, metadata, bindings, visibility and reset callbacks. The rename to `reconstruction/` and shader grouping do not change the existing shader registry or FSR vendor contents/provenance.
-
-For this structural change, verify saved mode/model/tuning after restarting, cycle Off/Analytical/FSR/DLSS, and check that Preset Off and Reset All still leave reconstruction controls alone. A pending DLSS request must keep the shader binding Off until activation succeeds. Build and CPU settings checks do not establish in-game visual or SDK-lifecycle parity.
+[GT-VBGI](../gtvbgi/README.md) currently has no separate temporal history and does not request motion. Keeping a texture alive does not prevent the game from overwriting its pixels. Future GI accumulation needs separate proof that motion, geometry, lighting, and history belong together.
 
 ## Usage and defaults
 
-The **Temporal Anti-Aliasing** section in the ReShade addon overlay contains these controls:
+The **Temporal Anti-Aliasing** section contains these controls:
 
-| Control | Current behavior/default |
+| Control | Behavior and default |
 |---|---|
 | **Temporal Reconstruction** | Off (Vanilla FXAA), Analytical TAA, AMD FSR 3.1.5, NVIDIA DLSS. New profiles default to FSR3. |
-| **DLSS Model** | Presets A-F and J-M, subject to DLL support. Default/reset is F (persisted value 6), with DLL-default fallback when unsupported. |
-| **TAA Jitter Pattern** | Analytical-only Halton (2,3), eight phases, or diagnostic Off. FSR3/DLSS enforce Halton without overwriting the Analytical preference. |
-| **TAA Clip Tightness** | Analytical history bounds; default `0.50`. |
-| **TAA History Clip Strength** | Analytical color-box clipping; default `1.00`. |
-| **TAA Current Frame Blend** | Maximum adaptive filtered-current contribution; default `0.15`. |
-| **Unclamp Motion Vectors** | Shared diagnostic, default Off. Also affects native motion blur. |
-| **Projection Jitter Path sliders** | Ten Analytical-only controls, range `-2x..2x`, all default/reset to `1x`. Alternate Stream correction is disabled and has no slider. |
-| **TAA Diagnostic View / Velocity View Range / Object Motion Source** | Analytical diagnostics; default Temporal Resolve, `8 px`, Auto-Corrected Native Object Velocity. |
+| **DLSS Model** | Presets A-F and J-M when supported by the DLL. Default/reset is F, saved as 6. Unsupported hints fall back to the DLL default. |
+| **TAA Jitter Pattern** | Analytical uses an eight-phase Halton pattern or diagnostic Off. FSR3/DLSS always use Halton without changing the saved Analytical choice. |
+| **TAA Clip Tightness** | Controls the allowed range of history colors. Default `0.50`. |
+| **TAA History Clip Strength** | Controls how strongly history is restricted to that range. Default `1.00`. |
+| **TAA Current Frame Blend** | Maximum weight of the filtered current frame. Default `0.15`. |
+| **Unclamp Motion Vectors** | Diagnostic, default Off. Also affects native motion blur. |
+| **Projection Jitter Path sliders** | Ten Analytical controls, each ranging from `-2x` to `2x`, default/reset `1x`. Alternate Stream has no slider and stays disabled. |
+| **TAA Diagnostic View / Velocity View Range / Object Motion Source** | Default Temporal Resolve, `8 px`, Auto-Corrected Native Object Velocity. |
 
-Method, model, tuning, and projection scales are global, appear above the preset slider, and are not changed by RenoDX
-preset selection. **Off (Vanilla FXAA)** restores vanilla FXAA and the unjittered projection path.
-Changing history-affecting controls resets accumulation; visualization range alone does not.
-Relaxing analytical clipping or current-frame blending can reduce shimmer at the cost of ghosting.
+These settings appear above the preset slider and remain independent of RenoDX presets. Off restores the original projection and FXAA. Changes that affect history restart accumulation; changing the visualization range alone does not. Weaker history clipping can reduce shimmer while increasing trails behind moving objects.
 
-Both `ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS` and `ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS` remain `1` in `state.hpp`; debug UI is available during gameplay. FSR3/DLSS ignore slider values and use `1x` on the original six paths and four enabled experimental paths. Projection-macro-0 builds retain the same scale policy. Alternate Stream always returns `0x`, including builds without diagnostic UI; old `FxTaaAlternateCameraJitterScale` keys are ignored without rewriting INIs. Motion-macro-0 builds use Temporal Resolve, `8 px`, and corrected native object motion.
+Diagnostic UI is enabled by `ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS` and `ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS` in [state.hpp](state.hpp). FSR3/DLSS use fixed `1x` correction on the six original and four enabled experimental paths. Alternate Stream stays at `0x`, including builds without diagnostic UI. Without motion diagnostic UI, rendering uses Temporal Resolve, `8 px`, and corrected native object motion.
 
-The FSR Legacy Compute State toggle **and compute-only implementation are removed** following the user's successful
-Legacy Off validation. All methods use the existing extended compute/graphics/OM preservation, including depth-stencil
-state. Old `FxFsrLegacyComputeState` keys are ignored without rewriting INIs. FSR tuning remains `0.15` shading-change
-scale and `1/3` accumulation increment. This removal is not a new flicker fix.
-
-Temporary pose/draw-buffer staging, GPU readbacks, geometry matching, binary dumps, jitter-link journals, per-path
-telemetry, and unused hook-call atomics are absent. Normal input/camera capture, DLSS query-scope tracking,
-command-list ownership, and SDK completion/cleanup safety remain; they are not disposable diagnostic instrumentation.
+All methods save and restore compute, graphics, and render-target state, including depth-stencil state. FSR uses a `0.15` shading-change scale and a `1/3` accumulation increment.
 
 ## Frame and resource contracts
 
-1. The validated main `SetViewMatrixState` call captures canonical no-jitter P/V, applies Halton to the gameplay
-   projection copy at `ShaderManager+0x680`, and publishes frame/sample, dimensions, jitter, and camera provenance.
-2. Guarded secondary native paths consume that publication without republishing camera history.
-3. `MotionBlurCameraVelocity` supplies depth, object velocity, final velocity, and the matching camera publication.
-   Scene color is accepted at a dimension-matched insertion. One `ValidatedFrameInputs` value serves all methods.
-4. The insertion cascade is full-resolution `DOF_ScatterBakeFirst` (`0xFE1DC3F8`), sequence-qualified post-DoF copy,
-   sequence-qualified post-motion-blur-tile copy, then Tonemap/1D-LUT. Lower-resolution candidates are skipped.
-5. One resolve per frame produces encoded output for copy-back and restores common D3D11 state. Successful camera
-   commit checks reset generation and sample, then advances the sample under the publication lock.
-6. Vanilla FXAA becomes pass-through while temporal reconstruction is enabled.
+1. The main `SetViewMatrixState` hook records the camera's view and projection matrices before jitter, offsets the gameplay projection at `ShaderManager+0x680`, and records its frame, sample, dimensions, and source camera.
+2. Other supported camera paths use that recorded camera data without advancing camera history.
+3. `MotionBlurCameraVelocity` supplies depth, object motion, composed motion, and the matching camera data. All methods receive the same checked `ValidatedFrameInputs`.
+4. Reconstruction runs at one suitable insertion: preferably full-resolution `DOF_ScatterBakeFirst` (`0xFE1DC3F8`), otherwise a checked post-DoF copy, post-motion-blur-preparation copy, or late tonemap/LUT draw. Lower-resolution candidates are skipped.
+5. One resolve per frame writes the reconstructed scene back in MGSV's expected encoding and restores game state. Camera history advances only if the result still matches the current reset counter and sample.
+6. With reconstruction enabled, the FXAA shader skips its filter but keeps its other scene processing.
 
-Inputs must agree on device, dimensions, resource type, sample count, presentation epoch, and temporal sample.
-Callbacks can straddle Present: current or immediately previous-epoch input is accepted only with the matching sample.
-Older or mismatched input fails closed. A Present with no new full-resolution candidate preserves history; a matching
-candidate that cannot resolve invalidates it after the fallback cascade. Creation, resize, mode/settings changes, and
-missing previous camera history reseed accumulation.
+Inputs must match the device, dimensions, texture layout, presentation interval, and temporal sample. A callback can cross Present, so data from the immediately preceding interval is allowed only when the sample also matches. Older or mismatched data is rejected. Missing full-resolution work preserves history; a matching draw that fails at every insertion invalidates it. Creation, resize, relevant setting changes, and missing previous camera data restart accumulation.
 
-`ValidatedFrameInputs` freezes metadata and ownership, **not GPU resource contents**. Retained SRVs are live resources;
-CPU callback order, camera commit, and matching handles do not prove which writes or poses contributed to a pixel.
-All three methods dispatch on the immediate context. Deferred insertion recordings are split into a preserved
-game prefix and remainder; submission executes prefix -> selected reconstruction/copy-back -> remainder.
-Pending work owns its mode and temporal generation, so a transition skips stale reconstruction without dropping
-the original game prefix. The shared immediate-context path is now unconditional; the temporary comparison toggle
-and original deferred reconstruction path are removed after the user reported comparable perceived performance.
-This is not a measured performance equivalence or a proven character-warble fix. Old `FxSharedImmediateContext`
-keys are ignored without rewriting INIs.
+All three methods run on the immediate D3D11 context. Deferred command lists are split around the insertion: the game work before reconstruction executes first, reconstruction and copy-back run next, then the remaining game work executes. Changing methods cancels obsolete reconstruction without dropping either part of the game's command list. CPU recording order and retained texture references alone do not prove which pixels the GPU will read.
 
-| Signal | Contract |
+| Signal | Required form |
 |---|---|
-| Scene color | Full-resolution RGBA16F clone in MGSV's sRGB-encoded scene domain; decode for linear reconstruction. |
-| Scene alpha | Preserve current-frame alpha exactly for downstream DoF/highlight behavior. |
-| Depth | Full-resolution reverse-Z from the velocity pass. |
-| Object/final velocity | Separate RGBA16F clones, preserving precision before the composite; native packed motion in `.ba`, object mask in `.r`. |
-| SDK inputs | Owned linear RGBA16F color and signed RG16F motion; DLSS also owns an R32F reverse-Z depth copy. Native render/output extents are equal. |
-| Camera history | Double-precision no-jitter matrix history, promoted only on a successful matching commit. |
+| Scene color | Full-resolution RGBA16F replacement texture containing MGSV's sRGB-encoded scene color; decode before combining light values. |
+| Scene alpha | Preserve current-frame alpha for downstream DoF and highlights. |
+| Depth | Full-resolution reverse-Z from the velocity pass. Larger raw values are nearer. |
+| Object/final velocity | Separate RGBA16F textures; native motion is packed in `.ba`, with the object mask in `.r`. |
+| SDK inputs | Linear RGBA16F color and signed RG16F motion; DLSS also receives an R32F reverse-Z depth copy. Render and output sizes are equal. |
+| Camera history | Double-precision matrices without jitter, saved only after a successful matching result. |
 
-All temporal methods retain full common CS slots/shader/classes, graphics SRVs, OM unbind/restore, render targets,
-DSV, blend/depth-stencil state, and tracked compute descriptors. Do not reintroduce reduced-slot FSR preservation.
+State restoration includes compute shaders and their bindings, graphics texture inputs, render targets, depth/stencil, blending, and tracked compute descriptors. FSR must keep the same full state preservation as the other methods.
 
 ## Native jitter ownership and lifetime
 
-`projection_jitter.hpp` validates executable bytes, image bounds, copy context, call targets, and whitelisted return sites before installing native hooks. The main viewport must be enabled, full-resolution, perspective, and have a valid camera; canonical viewport P must match the active shader-manager copy before correction.
+[projection_jitter.hpp](projection_jitter.hpp) checks the executable and expected call sites before installing camera hooks. The main viewport must be enabled, full-resolution, and perspective, with a valid camera. Its original projection must match the shader manager's copy.
 
-- Setter corrections change only projection elements 8/9 and their dirty flags: `P[8] += 2*jitter_uv.x`,
-  `P[9] -= 2*jitter_uv.y`, scaled for the selected path.
-- The original six paths are Velocity, Forward, Model, Alpha Model, Overlay Model, and Local Light. The guarded local-light
-  callback temporarily changes its viewport source and restores all sixteen floats before returning. Persistent viewport
-  P otherwise stays canonical; no broad mapped-constant-buffer mutation or culling/UI/shadow projection changes.
-- Velocity and Thermography permit the previous Present epoch under exact camera/viewport identity, dimensions, byte-exact
-  canonical P/V, reset-generation, and sample checks. Their publication guards span validation and the native write;
-  it does not acquire the execution gate. Other original secondary paths retain their existing epoch policy.
-- Experimental scopes own P/V, sequence, generation, and sample. Final writes use the common nonblocking execution gate
-  then publication guard; scale/reset transactions follow transition -> execution -> publication ordering. Revalidate
-  inside the final guarded section. Do not hold these guards across original native calls, allocation, or logging.
-- Reject null/orthographic/foreign cameras and nonfinite, already-jittered, or ambiguous matrix matches. Rejected nested
-  scopes must shadow outer scopes. Borrowed synchronous data must not escape into deferred work or cross-thread TLS.
-- A deferred packet needs proven producer-to-consumer generation/sample ownership. Matching the latest VP or pointer
-  is not enough; do not invent a global pointer cache or guessed payload fields to bypass that requirement.
+- Projection setters change only elements 8/9 and their dirty flags: `P[8] += 2*jitter_uv.x`, `P[9] -= 2*jitter_uv.y`, multiplied by that path's scale.
+- The six original paths are Velocity, Forward, Model, Alpha Model, Overlay Model, and Local Light. The local-light callback temporarily changes its source viewport, then restores all sixteen projection values. The main viewport projection stays unchanged.
+- Velocity and Thermography may use the preceding Present interval only when the camera, viewport, dimensions, exact original matrices, reset counter, and sample match. Their camera-data lock covers both the checks and the write.
+- Experimental paths save the matrices, sequence, reset counter, and sample for their own call. Final writes acquire the execution guard before the camera-data guard and check the data again. Mode/reset changes acquire locks in this order: transition, execution, camera data. Release guards before native calls, allocation, or logging.
+- Reject missing, unrelated, orthographic, nonfinite, already-offset, or ambiguous camera data. A rejected nested call must not inherit a valid outer call's correction. Temporary data must stay within its synchronous call and thread.
+- Deferred camera packets need a proven link between the producer and consumer's sample and reset counter. A matching pointer or latest matrix is insufficient.
 
-**Native projection hooks and the addon module are pinned for process lifetime.** Device destruction stops admission;
-it does not unpatch or free trampolines. Recreation reuses the installation. Restart MGSV to replace or remove the addon;
-dynamic native-hook unloading is unsupported. Installation belongs at the established init-device boundary, never a
-slider callback. Do not introduce detach waits while holding a lock needed by callbacks. Stopping admission or changing
-Off/reset cannot undo previously admitted/submitted work; rapid-transition GPU ordering still requires validation.
+**Restart MGSV to replace or remove the addon.** Camera hooks and the addon module stay loaded for the process lifetime. Device destruction stops new work without removing hooks; recreation reuses them. Install hooks during device initialization, never from a slider callback. Do not wait for callbacks while holding a lock they need. Off or Reset cannot undo work already recorded or submitted, so rapid transitions still need gameplay checks.
 
 ### Experimental projection paths
 
-The four remaining experimental controls default to `1x` for Analytical. FSR3/DLSS also use fixed `1x` on these paths; this policy is **not a declaration of visual validation**. Alternate Stream correction is disabled for every method. Addresses and offsets below are hexadecimal RVAs/offsets; executable validation remains mandatory.
+The four enabled experimental paths use `1x` by default for Analytical and fixed `1x` for FSR3/DLSS. They still need gameplay coverage. Alternate Stream is disabled for every method. Addresses and offsets below are hexadecimal; check the executable before using them. `P` means projection and `VP` means combined view/projection.
 
-| Control / persisted key | Correction and restriction |
+| Control / saved key | Correction and restriction |
 |---|---|
 | Sun Volume / `FxTaaSunVolumeJitterScale` | `30AC50 -> 30B680`, return `30B07D`: private aligned VP copy for synchronous volume upload/draw. |
-| SH Fallback / `FxTaaShFallbackJitterScale` | `27EF80`, return `1F2529`: successful output XY only; kinds 0..3 use validated 8/6/18/8 vertex counts. Preserve Z/W, visibility, depth bounds. |
-| Terrain Decal / `FxTaaTerrainDecalJitterScale` | `275280 -> 2D18D0`, return `2755CA`: native-owned packet P at `+160` before attachment; affects inverse-plane reconstruction, not separately captured raster P. |
+| SH Fallback / `FxTaaShFallbackJitterScale` | `27EF80`, return `1F2529`: successful output XY only; kinds 0..3 use checked 8/6/18/8 vertex counts. Preserve Z/W, visibility, and depth bounds. |
+| Terrain Decal / `FxTaaTerrainDecalJitterScale` | `275280 -> 2D18D0`, return `2755CA`: native-owned packet P at `+160` before attachment; affects inverse-plane reconstruction, not the separately captured raster projection. |
 | General Light Packet / `FxTaaLightPacketJitterScale` | `2A4C00 -> 2D3380`, return `2A5342`: native-owned VP at `+130` before attachment; preserve clip-W and selection data. |
-| Alternate Stream / disabled | `2E7330/2E4C70 -> 2D7AA0`, returns `2E7484/2E4DD7`: native constant `0x47` staging passes through unchanged. Hook installation/lifetime remains unchanged; the slider and its storage are removed. |
+| Alternate Stream / disabled | `2E7330/2E4C70 -> 2D7AA0`, returns `2E7484/2E4DD7`: native constant `0x47` passes through unchanged. Hook lifetime is unchanged; there is no slider or setting field. |
 
-The user confirmed that, after accumulation settled, Analytical Alternate Stream `0x` removed waveform instability and `1x` restored it. This is the basis for disabling only this path; it is not proof of the underlying consumer mismatch or a fix for the separate Preset M rail flicker reproduced with an older binary. The all-method disable still needs fresh in-game validation.
+The user reproduced waveform instability with Analytical Alternate Stream at `1x`; `0x` removed it after accumulation settled. That supports disabling this path. The underlying mismatch and separate Preset M rail flicker remain unresolved, and the all-method disable still needs fresh gameplay validation.
 
-Clip translation changes XY by the jitter offset times W, leaving Z/W unchanged. SH validates original success, kind,
-bounds, and all finite results before storing. Packet attachment must retain native-owned storage, never a stack payload
-or copied refcount header. Alternate constant `0x47` means bank 7/vectors 4..7, not physical D3D `b7`; null-camera updates
-can leave old context P/V intact, so persistent context edits are unsafe.
+Clip translation adds the jitter offset times W to XY while preserving Z/W. SH checks that the original operation succeeded and its output kind, bounds, and values are valid. Packets must keep native-owned storage, including their reference-count headers. Alternate constant `0x47` identifies bank 7, vectors 4..7; it is not D3D constant buffer `b7`. A null-camera update can leave old context matrices behind, so those matrices must not be changed permanently.
 
-The deferred **SH packet** route (`27F450`) is not implemented or exposed: producer-generation ownership is unresolved. Live draw-grid correlation, terrain inverse/raster consistency, and general-light final consumers remain outstanding. Their enabled SDK policy does not resolve these coverage gaps. Alternate Stream must remain disabled unless its world/UI consumers and waveform stability are proven separately.
+The deferred SH packet route (`27F450`) remains disabled because ownership between its producer and consumer is unresolved. Actual draw-grid alignment, terrain reconstruction/raster agreement, and final general-light consumers still need verification. Alternate Stream must stay disabled until its world/UI consumers and waveform stability are understood.
 
 ## Motion and reconstruction
 
-Native `.ba` decodes as `(ba*2-1)*64/render_size`, a current-minus-previous UV delta. History samples at
-`output_uv - velocity`, not at the selected dilation UV. Background motion comes from depth and no-jitter matrices;
-object pixels retain native bone-aware motion with the configured current projection jitter removed. Do not change
-sign/swizzle/scale, subtract a global jitter delta, or gate correction on a last-success counter without pixel evidence.
+Native `.ba` decodes to `(ba*2-1)*64/render_size`, giving current-minus-previous UV motion. History is read at `output_uv - velocity`. When a neighboring pixel supplies motion, use that motion to offset the output pixel's UV. Background motion comes from depth and camera matrices without jitter. Object motion retains native bone movement, with the configured current projection jitter removed.
 
-Analytical selects center plus four diagonal depth taps using maximum raw reverse-Z (`>=` makes the last equal-depth
-tap win), moving mask/motion/depth/UV together. FSR3/DLSS adapters load center pixels; this difference alone does not
-establish the cause of warble in any method. Analytical decodes current filtering and all sixteen Catmull-Rom history taps before
-linear-light reconstruction, then stores history in MGSV's encoded domain. It has no previous-depth rejection or locks.
+Analytical chooses the nearest depth from the center and four diagonal pixels. It moves the mask, motion, depth, and UV together; the last equal-depth tap wins. FSR3/DLSS read the center pixel. Analytical decodes current-frame filtering samples and all sixteen Catmull-Rom history taps before combining them in linear light, then stores encoded history. It has no previous-depth rejection or history locks.
 
-The Object Motion Source modes retain Auto, Matrix Camera Everywhere, current-jitter and jitter-delta sign diagnostics,
-plus **Direct Object Velocity** (6: bypass composite at the same selected texel) and **Auto Center Pixel**
-(7: disable dilation, retain Auto's correction/composite). These are diagnostics, not warble fixes. Matrix Camera
-Everywhere discards deformation motion and causes animation ghosting; it is not a production substitute.
+Object Motion Source includes Auto, Matrix Camera Everywhere, jitter-sign diagnostics, Direct Object Velocity (6), and Auto Center Pixel (7). Direct Object Velocity bypasses the composite at the selected pixel. Auto Center Pixel disables the neighbor search. Matrix Camera Everywhere drops bone/deformation motion and causes animation trails; these modes are diagnostic comparisons rather than fixes for character wobble.
 
-The three minimal velocity pixel-shader replacements preserve native encoding and alpha tests. **Unclamp Motion Vectors**
-only bypasses the native radial clamp while enabled with temporal reconstruction. The approximately 64-pixel clamp and
-native motion-blur compatibility remain reasons to keep it default Off until an owned temporal-only path is proven.
+The three velocity replacements preserve native encoding and alpha tests. **Unclamp Motion Vectors** bypasses the roughly 64-pixel radial limit only while temporal reconstruction is enabled. Keep it Off for baseline comparisons because it also affects native motion blur.
 
 ## SDK lifecycle
 
-FSR3 uses AMD's 3.1.5 host schedule through the local D3D11/SM5 backend. It supplies no external reactive,
-transparency/composition, or exposure resource; internal shading-change/reactivity/disocclusion analysis remains active.
-`preExposure = 1`; sharpening and the separate generate-mask API are disabled even though their pipelines exist.
-This is a local source adaptation, not an AMD-supported D3D11 integration. See [provenance and licenses](fsr3/README.md).
+FSR3 follows AMD's 3.1.5 host schedule using a local D3D11/Shader Model 5 backend. It has no external reactive, transparency, or exposure texture; its internal analysis still identifies changing shading and newly visible surfaces. `preExposure = 1`. Sharpening and the separate mask-generation API are disabled. AMD does not provide this D3D11 integration; see [credits and licenses](fsr3/README.md).
 
-DLSS requires a compatible `nvngx_dlss.dll` beside `mgsvtpp.exe` and the installed NVIDIA NGX core; the addon does not
-bundle the feature DLL. Startup checks only ReShade's rendering-device vendor ID. Non-NVIDIA/unidentified devices show
-a disabled option with a red explanation. NVIDIA eligibility is not proof of feature support.
+DLSS requires a compatible `nvngx_dlss.dll` beside the game executable and NVIDIA's installed NGX core. The addon does not bundle that DLL. Startup checks the rendering GPU's vendor; other or unidentified vendors see a disabled option with an explanation. An NVIDIA GPU alone does not guarantee DLSS support.
 
-- No DLL lookup/version/load or NGX call occurs before explicit or restored DLSS
-  selection. Opening the dropdown does not activate it. Settings queue activation for Present, never initialize in a draw.
-- While pending, requested mode remains DLSS but effective mode/binding is Off. A newer choice cancels the request.
-  Support failures are cached with an explanation and effective Off until restart; no per-Present retry loop.
-- Install the shared submission/query bridge at Present when a temporal method is selected; Analytical/FSR selection
-  does not probe or load NGX. Once installed, retain tracking through ordinary method/Off transitions until device teardown.
-  Existing deferred recordings are
-  unknown, not query-free: splitting requires a post-install context or a natural successful `FinishCommandList`
-  boundary. Reset/Present/failed Finish does not establish that boundary. Skip unqualified recordings.
-- NGX evaluates on the immediate context between the original prefix and post-insertion command list. Preserve pending
-  original prefixes through mode/generation changes; do not discard game work or evaluate stale generations.
-  Query tracking is shared by all three methods, including a fresh never-DLSS startup.
-- Leaving DLSS suspends one feature/texture bundle instead of releasing it or waiting for the GPU from Present.
-  Compatible device/context/size/model resumes with fresh history; incompatible requests recreate during dispatch.
-  Retention is approximately 253 MiB of adapter textures at 4K plus NGX allocations, not a growing bundle per switch.
-- Actual teardown verifies bounded GPU completion and NGX release; failure retains owners and disables DLSS.
-  Query completion and retained ownership are safety requirements, not temporary readback instrumentation.
+- DLSS libraries are inspected and loaded only after explicit or saved DLSS selection. Opening the dropdown does not start DLSS. Initialization is requested at Present, outside draw callbacks.
+- While loading, the setting stays DLSS but rendering uses Off. Selecting another method cancels the request. A support failure keeps an explanation and effective Off until restart instead of retrying every Present.
+- The shared command-submission and query tracking starts at Present when any temporal method is selected. Analytical and FSR do not load NGX. Tracking remains active through method changes until device teardown.
+- An existing deferred recording is usable only after a known successful `FinishCommandList` boundary, or when its context was created after tracking began. Reset, Present, or a failed finish does not prove that its GPU queries are safe to split.
+- NGX runs between the preserved parts of the native command list on the immediate context. Method and reset changes must cancel only obsolete reconstruction, preserving the game's work.
+- Leaving DLSS keeps one feature and texture set for reuse. Matching device, context, size, and model resume it with fresh history; incompatible requests recreate it. At 4K the retained adapter textures use about 253 MiB, plus NGX allocations. Switching does not retain another set each time.
+- Teardown checks for GPU completion before releasing NGX resources. If completion or release cannot be confirmed within the allowed wait, retain the resources and disable DLSS.
 
-DLSS uses native-resolution quality, auto exposure, no sharpening, and the selected supported model hint. Unsupported
-submission/state/query conditions or NGX failure queue a coherent transition to Off. Analytical/FSR inactive graphs
-are released; DLSS suspension is a transition-crash mitigation, not identification of the original heap-corrupting write.
+DLSS uses native-resolution quality, automatic exposure, no sharpening, and the supported model hint. Submission, state, query, or NGX failures request a switch to Off. Inactive Analytical/FSR resources are released. Keeping DLSS resources across switches reduces teardown risk; it does not identify the original heap-corruption cause.
 
 ## Known limitations and validation status
 
-- **Character warble root cause remains unidentified.** Latest user clarification (2026-09-09): Analytical Jitter Off
-  did not improve it, and repeated Auto/Direct comparisons showed no noticeable difference. Matrix Camera Everywhere
-  was **inconclusive** because heavy animation ghosting prevented judging warble; it is not evidence that bypassing
-  native object motion helped. The narrow velocity ownership correction did not visually fix the observed warble.
-  The user subsequently confirmed wobble with DLSS too; newer DLSS models conceal it better. Shared immediate
-  submission is not a proven wobble fix.
-- Prior repaired readbacks completed but did not establish same-character color/velocity geometry and contributing
-  history correspondence. Native previous bones/object transforms versus the last accumulated frame remain unproved.
-  These are coverage gaps, not evidence of a native-pose root cause or grounds to prioritize it from the camera-only test.
-  Current source has no automatic capture machinery; no repeated generic capture or old A/B run is requested.
-- Thermography now receives scene jitter at its two native projection setters. Matched RenderDoc body/highlight
-  draws agree on clip positions after correction; the user reports clean NVG rendering with original shaders.
-  The native `NewThermography` branch was observed live; the alternate branch still needs gameplay coverage.
-- Four enabled experimental projection paths still need runtime coverage/transition validation; Alternate Stream remains disabled after the reproducible waveform test. There is no proven native camera-cut signal; do not restore the removed clip-space heuristic that falsely reset SDK history every frame.
-- FSR external masks/exposure and analytical previous-depth/disocclusion/lock history remain absent. Thin detail,
-  transparency, rain, emissives, and disocclusions require continued validation. No method applies sharpening here.
+- Character wobble remains unexplained. Previous gameplay comparisons found no improvement from Analytical Jitter Off or Auto versus Direct object motion. Matrix Camera Everywhere caused too much ghosting to judge wobble. DLSS also showed wobble, although newer models hid it better. Motion ownership and submission changes have not established a fix.
+- Previous readbacks did not prove that the same character's color, motion, geometry, and accumulated history matched. Correspondence between native previous bones/object transforms and the last accumulated frame remains unverified. Camera-only comparisons do not establish a native-pose cause.
+- Thermography receives jitter at two native projection setters. Matched capture draws agree on clip positions, and the user reported clean NVG rendering with original shaders. The alternate thermography branch still needs gameplay coverage.
+- Four enabled experimental paths need transition and gameplay checks. There is no proven native camera-cut signal; the removed clip-space heuristic incorrectly reset history every frame.
+- FSR has no external masks/exposure input. Analytical has no previous-depth rejection or history locks. Thin detail, transparency, rain, bright effects, and newly exposed surfaces need continued testing. No method adds sharpening.
 
-Earlier runtime tests established RGBA16F object/final velocity sampling and FSR3 dispatch on D3D11 Feature Level 11_0.
-They do not establish current character stability. The preceding gameplay/legacy-removal cleanup built successfully as
-`mgsv` with the approved MSVC/Ninja Release profile; that cleanup binary was **not deployed or newly gameplay-tested**.
-The ownership/helper cleanup also passed the `mgsv` MSVC/Ninja Release build. It preserves both native context-state
-swapping and native/ReShade compute-state restoration. No new deployment, gameplay, or performance result is claimed.
+Earlier runtime checks established RGBA16F object/final velocity sampling and FSR3 operation on D3D11 Feature Level 11_0. They do not establish current character stability or validate a future GT-VBGI accumulator.
 
 ## Manual validation
 
-Shared-input GI qualification is separate from temporal validation below. Follow the [exact two-frame plan](../docs/ARCHITECTURE.md#manual-gi-qualification-plan--not-yet-completed): establish `0xB2601810` -> GI order relative to `0xA13321B6` motion and object producers; follow writes, clears, copies and exact sampled subresources; match materials, native b0 and depth; inspect first radiance/geometry/moments history contents over at least two frames; then repeat with an untraced control. Retained identities and fixture readbacks do not close this gate, and no new history clearing/reseeding or qualified Off+GI handoff is claimed.
+These checks cover scene reconstruction. GT-VBGI currently has no dedicated temporal accumulator. Build or replace DLLs only with MGSV stopped, following the [addon instructions](../README.md#building--deployment). Use one matching addon without live shader overrides and restart after replacement.
 
-Build/deploy only with MGSV fully stopped; use one matching addon and no live shader overrides. Follow the
-[addon build instructions](../README.md#building--deployment). Inspect generated Analytical, FSR3, DLSS boundary, and
-native velocity shader artifacts. Restart for addon/DLL replacement; do not attempt live native-hook unloading.
+1. Check fresh settings: FSR3, DLSS model F, ten projection scales at `1x`, diagnostic UI enabled, and no Alternate Stream slider. Presets must leave reconstruction selected. Off must restore FXAA and the original projection without a lasting shift.
+2. Start Analytical and FSR without first selecting DLSS. Check that accumulation starts without NGX loading, restarts only when needed, and does not repeatedly reset in static menus or at smaller DoF draws.
+3. Check static detail, animated characters, hair, wires, foliage, camera motion, binoculars, cuts, menus, pause/resume, DoF, motion blur, rain, transparency, night vision, and size/device changes. Record wobble separately from ghost trails.
+4. Check experimental projection paths against the actual render/depth grid, including unusual slider values, missing or unrelated cameras, UI boundaries, rapid setting changes, and normal exit.
+5. Cycle all reconstruction modes. For DLSS, check saved and manual selection, cancellation, missing-DLL/non-NVIDIA explanations, pause/resume of retained resources, and model/size changes. Look for repeated history restarts, skipped reconstruction, query warnings, or submission failures.
+6. Keep Unclamp Off for baseline gameplay. Any motion-source or clamp comparison must also check motion blur and animation trails. Previous Auto/Direct comparisons did not resolve wobble.
+7. Check the settled waveform under Analytical, FSR3, and DLSS with stationary and moving cameras, menus, and method changes. Keep the older Preset M rail flicker separate from Alternate Stream instability.
 
-1. Check fresh/reset settings: FSR3 method, DLSS F hint, ten scales `1x`, debug UI enabled, and no Alternate Stream slider. Confirm preset changes do not alter temporal settings and an old saved Alternate Stream value cannot reactivate correction. Off must restore vanilla FXAA/projection without persistent shift or stale history.
-2. Check FSR3/Analytical selection, hidden SDK tuning/jitter controls, and one accumulation seed per intended reset.
-   Lower-resolution DoF candidates and static menus straddling Present must not cause recurring resets/warnings.
-3. Cover static detail, idle/skinned motion, hair, wires, foliage, pans, aiming/binoculars, cuts, menus, pause/resume,
-   DoF/motion blur, rain/transparency/emissives, NoIR/sonar/night vision, and resolution/device changes. Record warble
-   and trails separately; do not infer a fix from a successful dispatch or quieter log.
-4. Validate each new projection path independently before promotion: signed/fractional scales, actual RTV/DSV grid,
-   packet/vertex effects, foreign/null cameras, world/UI separation, rapid preset/method/Off changes, and normal exit.
-5. Verify a cold Analytical/FSR startup installs the shared submission bridge and starts accumulation without NGX
-  probing. Check idle animation and camera motion without changing tuning;
-  record wobble separately from ghosting. Exercise Analytical/FSR/DLSS/Off round trips and check for recurring seeds,
-  skipped reconstruction, query warnings, or submission failures.
-  For DLSS, verify vendor-only cold startup, request-time activation (including a saved request), missing-DLL/non-NVIDIA
-  explanations, cancellation, and known recording boundaries. Check FSR/Off/Analytical round trips for suspension/resume
-   and fresh seeds, then model/resize recreation separately. One successful switch does not prove crash mitigation.
-6. Keep Unclamp Off for baseline gameplay; any clamp or motion-source comparison must also check native motion blur
-   and animation trails. Do not repeat the already-negative Auto/Direct sweep as a new warble investigation.
-7. In the same scene used for the settled Alternate Stream comparison, check the waveform under Analytical, FSR3, and DLSS after each mode settles. Test stationary and moving cameras, menus, and mode round trips. Record the older Preset M rail flicker separately; this change does not claim to fix it.
-
-Normal logs cover startup/availability, selection, first publication, context/feature creation, accumulation seeds,
-suspension/resume, disable, and one expected lower-resolution-candidate notice. Repeated seeds with unchanged settings
-or recurring capture/dispatch warnings remain actionable. There are no per-frame success or projection-path reports.
+Logs report startup, availability, selection, first camera data, resource creation, history restarts, pause/resume, disable, and the expected notice for a smaller insertion candidate. Repeated restarts with unchanged settings or recurring input/dispatch warnings need investigation. Recording a dispatch does not prove the GPU completed it.
 
 ## Source map
 
 | Files | Responsibility |
 |---|---|
-| `runtime.hpp` | Settings state/writes, transitions, lifecycle, borrowed state and MGSV draw routing in `mgsv::game::reconstruction` |
-| `settings.hpp` | Descriptor assembly and explicit migration; includes the runtime umbrella |
-| `dlss/model.hpp` | Model enum, metadata, default and lookup; no SDK/runtime dependency |
-| `state.hpp`, `camera_state.hpp`, `projection_jitter.hpp` | Sample/reset state, canonical camera history/publication, validated native corrections |
-| `../inputs.hpp` | Shared descriptor tracking, retained latest/compatibility motion and materials, first-present selection, generations and tickets |
-| `input_capture.hpp` | Retained-motion temporal adapter, camera/frame/sample annotations and insertion-time layout/dimension validation |
-| `frame_inputs.hpp`, `prepare_inputs.hlsli`, `encode_output.hlsli` | Backend input/output and 96-byte preparation contract, shared SDK adapter math |
-| `coordinator.hpp`, `../d3d11_compute_state.hpp` | Submission/query ownership, shared immediate bridge, dispatch/copy-back, shared state restoration, coherent commit |
-| `logging.hpp` | Existing reconstruction log helpers |
-| `analytical/runtime.hpp`, `analytical/mgsv_taa.cs_5_0.hlsl` | Analytical history and resolve |
-| `../motion/` | Native object, masked-object and camera velocity replacements |
-| `fsr3/`, `dlss/` | Method lifecycle and linear color/motion/output adapters; AMD host/backend and NGX integration |
+| [runtime.hpp](runtime.hpp), [settings.hpp](settings.hpp) | Requested settings, active method, controls, draw routing, startup, and teardown |
+| [dlss/model.hpp](dlss/model.hpp) | Model names, defaults, and lookup |
+| [state.hpp](state.hpp), [camera_state.hpp](camera_state.hpp), [projection_jitter.hpp](projection_jitter.hpp) | Samples, resets, camera history, and projection offsets |
+| [inputs.hpp](../inputs.hpp), [input_capture.hpp](input_capture.hpp) | Shared native texture references and the matching reconstruction inputs |
+| [frame_inputs.hpp](frame_inputs.hpp), [prepare_inputs.hlsli](prepare_inputs.hlsli), [encode_output.hlsli](encode_output.hlsli) | Common input/output data and color/motion conversions |
+| [coordinator.hpp](coordinator.hpp), [d3d11_compute_state.hpp](../d3d11_compute_state.hpp) | Command ordering, GPU queries, copy-back, state restoration, and camera-history updates |
+| [logging.hpp](logging.hpp) | Reconstruction logs |
+| [analytical/](analytical), [motion/](../motion) | Analytical history/resolve and native velocity replacements |
+| [fsr3/](fsr3), [dlss/](dlss) | Backend resources, lifecycle, and SDK integration |

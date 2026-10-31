@@ -58,43 +58,6 @@ struct ShaderInjectData {
   float ss_shadow_fade_end;
   float ss_shadow_material_max;
 
-  // AO runs after the game's subsurface scattering. The CPU controls dispatch.
-  float ao_enabled;
-  float ao_strength;
-  float ao_radius;
-  float ao_slices;
-  float ao_steps;
-  float ao_thickness;
-  float ao_fade;
-  // Set by the CPU when depth mips are available; otherwise sample full-resolution depth.
-  float ao_depth_mips;
-  // Full-resolution pixels per AO pixel along each axis: 1, 2, or 4.
-  float ao_scale;
-  // Resolution choice: 0 = full, 1 = half, 2 = quarter.
-  float ao_resolution;
-  // Indirect lighting runs before AO. The CPU controls dispatch.
-  float il_enabled;
-  // Multiplier on the filtered bounced light added to the scene.
-  float il_amount;
-  // Gather radius as a fraction of screen height.
-  float il_radius;
-  // Candidate samples per gather pixel.
-  float il_samples;
-  // Full-resolution pixels per gather pixel along each axis: 1, 2, or 4.
-  float il_scale;
-  // Number of denoising passes, using sample spacing of 1, 2, then 4 pixels.
-  float il_filter_radius;
-  // Resolution choice: 0 = full, 1 = half, 2 = quarter.
-  float il_resolution;
-  // Maximum history weight and the CPU's history-availability flag.
-  float il_history_blend;
-  float il_history_valid;
-  // Accepted samples needed for a valid gather result.
-  float il_min_samples;
-  // Debug view: 0 = off, 1 = indirect light, 2 through 5 = history and noise diagnostics.
-  float il_debug;
-  // Current denoising pass: 0, 1, or 2.
-  float il_filter_step;
   // Extra spotlight shadows run separately for each light.
   float spot_screen_space_shadows;
   // Spotlight tuning is independent of directional shadows.
@@ -115,10 +78,30 @@ struct ShaderInjectData {
   float point_ss_strength;
   float point_ss_fade_end;
   float point_ss_material_max;
+
+  // Indirect Lighting controls, in GUI order.
+  float lighting_mode;  // 0 = Off, 1 = On (AO + GI).
+  float ao_strength;
+  float gi_strength;
+  float gt_resolution;  // 0 = full, 1 = half, 2 = quarter, 3 = eighth.
+  float gt_search_radius_pixels;
+  float gt_surface_thickness;  // Native view-depth units.
+  float gt_surface_offset;     // Receiver offset along the shading normal, in native view-space units.
+  float gt_slice_count;
+  float gt_samples_per_side;
+  float gt_depth_mips_enabled;  // Set by the CPU when requested depth mips are available.
+  float gi_reject_backfaces;
+  float gi_source_specular_weight;
+  float gi_debug_view;
+
+  // Dispatch-local values, separate from user controls.
+  float gt_resolution_divisor;  // Full-resolution pixels per trace pixel along each axis: 1, 2, 4, or 8.
+  float il_scale;               // Matches the shared trace resolution divisor.
+  float gt_noise_frame;         // Ordered FAST sample index, not a history-validity token.
 };
 
 #ifndef __cplusplus
-cbuffer cb13 : register(b13) {
+cbuffer RenoDXSettings : register(b13) {
   ShaderInjectData shader_injection : packoffset(c0);
 }
 
@@ -191,26 +174,22 @@ cbuffer cb13 : register(b13) {
 #define CUSTOM_SS_POINT_FADE_END     shader_injection.point_ss_fade_end
 #define CUSTOM_SS_POINT_MATERIAL_MAX shader_injection.point_ss_material_max
 
-#define CUSTOM_MGSV_AO_ENABLED    shader_injection.ao_enabled
-#define CUSTOM_MGSV_AO_STRENGTH   shader_injection.ao_strength
-#define CUSTOM_MGSV_AO_RADIUS     shader_injection.ao_radius
-#define CUSTOM_MGSV_AO_SLICES     shader_injection.ao_slices
-#define CUSTOM_MGSV_AO_STEPS      shader_injection.ao_steps
-#define CUSTOM_MGSV_AO_THICKNESS  shader_injection.ao_thickness
-#define CUSTOM_MGSV_AO_FADE       shader_injection.ao_fade
-#define CUSTOM_MGSV_AO_DEPTH_MIPS shader_injection.ao_depth_mips
-#define CUSTOM_MGSV_AO_SCALE      shader_injection.ao_scale
+#define CUSTOM_MGSV_AO_ENABLED                (shader_injection.lighting_mode >= 0.5)
+#define CUSTOM_MGSV_AO_STRENGTH               shader_injection.ao_strength
+#define CUSTOM_MGSV_GI_STRENGTH               shader_injection.gi_strength
+#define CUSTOM_MGSV_GT_SEARCH_RADIUS_PIXELS   shader_injection.gt_search_radius_pixels
+#define CUSTOM_MGSV_GT_SURFACE_THICKNESS      shader_injection.gt_surface_thickness
+#define CUSTOM_MGSV_GT_SURFACE_OFFSET         shader_injection.gt_surface_offset
+#define CUSTOM_MGSV_GT_SLICE_COUNT            shader_injection.gt_slice_count
+#define CUSTOM_MGSV_GT_SAMPLES_PER_SIDE       shader_injection.gt_samples_per_side
+#define CUSTOM_MGSV_GT_DEPTH_MIPS_ENABLED     shader_injection.gt_depth_mips_enabled
+#define CUSTOM_MGSV_GI_REJECT_BACKFACES       shader_injection.gi_reject_backfaces
+#define CUSTOM_MGSV_GI_SOURCE_SPECULAR_WEIGHT shader_injection.gi_source_specular_weight
+#define CUSTOM_MGSV_GI_DEBUG_VIEW             shader_injection.gi_debug_view
 
-#define CUSTOM_MGSV_IL_AMOUNT        shader_injection.il_amount
-#define CUSTOM_MGSV_IL_RADIUS        shader_injection.il_radius
-#define CUSTOM_MGSV_IL_SAMPLES       shader_injection.il_samples
-#define CUSTOM_MGSV_IL_MIN_SAMPLES   shader_injection.il_min_samples
-#define CUSTOM_MGSV_IL_SCALE         shader_injection.il_scale
-#define CUSTOM_MGSV_IL_FILTER_RADIUS shader_injection.il_filter_radius
-#define CUSTOM_MGSV_IL_HISTORY       shader_injection.il_history_blend
-#define CUSTOM_MGSV_IL_HISTORY_VALID shader_injection.il_history_valid
-#define CUSTOM_MGSV_IL_DEBUG         shader_injection.il_debug
-#define CUSTOM_MGSV_IL_FILTER_STEP   shader_injection.il_filter_step
+#define CUSTOM_MGSV_GT_RESOLUTION_DIVISOR shader_injection.gt_resolution_divisor
+#define CUSTOM_MGSV_IL_SCALE              shader_injection.il_scale
+#define CUSTOM_MGSV_GT_NOISE_FRAME        shader_injection.gt_noise_frame
 
 #include "../../shaders/renodx.hlsl"
 

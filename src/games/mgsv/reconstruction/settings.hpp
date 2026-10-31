@@ -1,7 +1,6 @@
 #pragma once
 
 #include <algorithm>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -15,59 +14,6 @@
 #include "./state.hpp"
 
 namespace mgsv::reconstruction::settings {
-
-inline void MigrateTemporalModeSetting() {
-  constexpr std::array<const char*, 3> preset_sections = {
-      "renodx-preset1",
-      "renodx-preset2",
-      "renodx-preset3",
-  };
-  for (const char* section : preset_sections) {
-    int temporal_mode_value = 0;
-    if (reshade::get_config_value(
-            nullptr,
-            section,
-            "FxTemporalReconstructionMode",
-            temporal_mode_value)) {
-      continue;
-    }
-
-    int enabled_value = 0;
-    // FxTaa predates the method selectors and originally enabled Analytical TAA.
-    constexpr int legacy_analytical_method = 0;
-    int method_value = legacy_analytical_method;
-    const bool has_enabled = reshade::get_config_value(nullptr, section, "FxTaa", enabled_value);
-    const bool has_current_method = reshade::get_config_value(
-        nullptr,
-        section,
-        "FxTemporalReconstructionMethod",
-        method_value);
-    int legacy_method_value = 0;
-    const bool has_legacy_method = reshade::get_config_value(
-        nullptr,
-        section,
-        "FxTaaReconstructionMethod",
-        legacy_method_value);
-    if (!has_enabled && !has_current_method && !has_legacy_method) {
-      continue;
-    }
-
-    temporal_mode_value = static_cast<int>(state::TemporalMode::OFF);
-    if (has_enabled && enabled_value > 0) {
-      if (!has_current_method && has_legacy_method) {
-        method_value = legacy_method_value;
-      }
-      temporal_mode_value = (method_value == legacy_analytical_method
-                                 ? static_cast<int>(state::TemporalMode::ANALYTICAL_TAA)
-                                 : static_cast<int>(state::TemporalMode::AMD_FSR3));
-    }
-    reshade::set_config_value(
-        nullptr,
-        section,
-        "FxTemporalReconstructionMode",
-        temporal_mode_value);
-  }
-}
 
 inline void AppendSettings(
     renodx::utils::settings::Settings* registry,

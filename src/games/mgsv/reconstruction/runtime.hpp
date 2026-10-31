@@ -75,7 +75,7 @@ inline constexpr uint32_t MB_TILE_REFINE_PS = 0x512E2B48u;
 
 }  // namespace shader_hashes
 
-inline bool HandleDraw(reshade::api::command_list* cmd_list, const ShaderInjectData* shader_injection = nullptr) {
+inline bool HandleDraw(reshade::api::command_list* cmd_list, const ShaderInjectData* = nullptr) {
   if (cmd_list == nullptr) return false;
   auto* device = cmd_list->get_device();
   if (device == nullptr || device->get_api() != reshade::api::device_api::d3d11) return false;
@@ -109,11 +109,6 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list, const ShaderInjectD
 
   if (velocity_producer == VelocityProducer::NONE && !runtime::state::IsEnabled()) return false;
 
-  bool indirect_lighting_enabled = false;
-  if (velocity_producer == VelocityProducer::CAMERA && shader_injection != nullptr) {
-    const std::unique_lock settings_lock(renodx::utils::mutex::global_mutex);
-    indirect_lighting_enabled = shader_injection->il_enabled != 0.f;
-  }
   const runtime::coordinator::ExecutionGuard execution_guard;
 
   const auto log_observed_shader = [](const char* stage, const char* name, uint32_t hash, bool* logged) {
@@ -134,13 +129,8 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list, const ShaderInjectD
     velocity_rtv = upgrades::PrepareVelocityTarget(cmd_list, velocity_rtv, vertex_hash, pixel_hash);
   }
 
-  if (!runtime::state::IsEnabled()) {
-    if (velocity_producer == VelocityProducer::CAMERA && indirect_lighting_enabled) {
-      // Observe only: these contents have not been qualified for GI at the scatter insertion.
-      ::mgsv::inputs::CaptureMotion(cmd_list, velocity_rtv, false);
-    }
-    return false;
-  }
+  // Retired GI no longer requests motion observations; velocity precision remains independent.
+  if (!runtime::state::IsEnabled()) return false;
   auto* data = ::mgsv::inputs::descriptor_tracker::Get(cmd_list);
   if (data == nullptr) return false;
 
