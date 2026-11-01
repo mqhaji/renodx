@@ -12,7 +12,7 @@ The shared [input owner](../inputs.hpp) keeps references to native material and 
 
 [frame_inputs.hpp](frame_inputs.hpp) defines the common inputs, outputs, and 96-byte preparation constants. Each backend converts color and motion into its required form. The [state guard](../d3d11_compute_state.hpp) restores the game's graphics bindings after reconstruction.
 
-[GT-VBGI](../gtvbgi/README.md) currently has no separate temporal history and does not request motion. Keeping a texture alive does not prevent the game from overwriting its pixels. Future GI accumulation needs separate proof that motion, geometry, lighting, and history belong together.
+[GT-VBGI](../gtvbgi/README.md) keeps separate GI history and uses the same command-submission bridge. Native motion and sun-camera data are tracked through their producer commands, including with reconstruction Off. GI advances history only at its own submitted insertion; it does not borrow scene reconstruction's previous frame. Keeping a texture alive does not prevent the game from overwriting its pixels.
 
 ## Usage and defaults
 
@@ -129,7 +129,7 @@ Earlier runtime checks established RGBA16F object/final velocity sampling and FS
 
 ## Manual validation
 
-These checks cover scene reconstruction. GT-VBGI currently has no dedicated temporal accumulator. Build or replace DLLs only with MGSV stopped, following the [addon instructions](../README.md#building--deployment). Use one matching addon without live shader overrides and restart after replacement.
+These checks cover scene reconstruction; the [GT-VBGI guide](../gtvbgi/README.md) describes its separate accumulator and filter. Build or replace DLLs only with MGSV stopped, following the [addon instructions](../README.md#building--deployment). Use one matching addon without live shader overrides and restart after replacement.
 
 1. Check fresh settings: FSR3, DLSS model F, ten projection scales at `1x`, diagnostic UI enabled, and no Alternate Stream slider. Presets must leave reconstruction selected. Off must restore FXAA and the original projection without a lasting shift.
 2. Start Analytical and FSR without first selecting DLSS. Check that accumulation starts without NGX loading, restarts only when needed, and does not repeatedly reset in static menus or at smaller DoF draws.

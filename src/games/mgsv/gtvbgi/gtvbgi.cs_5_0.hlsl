@@ -35,7 +35,7 @@ Texture2D<float4> depthBuffer : register(t0);
 Texture2D<float4> normalBuffer : register(t1);
 Texture2D<float4> depthMips : register(t2);
 Texture2DArray<float2> fastNoise : register(t6);
-RWTexture2D<float4> aoOutput : register(u0);
+RWTexture2D<float2> aoOutput : register(u0);
 
 Texture2D<float4> sourceDiffuse : register(t3);
 Texture2D<float4> sourceAlbedo : register(t4);
@@ -173,9 +173,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
   aoOutput.GetDimensions(ao_width, ao_height);
   if (ao_pixel.x >= ao_width || ao_pixel.y >= ao_height) return;
   giOutput[ao_pixel] = 0.0;
-  const int diagnostic = (int)clamp(CUSTOM_MGSV_GI_DEBUG_VIEW, 0.0, 5.0);
+  const int diagnostic = (int)clamp(CUSTOM_MGSV_GI_DEBUG_VIEW, 0.0, 12.0);
   if (diagnostic >= 2) {
     diagnosticOutput[ao_pixel] = diagnostic == 4 ? float4(1.0, 0.0, 0.0, 1.0) : float4(0.0, 0.0, 0.0, 1.0);
+    if (diagnostic >= 9 && diagnostic <= 11) diagnosticOutput[ao_pixel] = 1.0;
   }
 
   const float scale = max(CUSTOM_MGSV_GT_RESOLUTION_DIVISOR, 1.0);
@@ -184,7 +185,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
   const float depth = depthBuffer.Load(int3(p, 0)).x;
   const float z = LinearZ(depth);
   if (!(depth > 0.0 && z > 0.0) || z > 1.0e6) {
-    aoOutput[ao_pixel] = float4(1.0, 1.0, 1.0, 1.0);
+    aoOutput[ao_pixel] = float2(1.0, 1.0);
     return;
   }
 
@@ -197,7 +198,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
   // The reference CDF assumes a view-facing receiver. Do not extrapolate its
   // measure to backfacing shading normals; use neutral visibility instead.
   if (any(!isfinite(N)) || !(P.z > 0.0) || dot(N, V) < 0.0) {
-    aoOutput[ao_pixel] = float4(1.0, 1.0, 1.0, 1.0);
+    aoOutput[ao_pixel] = float2(1.0, 1.0);
     return;
   }
 
@@ -229,7 +230,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // Use the stored uniform channels directly.
     // A separated R2 offset supplies the third variate, following EA's guidance.
     // Address the trace lattice, avoiding decimation of noise at reduced scale.
-    const uint frame = CUSTOM_TAA != 0.0 ? (uint)CUSTOM_MGSV_GT_NOISE_FRAME : 0u;
+    const uint frame = (CUSTOM_TAA != 0.0 || CUSTOM_MGSV_GI_TEMPORAL_ACTIVE > 0.5 || CUSTOM_MGSV_AO_TEMPORAL_ACTIVE > 0.5)
+                          ? (uint)CUSTOM_MGSV_GT_NOISE_FRAME : 0u;
     const uint sampleIndex = (frame * (uint)slices + (uint)slice) & 31u;
     const uint2 q = ao_pixel & 127u;
     float3 phases;
@@ -340,13 +342,16 @@ void main(uint3 tid : SV_DispatchThreadID) {
 
   const float occlusion = saturate(1.0 - visibility / float(slices));
   const float applied = saturate(occlusion * CUSTOM_MGSV_AO_STRENGTH);
-  aoOutput[ao_pixel] = float4(1.0 - applied, 1.0 - applied, 1.0 - applied, 1.0);
+  aoOutput[ao_pixel] = float2(1.0 - applied, 1.0);
+  if (diagnostic >= 9 && diagnostic <= 11) {
+    diagnosticOutput[ao_pixel] = float4((1.0 - applied).xxx, 1.0);
+  }
   // No-hit and black-source results remain valid zero. Missing qualification
   // is separate from AO visibility. Bound only to the RGBA16F storage range.
   const float3 bounce = indirect / float(slices);
   giValid = giValid && all(isfinite(bounce));
   giOutput[ao_pixel] = giValid ? float4(clamp(bounce, 0.0, 65504.0), 1.0) : 0.0;
-  if (diagnostic >= 2) {
+  if (diagnostic >= 2 && diagnostic <= 5) {
     float3 value = occlusion.xxx;
     if (diagnostic == 3) value = (acceptedCoverage / float(slices)).xxx;
     if (diagnostic == 4) value = giValid ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);

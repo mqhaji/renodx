@@ -62,18 +62,6 @@ inline reshade::api::format GetTypedViewFormat(
   return reshade::api::format_to_default_typed(device->get_resource_desc(resource).texture.format);
 }
 
-inline reshade::api::resource_view NormalizeColorSrv(reshade::api::resource_view color_srv) {
-  if (color_srv.handle == 0u) return {0u};
-  const auto clone = renodx::utils::resource::upgrade::GetResourceViewClone(
-      color_srv,
-      {
-          .require_enabled = true,
-          .allow_create = true,
-          .activate = false,
-      });
-  return clone.handle != 0u ? clone : color_srv;
-}
-
 inline void CaptureCameraMotionLocked(
     reshade::api::command_list* cmd_list,
     const inputs::descriptor_tracker::CommandListData& command_data,
@@ -132,7 +120,19 @@ inline bool BuildValidatedFrameInputsLocked(
   const reshade::api::resource_view velocity_srv = {reinterpret_cast<uintptr_t>(motion.velocity.Get())};
   const reshade::api::resource_view depth_srv = {reinterpret_cast<uintptr_t>(motion.depth.Get())};
   const reshade::api::resource_view object_velocity_srv = {reinterpret_cast<uintptr_t>(motion.object_velocity.Get())};
-  const auto color_srv = NormalizeColorSrv(source_color_srv);
+  auto color_srv = source_color_srv;
+  if (color_srv.handle != 0u) {
+    const auto clone = renodx::utils::resource::upgrade::GetResourceViewClone(
+        color_srv,
+        {
+            .require_enabled = true,
+            .allow_create = true,
+            .activate = false,
+        });
+    if (clone.handle != 0u) {
+      color_srv = clone;
+    }
+  }
   if (device == nullptr
       || color_srv.handle == 0u
       || velocity_srv.handle == 0u

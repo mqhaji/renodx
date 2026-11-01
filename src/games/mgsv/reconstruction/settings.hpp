@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -324,7 +325,7 @@ inline void AppendSettings(
     const char* tooltip;
     const char* reason;
   };
-  constexpr ProjectionSettingMetadata projection_settings[] = {
+  constexpr auto projection_settings = std::to_array<ProjectionSettingMetadata>({
       {
           .path = state::ProjectionJitterPath::VELOCITY,
           .key = "FxTaaVelocityProjectionJitterScale",
@@ -395,7 +396,7 @@ inline void AppendSettings(
           .tooltip = "Experimental: translates owned light-packet VP before publication, leaving clip-W and selection data unchanged. Final consumer coverage is not yet visually verified.",
           .reason = "light packet jitter changed",
       },
-  };
+  });
   for (const auto& projection_setting : projection_settings) {
     reconstruction_settings.push_back(
         new renodx::utils::settings::Setting{

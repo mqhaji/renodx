@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-#include <d3d11.h>
+#include <d3d11_1.h>
 #include <wrl/client.h>
 
 #include <include/reshade.hpp>
@@ -36,6 +36,9 @@ struct State {
       pixel_shader_resources;
   std::array<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>, 8> unordered_access_views;
   std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT> constant_buffers;
+  std::array<UINT, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT> first_constants = {};
+  std::array<UINT, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT> constant_counts = {};
+  bool constant_ranges_captured = false;
   std::array<Microsoft::WRL::ComPtr<ID3D11RenderTargetView>, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> render_targets;
   UINT render_target_count = 0u;
   std::array<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>, D3D11_PS_CS_UAV_REGISTER_COUNT>
@@ -101,7 +104,14 @@ inline State Capture(reshade::api::command_list* cmd_list) {
       0u,
       static_cast<UINT>(unordered_access_views.size()),
       unordered_access_views.data());
-  context->CSGetConstantBuffers(0u, static_cast<UINT>(constant_buffers.size()), constant_buffers.data());
+  Microsoft::WRL::ComPtr<ID3D11DeviceContext1> context1;
+  if (SUCCEEDED(context->QueryInterface(IID_PPV_ARGS(&context1)))) {
+    context1->CSGetConstantBuffers1(0u, static_cast<UINT>(constant_buffers.size()), constant_buffers.data(),
+                                    result.first_constants.data(), result.constant_counts.data());
+    result.constant_ranges_captured = true;
+  } else {
+    context->CSGetConstantBuffers(0u, static_cast<UINT>(constant_buffers.size()), constant_buffers.data());
+  }
   // Preserve graphics bindings that compute outputs can displace.
   context->OMGetRenderTargets(
       static_cast<UINT>(render_targets.size()),
@@ -264,10 +274,13 @@ inline void Restore(reshade::api::command_list* cmd_list, const State& state) {
       static_cast<UINT>(unordered_access_views.size()),
       unordered_access_views.data(),
       nullptr);
-  context->CSSetConstantBuffers(
-      0u,
-      static_cast<UINT>(constant_buffers.size()),
-      constant_buffers.data());
+  Microsoft::WRL::ComPtr<ID3D11DeviceContext1> context1;
+  if (state.constant_ranges_captured && SUCCEEDED(context->QueryInterface(IID_PPV_ARGS(&context1)))) {
+    context1->CSSetConstantBuffers1(0u, static_cast<UINT>(constant_buffers.size()), constant_buffers.data(),
+                                    state.first_constants.data(), state.constant_counts.data());
+  } else {
+    context->CSSetConstantBuffers(0u, static_cast<UINT>(constant_buffers.size()), constant_buffers.data());
+  }
   context->CSSetShader(
       state.compute_shader.Get(),
       class_instances.empty() ? nullptr : class_instances.data(),

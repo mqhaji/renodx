@@ -12,20 +12,31 @@
 // #define DEBUG_LEVEL_3
 
 #include <array>
+#include <atomic>
 #include <cstdint>
+#include <functional>
 #include <mutex>
+#include <shared_mutex>
 #include <utility>
 #include <vector>
 
 #include <windows.h>
 
+#include <d3d11.h>
+#include <wrl/client.h>
+
 #include <deps/imgui/imgui.h>
 #include <include/reshade.hpp>
 #include <include/reshade_api.hpp>
+#include <include/reshade_api_device.hpp>
+#include <include/reshade_api_format.hpp>
+#include <include/reshade_api_pipeline.hpp>
+#include <include/reshade_api_resource.hpp>
+#include <include/reshade_events.hpp>
 
 #include "../../mods/shader.hpp"
 #include "../../mods/swapchain_v2.hpp"
-#include "../../utils/pipeline_layout.hpp"
+#include "../../utils/mutex.hpp"
 #include "../../utils/random.hpp"
 #include "../../utils/resource.hpp"
 #include "../../utils/settings.hpp"
@@ -33,8 +44,11 @@
 #include "../../utils/state.hpp"
 #include "../../utils/swapchain.hpp"
 #include "./gtvbgi/lighting.hpp"
+#include "./gtvbgi/temporal_inputs.hpp"
 #include "./inputs.hpp"
 #include "./output/output.hpp"
+#include "./reconstruction/coordinator.hpp"
+#include "./reconstruction/input_capture.hpp"
 #include "./reconstruction/runtime.hpp"
 #include "./reconstruction/settings.hpp"
 #include "./resource_upgrades.hpp"
@@ -87,6 +101,7 @@ void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool resize) {
   mgsv::reconstruction::coordinator::ResetTemporalState("input swapchain retired");
   // Cancel reconstruction but retain every original game prefix/post list for its existing replay path.
   std::vector<std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 4>> retired_views;
+  std::vector<std::function<void(reshade::api::command_list*, bool)>> retired_lighting;
   {
     const std::unique_lock submission_lock(mgsv::reconstruction::coordinator::submission.mutex);
     for (auto& pending : mgsv::reconstruction::coordinator::submission.pending_dispatches) {
@@ -97,6 +112,7 @@ void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool resize) {
           std::move(pending.object_velocity_srv),
       });
       pending.inputs = {};
+      if (pending.is_lighting) retired_lighting.push_back(std::move(pending.lighting_callback));
     }
   }
 }
@@ -137,9 +153,20 @@ void OnPresent(
     const reshade::api::rect* dest_rect,
     uint32_t dirty_rect_count,
     const reshade::api::rect* dirty_rects) {
-  mgsv::inputs::OnPresent(queue, swapchain, source_rect, dest_rect, dirty_rect_count, dirty_rects);
-  if (mgsv::inputs::IsSelectedSwapchain(swapchain)) {
-    mgsv::lighting::noise_frame.fetch_add(1u, std::memory_order_relaxed);
+  bool temporal_lighting_enabled = false;
+  {
+    const std::shared_lock settings_lock(renodx::utils::mutex::global_mutex);
+    temporal_lighting_enabled = shader_injection.lighting_mode >= 0.5f
+                                && shader_injection.gt_temporal_enabled >= 0.5f;
+  }
+  {
+    const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
+    mgsv::inputs::OnPresent(queue, swapchain, source_rect, dest_rect, dirty_rect_count, dirty_rects);
+    if (mgsv::inputs::IsSelectedSwapchain(swapchain)) {
+      mgsv::lighting::temporal_inputs::enabled.store(temporal_lighting_enabled, std::memory_order_release);
+      mgsv::lighting::temporal_inputs::BeginFrame(queue->get_device());
+      mgsv::lighting::noise_frame.fetch_add(1u, std::memory_order_relaxed);
+    }
   }
   (void)source_rect;
   (void)dest_rect;
@@ -188,8 +215,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       mgsv::settings::AppendSettings(&settings, &shader_injection, &output_state);
       mgsv::shadows::AppendSettings(&settings, &shader_injection);
       mgsv::reconstruction::settings::AppendSettings(&settings, &shader_injection, &reconstruction_settings);
-      mgsv::ao::AppendSettings(&settings, &shader_injection);
-      mgsv::il::AppendSettings(&settings, &shader_injection);
+      mgsv::lighting::AppendSettings(&settings, &shader_injection);
 
       if (!initialized) {
         renodx::mods::swapchain::v2::force_borderless = true;
@@ -264,7 +290,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     renodx::utils::state::use_snapshot = true;
   }
   renodx::utils::resource::Use(fdw_reason);
-  renodx::utils::pipeline_layout::Use(fdw_reason);
   renodx::utils::shader::Use(fdw_reason);
   renodx::utils::state::Use(fdw_reason);
   if (fdw_reason == DLL_PROCESS_ATTACH) {

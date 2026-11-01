@@ -129,7 +129,35 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list, const ShaderInjectD
     velocity_rtv = upgrades::PrepareVelocityTarget(cmd_list, velocity_rtv, vertex_hash, pixel_hash);
   }
 
-  // Retired GI no longer requests motion observations; velocity precision remains independent.
+  const bool lighting_motion_needed = velocity_producer == VelocityProducer::CAMERA
+                                      && lighting::temporal_inputs::enabled.load(std::memory_order_acquire);
+  const auto record_lighting_motion = [&](inputs::Motion motion, const runtime::camera_state::CameraFrame& camera) {
+    // This observation has its own submission ledger. It never promotes the
+    // old lighting_motion compatibility cache or enables projection jitter.
+    const bool reconstruction_enabled = runtime::state::IsEnabled();
+    const uint64_t generation = motion.generation;
+    lighting::temporal_inputs::Record(cmd_list, {
+                                                    .device = device,
+                                                    .generation = generation,
+                                                    .motion = std::move(motion),
+                                                    .motion_jitter_uv = (reconstruction_enabled
+                                                                             ? std::array<float, 2>{camera.jitter_uv_x, camera.jitter_uv_y}
+                                                                             : std::array<float, 2>{}),
+                                                    .velocity_projection_jitter_scale = (reconstruction_enabled
+                                                                                             ? runtime::state::GetProjectionJitterScale(runtime::state::ProjectionJitterPath::VELOCITY)
+                                                                                             : 0.f),
+                                                    .camera_publication = (reconstruction_enabled ? camera.publication_sequence : 0u),
+                                                    .camera_generation = (reconstruction_enabled ? camera.reset_generation : 0u),
+                                                    .camera_sample = (reconstruction_enabled ? camera.sample_index : 0u),
+                                                    .jitter_valid = !reconstruction_enabled || (camera.valid && camera.camera_matrix_valid),
+                                                    .is_motion = true,
+                                                });
+  };
+  if (lighting_motion_needed && !runtime::state::IsEnabled()) {
+    record_lighting_motion(inputs::CaptureMotion(cmd_list, velocity_rtv, false), {});
+  }
+
+  // Velocity precision and GI producer observation remain active with scene reconstruction Off.
   if (!runtime::state::IsEnabled()) return false;
   auto* data = ::mgsv::inputs::descriptor_tracker::Get(cmd_list);
   if (data == nullptr) return false;
@@ -143,7 +171,15 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list, const ShaderInjectD
 
   // MotionBlurCameraVelocity exposes pixel b2 and writes RTV0; capture stays at this pre-draw boundary.
   if (velocity_producer == VelocityProducer::CAMERA) {
+    const uint64_t previous_observation = runtime::input_capture::resources.motion.observation;
     runtime::input_capture::CaptureCameraMotionLocked(cmd_list, *data, velocity_rtv);
+    if (lighting_motion_needed) {
+      if (runtime::input_capture::resources.motion.observation != previous_observation) {
+        record_lighting_motion(runtime::input_capture::resources.motion, runtime::input_capture::resources.camera);
+      } else {
+        record_lighting_motion({}, {});
+      }
+    }
   }
 
   // Sequence markers arm the later CopyRenderBuffer fallbacks. The DoF
@@ -625,6 +661,7 @@ inline void OnPresent(
   {
     const coordinator::ExecutionGuard execution_guard;
     const bool bridge_required = state::IsEnabled()
+                                 || lighting::temporal_inputs::enabled.load(std::memory_order_acquire)
                                  || (dlss::activation_requested.load(std::memory_order_acquire)
                                      && dlss::ActivationPending());
     const bool bridge_ready = !bridge_required || coordinator::EnsureTemporalSubmissionBridge(device);

@@ -10,6 +10,7 @@
 // Bound state and the registry must outlive the callbacks.
 
 #include <algorithm>
+#include <array>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -225,17 +226,8 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .max = 100.f,
               .parse = [](float value) { return value * 0.01f; },
           },
-          // new renodx::utils::settings::Setting{
-          //     .key = "FxBloomType",
-          //     .binding = &shader_injection->custom_bloom_type,
-          //     .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-          //     .default_value = 1.f,
-          //     .label = "Bloom Type",
-          //     .section = "Effects",
-          //     .labels = {"Vanilla", "Enhanced"},
-          // },
           new renodx::utils::settings::Setting{
-              .key = "FxBloom",
+              .key = "FxBloomStrength",
               .binding = &shader_injection->custom_bloom,
               .default_value = 100.f,
               .label = "Bloom",
@@ -244,7 +236,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .parse = [](float value) { return value * 0.01f; },
           },
           new renodx::utils::settings::Setting{
-              .key = "FxBoostSun",
+              .key = "FxSunBrightnessBoostEnabled",
               .binding = &shader_injection->custom_boost_sun,
               .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
               .default_value = 1.f,
@@ -253,7 +245,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .tooltip = "Boosts the brightness of the sun.",
           },
           new renodx::utils::settings::Setting{
-              .key = "FxMotionBlur",
+              .key = "FxMotionBlurStrength",
               .binding = &shader_injection->custom_motion_blur,
               .default_value = 100.f,
               .label = "Motion Blur",
@@ -263,7 +255,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .parse = [](float value) { return value * 0.01f; },
           },
           new renodx::utils::settings::Setting{
-              .key = "FxFilmGrain",
+              .key = "FxFilmGrainStrength",
               .binding = &shader_injection->custom_grain_strength,
               .default_value = 0.f,
               .label = "Film Grain",
@@ -359,7 +351,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
 
 inline void ApplyPresetOff(renodx::utils::settings::Settings* registry, ShaderInjectData* shader_injection,
                            const mgsv::output::State& output_state) {
-  constexpr std::pair<const char*, float> PRESET_VALUES[] = {
+  constexpr auto PRESET_VALUES = std::to_array<std::pair<const char*, float>>({
       {"OutputMode", 0.f},
       {"ToneMapType", 0.f},
       {"ToneMapPeakNits", 203.f},
@@ -378,19 +370,18 @@ inline void ApplyPresetOff(renodx::utils::settings::Settings* registry, ShaderIn
       {"ColorGradeFlare", 0.f},
       {"ColorGradeScene", 100.f},
       {"ColorGradeSceneScaling", 0.f},
-      {"FxBloomType", 0.f},
-      {"FxBloom", 100.f},
-      {"FxBoostSun", 0.f},
-      {"FxFilmGrain", 0.f},
-      {"FxMotionBlur", 100.f},
+      {"FxBloomStrength", 100.f},
+      {"FxSunBrightnessBoostEnabled", 0.f},
+      {"FxFilmGrainStrength", 0.f},
+      {"FxMotionBlurStrength", 100.f},
       {"FxDirectionalContactHardening", 0.f},
       {"FxSpotContactHardening", 0.f},
       {"FxPointContactHardening", 0.f},
       {"FxDirectionalScreenSpaceShadows", 0.f},
       {"FxSpotScreenSpaceShadows", 0.f},
       {"FxPointScreenSpaceShadows", 0.f},
-      {"FxLightingMode", 0.f},
-  };
+      {"FxIndirectLightingEnabled", 0.f},
+  });
   {
     const std::unique_lock lock(renodx::utils::mutex::global_mutex);
     for (const auto& [key, value] : PRESET_VALUES) {

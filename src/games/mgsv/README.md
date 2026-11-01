@@ -12,13 +12,15 @@ Reconstruction settings stay independent of RenoDX presets. DLSS requires a comp
 
 **Screen-Space Lighting** selects Off or GT-VBGI. GT-VBGI combines AO contact shading with GI light bouncing from visible surfaces. Their strengths are independent. Both use the same search through scene depth, controlled by resolution, radius, thickness, offset, directions, samples, and depth sampling.
 
-Defaults are GT-VBGI, Half resolution, a 2000-pixel radius, 40 samples per side, one slice direction, surface thickness 0.15, and surface offset 1/1024 in the game's view-space units. Full/Half/Quarter/Eighth scale both image dimensions, so Half processes one quarter of the pixels. Coarse depth sampling and GI backface rejection default to Off; reflections contribute zero to the GI source by default. Noise uses IS-FAST.
+Defaults are GT-VBGI, AO and GI strengths at 75%, Half resolution, a 2000-pixel radius, 40 samples per side, one slice direction, surface thickness 0.15, and surface offset 1/1024 in the game's view-space units. Full/Half/Quarter/Eighth scale both image dimensions, so Half processes one quarter of the pixels. Coarse depth sampling and GI backface rejection default to Off; reflections contribute zero to the GI source by default. Noise uses IS-FAST.
 
 Surface Thickness controls the assumed depth of sampled geometry. AO Strength controls contact darkening, and Global Illumination Strength controls bounce brightness. Search Radius changes reach; samples and directions control coverage quality. **Reject Backfacing GI Sources** suppresses source light while retaining its occlusion. **Reflections in GI Source** adds a view-dependent specular approximation.
 
-**Global Illumination Debug View** shows bounce, sampled coverage, valid/invalid results, or source light in place of diffuse lighting. The game still applies surface color, specular reflections, fog, and later image processing to these views.
+**Temporal Accumulation** and **Spatial Filtering** control AO and GI together, both On by default. One temporal pass combines accepted previous samples, then each spatial pass smooths both results. Each signal keeps its own history weight and rejection controls; setting its history weight to zero uses only current samples. Defaults are 90% history weight and three 5-by-5 A-Trous passes with radius 8. Radius only affects later A-Trous passes. The separable Gaussian option filters horizontally and vertically. The shared switches provide Off comparisons.
 
-The added lighting runs after the game's skin-scattering passes. It applies AO to existing diffuse light, then adds GI. The game then combines surface color and lighting, adds fog, and applies its early tone curve. Missing or incompatible inputs skip the combined effect. There is no separate AO-only shader, GI accumulator, or denoiser; selected scene reconstruction smooths the final image. See the [GT-VBGI reference](gtvbgi/README.md) for the Shadertoy algorithm and MGSV adaptation.
+**Lighting Debug View** shows bounce, sampled coverage, valid/invalid results, source light, temporal or filtered GI, raw/temporal/filtered AO, and separate AO/GI history acceptance in place of diffuse lighting. The game still applies surface color, specular reflections, fog, and later image processing to these views.
+
+The added lighting runs after the game's skin-scattering passes. Its final pass applies AO to existing diffuse light and then adds GI, preserving the game's alpha channel. The default chain uses six compute dispatches; optional depth reductions add four. The game then combines surface color and lighting, adds fog, and applies its early tone curve. Missing or incompatible trace inputs skip the combined effect. Unavailable temporal inputs fall back to current samples, which can still be spatially filtered. AO and GI retain separate temporal results before spatial filtering, so blur does not feed back into history. Selected scene reconstruction also smooths the final image. See the [GT-VBGI reference](gtvbgi/README.md) for the algorithms and MGSV adaptation.
 
 ### Native AO compatibility
 
@@ -54,7 +56,7 @@ The [architecture guide](docs/ARCHITECTURE.md) explains which files manage each 
 
 Build the `mgsv` target through CMake Tools with the approved configuration and MGSV fully stopped. Deploy the matching `renodx-mgsv.addon64` beside `mgsvtpp.exe`, then restart. Camera hooks stay installed until the game exits, so do not unload or replace the addon while playing. Replace the DLSS DLL only with the game stopped too.
 
-After shader or shared-layout changes, verify that generated headers match the compiled shaders and that the deployed addon contains those bytes. The lighting outputs are `gtvbgi`, `gtvbgi_depth_mips`, `gtvbgi_apply_ao`, and `gtvbgi_add` under `build/mgsv.include/embed`. A successful build or automated test still needs gameplay checks.
+After shader or shared-layout changes, verify that generated headers match the compiled shaders and that the deployed addon contains those bytes. The lighting outputs are `gtvbgi`, `gtvbgi_depth_mips`, `gtvbgi_temporal`, `gtvbgi_filter`, and `gtvbgi_add` under `build/mgsv.include/embed`. A successful build or automated test still needs gameplay checks.
 
 ## Manual validation
 
@@ -62,7 +64,8 @@ After shader or shared-layout changes, verify that generated headers match the c
 2. Compare Screen-Space Lighting Off/GT-VBGI with the camera and other settings fixed. Vary AO and GI strengths independently and check contact shading, color bounce, hair, foliage, and screen edges.
 3. Check Full/Half/Quarter/Eighth and coarse depth sampling Off/On, including odd render dimensions. Look for shifted output, edge strips, leaks, and loss of thin geometry.
 4. Check fog, rain, skin scattering, SDR/HDR, camera motion, and reconstruction Off/On. Native specular and rain-reflection AO should remain intact.
-5. Follow the [reconstruction validation matrix](reconstruction/README.md#manual-validation) for method changes, animation, special views, and lifecycle checks.
-6. Read the fresh ReShade log for repeated input/setup failures. Command-recording messages are not proof of GPU completion or performance.
+5. Compare temporal and spatial filtering separately and together. Set either history weight to zero to check the other signal independently. Check stationary noise, moving characters, newly revealed surfaces, exposure changes, and the temporal/filtered/history debug views. Toggling filtering should not shift the image or change overall brightness.
+6. Follow the [reconstruction validation matrix](reconstruction/README.md#manual-validation) for method changes, animation, special views, and lifecycle checks.
+7. Read the fresh ReShade log for repeated input/setup failures. Command-recording messages are not proof of GPU completion or performance.
 
 The existing On/Off RenderDoc captures establish native order and resource relationships but omit addon work. They cannot validate custom execution, histories, or performance. Tests and analysis artifacts remain local-only and outside the standalone addon build.
