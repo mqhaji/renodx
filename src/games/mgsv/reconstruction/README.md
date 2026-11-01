@@ -16,7 +16,7 @@ The shared [input owner](../inputs.hpp) keeps references to native material and 
 
 ## Usage and defaults
 
-The **Temporal Anti-Aliasing** section contains these controls:
+The **Temporal Anti-Aliasing** section contains the reconstruction mode and DLSS model. The remaining controls are under **Temporal Anti-Aliasing (Advanced)**, collapsed by default:
 
 | Control | Behavior and default |
 |---|---|
