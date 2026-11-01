@@ -145,6 +145,28 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
 
       MGSV_UPGRADE_DEFERRED_TONEMAP_OUTPUT_RTV(0x410AE8C5),  // DeferredRenderingFilmic
 
+      {
+          0x5AFD2E17,
+          {
+              .crc32 = 0x5AFD2E17,
+              .code = __0x5AFD2E17,
+              .on_draw = [](reshade::api::command_list* cmd_list) {
+                mgsv::lighting::temporal_inputs::CaptureScene(cmd_list);
+                return true;
+              },
+          },
+      },
+      {
+          0x712F7222,
+          {
+              .crc32 = 0x712F7222,
+              .on_inject = [](reshade::api::command_list*) { return false; },
+              .on_draw = [](reshade::api::command_list* cmd_list) {
+                mgsv::lighting::temporal_inputs::CaptureScene(cmd_list);
+                return true; },
+          },
+      },
+
       // Keep the second scatter dispatch; record added lighting after it.
       {
           0xB2601810,

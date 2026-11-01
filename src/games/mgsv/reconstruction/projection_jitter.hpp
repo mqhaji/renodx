@@ -25,6 +25,7 @@
 #include <cstring>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
 
 #include <detours.h>
 
@@ -208,7 +209,7 @@ inline void** shader_manager_global = nullptr;
 inline std::atomic<bool> installed = false;
 // Only lifecycle callbacks take this mutex; native hooks must never need it
 // to drain. Own installation before changing any target/trampoline pointer.
-inline std::mutex lifecycle_mutex;
+inline std::shared_mutex lifecycle_mutex;
 
 inline std::atomic<uint32_t> production_restoration_hits = 0u;
 inline std::atomic<bool> production_awaiting_restoration = false;

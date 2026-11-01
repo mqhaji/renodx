@@ -23,7 +23,6 @@ struct ShaderInjectData {
   float scene_grade_strength;
   float scene_grade_scaling;
 
-  float custom_bloom_type;
   float custom_bloom;
   float custom_boost_sun;
   float custom_random;
@@ -92,12 +91,37 @@ struct ShaderInjectData {
   float gt_depth_mips_enabled;  // Set by the CPU when requested depth mips are available.
   float gi_reject_backfaces;
   float gi_source_specular_weight;
+  float gt_temporal_enabled;
+  float ao_history_weight;
+  float ao_depth_rejection;
+  float ao_normal_rejection;
+  float ao_history_clamp;
+  float gi_history_weight;
+  float gi_depth_rejection;
+  float gi_normal_rejection;
+  float gi_history_clamp;
+  float gt_spatial_enabled;
+  float gt_filter_type;  // 0 = separable bilateral, 1 = a-trous.
+  float gt_filter_radius;
+  float gt_filter_passes;
+  float gt_filter_taps_separable;
+  float gt_filter_taps_atrous;
   float gi_debug_view;
 
   // Dispatch-local values, separate from user controls.
   float gt_resolution_divisor;  // Full-resolution pixels per trace pixel along each axis: 1, 2, 4, or 8.
-  float il_scale;               // Matches the shared trace resolution divisor.
   float gt_noise_frame;         // Ordered FAST sample index, not a history-validity token.
+  float gi_history_valid;
+  float gi_temporal_active;
+  float gt_filter_step;
+  float gt_filter_direction;  // 0 = horizontal, 1 = vertical, 2 = two-dimensional.
+  float gt_current_jitter_x;
+  float gt_current_jitter_y;
+  float gt_previous_jitter_x;
+  float gt_previous_jitter_y;
+  float gt_velocity_jitter_scale;
+  float ao_history_valid;
+  float ao_temporal_active;
 };
 
 #ifndef __cplusplus
@@ -125,7 +149,6 @@ cbuffer RenoDXSettings : register(b13) {
 #define RENODX_COLOR_GRADE_STRENGTH          shader_injection.scene_grade_strength
 #define RENODX_COLOR_GRADE_SCALING           shader_injection.scene_grade_scaling
 
-#define CUSTOM_BLOOM_TYPE     shader_injection.custom_bloom_type
 #define CUSTOM_BLOOM          shader_injection.custom_bloom
 #define CUSTOM_BOOST_SUN      shader_injection.custom_boost_sun
 #define CUSTOM_RANDOM         shader_injection.custom_random
@@ -185,11 +208,35 @@ cbuffer RenoDXSettings : register(b13) {
 #define CUSTOM_MGSV_GT_DEPTH_MIPS_ENABLED     shader_injection.gt_depth_mips_enabled
 #define CUSTOM_MGSV_GI_REJECT_BACKFACES       shader_injection.gi_reject_backfaces
 #define CUSTOM_MGSV_GI_SOURCE_SPECULAR_WEIGHT shader_injection.gi_source_specular_weight
+#define CUSTOM_MGSV_GT_TEMPORAL_ENABLED       shader_injection.gt_temporal_enabled
+#define CUSTOM_MGSV_GT_SPATIAL_ENABLED        shader_injection.gt_spatial_enabled
+#define CUSTOM_MGSV_GT_FILTER_TYPE            shader_injection.gt_filter_type
+#define CUSTOM_MGSV_GT_FILTER_RADIUS          shader_injection.gt_filter_radius
+#define CUSTOM_MGSV_GT_FILTER_TAPS_SEPARABLE  shader_injection.gt_filter_taps_separable
+#define CUSTOM_MGSV_GT_FILTER_TAPS_ATROUS     shader_injection.gt_filter_taps_atrous
+#define CUSTOM_MGSV_AO_HISTORY_WEIGHT         shader_injection.ao_history_weight
+#define CUSTOM_MGSV_AO_DEPTH_REJECTION        shader_injection.ao_depth_rejection
+#define CUSTOM_MGSV_AO_NORMAL_REJECTION       shader_injection.ao_normal_rejection
+#define CUSTOM_MGSV_AO_HISTORY_CLAMP          shader_injection.ao_history_clamp
+#define CUSTOM_MGSV_GI_HISTORY_WEIGHT         shader_injection.gi_history_weight
+#define CUSTOM_MGSV_GI_DEPTH_REJECTION        shader_injection.gi_depth_rejection
+#define CUSTOM_MGSV_GI_NORMAL_REJECTION       shader_injection.gi_normal_rejection
+#define CUSTOM_MGSV_GI_HISTORY_CLAMP          shader_injection.gi_history_clamp
 #define CUSTOM_MGSV_GI_DEBUG_VIEW             shader_injection.gi_debug_view
 
-#define CUSTOM_MGSV_GT_RESOLUTION_DIVISOR shader_injection.gt_resolution_divisor
-#define CUSTOM_MGSV_IL_SCALE              shader_injection.il_scale
-#define CUSTOM_MGSV_GT_NOISE_FRAME        shader_injection.gt_noise_frame
+#define CUSTOM_MGSV_GT_RESOLUTION_DIVISOR    shader_injection.gt_resolution_divisor
+#define CUSTOM_MGSV_GT_NOISE_FRAME           shader_injection.gt_noise_frame
+#define CUSTOM_MGSV_GI_HISTORY_VALID         shader_injection.gi_history_valid
+#define CUSTOM_MGSV_GI_TEMPORAL_ACTIVE       shader_injection.gi_temporal_active
+#define CUSTOM_MGSV_GT_FILTER_STEP           shader_injection.gt_filter_step
+#define CUSTOM_MGSV_GT_FILTER_DIRECTION      shader_injection.gt_filter_direction
+#define CUSTOM_MGSV_GT_CURRENT_JITTER_X      shader_injection.gt_current_jitter_x
+#define CUSTOM_MGSV_GT_CURRENT_JITTER_Y      shader_injection.gt_current_jitter_y
+#define CUSTOM_MGSV_GT_PREVIOUS_JITTER_X     shader_injection.gt_previous_jitter_x
+#define CUSTOM_MGSV_GT_PREVIOUS_JITTER_Y     shader_injection.gt_previous_jitter_y
+#define CUSTOM_MGSV_GT_VELOCITY_JITTER_SCALE shader_injection.gt_velocity_jitter_scale
+#define CUSTOM_MGSV_AO_HISTORY_VALID         shader_injection.ao_history_valid
+#define CUSTOM_MGSV_AO_TEMPORAL_ACTIVE       shader_injection.ao_temporal_active
 
 #include "../../shaders/renodx.hlsl"
 

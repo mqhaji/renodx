@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <functional>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
@@ -20,6 +21,7 @@
 #include <wrl/client.h>
 
 #include "../d3d11_compute_state.hpp"
+#include "../gtvbgi/temporal_inputs.hpp"
 #include "../inputs.hpp"
 #include "./analytical/runtime.hpp"
 #include "./camera_state.hpp"
@@ -48,6 +50,8 @@ struct PendingTemporalDispatch {
   ValidatedFrameInputs inputs;
   uint64_t temporal_generation = 0u;
   state::TemporalMode mode = state::TemporalMode::OFF;
+  std::function<void(reshade::api::command_list*, bool)> lighting_callback;
+  bool is_lighting = false;
   bool dispatch_consumed = false;
 };
 
@@ -163,6 +167,7 @@ inline void Destroy(reshade::api::device* device) {
   fsr3::Destroy();
   submission_failure_pending.store(false, std::memory_order_release);
   runtime_device = nullptr;
+  lighting::temporal_inputs::Reset();
 }
 
 inline void ReleaseInactiveResources(
@@ -394,6 +399,9 @@ inline void UninstallTemporalSubmissionBridge() {
     retired_dispatches.swap(submission.pending_dispatches);
     submission.active_queries.clear();
   }
+  for (const auto& pending : retired_dispatches) {
+    lighting::temporal_inputs::Forget(pending.prefix.Get());
+  }
   submission_bridge_installed = false;
   begin_query = nullptr;
   deferred_begin_query = nullptr;
@@ -413,6 +421,55 @@ inline void OnInitCommandList(reshade::api::command_list* command_list) {
   submission.active_queries.try_emplace(context.Get());
 }
 
+inline void CompleteRecording(reshade::api::command_list* recording, ID3D11CommandList* finished) {
+  auto* context = reinterpret_cast<ID3D11DeviceContext*>(recording->get_native());  // NOLINT(performance-no-int-to-ptr)
+  lighting::temporal_inputs::Finish(context, finished);
+  const std::unique_lock lock(submission.mutex);
+  submission.active_queries[context].clear();
+  const auto pending = std::ranges::find_if(
+      submission.pending_dispatches,
+      [recording](const PendingTemporalDispatch& candidate) {
+        return candidate.deferred_context == recording && candidate.post == nullptr;
+      });
+  if (pending != submission.pending_dispatches.end()) {
+    pending->deferred_context = nullptr;
+    pending->post = finished;
+  }
+}
+
+inline bool ScheduleLighting(
+    reshade::api::command_list* cmd_list,
+    std::function<void(reshade::api::command_list*, bool)> callback) {
+  if (cmd_list == nullptr || !callback) return false;
+  auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
+  if (context == nullptr) return false;
+  const ExecutionGuard execution_guard;
+  if (context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE) {
+    callback(cmd_list, true);
+    return true;
+  }
+  if (submission_bridge_device.load(std::memory_order_acquire) != cmd_list->get_device()) return false;
+  {
+    const std::unique_lock lock(submission.mutex);
+    const auto queries = submission.active_queries.find(context);
+    if (queries == submission.active_queries.end() || !queries->second.empty()
+        || submission.pending_dispatches.size() >= 64u) return false;
+  }
+  Microsoft::WRL::ComPtr<ID3D11CommandList> prefix;
+  if (FAILED(context->FinishCommandList(TRUE, &prefix)) || prefix == nullptr) return false;
+  // A second split completes the preceding insertion's remainder. Keep that
+  // link so GI and the later scene reconstruction execute in recorded order.
+  CompleteRecording(cmd_list, prefix.Get());
+  const std::unique_lock lock(submission.mutex);
+  submission.pending_dispatches.push_back({
+      .deferred_context = cmd_list,
+      .prefix = std::move(prefix),
+      .lighting_callback = std::move(callback),
+      .is_lighting = true,
+  });
+  return true;
+}
+
 inline void OnExecuteSecondaryCommandList(
     reshade::api::command_list* command_list,
     reshade::api::command_list* secondary_command_list) {
@@ -428,122 +485,124 @@ inline void OnExecuteSecondaryCommandList(
   if (secondary_native == nullptr) return;
   if (SUCCEEDED(secondary_native->QueryInterface(IID_PPV_ARGS(&recording_context)))) {
     if (recording_context->GetType() != D3D11_DEVICE_CONTEXT_DEFERRED) return;
+    CompleteRecording(secondary_command_list,
+                      reinterpret_cast<ID3D11CommandList*>(command_list->get_native()));  // NOLINT(performance-no-int-to-ptr)
+    return;
+  }
+
+  auto* post = reinterpret_cast<ID3D11CommandList*>(secondary_command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
+  std::vector<PendingTemporalDispatch> chain;
+  {
     const std::unique_lock lock(submission.mutex);
-    submission.active_queries[recording_context.Get()].clear();
-    const auto recorded = std::find_if(
-        submission.pending_dispatches.begin(),
-        submission.pending_dispatches.end(),
-        [secondary_command_list](const PendingTemporalDispatch& candidate) {
-          return candidate.deferred_context == secondary_command_list && candidate.post == nullptr;
-        });
-    if (recorded != submission.pending_dispatches.end()) {
-      recorded->deferred_context = nullptr;
-      recorded->post = reinterpret_cast<ID3D11CommandList*>(command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
-      if (!logged_immediate_dispatch.load(std::memory_order_relaxed)) {
-        logging::Info("mapped temporal post command list frame=", recorded->inputs.frame_token);
+    auto* remainder = post;
+    for (size_t index = 0u; index < submission.pending_dispatches.size(); ++index) {
+      const auto found = std::ranges::find_if(
+          submission.pending_dispatches,
+          [remainder](const PendingTemporalDispatch& candidate) { return candidate.post.Get() == remainder; });
+      if (found == submission.pending_dispatches.end()) break;
+      chain.push_back(*found);
+      found->dispatch_consumed = true;
+      remainder = found->prefix.Get();
+    }
+  }
+
+  auto* context = reinterpret_cast<ID3D11DeviceContext*>(command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
+  if (context == nullptr) return;
+  if (chain.empty()) {
+    if (context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE) lighting::temporal_inputs::Submit(post);
+    return;
+  }
+  std::ranges::reverse(chain);
+  if (context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) {
+    for (const auto& pending : chain) {
+      context->ExecuteCommandList(pending.prefix.Get(), TRUE);
+      if (!pending.is_lighting && !pending.dispatch_consumed && state::GetTemporalMode() == pending.mode) {
+        const ExecutionGuard execution_guard;
+        if (pending.temporal_generation != state::frame_state.temporal_generation) continue;
+        state::frame_state.reconstruction_scheduled = false;
+        logging::Warn("temporal post list was merged into another deferred context");
+        submission_failure_pending.store(true, std::memory_order_release);
       }
     }
     return;
   }
 
-  auto* post = reinterpret_cast<ID3D11CommandList*>(secondary_command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
-  PendingTemporalDispatch pending = {};
-  bool dispatch_pending = false;
-  {
-    const std::unique_lock lock(submission.mutex);
-    const auto found = std::find_if(
-        submission.pending_dispatches.begin(),
-        submission.pending_dispatches.end(),
-        [post](const PendingTemporalDispatch& candidate) { return candidate.post.Get() == post; });
-    if (found == submission.pending_dispatches.end()) return;
-    pending = *found;
-    dispatch_pending = !found->dispatch_consumed;
-    found->dispatch_consumed = true;
-  }
-
-  auto* context = reinterpret_cast<ID3D11DeviceContext*>(command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
-  if (context == nullptr) return;
-  if (context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) {
-    context->ExecuteCommandList(pending.prefix.Get(), TRUE);
-    if (dispatch_pending && state::GetTemporalMode() == pending.mode) {
-      ExecutionGuard execution_guard;
-      if (pending.temporal_generation != state::frame_state.temporal_generation) return;
-      state::frame_state.reconstruction_scheduled = false;
-      logging::Warn("temporal post list was merged into another deferred context");
-      submission_failure_pending.store(true, std::memory_order_release);
+  const ExecutionGuard execution_guard;
+  const ImmediateContextStateGuard state_guard(context);
+  for (auto& pending : chain) {
+    context->ExecuteCommandList(pending.prefix.Get(), state_guard.IsActive() ? FALSE : TRUE);
+    lighting::temporal_inputs::Submit(pending.prefix.Get());
+    if (pending.is_lighting) {
+      if (pending.lighting_callback) {
+        pending.lighting_callback(command_list, !pending.dispatch_consumed);
+      }
+      continue;
     }
-    return;
-  }
-
-  ExecutionGuard execution_guard;
-  ImmediateContextStateGuard state_guard(context);
-  if (!state_guard.IsActive()) {
-    context->ExecuteCommandList(pending.prefix.Get(), TRUE);
-    if (dispatch_pending && state::GetTemporalMode() == pending.mode
-        && pending.temporal_generation == state::frame_state.temporal_generation) {
+    // Every native prefix runs even when its added operation was canceled.
+    if (pending.temporal_generation != state::frame_state.temporal_generation
+        || state::GetTemporalMode() != pending.mode) continue;
+    if (!state_guard.IsActive() || pending.dispatch_consumed
+        || pending.inputs.device != runtime_device
+        || pending.inputs.sample_index != state::CurrentSampleIndex()) {
       state::frame_state.reconstruction_scheduled = false;
-      logging::Warn("unable to preserve immediate D3D11 state for temporal submission");
+      logging::Warn("rejected scene reconstruction submission: state, replay, or capture mismatch");
       submission_failure_pending.store(true, std::memory_order_release);
+      continue;
     }
-    return;
+    const uint64_t current_frame = state::CurrentFrameToken();
+    if (!logged_immediate_dispatch.exchange(true, std::memory_order_relaxed)) {
+      logging::Info("executing temporal dispatch on immediate context mode=", static_cast<uint32_t>(pending.mode),
+                    " frame=", pending.inputs.frame_token, " submission_frame=", current_frame);
+    }
+    pending.inputs.cmd_list = command_list;
+    if (!DispatchValidatedLocked(pending.inputs)) {
+      state::frame_state.reconstruction_scheduled = false;
+    } else if (pending.inputs.frame_token != current_frame) {
+      state::frame_state.reconstruction_completed = false;
+    }
   }
-
-  context->ExecuteCommandList(pending.prefix.Get(), FALSE);
-  // Prefix execution is unconditional: mode changes cancel reconstruction, never original game work.
-  if (pending.temporal_generation != state::frame_state.temporal_generation
-      || state::GetTemporalMode() != pending.mode) return;
-  if (!dispatch_pending) {
-    logging::Warn("repeated execution of a temporal command list is unsupported");
-    submission_failure_pending.store(true, std::memory_order_release);
-    return;
-  }
-
-  const uint64_t current_frame = state::CurrentFrameToken();
-  const bool current_dispatch = pending.inputs.device == runtime_device
-                                && pending.inputs.sample_index == state::CurrentSampleIndex();
-  if (!current_dispatch) {
-    state::frame_state.reconstruction_scheduled = false;
-    logging::Warn("rejecting temporal execution pending_frame=", pending.inputs.frame_token,
-                  " submission_frame=", current_frame,
-                  " pending_sample=", pending.inputs.sample_index,
-                  " current_sample=", state::CurrentSampleIndex(),
-                  " device_match=", logging::Bool{pending.inputs.device == runtime_device});
-    submission_failure_pending.store(true, std::memory_order_release);
-    return;
-  }
-
-  if (!logged_immediate_dispatch.exchange(true, std::memory_order_relaxed)) {
-    logging::Info("executing temporal dispatch on immediate context mode=", static_cast<uint32_t>(pending.mode),
-                  " frame=", pending.inputs.frame_token,
-                  " submission_frame=", current_frame);
-  }
-  pending.inputs.cmd_list = command_list;
-  const bool completed = DispatchValidatedLocked(pending.inputs);
-  if (!completed) {
-    state::frame_state.reconstruction_scheduled = false;
-  } else if (pending.inputs.frame_token != current_frame) {
-    state::frame_state.reconstruction_completed = false;
-  }
+  // ReShade submits this final native remainder immediately after this event.
+  lighting::temporal_inputs::Submit(post);
 }
 
 inline void OnDestroyCommandList(reshade::api::command_list* command_list) {
+  lighting::temporal_inputs::Destroy(command_list);
   const auto* device = submission_bridge_device.load(std::memory_order_acquire);
   if (device == nullptr || command_list == nullptr || command_list->get_device() != device) return;
   auto* native_command_list = reinterpret_cast<ID3D11CommandList*>(command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   auto* native_context = reinterpret_cast<ID3D11DeviceContext*>(command_list->get_native());     // NOLINT(performance-no-int-to-ptr)
   bool abandoned = false;
   uint64_t abandoned_generation = 0u;
+  std::vector<PendingTemporalDispatch> retired;
   {
     const std::unique_lock lock(submission.mutex);
     submission.active_queries.erase(native_context);
-    std::erase_if(submission.pending_dispatches, [&](const PendingTemporalDispatch& pending) {
-      const bool matches = pending.deferred_context == command_list || pending.post.Get() == native_command_list;
-      if (matches && !pending.dispatch_consumed) {
-        abandoned = true;
-        abandoned_generation = pending.temporal_generation;
+    std::vector<ID3D11CommandList*> orphaned_lists = {native_command_list};
+    // Intermediate prefixes were finished through the native context, so they
+    // have no ReShade wrapper destruction event. Retire their whole chain.
+    bool removed = true;
+    while (removed) {
+      removed = false;
+      for (auto pending = submission.pending_dispatches.begin(); pending != submission.pending_dispatches.end();) {
+        const bool matches = pending->deferred_context == command_list
+                             || std::ranges::find(orphaned_lists, pending->post.Get()) != orphaned_lists.end();
+        if (!matches) {
+          ++pending;
+          continue;
+        }
+        if (!pending->is_lighting && !pending->dispatch_consumed) {
+          abandoned = true;
+          abandoned_generation = pending->temporal_generation;
+        }
+        orphaned_lists.push_back(pending->prefix.Get());
+        retired.push_back(std::move(*pending));
+        pending = submission.pending_dispatches.erase(pending);
+        removed = true;
       }
-      return matches;
-    });
+    }
+  }
+  for (const auto& pending : retired) {
+    lighting::temporal_inputs::Forget(pending.prefix.Get());
   }
   if (abandoned && state::IsEnabled()) {
     ExecutionGuard execution_guard;
@@ -600,11 +659,6 @@ inline void MaybeRunLocked(
       // Existing recordings may contain an unseen Begin. Wait for a natural
       // successful FinishCommandList or a fresh context before splitting them.
       if (queries == submission.active_queries.end() || !queries->second.empty()) return;
-      if (std::any_of(
-              submission.pending_dispatches.begin(), submission.pending_dispatches.end(),
-              [&inputs](const PendingTemporalDispatch& candidate) {
-                return candidate.deferred_context == inputs.cmd_list && candidate.post == nullptr;
-              })) return;
     }
     PendingTemporalDispatch pending = {
         .deferred_context = inputs.cmd_list,
@@ -625,6 +679,7 @@ inline void MaybeRunLocked(
       return;
     }
     pending.prefix.Attach(prefix);
+    CompleteRecording(cmd_list, prefix);
     const std::unique_lock lock(submission.mutex);
     submission.pending_dispatches.emplace_back(std::move(pending));
     state::frame_state.reconstruction_scheduled = true;
