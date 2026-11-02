@@ -1,3 +1,4 @@
+#include "../../gtvbgi/specular_composition.hlsli"
 #include "../tonemap.hlsli"
 
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:24 2026
@@ -56,9 +57,9 @@ Texture2D<float4> inOcclusion : register(t13);
 #define cmp -
 
 void main(
-    float4 v0: SV_Position0,
-    float2 v1: TEXCOORD0,
-    out float4 o0: SV_Target0) {
+    float4 v0 : SV_Position0,
+    float2 v1 : TEXCOORD0,
+    out float4 o0 : SV_Target0) {
   float4 r0, r1, r2, r3, r4, r5;
   uint4 bitmask, uiDest;
   float4 fDest;
@@ -102,15 +103,20 @@ void main(
   r1.xyz = r1.xyz;
   r3.xyz = inAlbedo.Sample(g_samplerLinear_Wrap_s, r0.xy).xyz;
   r3.xyz = r3.xyz;
+  const float2 specular_uv = r0.xy;
   r0.x = inOcclusion.Sample(g_samplerLinear_Wrap_s, r0.xy).x;
+  const float3 specular_correction = EnvironmentSpecularCorrection(specular_uv, r0.x);
   r0.xyw = r0.xxx;
   r2.xyz = r3.xyz * r2.xyz;
   // Custom AO already attenuates diffuse upstream; keep native AO on specular only.
-  if (CUSTOM_MGSV_AO_ENABLED != 0.f) {
+  if (CUSTOM_MGSV_LIGHTING_ENABLED != 0.f) {
     r0.xyw = r2.xyz + r1.xyz * r0.xyw;
   } else {
     r1.xyz = r2.xyz + r1.xyz;
     r0.xyw = r1.xyz * r0.xyw;
+  }
+  if (CUSTOM_MGSV_LIGHTING_ENABLED != 0.0 && CUSTOM_MGSV_SPECULAR_OCCLUSION_STRENGTH > 0.0) {
+    r0.xyw += specular_correction;
   }
   r0.xyw = r0.xyw;
   r0.xyw = r0.xyw;

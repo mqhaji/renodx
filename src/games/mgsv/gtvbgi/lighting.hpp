@@ -1,9 +1,5 @@
-/*
- * Copyright (C) 2024 Musa Haji
- * Copyright (C) 2026 Musa Haji
- * Copyright (C) 2026 ZioPao
- * SPDX-License-Identifier: MIT
- */
+// SPDX-License-Identifier: MIT
+// Copyright and license notices: README.md#credits-and-license.
 
 #ifndef SRC_GAMES_MGSV_LIGHTING_HPP_
 #define SRC_GAMES_MGSV_LIGHTING_HPP_
@@ -34,6 +30,7 @@
 #include "../inputs.hpp"
 #include "../reconstruction/coordinator.hpp"
 #include "../shared.h"
+#include "environment_specular.hpp"
 #include "temporal_inputs.hpp"
 
 // Shared lighting resources and dispatch support.
@@ -153,12 +150,12 @@ inline bool EnsureLightPassLayout(reshade::api::device* device) {
 
   std::array<reshade::api::pipeline_layout_param, 3> params = {};
   params[0].type = reshade::api::pipeline_layout_param_type::push_descriptors;
-  params[0].push_descriptors.count = 9u;  // t0-t8; input roles vary by pass
+  params[0].push_descriptors.count = 11u;  // t0-t10; input roles vary by pass
   params[0].push_descriptors.type = reshade::api::descriptor_type::texture_shader_resource_view;
   params[0].push_descriptors.dx_register_index = 0u;
   params[0].push_descriptors.dx_register_space = 0u;
   params[1].type = reshade::api::pipeline_layout_param_type::push_descriptors;
-  params[1].push_descriptors.count = 4u;  // u0-u3; only accumulation uses all four outputs
+  params[1].push_descriptors.count = 5u;  // u0-u4; accumulation also writes directional history
   params[1].push_descriptors.type = reshade::api::descriptor_type::texture_unordered_access_view;
   params[1].push_descriptors.dx_register_index = 0u;
   params[1].push_descriptors.dx_register_space = 0u;
@@ -232,8 +229,8 @@ inline void DestroyLightPassLayout(reshade::api::device* device) {
 // output slot, so binding a placeholder cannot unbind another input or output.
 inline reshade::api::resource fallback_srv_resource = {0};
 inline reshade::api::resource_view fallback_srv = {0};
-inline std::array<reshade::api::resource, 3> fallback_uav_resources = {};
-inline std::array<reshade::api::resource_view, 3> fallback_uavs = {};
+inline std::array<reshade::api::resource, 4> fallback_uav_resources = {};
+inline std::array<reshade::api::resource_view, 4> fallback_uavs = {};
 
 inline void DestroyFallbackViews(reshade::api::device* device) {
   for (auto& view : fallback_uavs) {
@@ -321,18 +318,20 @@ inline reshade::api::resource_view GetFallbackUav(reshade::api::command_list* cm
 // after the complete lighting chain, not between individual dispatches.
 inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* pass,
                               const ShaderInjectData& constants,
-                              const std::array<reshade::api::resource_view, 9>& sources,
+                              const std::array<reshade::api::resource_view, 11>& sources,
                               reshade::api::resource_view target,
                               reshade::api::resource_view second_target,
                               reshade::api::resource_view third_target,
                               reshade::api::resource_view fourth_target,
+                              reshade::api::resource_view fifth_target,
                               uint32_t width, uint32_t height) {
   cmd_list->bind_pipeline(reshade::api::pipeline_stage::all_compute, pass->pipeline);
-  const std::array<reshade::api::resource_view, 4> targets = {
+  const std::array<reshade::api::resource_view, 5> targets = {
       target,  // u0
       second_target,
       third_target,
       fourth_target,
+      fifth_target,
   };
   cmd_list->push_descriptors(
       reshade::api::shader_stage::all_compute, light_pass_layout, 1u,
@@ -340,7 +339,7 @@ inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* p
           .table = {0u},
           .binding = 0u,
           .array_offset = 0u,
-          .count = 4u,
+          .count = static_cast<uint32_t>(targets.size()),
           .type = reshade::api::descriptor_type::texture_unordered_access_view,
           .descriptors = targets.data(),
       });
@@ -380,6 +379,9 @@ using lighting::LogLightOnce;
 
 inline float depth_mips_enabled = 0.f;
 inline LightTarget visibility_target;
+inline LightTarget bent_normal_target;
+inline std::array<LightTarget, 2> bent_temporal_targets;
+inline std::array<LightTarget, 2> bent_filter_targets;
 inline std::array<LightTarget, 2> temporal_targets;
 inline std::array<LightTarget, 2> filter_targets;
 inline uint32_t temporal_status = UINT32_MAX;
@@ -589,6 +591,13 @@ inline bool BuildDepthMips(reshade::api::command_list* cmd_list, reshade::api::r
 inline void Destroy(reshade::api::device* device) {
   DestroyDepthMipChain(device);
   DestroyLightTarget(device, &visibility_target);
+  DestroyLightTarget(device, &bent_normal_target);
+  for (auto& target : bent_temporal_targets) {
+    DestroyLightTarget(device, &target);
+  }
+  for (auto& target : bent_filter_targets) {
+    DestroyLightTarget(device, &target);
+  }
   for (auto& target : temporal_targets) {
     DestroyLightTarget(device, &target);
   }
@@ -632,6 +641,7 @@ inline std::array<lighting::temporal_inputs::Scene, 2> history_scenes;
 struct History {
   std::array<float, 12> parameters = {};
   std::array<float, 11> ao_parameters = {};
+  std::array<float, 10> bent_parameters = {};
   std::array<float, 2> jitter_uv = {};
   uint64_t generation = 0u;
   uint64_t submission = 0u;
@@ -642,6 +652,7 @@ struct History {
   uint32_t slot = 0u;
   bool valid = false;
   bool ao_valid = false;
+  bool bent_valid = false;
 };
 inline History history;
 inline uint32_t temporal_status = UINT32_MAX;
@@ -695,8 +706,8 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .default_value = 1.f,
           .label = "Screen-Space Lighting",
           .section = "Indirect Lighting",
-          .tooltip = "Adds ambient occlusion and Global Illumination: contact shading and approximate bounced light from visible surfaces. Off restores native lighting.",
-          .labels = {"Off", "GT-VBGI"},
+          .tooltip = "Adds ambient occlusion, bounced light, and directional occlusion of environment reflections. Off restores native lighting.",
+          .labels = {"Off", "GT-VBGI + GTSO"},
       },
       new renodx::utils::settings::Setting{
           .key = "FxAOStrength",
@@ -721,13 +732,24 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .is_visible = [shader_injection] { return shader_injection->lighting_mode >= 0.5f; },
       },
       new renodx::utils::settings::Setting{
+          .key = "FxIndirectLightingSpecularOcclusionStrength",
+          .binding = &shader_injection->specular_occlusion_strength,
+          .default_value = 75.f,
+          .label = "Specular Occlusion Strength",
+          .section = "Indirect Lighting",
+          .tooltip = "Controls occlusion of environment reflections. 0% keeps native occlusion; 100% uses GTSO where supported. Direct highlights and separate rain reflections keep their existing shading.",
+          .max = 100.f,
+          .parse = [](float value) { return value * 0.01f; },
+          .is_visible = [shader_injection] { return shader_injection->lighting_mode >= 0.5f; },
+      },
+      new renodx::utils::settings::Setting{
           .key = "FxIndirectLightingResolution",
           .binding = &shader_injection->gt_resolution,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
           .default_value = 2.f,
           .label = "Lighting Resolution",
           .section = "Indirect Lighting",
-          .tooltip = "Scales both width and height of the AO/GI trace. Quarter uses 1/16 as many pixels; Eighth uses 1/64. Lower resolutions can lose thin geometry and contact detail. Search radii stay in full-resolution pixels.",
+          .tooltip = "Scales both width and height of the shared lighting trace. Quarter uses 1/16 as many pixels; Eighth uses 1/64. Lower resolutions can lose thin geometry and contact detail. Search radii stay in full-resolution pixels.",
           .labels = {"Full", "Half", "Quarter", "Eighth"},
           .is_visible = [shader_injection] { return shader_injection->lighting_mode >= 0.5f; },
       },
@@ -834,9 +856,9 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .key = "FxAOHistoryWeight",
           .binding = &shader_injection->ao_history_weight,
           .default_value = 90.f,
-          .label = "AO History Weight",
+          .label = "Occlusion History Weight",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Maximum percentage of accepted history. Higher values reduce noise but can retain changes longer. Zero uses only the current sample.",
+          .tooltip = "Applies to AO and directional visibility. Maximum percentage of accepted history. Higher values reduce noise but can retain changes longer. Zero uses only the current sample.",
           .max = 99.f,
           .parse = [](float value) { return value * 0.01f; },
           .is_visible = is_temporal_visible,
@@ -845,9 +867,9 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .key = "FxAODepthRejection",
           .binding = &shader_injection->ao_depth_rejection,
           .default_value = 20.f,
-          .label = "AO Depth Rejection",
+          .label = "Occlusion Depth Rejection",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Allowed history depth difference as a percentage of the expected previous depth. Lower values reject mismatched surfaces more strongly.",
+          .tooltip = "Applies to AO and directional visibility. Allowed history depth difference as a percentage of the expected previous depth. Lower values reject mismatched surfaces more strongly.",
           .max = 20.f,
           .parse = [](float value) { return value * 0.01f; },
           .is_visible = is_temporal_visible,
@@ -856,9 +878,9 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .key = "FxAONormalRejection",
           .binding = &shader_injection->ao_normal_rejection,
           .default_value = 0.f,
-          .label = "AO Normal Rejection",
+          .label = "Occlusion Normal Rejection",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Surface-direction agreement required for full history weight. The weight fades to zero over a 0.4-wide range below this value.",
+          .tooltip = "Applies to AO and directional visibility. Surface-direction agreement required for full history weight. The weight fades to zero over a 0.4-wide range below this value.",
           .max = 1.f,
           .format = "%.2f",
           .is_visible = is_temporal_visible,
@@ -867,9 +889,9 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .key = "FxAOHistoryClamp",
           .binding = &shader_injection->ao_history_clamp,
           .default_value = 0.1f,
-          .label = "AO History Clamp",
+          .label = "Occlusion History Clamp",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Allowed history range in standard deviations of nearby current samples. Lower values react faster; zero disables clamping.",
+          .tooltip = "Applies to AO and directional visibility. Allowed history range in standard deviations of nearby current samples. Lower values react faster; zero disables clamping.",
           .max = 4.f,
           .format = "%.2f",
           .is_visible = is_temporal_visible,
@@ -1002,7 +1024,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .label = "Lighting Debug View",
           .section = "Indirect Lighting (Advanced)",
           .tooltip = "Replaces diffuse lighting to inspect bounced light, sector coverage, accepted source directions, valid receivers, or source radiance. Surface color, specular, fog, and later processing still apply.",
-          .labels = {"Off", "Bounce Lighting", "Geometry Coverage", "Accepted Source Coverage", "Valid / Invalid Results", "Source Lighting", "Temporal GI", "Filtered GI", "Accepted GI History", "Raw AO", "Temporal AO", "Filtered AO", "Accepted AO History"},
+          .labels = {"Off", "Bounce Lighting", "Geometry Coverage", "Accepted Source Coverage", "Valid / Invalid Results", "Source Lighting", "Temporal GI", "Filtered GI", "Accepted GI History", "Raw AO", "Temporal AO", "Filtered AO", "Accepted AO History", "Raw Bent Normals", "Filtered Bent Normals", "Native Roughness", "Environment Specular", "Specular Visibility", "Specular Confidence"},
           .is_visible = [shader_injection] {
             return shader_injection->lighting_mode >= 0.5f;
           },
@@ -1013,7 +1035,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
     setting->on_change_value = [setting](float, float current) {
       const char* state = "Off";
       if (current >= 0.5f) {
-        state = (setting->key == "FxIndirectLightingEnabled" ? "GT-VBGI" : "On");
+        state = (setting->key == "FxIndirectLightingEnabled" ? "GT-VBGI + GTSO" : "On");
       }
       LogLight(reshade::log::level::info, setting->label, " = ", state, " (", setting->key, ")");
     };
@@ -1041,6 +1063,7 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
     scale = 2u;
   }
   constants.gt_resolution_divisor = static_cast<float>(scale);
+  constants.gt_directional_visibility_active = 1.f;
 
   constants.gt_noise_frame = static_cast<float>(lighting::noise_frame.load(std::memory_order_relaxed) & 31u);
   const uint32_t present = lighting::noise_frame.load(std::memory_order_relaxed);
@@ -1105,20 +1128,29 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
     return;
   }
 
-  if (constants.gi_debug_view >= 2.f
-      && !EnsureLightTarget(device, &il::diagnostic_target, width, height)) {
+  const bool diagnostic_requested = constants.gi_debug_view >= 2.f && constants.gi_debug_view <= 12.f && constants.gi_debug_view != 7.f;
+  const bool diagnostic_ready = diagnostic_requested && EnsureLightTarget(device, &il::diagnostic_target, width, height);
+  if (diagnostic_requested && !diagnostic_ready) {
     constants.gi_debug_view = 0.f;
     static std::atomic_flag failed = {};
     LogLightOnce(&failed, reshade::log::level::warning,
                  "GI diagnostic allocation failed; normal AO and GI remain enabled");
   }
 
+  if (constants.gt_directional_visibility_active >= 0.5f
+      && !EnsureLightTarget(device, &bent_normal_target, width, height)) {
+    constants.gt_directional_visibility_active = 0.f;
+  }
+  if ((constants.gi_debug_view == 13.f || constants.gi_debug_view == 14.f) && constants.gt_directional_visibility_active < 0.5f) {
+    constants.gi_debug_view = 0.f;
+  }
   const bool depth_mips_requested = constants.gt_depth_mips_enabled != 0.f;
   const bool depth_mips_ready = BuildDepthMips(cmd_list, frame.depth, depth_mips_requested);
   constants.gt_depth_mips_enabled = (depth_mips_ready ? 1.f : 0.f);
   const auto scratch0 = GetFallbackUav(cmd_list, 0);
   const auto scratch1 = GetFallbackUav(cmd_list, 1);
   const auto scratch2 = GetFallbackUav(cmd_list, 2);
+  const auto scratch3 = GetFallbackUav(cmd_list, 3);
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   const bool immediate = context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE;
   const std::array<float, 12> parameters = {
@@ -1148,6 +1180,18 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
       constants.custom_taa,
       constants.unclamp_motion_vectors,
   };
+  const std::array<float, 10> bent_parameters = {
+      constants.gt_search_radius_pixels,
+      constants.gt_surface_thickness,
+      constants.gt_surface_offset,
+      constants.gt_slice_count,
+      constants.gt_samples_per_side,
+      constants.gt_depth_mips_enabled,
+      constants.gt_resolution,
+      constants.gt_temporal_enabled,
+      constants.custom_taa,
+      constants.unclamp_motion_vectors,
+  };
   const bool same_camera = il::history_scenes[il::history.slot].camera_generation == temporal.scene.camera_generation
                            && il::history_scenes[il::history.slot].camera_identity == temporal.scene.camera_identity
                            && il::history_scenes[il::history.slot].viewport_identity == temporal.scene.viewport_identity;
@@ -1160,6 +1204,9 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   if (immediate && (geometry_changed || il::history.ao_parameters != ao_parameters)) {
     il::history.ao_valid = false;
   }
+  if (immediate && (geometry_changed || il::history.bent_parameters != bent_parameters || constants.gt_directional_visibility_active < 0.5f)) {
+    il::history.bent_valid = false;
+  }
   const uint32_t write_slot = 1u - il::history.slot;
   // An unsplit deferred fallback must never write submitted history textures.
   bool temporal_ready = immediate && EnsureLightPass(device, &il::temporal_pass, "mgsv: combined AO/GI temporal pass created", __gtvbgi_temporal);
@@ -1168,6 +1215,14 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
                      && EnsureLightTarget(device, &ao::temporal_targets[index], width, height, reshade::api::format::r16g16_float)
                      && EnsureLightTarget(device, &il::geometry_targets[index], width, height,
                                           reshade::api::format::r32g32_uint);
+  }
+  bool bent_temporal_ready = temporal_ready && constants.gt_directional_visibility_active >= 0.5f;
+  for (uint32_t index = 0u; index < 2u && bent_temporal_ready; ++index) {
+    bent_temporal_ready = EnsureLightTarget(device, &bent_temporal_targets[index], width, height);
+  }
+  if (temporal_ready && constants.gt_directional_visibility_active >= 0.5f && !bent_temporal_ready) {
+    static std::atomic_flag failed = {};
+    LogLightOnce(&failed, reshade::log::level::warning, "Bent-normal history allocation failed; using current directions");
   }
   if (!temporal_ready) {
     constants.gi_temporal_active = 0.f;
@@ -1211,6 +1266,11 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
                                         && il::history_scenes[il::history.slot].buffer != nullptr
                                     ? 1.f
                                     : 0.f);
+  constants.gt_directional_history_valid = (bent_temporal_ready && constants.ao_temporal_active >= 0.5f
+                                                    && il::history.bent_valid && present - il::history.frame == 1u
+                                                    && il::history_scenes[il::history.slot].buffer != nullptr
+                                                ? 1.f
+                                                : 0.f);
   for (const bool ambient_occlusion : {true, false}) {
     uint32_t status = 0u;
     const bool requested = (ambient_occlusion
@@ -1255,11 +1315,19 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
     filter_ready = EnsureLightTarget(device, &il::filter_targets[index], width, height)
                    && EnsureLightTarget(device, &ao::filter_targets[index], width, height, reshade::api::format::r16g16_float);
   }
+  bool bent_filter_ready = filter_ready && constants.gt_directional_visibility_active >= 0.5f;
+  for (uint32_t index = 0u; index < 2u && bent_filter_ready; ++index) {
+    bent_filter_ready = EnsureLightTarget(device, &bent_filter_targets[index], width, height);
+  }
+  if (filter_ready && constants.gt_directional_visibility_active >= 0.5f && !bent_filter_ready) {
+    static std::atomic_flag failed = {};
+    LogLightOnce(&failed, reshade::log::level::warning, "Bent-normal spatial allocation failed; using unfiltered directions");
+  }
   if (!filter_ready) {
     static std::atomic_flag failed = {};
     LogLightOnce(&failed, reshade::log::level::warning, "Lighting spatial setup failed; using unfiltered AO and GI");
   }
-  const std::array<reshade::api::resource_view, 9> sources = {
+  const std::array<reshade::api::resource_view, 11> sources = {
       frame.depth,
       frame.normal,
       (depth_mip_chain.ready ? depth_mip_chain.view : GetFallbackView(cmd_list)),
@@ -1269,14 +1337,18 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
       lighting::noise_view,
       GetFallbackView(cmd_list),
       GetFallbackView(cmd_list),
+      GetFallbackView(cmd_list),
+      GetFallbackView(cmd_list),
   };
   DispatchLightPass(cmd_list, &il::gather_pass, constants, sources,
                     visibility_target.uav, il::bounce_target.uav,
-                    constants.gi_debug_view >= 2.f ? il::diagnostic_target.uav : scratch1,
-                    scratch2, width, height);
+                    diagnostic_ready ? il::diagnostic_target.uav : scratch1,
+                    constants.gt_directional_visibility_active >= 0.5f ? bent_normal_target.uav : scratch2,
+                    scratch3, width, height);
 
   auto ao_source = visibility_target.view;
   auto gi_source = il::bounce_target.view;
+  auto bent_source = (constants.gt_directional_visibility_active >= 0.5f ? bent_normal_target.view : GetFallbackView(cmd_list));
   if (temporal_ready) {
     const std::array<ID3D11Buffer*, 2> scenes = {
         temporal.scene.buffer.Get(),
@@ -1296,7 +1368,7 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
     } else {
       context->CSSetConstantBuffers(1u, 2u, scenes.data());
     }
-    const std::array<reshade::api::resource_view, 9> temporal_sources = {
+    const std::array<reshade::api::resource_view, 11> temporal_sources = {
         gi_source,
         frame.depth,
         frame.normal,
@@ -1310,13 +1382,24 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
         il::geometry_targets[il::history.slot].view,
         ao_source,
         ao::temporal_targets[il::history.slot].view,
+        bent_source,
+        bent_temporal_ready ? bent_temporal_targets[il::history.slot].view : GetFallbackView(cmd_list),
     };
-    DispatchLightPass(cmd_list, &il::temporal_pass, constants, temporal_sources,
+    auto temporal_constants = constants;
+    if (!bent_temporal_ready) {
+      temporal_constants.gt_directional_visibility_active = 0.f;
+    }
+    DispatchLightPass(cmd_list, &il::temporal_pass, temporal_constants, temporal_sources,
                       il::temporal_targets[write_slot].uav, il::geometry_targets[write_slot].uav,
-                      constants.gi_debug_view >= 2.f ? il::diagnostic_target.uav : scratch1,
-                      ao::temporal_targets[write_slot].uav, width, height);
+                      diagnostic_ready ? il::diagnostic_target.uav : scratch1,
+                      ao::temporal_targets[write_slot].uav,
+                      bent_temporal_ready ? bent_temporal_targets[write_slot].uav : scratch3,
+                      width, height);
     gi_source = il::temporal_targets[write_slot].view;
     ao_source = ao::temporal_targets[write_slot].view;
+    if (bent_temporal_ready) {
+      bent_source = bent_temporal_targets[write_slot].view;
+    }
     if (new_submission) {
       if (constants.gi_temporal_active >= 0.5f || constants.ao_temporal_active >= 0.5f) {
         // Retain the camera paired with both newly written histories after
@@ -1329,6 +1412,7 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
       il::history = {
           .parameters = parameters,
           .ao_parameters = ao_parameters,
+          .bent_parameters = bent_parameters,
           .jitter_uv = temporal.current_jitter_uv,
           .generation = temporal.generation,
           .submission = temporal.submission,
@@ -1339,6 +1423,7 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
           .slot = write_slot,
           .valid = constants.gi_temporal_active >= 0.5f,
           .ao_valid = constants.ao_temporal_active >= 0.5f,
+          .bent_valid = bent_temporal_ready && constants.ao_temporal_active >= 0.5f,
       };
     }
   }
@@ -1354,43 +1439,64 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
     for (uint32_t index = 0u; index < pass_count; ++index) {
       constants.gt_filter_step = (separable ? 1.f : static_cast<float>(std::min(1u << index, std::max(1u, radius / 2u))));
       constants.gt_filter_direction = (separable ? static_cast<float>(index & 1u) : 2.f);
-      const std::array<reshade::api::resource_view, 9> filter_sources = {
+      const std::array<reshade::api::resource_view, 11> filter_sources = {
           gi_source,
           frame.depth,
           frame.normal,
           ao_source,
+          bent_source,
+          GetFallbackView(cmd_list),
           GetFallbackView(cmd_list),
           GetFallbackView(cmd_list),
           GetFallbackView(cmd_list),
           GetFallbackView(cmd_list),
           GetFallbackView(cmd_list),
       };
-      DispatchLightPass(cmd_list, &il::filter_pass, constants, filter_sources,
+      auto filter_constants = constants;
+      if (!bent_filter_ready) {
+        filter_constants.gt_directional_visibility_active = 0.f;
+      }
+      DispatchLightPass(cmd_list, &il::filter_pass, filter_constants, filter_sources,
                         il::filter_targets[index & 1u].uav, ao::filter_targets[index & 1u].uav,
                         constants.gi_debug_view == 11.f ? il::diagnostic_target.uav : scratch1,
-                        scratch2, width, height);
+                        bent_filter_ready ? bent_filter_targets[index & 1u].uav : scratch2,
+                        scratch3, width, height);
       gi_source = il::filter_targets[index & 1u].view;
       ao_source = ao::filter_targets[index & 1u].view;
+      if (bent_filter_ready) {
+        bent_source = bent_filter_targets[index & 1u].view;
+      }
     }
   }
-  const std::array<reshade::api::resource_view, 9> apply_sources = {
+  Microsoft::WRL::ComPtr<ID3D11Resource> specular_resource;
+  Microsoft::WRL::ComPtr<ID3D11Resource> depth_resource;
+  reinterpret_cast<ID3D11ShaderResourceView*>(frame.specular.handle)->GetResource(&specular_resource);  // NOLINT(performance-no-int-to-ptr)
+  reinterpret_cast<ID3D11ShaderResourceView*>(frame.depth.handle)->GetResource(&depth_resource);        // NOLINT(performance-no-int-to-ptr)
+  auto environment = lighting::environment_specular::Read(device, specular_resource.Get());
+  if (environment != nullptr && environment->depth.Get() != depth_resource.Get()) {
+    environment.reset();
+  }
+  const std::array<reshade::api::resource_view, 11> apply_sources = {
       gi_source,
       frame.depth,
-      constants.gi_debug_view >= 2.f ? il::diagnostic_target.view : GetFallbackView(cmd_list),
+      diagnostic_ready ? il::diagnostic_target.view : GetFallbackView(cmd_list),
       ao_source,
-      GetFallbackView(cmd_list),
-      GetFallbackView(cmd_list),
-      GetFallbackView(cmd_list),
+      constants.gt_directional_visibility_active >= 0.5f ? bent_normal_target.view : GetFallbackView(cmd_list),
+      bent_source,
+      frame.normal,
+      environment != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->srv.Get())} : GetFallbackView(cmd_list),
+      environment != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->material.Get())} : GetFallbackView(cmd_list),
       GetFallbackView(cmd_list),
       GetFallbackView(cmd_list),
   };
   // Resolve both signals together: AO attenuates only existing diffuse, and
   // the visibility-integrated bounce is added afterward in the same store.
   DispatchLightPass(cmd_list, &il::add_pass, constants, apply_sources, frame.light,
-                    scratch0, scratch1, scratch2, frame.width, frame.height);
+                    environment != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->visibility_uav.Get())} : scratch0,
+                    scratch1, scratch2, scratch3, frame.width, frame.height);
   static std::atomic_flag recorded = {};
   LogLightOnce(&recorded, reshade::log::level::info,
-               "GT-VBGI commands recorded; effect=", width, "x", height,
+               "GT-VBGI + GTSO commands recorded; effect=", width, "x", height,
                " noise=IS-FAST",
                " full_resolution=", frame.width, "x", frame.height,
                " scale=", constants.gt_resolution_divisor,
@@ -1432,7 +1538,7 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
   {
     const std::shared_lock lock(renodx::utils::mutex::global_mutex);
     constants = shader_injection;
-    constants.gi_debug_view = std::clamp(il::raw_view, 0.f, 12.f);
+    constants.gi_debug_view = std::clamp(il::raw_view, 0.f, 18.f);
     constants.gt_depth_mips_enabled = ao::depth_mips_enabled;
   }
   if (constants.lighting_mode < 0.5f) {

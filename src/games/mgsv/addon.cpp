@@ -43,6 +43,7 @@
 #include "../../utils/shader.hpp"
 #include "../../utils/state.hpp"
 #include "../../utils/swapchain.hpp"
+#include "./gtvbgi/environment_specular.hpp"
 #include "./gtvbgi/lighting.hpp"
 #include "./gtvbgi/temporal_inputs.hpp"
 #include "./inputs.hpp"
@@ -82,6 +83,25 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
     ImGui::PopTextWrapPos();
     ImGui::TreePop();
   }
+  if (ImGui::TreeNode("GT-VBGI + GTSO (MIT)")) {
+    ImGui::PushTextWrapPos();
+    ImGui::TextUnformatted(R"license(GT-VBGI reference: Mirko Salm (TinyTexel).
+Temporal and spatial filtering reference: Toru77's Falcom Engine Plus.
+Specular occlusion adapted from three.js GTAONode.js.
+
+Copyright (c) 2024, 2026 Musa Haji
+Copyright (c) 2026 ZioPao
+Copyright (c) 2025 Carlos Lopez Jr.
+Copyright (c) 2010-2026 three.js authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.)license");
+    ImGui::PopTextWrapPos();
+    ImGui::TreePop();
+  }
   ImGui::TreePop();
 };
 
@@ -98,6 +118,7 @@ void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool resize) {
   const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
   if (!mgsv::inputs::IsSelectedSwapchain(swapchain)) return;
   mgsv::inputs::OnDestroySwapchain(swapchain, resize);
+  mgsv::lighting::environment_specular::Reset();
   mgsv::reconstruction::coordinator::ResetTemporalState("input swapchain retired");
   // Cancel reconstruction but retain every original game prefix/post list for its existing replay path.
   std::vector<std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 4>> retired_views;
@@ -154,15 +175,19 @@ void OnPresent(
     uint32_t dirty_rect_count,
     const reshade::api::rect* dirty_rects) {
   bool temporal_lighting_enabled = false;
+  bool lighting_enabled = false;
   {
     const std::shared_lock settings_lock(renodx::utils::mutex::global_mutex);
-    temporal_lighting_enabled = shader_injection.lighting_mode >= 0.5f
-                                && shader_injection.gt_temporal_enabled >= 0.5f;
+    lighting_enabled = shader_injection.lighting_mode >= 0.5f;
+    temporal_lighting_enabled = lighting_enabled && shader_injection.gt_temporal_enabled >= 0.5f;
   }
   {
     const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
     mgsv::inputs::OnPresent(queue, swapchain, source_rect, dest_rect, dirty_rect_count, dirty_rects);
     if (mgsv::inputs::IsSelectedSwapchain(swapchain)) {
+      if (!lighting_enabled) {
+        mgsv::lighting::environment_specular::Reset();
+      }
       mgsv::lighting::temporal_inputs::enabled.store(temporal_lighting_enabled, std::memory_order_release);
       mgsv::lighting::temporal_inputs::BeginFrame(queue->get_device());
       mgsv::lighting::noise_frame.fetch_add(1u, std::memory_order_relaxed);
@@ -189,6 +214,7 @@ void OnDestroyDevice(reshade::api::device* device) {
   const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
   if (!mgsv::inputs::IsSelectedDevice(device)) return;
   mgsv::inputs::OnDestroyDevice(device);
+  mgsv::lighting::environment_specular::Reset();
   mgsv::reconstruction::input_capture::InvalidateCapturedFrame();
   mgsv::ao::Destroy(device);
   mgsv::il::Destroy(device);
@@ -293,7 +319,14 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   renodx::utils::shader::Use(fdw_reason);
   renodx::utils::state::Use(fdw_reason);
   if (fdw_reason == DLL_PROCESS_ATTACH) {
+    reshade::register_event<reshade::addon_event::init_device>(mgsv::lighting::environment_specular::OnInitDevice);
+    reshade::register_event<reshade::addon_event::destroy_device>(mgsv::lighting::environment_specular::OnDestroyDevice);
     reshade::register_event<reshade::addon_event::init_command_list>(mgsv::inputs::descriptor_tracker::OnInitCommandList);
+    reshade::register_event<reshade::addon_event::init_command_list>(mgsv::lighting::environment_specular::OnInitCommandList);
+    reshade::register_event<reshade::addon_event::reset_command_list>(mgsv::lighting::environment_specular::OnResetCommandList);
+    reshade::register_event<reshade::addon_event::destroy_command_list>(mgsv::lighting::environment_specular::OnDestroyCommandList);
+    reshade::register_event<reshade::addon_event::clear_render_target_view>(mgsv::lighting::environment_specular::OnClearRenderTarget);
+    reshade::register_event<reshade::addon_event::destroy_resource>(mgsv::lighting::environment_specular::OnDestroyResource);
     reshade::register_event<reshade::addon_event::destroy_command_list>(mgsv::inputs::descriptor_tracker::OnDestroyCommandList);
     reshade::register_event<reshade::addon_event::reset_command_list>(mgsv::inputs::descriptor_tracker::OnResetCommandList);
     reshade::register_event<reshade::addon_event::push_descriptors>(mgsv::inputs::descriptor_tracker::OnPushDescriptors);
@@ -301,7 +334,14 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     reshade::register_event<reshade::addon_event::draw_indexed>(OnDrawIndexed);
     reshade::register_event<reshade::addon_event::draw_or_dispatch_indirect>(OnDrawOrDispatchIndirect);
   } else if (fdw_reason == DLL_PROCESS_DETACH) {
+    reshade::unregister_event<reshade::addon_event::init_device>(mgsv::lighting::environment_specular::OnInitDevice);
+    reshade::unregister_event<reshade::addon_event::destroy_device>(mgsv::lighting::environment_specular::OnDestroyDevice);
     reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::inputs::descriptor_tracker::OnInitCommandList);
+    reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::lighting::environment_specular::OnInitCommandList);
+    reshade::unregister_event<reshade::addon_event::reset_command_list>(mgsv::lighting::environment_specular::OnResetCommandList);
+    reshade::unregister_event<reshade::addon_event::destroy_command_list>(mgsv::lighting::environment_specular::OnDestroyCommandList);
+    reshade::unregister_event<reshade::addon_event::clear_render_target_view>(mgsv::lighting::environment_specular::OnClearRenderTarget);
+    reshade::unregister_event<reshade::addon_event::destroy_resource>(mgsv::lighting::environment_specular::OnDestroyResource);
     reshade::unregister_event<reshade::addon_event::destroy_command_list>(mgsv::inputs::descriptor_tracker::OnDestroyCommandList);
     reshade::unregister_event<reshade::addon_event::reset_command_list>(mgsv::inputs::descriptor_tracker::OnResetCommandList);
     reshade::unregister_event<reshade::addon_event::push_descriptors>(mgsv::inputs::descriptor_tracker::OnPushDescriptors);

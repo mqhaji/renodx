@@ -79,9 +79,10 @@ struct ShaderInjectData {
   float point_ss_material_max;
 
   // Indirect Lighting controls, in GUI order.
-  float lighting_mode;  // 0 = Off, 1 = On (AO + GI).
+  float lighting_mode;  // 0 = Off, 1 = GT-VBGI + GTSO.
   float ao_strength;
   float gi_strength;
+  float specular_occlusion_strength;
   float gt_resolution;  // 0 = full, 1 = half, 2 = quarter, 3 = eighth.
   float gt_search_radius_pixels;
   float gt_surface_thickness;  // Native view-depth units.
@@ -122,6 +123,8 @@ struct ShaderInjectData {
   float gt_velocity_jitter_scale;
   float ao_history_valid;
   float ao_temporal_active;
+  float gt_directional_visibility_active;
+  float gt_directional_history_valid;
 };
 
 #ifndef __cplusplus
@@ -197,46 +200,49 @@ cbuffer RenoDXSettings : register(b13) {
 #define CUSTOM_SS_POINT_FADE_END     shader_injection.point_ss_fade_end
 #define CUSTOM_SS_POINT_MATERIAL_MAX shader_injection.point_ss_material_max
 
-#define CUSTOM_MGSV_AO_ENABLED                (shader_injection.lighting_mode >= 0.5)
-#define CUSTOM_MGSV_AO_STRENGTH               shader_injection.ao_strength
-#define CUSTOM_MGSV_GI_STRENGTH               shader_injection.gi_strength
-#define CUSTOM_MGSV_GT_SEARCH_RADIUS_PIXELS   shader_injection.gt_search_radius_pixels
-#define CUSTOM_MGSV_GT_SURFACE_THICKNESS      shader_injection.gt_surface_thickness
-#define CUSTOM_MGSV_GT_SURFACE_OFFSET         shader_injection.gt_surface_offset
-#define CUSTOM_MGSV_GT_SLICE_COUNT            shader_injection.gt_slice_count
-#define CUSTOM_MGSV_GT_SAMPLES_PER_SIDE       shader_injection.gt_samples_per_side
-#define CUSTOM_MGSV_GT_DEPTH_MIPS_ENABLED     shader_injection.gt_depth_mips_enabled
-#define CUSTOM_MGSV_GI_REJECT_BACKFACES       shader_injection.gi_reject_backfaces
-#define CUSTOM_MGSV_GI_SOURCE_SPECULAR_WEIGHT shader_injection.gi_source_specular_weight
-#define CUSTOM_MGSV_GT_TEMPORAL_ENABLED       shader_injection.gt_temporal_enabled
-#define CUSTOM_MGSV_GT_SPATIAL_ENABLED        shader_injection.gt_spatial_enabled
-#define CUSTOM_MGSV_GT_FILTER_TYPE            shader_injection.gt_filter_type
-#define CUSTOM_MGSV_GT_FILTER_RADIUS          shader_injection.gt_filter_radius
-#define CUSTOM_MGSV_GT_FILTER_TAPS_SEPARABLE  shader_injection.gt_filter_taps_separable
-#define CUSTOM_MGSV_GT_FILTER_TAPS_ATROUS     shader_injection.gt_filter_taps_atrous
-#define CUSTOM_MGSV_AO_HISTORY_WEIGHT         shader_injection.ao_history_weight
-#define CUSTOM_MGSV_AO_DEPTH_REJECTION        shader_injection.ao_depth_rejection
-#define CUSTOM_MGSV_AO_NORMAL_REJECTION       shader_injection.ao_normal_rejection
-#define CUSTOM_MGSV_AO_HISTORY_CLAMP          shader_injection.ao_history_clamp
-#define CUSTOM_MGSV_GI_HISTORY_WEIGHT         shader_injection.gi_history_weight
-#define CUSTOM_MGSV_GI_DEPTH_REJECTION        shader_injection.gi_depth_rejection
-#define CUSTOM_MGSV_GI_NORMAL_REJECTION       shader_injection.gi_normal_rejection
-#define CUSTOM_MGSV_GI_HISTORY_CLAMP          shader_injection.gi_history_clamp
-#define CUSTOM_MGSV_GI_DEBUG_VIEW             shader_injection.gi_debug_view
+#define CUSTOM_MGSV_LIGHTING_ENABLED            (shader_injection.lighting_mode >= 0.5)
+#define CUSTOM_MGSV_AO_STRENGTH                 shader_injection.ao_strength
+#define CUSTOM_MGSV_GI_STRENGTH                 shader_injection.gi_strength
+#define CUSTOM_MGSV_SPECULAR_OCCLUSION_STRENGTH shader_injection.specular_occlusion_strength
+#define CUSTOM_MGSV_GT_SEARCH_RADIUS_PIXELS     shader_injection.gt_search_radius_pixels
+#define CUSTOM_MGSV_GT_SURFACE_THICKNESS        shader_injection.gt_surface_thickness
+#define CUSTOM_MGSV_GT_SURFACE_OFFSET           shader_injection.gt_surface_offset
+#define CUSTOM_MGSV_GT_SLICE_COUNT              shader_injection.gt_slice_count
+#define CUSTOM_MGSV_GT_SAMPLES_PER_SIDE         shader_injection.gt_samples_per_side
+#define CUSTOM_MGSV_GT_DEPTH_MIPS_ENABLED       shader_injection.gt_depth_mips_enabled
+#define CUSTOM_MGSV_GI_REJECT_BACKFACES         shader_injection.gi_reject_backfaces
+#define CUSTOM_MGSV_GI_SOURCE_SPECULAR_WEIGHT   shader_injection.gi_source_specular_weight
+#define CUSTOM_MGSV_GT_TEMPORAL_ENABLED         shader_injection.gt_temporal_enabled
+#define CUSTOM_MGSV_GT_SPATIAL_ENABLED          shader_injection.gt_spatial_enabled
+#define CUSTOM_MGSV_GT_FILTER_TYPE              shader_injection.gt_filter_type
+#define CUSTOM_MGSV_GT_FILTER_RADIUS            shader_injection.gt_filter_radius
+#define CUSTOM_MGSV_GT_FILTER_TAPS_SEPARABLE    shader_injection.gt_filter_taps_separable
+#define CUSTOM_MGSV_GT_FILTER_TAPS_ATROUS       shader_injection.gt_filter_taps_atrous
+#define CUSTOM_MGSV_AO_HISTORY_WEIGHT           shader_injection.ao_history_weight
+#define CUSTOM_MGSV_AO_DEPTH_REJECTION          shader_injection.ao_depth_rejection
+#define CUSTOM_MGSV_AO_NORMAL_REJECTION         shader_injection.ao_normal_rejection
+#define CUSTOM_MGSV_AO_HISTORY_CLAMP            shader_injection.ao_history_clamp
+#define CUSTOM_MGSV_GI_HISTORY_WEIGHT           shader_injection.gi_history_weight
+#define CUSTOM_MGSV_GI_DEPTH_REJECTION          shader_injection.gi_depth_rejection
+#define CUSTOM_MGSV_GI_NORMAL_REJECTION         shader_injection.gi_normal_rejection
+#define CUSTOM_MGSV_GI_HISTORY_CLAMP            shader_injection.gi_history_clamp
+#define CUSTOM_MGSV_GI_DEBUG_VIEW               shader_injection.gi_debug_view
 
-#define CUSTOM_MGSV_GT_RESOLUTION_DIVISOR    shader_injection.gt_resolution_divisor
-#define CUSTOM_MGSV_GT_NOISE_FRAME           shader_injection.gt_noise_frame
-#define CUSTOM_MGSV_GI_HISTORY_VALID         shader_injection.gi_history_valid
-#define CUSTOM_MGSV_GI_TEMPORAL_ACTIVE       shader_injection.gi_temporal_active
-#define CUSTOM_MGSV_GT_FILTER_STEP           shader_injection.gt_filter_step
-#define CUSTOM_MGSV_GT_FILTER_DIRECTION      shader_injection.gt_filter_direction
-#define CUSTOM_MGSV_GT_CURRENT_JITTER_X      shader_injection.gt_current_jitter_x
-#define CUSTOM_MGSV_GT_CURRENT_JITTER_Y      shader_injection.gt_current_jitter_y
-#define CUSTOM_MGSV_GT_PREVIOUS_JITTER_X     shader_injection.gt_previous_jitter_x
-#define CUSTOM_MGSV_GT_PREVIOUS_JITTER_Y     shader_injection.gt_previous_jitter_y
-#define CUSTOM_MGSV_GT_VELOCITY_JITTER_SCALE shader_injection.gt_velocity_jitter_scale
-#define CUSTOM_MGSV_AO_HISTORY_VALID         shader_injection.ao_history_valid
-#define CUSTOM_MGSV_AO_TEMPORAL_ACTIVE       shader_injection.ao_temporal_active
+#define CUSTOM_MGSV_GT_RESOLUTION_DIVISOR     shader_injection.gt_resolution_divisor
+#define CUSTOM_MGSV_GT_NOISE_FRAME            shader_injection.gt_noise_frame
+#define CUSTOM_MGSV_GI_HISTORY_VALID          shader_injection.gi_history_valid
+#define CUSTOM_MGSV_GI_TEMPORAL_ACTIVE        shader_injection.gi_temporal_active
+#define CUSTOM_MGSV_GT_FILTER_STEP            shader_injection.gt_filter_step
+#define CUSTOM_MGSV_GT_FILTER_DIRECTION       shader_injection.gt_filter_direction
+#define CUSTOM_MGSV_GT_CURRENT_JITTER_X       shader_injection.gt_current_jitter_x
+#define CUSTOM_MGSV_GT_CURRENT_JITTER_Y       shader_injection.gt_current_jitter_y
+#define CUSTOM_MGSV_GT_PREVIOUS_JITTER_X      shader_injection.gt_previous_jitter_x
+#define CUSTOM_MGSV_GT_PREVIOUS_JITTER_Y      shader_injection.gt_previous_jitter_y
+#define CUSTOM_MGSV_GT_VELOCITY_JITTER_SCALE  shader_injection.gt_velocity_jitter_scale
+#define CUSTOM_MGSV_AO_HISTORY_VALID          shader_injection.ao_history_valid
+#define CUSTOM_MGSV_AO_TEMPORAL_ACTIVE        shader_injection.ao_temporal_active
+#define CUSTOM_MGSV_DIRECTIONAL_ACTIVE        shader_injection.gt_directional_visibility_active
+#define CUSTOM_MGSV_DIRECTIONAL_HISTORY_VALID shader_injection.gt_directional_history_valid
 
 #include "../../shaders/renodx.hlsl"
 

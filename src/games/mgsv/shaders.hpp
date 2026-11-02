@@ -6,11 +6,14 @@
 
 #pragma once
 
+#include <shared_mutex>
+
 #include <embed/shaders.h>
 
 #include <include/reshade.hpp>
 
 #include "../../mods/shader.hpp"
+#include "../../utils/mutex.hpp"
 #include "gtvbgi/lighting.hpp"
 #include "inputs.hpp"
 #include "resource_upgrades.hpp"
@@ -52,8 +55,10 @@ namespace mgsv::game {
           .on_draw = [](auto* cmd_list) {                                                  \
             mgsv::rendering::resource_upgrades::UpgradeDeferredSceneColorTarget(cmd_list); \
             mgsv::inputs::CaptureCompositeInputs(cmd_list);                                \
+            mgsv::lighting::environment_specular::BeginComposite(cmd_list);                \
             return true;                                                                   \
           },                                                                               \
+          .on_drawn = &mgsv::lighting::environment_specular::EndComposite,                 \
       },                                                                                   \
   }
 
@@ -71,6 +76,20 @@ namespace mgsv::game {
 
 // The supplied shader data must outlive this registry and its draw callbacks.
 inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shader_injection) {
+  const auto capture_environment = [shader_injection](reshade::api::command_list* cmd_list) {
+    mgsv::lighting::temporal_inputs::CaptureScene(cmd_list);
+    bool lighting_enabled = false;
+    {
+      const std::shared_lock lock(renodx::utils::mutex::global_mutex);
+      lighting_enabled = shader_injection->lighting_mode >= 0.5f;
+    }
+    mgsv::lighting::environment_specular::BeginCapture(cmd_list, lighting_enabled);
+    return true;
+  };
+  const auto capture_active = [](reshade::api::command_list* cmd_list) {
+    const auto* saved = cmd_list->get_private_data<mgsv::lighting::environment_specular::DrawState>();
+    return saved != nullptr && saved->active;
+  };
   return {
       // DOF_ScatterCompositeNear
       MGSV_UPGRADE_RTV_REPLACE_SHADER_CALLBACK(
@@ -150,20 +169,31 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
           {
               .crc32 = 0x5AFD2E17,
               .code = __0x5AFD2E17,
-              .on_draw = [](reshade::api::command_list* cmd_list) {
-                mgsv::lighting::temporal_inputs::CaptureScene(cmd_list);
-                return true;
-              },
+              .on_draw = capture_environment,
+              .on_drawn = &mgsv::lighting::environment_specular::EndCapture,
+              .get_replacement_pipeline = [](reshade::api::command_list* cmd_list) { return mgsv::lighting::environment_specular::GetShadowedCapturePipeline(cmd_list, __sun_environment_capture); },
           },
       },
       {
           0x712F7222,
           {
               .crc32 = 0x712F7222,
+              .code = __0x712F7222,
+              .on_replace = capture_active,
               .on_inject = [](reshade::api::command_list*) { return false; },
-              .on_draw = [](reshade::api::command_list* cmd_list) {
-                mgsv::lighting::temporal_inputs::CaptureScene(cmd_list);
-                return true; },
+              .on_draw = capture_environment,
+              .on_drawn = &mgsv::lighting::environment_specular::EndCapture,
+          },
+      },
+      {
+          0x34B04FB1,
+          {
+              .crc32 = 0x34B04FB1,
+              .code = __0x34B04FB1,
+              .on_replace = capture_active,
+              .on_inject = [](reshade::api::command_list*) { return false; },
+              .on_draw = capture_environment,
+              .on_drawn = &mgsv::lighting::environment_specular::EndCapture,
           },
       },
 

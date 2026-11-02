@@ -342,7 +342,11 @@ void main(
   float4 v1 : TEXCOORD0,
   float4 v2 : TEXCOORD1,
   out float4 o0 : SV_Target0,
-  out float4 o1 : SV_Target1)
+  out float4 o1 : SV_Target1
+#ifdef MGSV_CAPTURE_ENVIRONMENT_SPECULAR
+  , out float4 o2 : SV_Target2
+#endif
+  )
 {
   float4 r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11,r12,r13,r14,r15;
   uint4 bitmask, uiDest;
@@ -1027,6 +1031,10 @@ void main(
   r0.x = g_psLight.m_lightParams[2].y * r0.x;
   r2.xyz = float3(-0,-0,-0) + r2.xyz;
   r1.xyz = r1.xyz * r0.xxx;
+#ifdef MGSV_CAPTURE_ENVIRONMENT_SPECULAR
+  // Exact environment contribution, before it is added to direct specular.
+  const float3 environment_specular = r1.xyz;
+#endif
   r0.xyz = r1.xyz + r0.yzw;
   r2.xyz = r2.xyz;
   r0.xyz = r0.xyz;
@@ -1206,5 +1214,8 @@ void main(
   // PROBE removed; see docs for the measured first-hit distribution.
   o0.xyzw = r2.xyzw;
   o1.xyzw = r0.xyzw;
+#ifdef MGSV_CAPTURE_ENVIRONMENT_SPECULAR
+  o2 = float4(environment_specular, 1.0);
+#endif
   return;
 }

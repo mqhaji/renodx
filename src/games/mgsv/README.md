@@ -1,6 +1,6 @@
 # MGSV RenoDX
 
-RenoDX for Metal Gear Solid V: The Phantom Pain adds HDR output and color grading, higher-precision textures, temporal reconstruction, improved shadows, ambient occlusion (AO), and global illumination (GI).
+RenoDX for Metal Gear Solid V: The Phantom Pain adds HDR output and color grading, higher-precision textures, temporal reconstruction, improved shadows, ambient occlusion (AO), global illumination (GI), and specular occlusion.
 
 ## Temporal reconstruction
 
@@ -10,25 +10,25 @@ Reconstruction settings stay independent of RenoDX presets. DLSS requires a comp
 
 ## Indirect Lighting
 
-**Screen-Space Lighting** selects Off or GT-VBGI. GT-VBGI combines AO contact shading with GI light bouncing from visible surfaces. Their strengths are independent. Both use the same search through scene depth, controlled by resolution, radius, thickness, offset, directions, samples, and depth sampling.
+**Screen-Space Lighting** selects Off or GT-VBGI + GTSO. One search through scene depth supplies AO contact shading, GI light bouncing from visible surfaces, and directional visibility for environment reflections. AO, GI, and Specular Occlusion have separate strengths; resolution and sampling controls are shared.
 
-Defaults are GT-VBGI, AO and GI strengths at 75%, Half resolution, a 2000-pixel radius, 40 samples per side, one slice direction, surface thickness 0.15, and surface offset 1/1024 in the game's view-space units. Full/Half/Quarter/Eighth scale both image dimensions, so Half processes one quarter of the pixels. Coarse depth sampling and GI backface rejection default to Off; reflections contribute zero to the GI source by default. Noise uses IS-FAST.
+Defaults are GT-VBGI + GTSO, all three strengths at 75%, Quarter resolution, a 2000-pixel radius, 40 samples per side, three sampling directions, surface thickness 0.15, and surface offset 1/1024 in the game's view-space units. Full/Half/Quarter/Eighth scale both image dimensions, so Quarter processes 1/16 as many pixels. Coarse depth sampling and GI backface rejection default to Off; reflections contribute zero to the GI source by default. Noise uses IS-FAST.
 
-Surface Thickness controls the assumed depth of sampled geometry. AO Strength controls contact darkening, and Global Illumination Strength controls bounce brightness. Search Radius changes reach; samples and directions control coverage quality. **Reject Backfacing GI Sources** suppresses source light while retaining its occlusion. **Reflections in GI Source** adds a view-dependent specular approximation.
+Surface Thickness controls the assumed depth of sampled geometry. Search Radius changes reach; samples and directions control coverage quality. **Specular Occlusion Strength** blends from native environment occlusion at 0% to the directional estimate at 100%. It can darken blocked reflections or restore reflections that native AO darkens too much. **Reject Backfacing GI Sources** suppresses source light while retaining its occlusion. **Reflections in GI Source** adds a view-dependent specular approximation to the bounce source.
 
-**Temporal Accumulation** and **Spatial Filtering** control AO and GI together, both On by default. One temporal pass combines accepted previous samples, then each spatial pass smooths both results. Each signal keeps its own history weight and rejection controls; setting its history weight to zero uses only current samples. Defaults are 90% history weight and three 5-by-5 A-Trous passes with radius 8. Radius only affects later A-Trous passes. The separable Gaussian option filters horizontally and vertically. The shared switches provide Off comparisons.
+**Temporal Accumulation** and **Spatial Filtering** control AO, GI, and directional visibility together, both On by default. Directional visibility uses the AO history controls; GI has its own controls. Setting a history weight to zero uses only current samples for those signals. Defaults are 90% history weight and three 5-by-5 A-Trous passes with radius 8. Radius only affects later A-Trous passes. The separable Gaussian option filters horizontally and vertically.
 
-**Lighting Debug View** shows bounce, sampled coverage, valid/invalid results, source light, temporal or filtered GI, raw/temporal/filtered AO, and separate AO/GI history acceptance in place of diffuse lighting. The game still applies surface color, specular reflections, fog, and later image processing to these views.
+**Lighting Debug View** shows lighting, coverage, histories, bent normals, native roughness, captured environment reflections, and specular visibility/confidence in place of diffuse lighting. Magenta marks missing diagnostic inputs. Surface color, specular reflections, fog, and later image processing still affect these views.
 
-The added lighting runs after the game's skin-scattering passes. Its final pass applies AO to existing diffuse light and then adds GI, preserving the game's alpha channel. The default chain uses six compute dispatches; optional depth reductions add four. The game then combines surface color and lighting, adds fog, and applies its early tone curve. Missing or incompatible trace inputs skip the combined effect. Unavailable temporal inputs fall back to current samples, which can still be spatially filtered. AO and GI retain separate temporal results before spatial filtering, so blur does not feed back into history. Selected scene reconstruction also smooths the final image. See the [GT-VBGI reference](gtvbgi/README.md) for the algorithms and MGSV adaptation.
+The added lighting runs after the game's skin-scattering passes. Its final pass applies AO to existing diffuse light, adds GI, and resolves specular visibility while preserving the game's alpha channel. Deferred composition then applies the environment-reflection correction before fog and tonemapping. Directional visibility shares the trace and filters without another dispatch; the default chain uses six compute dispatches, with four more for optional depth reductions. Missing temporal inputs use current samples, and histories retain the temporal results before spatial filtering. See the [lighting reference](gtvbgi/README.md) for the algorithms and MGSV adaptation.
 
 ### Native AO compatibility
 
-With Screen-Space Lighting set to GT-VBGI, the six composition shaders skip the game's AO on diffuse light because custom AO has already darkened it. The game's AO still affects specular light and separate rain reflections. Off restores its original use on both diffuse and specular. The game still calculates its AO in either mode.
+With Screen-Space Lighting enabled, the six composition shaders skip the game's AO on diffuse light because custom AO has already darkened it. GTSO replaces native AO only on supported environment reflections where captured data and confidence permit. Direct highlights, unsupported reflections, and separate rain reflections keep their native AO treatment. Off restores the original composition. The game still calculates its AO in either mode.
 
-The bypass follows the setting: if custom lighting cannot run with GT-VBGI selected, diffuse receives neither the game's AO nor custom AO at that insertion. Custom AO currently darkens all accumulated diffuse light, including direct lighting. GI is added afterward. Applying occlusion separately to ambient light and environment reflections remains future work.
+The diffuse bypass follows the setting: if custom lighting cannot run while enabled, diffuse receives neither the game's AO nor custom AO at that insertion. Custom AO darkens all accumulated diffuse light, including direct lighting; GI is added afterward. Applying diffuse AO selectively to ambient light remains future work.
 
-Preset Off disables combined lighting and the six shadow enhancement switches while leaving reconstruction selected. Reset All restores defaults. Existing saved settings load normally; the addon does not rewrite presets to convert old settings.
+Preset Off disables combined lighting and the six shadow enhancement switches while leaving reconstruction selected. Reset All restores defaults.
 
 ## Shadows
 
@@ -61,9 +61,9 @@ After shader or shared-layout changes, verify that generated headers match the c
 ## Manual validation
 
 1. Confirm RenoDX loads in ReShade and saved settings survive restart. Exercise Reset All and Preset Off; reconstruction must remain independently selected.
-2. Compare Screen-Space Lighting Off/GT-VBGI with the camera and other settings fixed. Vary AO and GI strengths independently and check contact shading, color bounce, hair, foliage, and screen edges.
+2. Compare Screen-Space Lighting Off/GT-VBGI + GTSO with the camera and other settings fixed. Vary AO, GI, and Specular Occlusion strengths independently. Check contact shading, color bounce, rough and smooth reflections, hair, foliage, and screen edges. Specular strength 0% should restore native environment occlusion.
 3. Check Full/Half/Quarter/Eighth and coarse depth sampling Off/On, including odd render dimensions. Look for shifted output, edge strips, leaks, and loss of thin geometry.
-4. Check fog, rain, skin scattering, SDR/HDR, camera motion, and reconstruction Off/On. Native specular and rain-reflection AO should remain intact.
+4. Check fog, rain, skin scattering, SDR/HDR, camera motion, and reconstruction Off/On. Direct highlights and separate rain reflections should retain their existing treatment. Check cold startup, gameplay, and returning to the menu for missing or stale specular data.
 5. Compare temporal and spatial filtering separately and together. Set either history weight to zero to check the other signal independently. Check stationary noise, moving characters, newly revealed surfaces, exposure changes, and the temporal/filtered/history debug views. Toggling filtering should not shift the image or change overall brightness.
 6. Follow the [reconstruction validation matrix](reconstruction/README.md#manual-validation) for method changes, animation, special views, and lifecycle checks.
 7. Read the fresh ReShade log for repeated input/setup failures. Command-recording messages are not proof of GPU completion or performance.
