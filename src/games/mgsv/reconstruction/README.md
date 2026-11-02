@@ -125,7 +125,7 @@ DLSS uses native-resolution quality, automatic exposure, no sharpening, and the 
 - Four enabled experimental paths need transition and gameplay checks. There is no proven native camera-cut signal; the removed clip-space heuristic incorrectly reset history every frame.
 - FSR has no external masks/exposure input. Analytical has no previous-depth rejection or history locks. Thin detail, transparency, rain, bright effects, and newly exposed surfaces need continued testing. No method adds sharpening.
 
-Earlier runtime checks established RGBA16F object/final velocity sampling and FSR3 operation on D3D11 Feature Level 11_0. They do not establish current character stability or validate a future GT-VBGI accumulator.
+Earlier runtime checks established RGBA16F object/final velocity sampling and FSR3 operation on D3D11 Feature Level 11_0. They do not establish current character stability or validate the separate GT-VBGI accumulator.
 
 ## Manual validation
 

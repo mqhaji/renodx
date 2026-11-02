@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright and license notices: README.md#credits-and-license.
+
 // GT-VBGI reverse-Z depth reduction: nearest depth wins.
 // Each dispatch writes one mip. Odd trailing rows/columns join the last footprint.
 

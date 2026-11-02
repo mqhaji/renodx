@@ -1,25 +1,9 @@
-// GI and AO temporal accumulation adapted from Toru77/RenoDX falcomengine-plus:
-// https://github.com/Toru77/renodx/blob/3360c8dff84ae8acf3558ddb80b00f3cbd1ac90e/src/games/falcomengine-plus/world/shaders/world_rtgi_temporal.cs_5_0.hlsl
-// Copyright (c) 2025 Carlos Lopez Jr.
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-// The above copyright notice and this permission notice shall be included in
-// all copies or substantial portions of the Software.
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-// THE SOFTWARE.
+// SPDX-License-Identifier: MIT
+// Copyright and license notices: README.md#credits-and-license.
 
 #include "../gbuffer.hlsli"
 #include "../shared.h"
+#include "directional_visibility.hlsli"
 
 Texture2D<float4> rawGI : register(t0);
 Texture2D<float4> depthBuffer : register(t1);
@@ -30,10 +14,13 @@ Texture2D<float4> previousGI : register(t5);
 Texture2D<uint2> previousGeometry : register(t6);
 Texture2D<float2> rawAO : register(t7);
 Texture2D<float2> previousAO : register(t8);
+Texture2D<float4> raw_bent_normals : register(t9);
+Texture2D<float4> previous_bent_normals : register(t10);
 RWTexture2D<float4> giOutput : register(u0);
 RWTexture2D<uint2> geometryOutput : register(u1);
 RWTexture2D<float4> diagnosticOutput : register(u2);
 RWTexture2D<float2> aoOutput : register(u3);
+RWTexture2D<float4> bent_normal_output : register(u4);
 
 // GPU copies of the native 480-byte scene block. These are scene data, not
 // another settings buffer. m_view has different meanings in native passes;
@@ -80,6 +67,15 @@ void main(uint3 tid : SV_DispatchThreadID) {
   const bool geometryValid = depth > 0.0 && z > 0.0 && z < 1.0e6 && all(isfinite(normal));
   const bool giValid = geometryValid && currentGI.a > 0.5 && all(isfinite(currentGI.rgb));
   const bool aoValid = geometryValid && currentAO.g > 0.5 && isfinite(currentAO.r);
+  const bool directional_active = CUSTOM_MGSV_DIRECTIONAL_ACTIVE >= 0.5;
+  float4 current_bent = float4(0.0, 0.0, 0.0, -1.0);
+  if (directional_active) {
+    current_bent = raw_bent_normals.Load(int3(pixel, 0));
+  }
+  const bool bent_valid = directional_active && geometryValid && ValidDirectionalVisibility(current_bent);
+  if (directional_active) {
+    bent_normal_output[pixel] = (bent_valid ? current_bent : float4(0.0, 0.0, 0.0, -1.0));
+  }
   const float3 currentRadiance = giValid ? min(currentGI.rgb, 65504.0) : 0.0;
   const float currentVisibility = aoValid ? saturate(currentAO.r) : 1.0;
   const int diagnostic = (int)CUSTOM_MGSV_GI_DEBUG_VIEW;
@@ -106,10 +102,14 @@ void main(uint3 tid : SV_DispatchThreadID) {
   const bool accumulateAO = aoValid && CUSTOM_MGSV_GT_TEMPORAL_ENABLED >= 0.5
                             && CUSTOM_MGSV_AO_TEMPORAL_ACTIVE >= 0.5 && CUSTOM_MGSV_AO_HISTORY_VALID >= 0.5
                             && CUSTOM_MGSV_AO_HISTORY_WEIGHT > 0.0;
+  const bool accumulate_bent = bent_valid && CUSTOM_MGSV_GT_TEMPORAL_ENABLED >= 0.5
+                               && CUSTOM_MGSV_AO_TEMPORAL_ACTIVE >= 0.5
+                               && CUSTOM_MGSV_DIRECTIONAL_HISTORY_VALID >= 0.5
+                               && CUSTOM_MGSV_AO_HISTORY_WEIGHT > 0.0;
   // Cold or disabled signals keep their current values. No previous texture
   // is read unless at least one signal has usable history.
   [branch]
-  if (!accumulateGI && !accumulateAO) return;
+  if (!accumulateGI && !accumulateAO && !accumulate_bent) return;
 
   float exposureRatio = 1.0;
   if (accumulateGI) {
@@ -123,13 +123,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
       accumulateGI = false;
     }
   }
-  if (!accumulateGI && !accumulateAO) return;
+  if (!accumulateGI && !accumulateAO && !accumulate_bent) return;
 
   // These snapshots must describe the same ordinary perspective view as the
   // scatter's geometry constants. A special-view or stale scene block may be
   // finite while still being incompatible; keep the current sample then.
   if (!all(isfinite(float4(currentScene.projection._m23, currentScene.projection._m33,
-                            previousScene.projection._m23, previousScene.projection._m33)))
+                           previousScene.projection._m23, previousScene.projection._m33)))
       || abs(currentScene.projection._m23 - 1.0) > 1.0e-5 || abs(currentScene.projection._m33) > 1.0e-5
       || abs(previousScene.projection._m23 - 1.0) > 1.0e-5 || abs(previousScene.projection._m33) > 1.0e-5) return;
   const float4 currentProjection = float4(1.0 / currentScene.projection._m00,
@@ -151,14 +151,18 @@ void main(uint3 tid : SV_DispatchThreadID) {
   // projection. Recover view columns while removing the projection shear.
   const float4 currentZ = currentScene.projectionView._m03_m13_m23_m33;
   const float4 currentX = (currentScene.projectionView._m00_m10_m20_m30
-                           - currentScene.projection._m20 * currentZ) / currentScene.projection._m00;
+                           - currentScene.projection._m20 * currentZ)
+                          / currentScene.projection._m00;
   const float4 currentY = (currentScene.projectionView._m01_m11_m21_m31
-                           - currentScene.projection._m21 * currentZ) / currentScene.projection._m11;
+                           - currentScene.projection._m21 * currentZ)
+                          / currentScene.projection._m11;
   const float4 previousZ = previousScene.projectionView._m03_m13_m23_m33;
   const float4 previousX = (previousScene.projectionView._m00_m10_m20_m30
-                            - previousScene.projection._m20 * previousZ) / previousScene.projection._m00;
+                            - previousScene.projection._m20 * previousZ)
+                           / previousScene.projection._m00;
   const float4 previousY = (previousScene.projectionView._m01_m11_m21_m31
-                            - previousScene.projection._m21 * previousZ) / previousScene.projection._m11;
+                            - previousScene.projection._m21 * previousZ)
+                           / previousScene.projection._m11;
   if (!all(isfinite(currentX)) || !all(isfinite(currentY)) || !all(isfinite(currentZ))
       || !all(isfinite(previousX)) || !all(isfinite(previousY)) || !all(isfinite(previousZ))) return;
   const float3 currentLengths = float3(dot(currentX.xyz, currentX.xyz), dot(currentY.xyz, currentY.xyz), dot(currentZ.xyz, currentZ.xyz));
@@ -180,8 +184,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
   if (!(previousPosition.z > 0.0) || !all(isfinite(previousPosition))) return;
   const float3 worldNormal = currentX.xyz * normal.x + currentY.xyz * normal.y + currentZ.xyz * normal.z;
   const float3 previousNormal = normalize(float3(dot(worldNormal, previousX.xyz),
-                                                  dot(worldNormal, previousY.xyz),
-                                                  dot(worldNormal, previousZ.xyz)));
+                                                 dot(worldNormal, previousY.xyz),
+                                                 dot(worldNormal, previousZ.xyz)));
   if (!all(isfinite(previousNormal))) return;
 
   const float2 previousNdc = previousPosition.xy / previousPosition.z / previousScene.projectionParameters.xy
@@ -222,6 +226,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
   float aoHistorySum = 0.0;
   float giAcceptedWeight = 0.0;
   float aoAcceptedWeight = 0.0;
+  float4 bent_history_sum = 0.0;
+  float bent_accepted_weight = 0.0;
   [unroll]
   for (int i = 0; i < 4; ++i) {
     const int2 offset = int2(i & 1, i >> 1);
@@ -238,12 +244,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
     float3 historyNormal = float3(octXY, 1.0 - abs(octXY.x) - abs(octXY.y));
     if (historyNormal.z < 0.0) {
       historyNormal.xy = (1.0 - abs(historyNormal.yx))
-                          * float2(historyNormal.x >= 0.0 ? 1.0 : -1.0, historyNormal.y >= 0.0 ? 1.0 : -1.0);
+                         * float2(historyNormal.x >= 0.0 ? 1.0 : -1.0, historyNormal.y >= 0.0 ? 1.0 : -1.0);
     }
     historyNormal = normalize(historyNormal);
     const float normalDot = dot(historyNormal, previousNormal);
     const float2 normalWeights = saturate((normalDot
-                                           - (float2(CUSTOM_MGSV_GI_NORMAL_REJECTION, CUSTOM_MGSV_AO_NORMAL_REJECTION) - 0.4)) / 0.4);
+                                           - (float2(CUSTOM_MGSV_GI_NORMAL_REJECTION, CUSTOM_MGSV_AO_NORMAL_REJECTION) - 0.4))
+                                          / 0.4);
     const float depthDifference = abs(historyZ - previousPosition.z);
     const float referenceDepth = max(previousPosition.z, 1.0e-4);
     if (accumulateGI && normalWeights.x > 0.0
@@ -267,25 +274,50 @@ void main(uint3 tid : SV_DispatchThreadID) {
         aoAcceptedWeight += weight;
       }
     }
+    if (accumulate_bent && normalWeights.y > 0.0
+        && depthDifference <= CUSTOM_MGSV_AO_DEPTH_REJECTION * referenceDepth) {
+      const float4 history = previous_bent_normals.Load(int3(q, 0));
+      if (ValidDirectionalVisibility(history)) {
+        // Directions rotate between camera bases; translation and exposure
+        // must not affect them. Keep their moment magnitude through blending.
+        const float3 world_moment = previousX.xyz * history.x
+                                    + previousY.xyz * history.y + previousZ.xyz * history.z;
+        const float3 current_moment = float3(dot(world_moment, currentX.xyz),
+                                             dot(world_moment, currentY.xyz), dot(world_moment, currentZ.xyz));
+        const float weight = bilinear * normalWeights.y;
+        bent_history_sum += float4(current_moment, history.a) * weight;
+        bent_accepted_weight += weight;
+      }
+    }
   }
 
   const bool giHistoryValid = giAcceptedWeight > 1.0e-4 && all(isfinite(giHistorySum));
   const bool aoHistoryValid = aoAcceptedWeight > 1.0e-4 && isfinite(aoHistorySum);
-  if (!giHistoryValid && !aoHistoryValid) return;
+  const bool bent_history_valid = bent_accepted_weight > 1.0e-4 && all(isfinite(bent_history_sum));
+  if (!giHistoryValid && !aoHistoryValid && !bent_history_valid) return;
   float3 giHistory = currentRadiance;
   float aoHistory = currentVisibility;
   if (giHistoryValid) giHistory = giHistorySum / giAcceptedWeight;
   if (aoHistoryValid) aoHistory = aoHistorySum / aoAcceptedWeight;
+  float4 bent_history = current_bent;
+  if (bent_history_valid) {
+    bent_history = bent_history_sum / bent_accepted_weight;
+  }
 
   const bool clampGI = giHistoryValid && CUSTOM_MGSV_GI_HISTORY_CLAMP > 0.0;
   const bool clampAO = aoHistoryValid && CUSTOM_MGSV_AO_HISTORY_CLAMP > 0.0;
-  if (clampGI || clampAO) {
+  const bool clamp_bent = bent_history_valid && CUSTOM_MGSV_AO_HISTORY_CLAMP > 0.0;
+  if (clampGI || clampAO || clamp_bent) {
     float3 giMean = 0.0;
     float3 giSquaredDifference = 0.0;
     float giCount = 0.0;
     float aoMean = 0.0;
     float aoSquaredDifference = 0.0;
     float aoCount = 0.0;
+    float4 bent_mean = 0.0;
+    float bent_squared_difference = 0.0;
+    float bent_visibility_squared_difference = 0.0;
+    float bent_count = 0.0;
     [unroll]
     for (int y = -1; y <= 1; ++y) {
       [unroll]
@@ -312,6 +344,16 @@ void main(uint3 tid : SV_DispatchThreadID) {
             aoSquaredDifference += difference * (sampleValue.r - aoMean);
           }
         }
+        if (clamp_bent) {
+          const float4 sample_value = raw_bent_normals.Load(int3(q, 0));
+          if (ValidDirectionalVisibility(sample_value)) {
+            bent_count += 1.0;
+            const float4 difference = sample_value - bent_mean;
+            bent_mean += difference / bent_count;
+            bent_squared_difference += dot(difference.rgb, sample_value.rgb - bent_mean.rgb);
+            bent_visibility_squared_difference += difference.a * (sample_value.a - bent_mean.a);
+          }
+        }
       }
     }
     if (clampGI) {
@@ -323,6 +365,19 @@ void main(uint3 tid : SV_DispatchThreadID) {
       const float sigma = sqrt(max(aoSquaredDifference / max(aoCount, 1.0), 0.0));
       aoHistory = clamp(aoHistory, aoMean - CUSTOM_MGSV_AO_HISTORY_CLAMP * sigma,
                         aoMean + CUSTOM_MGSV_AO_HISTORY_CLAMP * sigma);
+    }
+    if (clamp_bent) {
+      // A spherical neighborhood bound is invariant under camera rotation.
+      const float radius = CUSTOM_MGSV_AO_HISTORY_CLAMP
+                           * sqrt(max(bent_squared_difference / max(bent_count, 1.0), 0.0));
+      const float3 difference = bent_history.rgb - bent_mean.rgb;
+      const float length_squared = dot(difference, difference);
+      if (length_squared > radius * radius) {
+        bent_history.rgb = bent_mean.rgb + difference * (radius * rsqrt(length_squared));
+      }
+      const float sigma = sqrt(max(bent_visibility_squared_difference / max(bent_count, 1.0), 0.0));
+      bent_history.a = clamp(bent_history.a, bent_mean.a - CUSTOM_MGSV_AO_HISTORY_CLAMP * sigma,
+                             bent_mean.a + CUSTOM_MGSV_AO_HISTORY_CLAMP * sigma);
     }
   }
 
@@ -342,6 +397,14 @@ void main(uint3 tid : SV_DispatchThreadID) {
       aoOutput[pixel] = float2(result, 1.0);
       if (diagnostic == 10) diagnosticOutput[pixel] = float4(result.xxx, 1.0);
       if (diagnostic == 12) diagnosticOutput[pixel] = float4(saturate(aoAcceptedWeight).xxx, 1.0);
+    }
+  }
+  if (bent_history_valid) {
+    const float blend = saturate(CUSTOM_MGSV_AO_HISTORY_WEIGHT) * saturate(bent_accepted_weight);
+    const float4 result = lerp(current_bent, bent_history, blend);
+    if (all(isfinite(result))) {
+      const float3 receiver_normal = BentReceiverNormal(normal, ViewPos(float2(fullPixel), z));
+      bent_normal_output[pixel] = BoundDirectionalVisibility(result, receiver_normal);
     }
   }
 }

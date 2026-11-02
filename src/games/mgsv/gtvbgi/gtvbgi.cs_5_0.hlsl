@@ -1,31 +1,14 @@
+// SPDX-License-Identifier: MIT
+// Copyright and license notices: README.md#credits-and-license.
+
 // MGSV bidirectional, cosine-weighted GT-VBGI with AO visibility output.
-// Based on Screen Space Indirect Lighting with Visibility Bitmask, Therrien,
-// Levesque and Gilet (2023), with GT-VBAO/GT-VBGI corrections by Mirko Salm
-// (TinyTexel): https://www.shadertoy.com/view/lfdBWn, Buffer C.
-// The reference core is dual CC0/MIT; the adapted math here uses its MIT license.
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-// The above copyright notice and this permission notice shall be included in
-// all copies or substantial portions of the Software.
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-// THE SOFTWARE.
-//
 // Runs after native second subsurface scatter, producing separate AO visibility.
 // One geometry search writes AO visibility to u0 and bounce/validity to u1.
 // The host applies AO to existing diffuse before adding this visibility-integrated GI.
 
 #include "../gbuffer.hlsli"
 #include "../shared.h"
+#include "directional_visibility.hlsli"
 
 #define AO_PI               3.14159265358979323846
 #define AO_SECTORS          32u
@@ -42,6 +25,7 @@ Texture2D<float4> source_albedo : register(t4);
 Texture2D<float4> source_specular : register(t5);
 RWTexture2D<float4> gi_output : register(u1);
 RWTexture2D<float4> diagnostic_output : register(u2);
+RWTexture2D<float4> bent_normal_output : register(u3);
 
 // Follow the same floor-sized, odd-edge-inclusive max reductions as AO depth
 // preparation. Prefer the sampled child on ties, otherwise the first maximum.
@@ -65,7 +49,8 @@ bool ResolveDepthOwner(int2 sample_pixel, int mip_level, float sampled_depth, ou
     [branch]
     if (level == 1) {
       owner_depth = depth_buffer.Load(int3(selected, 0)).x;
-    } else {
+    }
+    else {
       owner_depth = depth_mips.Load(int3(selected, level - 2)).x;
     }
     [loop]
@@ -78,7 +63,8 @@ bool ResolveDepthOwner(int2 sample_pixel, int mip_level, float sampled_depth, ou
         [branch]
         if (level == 1) {
           candidate = depth_buffer.Load(int3(x, y, 0)).x;
-        } else {
+        }
+        else {
           candidate = depth_mips.Load(int3(x, y, level - 2)).x;
         }
         if (candidate > owner_depth) {
@@ -132,12 +118,15 @@ float SliceRelCDFCos(float x, float normal_angle, float cos_n, bool direction_is
          / (4.0 * (cos_n + normal_angle * sin_n));
 }
 
+#include "bent_normals.hlsli"
+
 float LoadTraceDepth(int2 sample_pixel, int mip_level) {
   float sampled_depth = 0.0;
   [branch]
   if (mip_level == 0) {
     sampled_depth = depth_buffer.Load(int3(sample_pixel, 0)).x;
-  } else {
+  }
+  else {
     const int2 coarse_size = max(int2(cBufferWidth, cBufferHeight) >> mip_level, 1);
     const int2 coarse_pixel = clamp(sample_pixel >> mip_level, int2(0, 0), coarse_size - 1);
     sampled_depth = depth_mips.Load(int3(coarse_pixel, mip_level - 1)).x;
@@ -167,14 +156,18 @@ uint CoverageMask(float2 sample_position, float sample_depth, float thickness,
 }
 
 [numthreads(8, 8, 1)]
-void main(uint3 tid: SV_DispatchThreadID) {
+void main(uint3 tid : SV_DispatchThreadID) {
   const uint2 ao_pixel = tid.xy;
   uint ao_width, ao_height;
   ao_output.GetDimensions(ao_width, ao_height);
   if (ao_pixel.x >= ao_width || ao_pixel.y >= ao_height) return;
   gi_output[ao_pixel] = 0.0;
-  const int diagnostic = (int)clamp(CUSTOM_MGSV_GI_DEBUG_VIEW, 0.0, 12.0);
-  if (diagnostic >= 2) {
+  const bool directional_active = CUSTOM_MGSV_DIRECTIONAL_ACTIVE >= 0.5;
+  if (directional_active) {
+    bent_normal_output[ao_pixel] = float4(0.0, 0.0, 0.0, -1.0);
+  }
+  const int diagnostic = (int)CUSTOM_MGSV_GI_DEBUG_VIEW;
+  if (diagnostic >= 2 && diagnostic <= 12 && diagnostic != 7) {
     diagnostic_output[ao_pixel] = diagnostic == 4 ? float4(1.0, 0.0, 0.0, 1.0) : float4(0.0, 0.0, 0.0, 1.0);
     if (diagnostic >= 9 && diagnostic <= 11) diagnostic_output[ao_pixel] = 1.0;
   }
@@ -192,7 +185,7 @@ void main(uint3 tid: SV_DispatchThreadID) {
   const float2 pixel = float2(receiver_pixel);
   float3 normal = DecodeNormal(normal_buffer.Load(int3(receiver_pixel, 0)).xyz);
   const float3 surface_position = ViewPos(pixel, z);
-  // Temporary receiver-facing trial; source normals and native shading stay unchanged.
+  // Source normals and native shading retain their original orientation.
   const float3 surface_view = normalize(-surface_position);
   // Fold the view component continuously instead of reversing the entire normal.
   normal -= 2.0 * min(dot(normal, surface_view), 0.0) * surface_view;
@@ -205,7 +198,7 @@ void main(uint3 tid: SV_DispatchThreadID) {
   // The reference CDF assumes a view-facing receiver. Do not extrapolate its
   // measure to backfacing shading normals; use neutral visibility instead.
   if (any(!isfinite(normal)) || !(position.z > 0.0) || dot(normal, view_direction) < 0.0) {
-    // Temporary diagnostic: distinguish receiver rejection reasons without changing lighting.
+    // Distinguish receiver rejection reasons in the geometry diagnostic.
     if (diagnostic == 4) {
       float3 reason = float3(0.0, 0.0, 1.0);
       if (any(!isfinite(normal)))
@@ -240,6 +233,8 @@ void main(uint3 tid: SV_DispatchThreadID) {
   float3 indirect = 0.0;
   float accepted_coverage = 0.0;
   bool gi_valid = true;
+  float3 visible_moment = 0.0;
+  float3 open_moment = 0.0;
 
   const uint noise_frame = (CUSTOM_TAA != 0.0 || CUSTOM_MGSV_GI_TEMPORAL_ACTIVE > 0.5 || CUSTOM_MGSV_AO_TEMPORAL_ACTIVE > 0.5)
                                ? (uint)CUSTOM_MGSV_GT_NOISE_FRAME
@@ -269,6 +264,10 @@ void main(uint3 tid: SV_DispatchThreadID) {
     const float projected_length_squared = dot(projected_normal, projected_normal);
     if (projected_length_squared < 1e-12) {
       visibility += 1.0;
+      if (directional_active) {
+        visible_moment += normal * (2.0 / 3.0);
+        open_moment += normal * (2.0 / 3.0);
+      }
       continue;
     }
     const float projected_inverse_length = rsqrt(projected_length_squared);
@@ -359,9 +358,29 @@ void main(uint3 tid: SV_DispatchThreadID) {
     // Importance sampling already accounts for slice weight. Fractional band
     // compensation would no longer describe which surface owns each sector.
     visibility += 1.0 - float(countbits(occupied)) / float(AO_SECTORS);
+    [branch]
+    if (directional_active) {
+      float2 slice_open_moment;
+      const float2 slice_moment = VisibleCosineSliceMoment(occupied, sector_offset, normal_angle,
+                                                           cos_n, slice_open_moment);
+      visible_moment += view_direction * slice_moment.x + slice_direction_3d * slice_moment.y;
+      open_moment += view_direction * slice_open_moment.x + slice_direction_3d * slice_open_moment.y;
+    }
   }
 
   const float occlusion = saturate(1.0 - visibility / float(slices));
+  [branch]
+  if (directional_active) {
+    const float raw_visibility = 1.0 - occlusion;
+    // Remove the finite-slice open-hemisphere bias without changing closed
+    // pixels. A fully open cosine hemisphere has first moment (2/3) * N.
+    float3 moment = visible_moment / float(slices)
+                    + raw_visibility * (normal * (2.0 / 3.0) - open_moment / float(slices));
+    if (all(isfinite(moment))) {
+      const float4 bounded_moment = BoundDirectionalVisibility(float4(moment, raw_visibility), normal);
+      bent_normal_output[ao_pixel] = bounded_moment;
+    }
+  }
   const float applied = saturate(occlusion * CUSTOM_MGSV_AO_STRENGTH);
   ao_output[ao_pixel] = float2(1.0 - applied, 1.0);
   if (diagnostic >= 9 && diagnostic <= 11) {

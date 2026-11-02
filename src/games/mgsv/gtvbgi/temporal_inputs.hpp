@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright and license notices: README.md#credits-and-license.
+
 #ifndef SRC_GAMES_MGSV_GTVBGI_TEMPORAL_INPUTS_HPP_
 #define SRC_GAMES_MGSV_GTVBGI_TEMPORAL_INPUTS_HPP_
 
