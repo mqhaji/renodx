@@ -724,7 +724,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .key = "FxIndirectLightingResolution",
           .binding = &shader_injection->gt_resolution,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-          .default_value = 1.f,
+          .default_value = 2.f,
           .label = "Lighting Resolution",
           .section = "Indirect Lighting",
           .tooltip = "Scales both width and height of the AO/GI trace. Quarter uses 1/16 as many pixels; Eighth uses 1/64. Lower resolutions can lose thin geometry and contact detail. Search radii stay in full-resolution pixels.",
@@ -770,7 +770,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
       new renodx::utils::settings::Setting{
           .key = "FxIndirectLightingSliceCount",
           .binding = &shader_injection->gt_slice_count,
-          .default_value = 1.f,
+          .default_value = 3.f,
           .label = "Sampling Directions",
           .section = "Indirect Lighting (Advanced)",
           .tooltip = "Search lines through each pixel, sampled on both sides and shared by AO and Global Illumination. More lines improve coverage but cost more GPU time.",
