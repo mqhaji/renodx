@@ -3,7 +3,11 @@
 
 #include "../gbuffer.hlsli"
 #include "../shared.h"
-#include "directional_visibility.hlsli"
+#include "specular_occlusion.hlsli"
+
+// Reuse matching pixels from the previous frame before spatial filtering.
+// AO, GI, and specular visibility share motion and geometry checks, but each
+// keeps its own history, accepted weight, and missing-data rules.
 
 Texture2D<float4> rawGI : register(t0);
 Texture2D<float4> depthBuffer : register(t1);
@@ -14,13 +18,13 @@ Texture2D<float4> previousGI : register(t5);
 Texture2D<uint2> previousGeometry : register(t6);
 Texture2D<float2> rawAO : register(t7);
 Texture2D<float2> previousAO : register(t8);
-Texture2D<float4> raw_bent_normals : register(t9);
-Texture2D<float4> previous_bent_normals : register(t10);
+Texture2D<float4> raw_specular : register(t9);
+Texture2D<float4> previous_specular : register(t10);
 RWTexture2D<float4> giOutput : register(u0);
 RWTexture2D<uint2> geometryOutput : register(u1);
 RWTexture2D<float4> diagnosticOutput : register(u2);
 RWTexture2D<float2> aoOutput : register(u3);
-RWTexture2D<float4> bent_normal_output : register(u4);
+RWTexture2D<float4> specular_output : register(u4);
 
 // GPU copies of the native 480-byte scene block. These are scene data, not
 // another settings buffer. m_view has different meanings in native passes;
@@ -50,6 +54,7 @@ cbuffer PreviousSceneConstants : register(b2) {
 }
 
 [numthreads(8, 8, 1)]
+
 void main(uint3 tid : SV_DispatchThreadID) {
   uint width, height;
   rawGI.GetDimensions(width, height);
@@ -67,28 +72,29 @@ void main(uint3 tid : SV_DispatchThreadID) {
   const bool geometryValid = depth > 0.0 && z > 0.0 && z < 1.0e6 && all(isfinite(normal));
   const bool giValid = geometryValid && currentGI.a > 0.5 && all(isfinite(currentGI.rgb));
   const bool aoValid = geometryValid && currentAO.g > 0.5 && isfinite(currentAO.r);
-  const bool directional_active = CUSTOM_MGSV_DIRECTIONAL_ACTIVE >= 0.5;
-  float4 current_bent = float4(0.0, 0.0, 0.0, -1.0);
-  if (directional_active) {
-    current_bent = raw_bent_normals.Load(int3(pixel, 0));
+  const bool specular_active = CUSTOM_MGSV_SPECULAR_ACTIVE >= 0.5;
+  float4 current_specular = float4(0.0, 0.0, 0.0, -1.0);
+  if (specular_active) {
+    current_specular = raw_specular.Load(int3(pixel, 0));
   }
-  const bool bent_valid = directional_active && geometryValid && ValidDirectionalVisibility(current_bent);
-  if (directional_active) {
-    bent_normal_output[pixel] = (bent_valid ? current_bent : float4(0.0, 0.0, 0.0, -1.0));
+  const bool specular_valid = specular_active && geometryValid && ValidSpecularMasses(current_specular);
+  if (specular_active) {
+    specular_output[pixel] = specular_valid ? current_specular : float4(0.0, 0.0, 0.0, -1.0);
   }
   const float3 currentRadiance = giValid ? min(currentGI.rgb, 65504.0) : 0.0;
   const float currentVisibility = aoValid ? saturate(currentAO.r) : 1.0;
-  const int diagnostic = (int)CUSTOM_MGSV_GI_DEBUG_VIEW;
+  const int diagnostic = (int)CUSTOM_MGSV_GT_DEBUG_VIEW;
   giOutput[pixel] = float4(currentRadiance, giValid ? 1.0 : 0.0);
   aoOutput[pixel] = float2(currentVisibility, aoValid ? 1.0 : 0.0);
   geometryOutput[pixel] = uint2(0u, 0u);
   if (diagnostic == 6) diagnosticOutput[pixel] = float4(currentRadiance, 1.0);
-  if (diagnostic == 9 || diagnostic == 10) diagnosticOutput[pixel] = float4(currentVisibility.xxx, 1.0);
-  if (diagnostic == 8 || diagnostic == 12) diagnosticOutput[pixel] = float4(0.0, 0.0, 0.0, 1.0);
+  if (diagnostic == 8 || diagnostic == 9) diagnosticOutput[pixel] = float4(currentVisibility.xxx, 1.0);
+  if (diagnostic == 7 || diagnostic == 11) diagnosticOutput[pixel] = float4(0.0, 0.0, 0.0, 1.0);
+  if (diagnostic == 17) diagnosticOutput[pixel] = float4(0.0, 0.0, 0.0, 1.0);
   if (!geometryValid) return;
 
-  // Geometry belongs to the receiver, independently of either signal's
-  // validity. GI alpha and AO green determine whether their values can be used.
+  // Store this surface even when one lighting result is missing. Each signal
+  // carries its own validity, so missing GI cannot invalidate AO or specular.
   float3 oct = normal / (abs(normal.x) + abs(normal.y) + abs(normal.z));
   if (oct.z < 0.0) {
     oct.xy = (1.0 - abs(oct.yx)) * float2(oct.x >= 0.0 ? 1.0 : -1.0, oct.y >= 0.0 ? 1.0 : -1.0);
@@ -101,15 +107,15 @@ void main(uint3 tid : SV_DispatchThreadID) {
                       && CUSTOM_MGSV_GI_HISTORY_WEIGHT > 0.0;
   const bool accumulateAO = aoValid && CUSTOM_MGSV_GT_TEMPORAL_ENABLED >= 0.5
                             && CUSTOM_MGSV_AO_TEMPORAL_ACTIVE >= 0.5 && CUSTOM_MGSV_AO_HISTORY_VALID >= 0.5
-                            && CUSTOM_MGSV_AO_HISTORY_WEIGHT > 0.0;
-  const bool accumulate_bent = bent_valid && CUSTOM_MGSV_GT_TEMPORAL_ENABLED >= 0.5
-                               && CUSTOM_MGSV_AO_TEMPORAL_ACTIVE >= 0.5
-                               && CUSTOM_MGSV_DIRECTIONAL_HISTORY_VALID >= 0.5
-                               && CUSTOM_MGSV_AO_HISTORY_WEIGHT > 0.0;
+                            && CUSTOM_MGSV_OCCLUSION_HISTORY_WEIGHT > 0.0;
+  const bool accumulate_specular = specular_valid && CUSTOM_MGSV_GT_TEMPORAL_ENABLED >= 0.5
+                                   && CUSTOM_MGSV_AO_TEMPORAL_ACTIVE >= 0.5
+                                   && CUSTOM_MGSV_SPECULAR_HISTORY_VALID >= 0.5
+                                   && CUSTOM_MGSV_OCCLUSION_HISTORY_WEIGHT > 0.0;
   // Cold or disabled signals keep their current values. No previous texture
   // is read unless at least one signal has usable history.
   [branch]
-  if (!accumulateGI && !accumulateAO && !accumulate_bent) return;
+  if (!accumulateGI && !accumulateAO && !accumulate_specular) return;
 
   float exposureRatio = 1.0;
   if (accumulateGI) {
@@ -123,7 +129,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
       accumulateGI = false;
     }
   }
-  if (!accumulateGI && !accumulateAO && !accumulate_bent) return;
+  if (!accumulateGI && !accumulateAO && !accumulate_specular) return;
 
   // These snapshots must describe the same ordinary perspective view as the
   // scatter's geometry constants. A special-view or stale scene block may be
@@ -200,7 +206,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
   }
   // Object motion supplies screen displacement, not a previous 3D position or
   // normal. The geometric test remains conservative for motion in depth and
-  // deformation; incompatible history falls back to the current GI sample.
+  // deformation; incompatible history falls back to the current samples.
   if (!all(isfinite(previousPixel)) || any(previousPixel < 0.0) || any(previousPixel > fullSize - 1.0)) return;
 
   // Invert the trace's representative-pixel map rather than multiplying UV by
@@ -226,8 +232,14 @@ void main(uint3 tid : SV_DispatchThreadID) {
   float aoHistorySum = 0.0;
   float giAcceptedWeight = 0.0;
   float aoAcceptedWeight = 0.0;
-  float4 bent_history_sum = 0.0;
-  float bent_accepted_weight = 0.0;
+  float2 specular_history_sum = 0.0;
+  float specular_accepted_weight = 0.0;
+  float3 current_reflection = 0.0;
+  float3 current_lobe = 0.0;
+  if (accumulate_specular) {
+    current_reflection = reflect(normalize(ViewPos(float2(fullPixel) + 0.5, z)), normal);
+    current_lobe = SpecularLobeParameters(current_specular.z);
+  }
   [unroll]
   for (int i = 0; i < 4; ++i) {
     const int2 offset = int2(i & 1, i >> 1);
@@ -249,7 +261,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     historyNormal = normalize(historyNormal);
     const float normalDot = dot(historyNormal, previousNormal);
     const float2 normalWeights = saturate((normalDot
-                                           - (float2(CUSTOM_MGSV_GI_NORMAL_REJECTION, CUSTOM_MGSV_AO_NORMAL_REJECTION) - 0.4))
+                                           - (float2(CUSTOM_MGSV_GI_NORMAL_REJECTION, CUSTOM_MGSV_OCCLUSION_NORMAL_REJECTION) - 0.4))
                                           / 0.4);
     const float depthDifference = abs(historyZ - previousPosition.z);
     const float referenceDepth = max(previousPosition.z, 1.0e-4);
@@ -266,7 +278,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
       }
     }
     if (accumulateAO && normalWeights.y > 0.0
-        && depthDifference <= CUSTOM_MGSV_AO_DEPTH_REJECTION * referenceDepth) {
+        && depthDifference <= CUSTOM_MGSV_OCCLUSION_DEPTH_REJECTION * referenceDepth) {
       const float2 history = previousAO.Load(int3(q, 0));
       if (history.g > 0.5 && isfinite(history.r)) {
         const float weight = bilinear * normalWeights.y;
@@ -274,50 +286,59 @@ void main(uint3 tid : SV_DispatchThreadID) {
         aoAcceptedWeight += weight;
       }
     }
-    if (accumulate_bent && normalWeights.y > 0.0
-        && depthDifference <= CUSTOM_MGSV_AO_DEPTH_REJECTION * referenceDepth) {
-      const float4 history = previous_bent_normals.Load(int3(q, 0));
-      if (ValidDirectionalVisibility(history)) {
-        // Directions rotate between camera bases; translation and exposure
-        // must not affect them. Keep their moment magnitude through blending.
-        const float3 world_moment = previousX.xyz * history.x
-                                    + previousY.xyz * history.y + previousZ.xyz * history.z;
-        const float3 current_moment = float3(dot(world_moment, currentX.xyz),
-                                             dot(world_moment, currentY.xyz), dot(world_moment, currentZ.xyz));
-        const float weight = bilinear * normalWeights.y;
-        bent_history_sum += float4(current_moment, history.a) * weight;
-        bent_accepted_weight += weight;
+    if (accumulate_specular && normalWeights.y > 0.0
+        && depthDifference <= CUSTOM_MGSV_OCCLUSION_DEPTH_REJECTION * referenceDepth) {
+      const float4 history = previous_specular.Load(int3(q, 0));
+      if (ValidSpecularMasses(history)) {
+        // Reconstruct the old receiver's actual reflected direction, then
+        // rotate it into this camera basis. Current view direction cannot
+        // stand in for the previous one when a glossy receiver moves.
+        const int2 history_pixel = min(int2(floor((float2(q) + 0.5) * scale)), int2(fullSize) - 1);
+        const float2 history_ndc = ((float2(history_pixel) + 0.5) / fullSize - 0.5) * float2(2.0, -2.0);
+        const float3 history_position = float3((history_ndc - previousScene.cameraCenterOffset.xy)
+                                                   * previousProjection.xy * historyZ,
+                                               historyZ);
+        const float3 history_reflection = reflect(normalize(history_position), historyNormal);
+        const float3 world_reflection = previousX.xyz * history_reflection.x
+                                        + previousY.xyz * history_reflection.y + previousZ.xyz * history_reflection.z;
+        const float3 reflection = float3(dot(world_reflection, currentX.xyz),
+                                         dot(world_reflection, currentY.xyz), dot(world_reflection, currentZ.xyz));
+        const float lobe_weight = SpecularLobeWeight(current_reflection, current_lobe, reflection, history.z);
+        const float weight = bilinear * normalWeights.y * lobe_weight;
+        specular_history_sum += history.xy * weight;
+        specular_accepted_weight += weight;
       }
     }
   }
 
   const bool giHistoryValid = giAcceptedWeight > 1.0e-4 && all(isfinite(giHistorySum));
   const bool aoHistoryValid = aoAcceptedWeight > 1.0e-4 && isfinite(aoHistorySum);
-  const bool bent_history_valid = bent_accepted_weight > 1.0e-4 && all(isfinite(bent_history_sum));
-  if (!giHistoryValid && !aoHistoryValid && !bent_history_valid) return;
+  const bool specular_history_valid = specular_accepted_weight > 1.0e-4 && all(isfinite(specular_history_sum));
+  if (!giHistoryValid && !aoHistoryValid && !specular_history_valid) return;
   float3 giHistory = currentRadiance;
   float aoHistory = currentVisibility;
   if (giHistoryValid) giHistory = giHistorySum / giAcceptedWeight;
   if (aoHistoryValid) aoHistory = aoHistorySum / aoAcceptedWeight;
-  float4 bent_history = current_bent;
-  if (bent_history_valid) {
-    bent_history = bent_history_sum / bent_accepted_weight;
+  float2 specular_history = current_specular.xy;
+  if (specular_history_valid) {
+    specular_history = specular_history_sum / specular_accepted_weight;
   }
 
   const bool clampGI = giHistoryValid && CUSTOM_MGSV_GI_HISTORY_CLAMP > 0.0;
   const bool clampAO = aoHistoryValid && CUSTOM_MGSV_AO_HISTORY_CLAMP > 0.0;
-  const bool clamp_bent = bent_history_valid && CUSTOM_MGSV_AO_HISTORY_CLAMP > 0.0;
-  if (clampGI || clampAO || clamp_bent) {
+  const bool clamp_specular = specular_history_valid && CUSTOM_MGSV_SPECULAR_HISTORY_CLAMP > 0.0;
+  if (clampGI || clampAO || clamp_specular) {
     float3 giMean = 0.0;
     float3 giSquaredDifference = 0.0;
     float giCount = 0.0;
     float aoMean = 0.0;
     float aoSquaredDifference = 0.0;
     float aoCount = 0.0;
-    float4 bent_mean = 0.0;
-    float bent_squared_difference = 0.0;
-    float bent_visibility_squared_difference = 0.0;
-    float bent_count = 0.0;
+    float specular_mean = 0.0;
+    float specular_squared_difference = 0.0;
+    float specular_open_sum = 0.0;
+    const float3 receiver_position = ViewPos(float2(fullPixel), z);
+    const float specular_plane_scale = max(0.02 * length(receiver_position), 1e-6);
     [unroll]
     for (int y = -1; y <= 1; ++y) {
       [unroll]
@@ -344,14 +365,30 @@ void main(uint3 tid : SV_DispatchThreadID) {
             aoSquaredDifference += difference * (sampleValue.r - aoMean);
           }
         }
-        if (clamp_bent) {
-          const float4 sample_value = raw_bent_normals.Load(int3(q, 0));
-          if (ValidDirectionalVisibility(sample_value)) {
-            bent_count += 1.0;
-            const float4 difference = sample_value - bent_mean;
-            bent_mean += difference / bent_count;
-            bent_squared_difference += dot(difference.rgb, sample_value.rgb - bent_mean.rgb);
-            bent_visibility_squared_difference += difference.a * (sample_value.a - bent_mean.a);
+        if (clamp_specular) {
+          const float4 sample_value = raw_specular.Load(int3(q, 0));
+          if (ValidSpecularMasses(sample_value) && sample_value.y > 1e-7) {
+            const int2 sample_pixel = min(int2(floor((float2(q) + 0.5) * scale)), int2(fullSize) - 1);
+            const float sample_depth = depthBuffer.Load(int3(sample_pixel, 0)).x;
+            const float sample_z = LinearZ(sample_depth);
+            const float3 sample_normal = DecodeNormal(normalBuffer.Load(int3(sample_pixel, 0)).xyz);
+            if (sample_depth > 0.0 && sample_z > 0.0 && sample_z < 1e6 && all(isfinite(sample_normal))) {
+              const float3 sample_position = ViewPos(float2(sample_pixel), sample_z);
+              const float plane = dot(normal, sample_position - receiver_position) / specular_plane_scale;
+              const float3 reflection = reflect(normalize(ViewPos(float2(sample_pixel) + 0.5, sample_z)), sample_normal);
+              const float weight = exp(-0.5 * plane * plane) * pow(saturate(dot(normal, sample_normal)), 16.0)
+                                   * SpecularLobeWeight(current_reflection, current_lobe, reflection, sample_value.z);
+              // Weight each visibility ratio by its sampled open area. This
+              // gives better-covered neighbors more influence on the clamp.
+              const float open_mass = weight * sample_value.y;
+              if (open_mass > 0.0) {
+                specular_open_sum += open_mass;
+                const float ratio = sample_value.x / sample_value.y;
+                const float difference = ratio - specular_mean;
+                specular_mean += difference * (open_mass / specular_open_sum);
+                specular_squared_difference += open_mass * difference * (ratio - specular_mean);
+              }
+            }
           }
         }
       }
@@ -366,18 +403,14 @@ void main(uint3 tid : SV_DispatchThreadID) {
       aoHistory = clamp(aoHistory, aoMean - CUSTOM_MGSV_AO_HISTORY_CLAMP * sigma,
                         aoMean + CUSTOM_MGSV_AO_HISTORY_CLAMP * sigma);
     }
-    if (clamp_bent) {
-      // A spherical neighborhood bound is invariant under camera rotation.
-      const float radius = CUSTOM_MGSV_AO_HISTORY_CLAMP
-                           * sqrt(max(bent_squared_difference / max(bent_count, 1.0), 0.0));
-      const float3 difference = bent_history.rgb - bent_mean.rgb;
-      const float length_squared = dot(difference, difference);
-      if (length_squared > radius * radius) {
-        bent_history.rgb = bent_mean.rgb + difference * (radius * rsqrt(length_squared));
-      }
-      const float sigma = sqrt(max(bent_visibility_squared_difference / max(bent_count, 1.0), 0.0));
-      bent_history.a = clamp(bent_history.a, bent_mean.a - CUSTOM_MGSV_AO_HISTORY_CLAMP * sigma,
-                             bent_mean.a + CUSTOM_MGSV_AO_HISTORY_CLAMP * sigma);
+    if (clamp_specular && specular_open_sum > 1e-7 && specular_history.y > 1e-7) {
+      const float sigma = sqrt(max(specular_squared_difference / specular_open_sum, 0.0));
+      const float ratio = clamp(specular_history.x / specular_history.y,
+                                specular_mean - CUSTOM_MGSV_SPECULAR_HISTORY_CLAMP * sigma,
+                                specular_mean + CUSTOM_MGSV_SPECULAR_HISTORY_CLAMP * sigma);
+      // The sampled open area changes between frames. Clamp visibility only,
+      // keeping that area so history can fill gaps in the current samples.
+      specular_history.x = saturate(ratio) * specular_history.y;
     }
   }
 
@@ -387,24 +420,24 @@ void main(uint3 tid : SV_DispatchThreadID) {
     if (all(isfinite(result))) {
       giOutput[pixel] = float4(min(result, 65504.0), 1.0);
       if (diagnostic == 6) diagnosticOutput[pixel] = float4(result, 1.0);
-      if (diagnostic == 8) diagnosticOutput[pixel] = float4(saturate(giAcceptedWeight).xxx, 1.0);
+      if (diagnostic == 7) diagnosticOutput[pixel] = float4(saturate(giAcceptedWeight).xxx, 1.0);
     }
   }
   if (aoHistoryValid) {
-    const float blend = saturate(CUSTOM_MGSV_AO_HISTORY_WEIGHT) * saturate(aoAcceptedWeight);
+    const float blend = saturate(CUSTOM_MGSV_OCCLUSION_HISTORY_WEIGHT) * saturate(aoAcceptedWeight);
     const float result = saturate(lerp(currentVisibility, aoHistory, blend));
     if (isfinite(result)) {
       aoOutput[pixel] = float2(result, 1.0);
-      if (diagnostic == 10) diagnosticOutput[pixel] = float4(result.xxx, 1.0);
-      if (diagnostic == 12) diagnosticOutput[pixel] = float4(saturate(aoAcceptedWeight).xxx, 1.0);
+      if (diagnostic == 9) diagnosticOutput[pixel] = float4(result.xxx, 1.0);
+      if (diagnostic == 11) diagnosticOutput[pixel] = float4(saturate(aoAcceptedWeight).xxx, 1.0);
     }
   }
-  if (bent_history_valid) {
-    const float blend = saturate(CUSTOM_MGSV_AO_HISTORY_WEIGHT) * saturate(bent_accepted_weight);
-    const float4 result = lerp(current_bent, bent_history, blend);
-    if (all(isfinite(result))) {
-      const float3 receiver_normal = BentReceiverNormal(normal, ViewPos(float2(fullPixel), z));
-      bent_normal_output[pixel] = BoundDirectionalVisibility(result, receiver_normal);
+  if (specular_history_valid) {
+    const float blend = saturate(CUSTOM_MGSV_OCCLUSION_HISTORY_WEIGHT) * saturate(specular_accepted_weight);
+    const float2 masses = lerp(current_specular.xy, specular_history, blend);
+    if (all(isfinite(masses))) {
+      specular_output[pixel] = float4(masses, current_specular.zw);
+      if (diagnostic == 17) diagnosticOutput[pixel] = float4(saturate(specular_accepted_weight).xxx, 1.0);
     }
   }
 }

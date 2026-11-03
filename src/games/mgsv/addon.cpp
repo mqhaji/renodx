@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024 Musa Haji
+ * Copyright (C) 2026 Musa Haji
  * Copyright (C) 2026 ZioPao
  * SPDX-License-Identifier: MIT
  */
@@ -83,16 +83,12 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
     ImGui::PopTextWrapPos();
     ImGui::TreePop();
   }
-  if (ImGui::TreeNode("GT-VBGI + GTSO (MIT)")) {
+  if (ImGui::TreeNode("GT-VBGI (MIT)")) {
     ImGui::PushTextWrapPos();
     ImGui::TextUnformatted(R"license(GT-VBGI reference: Mirko Salm (TinyTexel).
-Temporal and spatial filtering reference: Toru77's Falcom Engine Plus.
-Specular occlusion adapted from three.js GTAONode.js.
+https://www.shadertoy.com/view/lfdBWn
 
-Copyright (c) 2024, 2026 Musa Haji
-Copyright (c) 2026 ZioPao
-Copyright (c) 2025 Carlos Lopez Jr.
-Copyright (c) 2010-2026 three.js authors
+MIT License
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 
@@ -178,7 +174,7 @@ void OnPresent(
   bool lighting_enabled = false;
   {
     const std::shared_lock settings_lock(renodx::utils::mutex::global_mutex);
-    lighting_enabled = shader_injection.lighting_mode >= 0.5f;
+    lighting_enabled = shader_injection.gt_enabled >= 0.5f;
     temporal_lighting_enabled = lighting_enabled && shader_injection.gt_temporal_enabled >= 0.5f;
   }
   {
