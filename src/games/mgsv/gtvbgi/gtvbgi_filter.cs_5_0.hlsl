@@ -3,17 +3,20 @@
 
 #include "../gbuffer.hlsli"
 #include "../shared.h"
-#include "directional_visibility.hlsli"
+#include "specular_occlusion.hlsli"
+
+// Smooth nearby lighting without crossing depth, normal, or reflection edges.
+// Specular visible/open areas are averaged together, then divided during resolve.
 
 Texture2D<float4> giInput : register(t0);
 Texture2D<float4> depthBuffer : register(t1);
 Texture2D<float4> normalBuffer : register(t2);
 Texture2D<float2> aoInput : register(t3);
-Texture2D<float4> bent_normal_input : register(t4);
+Texture2D<float4> specular_input : register(t4);
 RWTexture2D<float4> giOutput : register(u0);
 RWTexture2D<float2> aoOutput : register(u1);
 RWTexture2D<float4> diagnosticOutput : register(u2);
-RWTexture2D<float4> bent_normal_output : register(u3);
+RWTexture2D<float4> specular_output : register(u3);
 
 // Columns contain the exact 3-, 5-, 7-, and 9-tap binomial coefficients.
 // Rows are the absolute offset from the center, so both axes share this table.
@@ -26,6 +29,7 @@ static const float4 BINOMIAL_WEIGHTS[5] = {
 };
 
 [numthreads(8, 8, 1)]
+
 void main(uint3 tid : SV_DispatchThreadID) {
   uint width, height;
   giInput.GetDimensions(width, height);
@@ -39,16 +43,17 @@ void main(uint3 tid : SV_DispatchThreadID) {
   const float currentVisibility = aoValid ? saturate(aoCenter.r) : 1.0;
   float4 giResult = giValid ? giCenter : 0.0;
   float2 aoResult = float2(currentVisibility, aoValid ? aoCenter.g : 0.0);
-  const bool directional_active = CUSTOM_MGSV_DIRECTIONAL_ACTIVE >= 0.5;
-  float4 bent_center = float4(0.0, 0.0, 0.0, -1.0);
-  if (directional_active) {
-    bent_center = bent_normal_input.Load(int3(pixel, 0));
+  const bool specular_active = CUSTOM_MGSV_SPECULAR_ACTIVE >= 0.5;
+  float4 specular_center = float4(0.0, 0.0, 0.0, -1.0);
+  if (specular_active) {
+    specular_center = specular_input.Load(int3(pixel, 0));
   }
-  const bool bent_valid = directional_active && ValidDirectionalVisibility(bent_center);
-  float4 bent_result = (bent_valid ? bent_center : float4(0.0, 0.0, 0.0, -1.0));
+  const bool specular_valid = specular_active && ValidSpecularMasses(specular_center);
+  float4 specular_result = specular_valid ? specular_center : float4(0.0, 0.0, 0.0, -1.0);
 
   [branch]
-  if (CUSTOM_MGSV_GT_SPATIAL_ENABLED >= 0.5 && (giValid || aoValid || bent_valid)) {
+
+  if (CUSTOM_MGSV_GT_SPATIAL_ENABLED >= 0.5 && (giValid || aoValid || specular_valid)) {
     const float scale = max(CUSTOM_MGSV_GT_RESOLUTION_DIVISOR, 1.0);
     const int2 fullSize = int2(cBufferWidth, cBufferHeight);
     const int2 centerPixel = min(int2(floor((float2(pixel) + 0.5) * scale)), fullSize - 1);
@@ -57,6 +62,12 @@ void main(uint3 tid : SV_DispatchThreadID) {
     const float3 centerNormal = DecodeNormal(normalBuffer.Load(int3(centerPixel, 0)).xyz);
     if (centerDepth > 0.0 && centerZ > 0.0 && centerZ < 1.0e6 && all(isfinite(centerNormal))) {
       const float3 centerPosition = ViewPos(float2(centerPixel), centerZ);
+      float3 center_reflection = 0.0;
+      float3 center_lobe = 0.0;
+      if (specular_valid) {
+        center_reflection = reflect(normalize(ViewPos(float2(centerPixel) + 0.5, centerZ)), centerNormal);
+        center_lobe = SpecularLobeParameters(specular_center.z);
+      }
       const float planeScale = max(0.02 * length(centerPosition), 1.0e-6);
       const bool atrous = CUSTOM_MGSV_GT_FILTER_TYPE >= 0.5;
       // The table covers every supported odd A-Trous width. Separable taps
@@ -75,8 +86,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
       precise float aoSum = 0.0;
       float giWeightSum = 0.0;
       float aoWeightSum = 0.0;
-      precise float4 bent_sum = 0.0;
-      float bent_weight_sum = 0.0;
+      precise float2 specular_sum = 0.0;
+      float specular_weight_sum = 0.0;
       const int firstRow = atrous ? -halfTaps : 0;
       const int lastRow = atrous ? halfTaps : 0;
       [loop]
@@ -91,12 +102,12 @@ void main(uint3 tid : SV_DispatchThreadID) {
           const float2 aoSample = aoInput.Load(int3(q, 0));
           const bool giSampleValid = giValid && giSample.a > 0.5 && all(isfinite(giSample.rgb));
           const bool aoSampleValid = aoValid && aoSample.g > 0.5 && isfinite(aoSample.r);
-          float4 bent_sample = float4(0.0, 0.0, 0.0, -1.0);
-          if (bent_valid) {
-            bent_sample = bent_normal_input.Load(int3(q, 0));
+          float4 specular_sample = float4(0.0, 0.0, 0.0, -1.0);
+          if (specular_valid) {
+            specular_sample = specular_input.Load(int3(q, 0));
           }
-          const bool bent_sample_valid = bent_valid && ValidDirectionalVisibility(bent_sample);
-          if (!giSampleValid && !aoSampleValid && !bent_sample_valid) continue;
+          const bool specular_sample_valid = specular_valid && ValidSpecularMasses(specular_sample);
+          if (!giSampleValid && !aoSampleValid && !specular_sample_valid) continue;
 
           float kernelWeight;
           [branch]
@@ -107,6 +118,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
             kernelWeight = exp(-0.5 * float(x * x) / (sigma * sigma));
           }
           float edgeWeight = 1.0;
+          float lobe_weight = 1.0;
           if (any(offset != 0)) {
             const int2 samplePixel = min(int2(floor((float2(q) + 0.5) * scale)), fullSize - 1);
             const float sampleDepth = depthBuffer.Load(int3(samplePixel, 0)).x;
@@ -121,6 +133,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
             normalWeight *= normalWeight;
             normalWeight *= normalWeight;
             edgeWeight = exp(-0.5 * plane * plane) * normalWeight;
+            if (specular_sample_valid) {
+              const float3 reflection = reflect(normalize(ViewPos(float2(samplePixel) + 0.5, sampleZ)), sampleNormal);
+              lobe_weight = SpecularLobeWeight(center_reflection, center_lobe, reflection, specular_sample.z);
+            }
           }
           const float weight = kernelWeight * edgeWeight;
           if (giSampleValid) {
@@ -131,9 +147,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
             aoSum += (aoSample.r - currentVisibility) * weight;
             aoWeightSum += weight;
           }
-          if (bent_sample_valid) {
-            bent_sum += (bent_sample - bent_center) * weight;
-            bent_weight_sum += weight;
+          if (specular_sample_valid) {
+            const float specular_weight = weight * lobe_weight;
+            specular_sum += (specular_sample.xy - specular_center.xy) * specular_weight;
+            specular_weight_sum += specular_weight;
           }
         }
       }
@@ -143,17 +160,19 @@ void main(uint3 tid : SV_DispatchThreadID) {
       if (aoWeightSum > 0.0 && isfinite(aoSum)) {
         aoResult = float2(saturate(currentVisibility + aoSum / aoWeightSum), aoCenter.g);
       }
-      if (bent_weight_sum > 0.0 && all(isfinite(bent_sum))) {
-        const float3 receiver_normal = BentReceiverNormal(centerNormal, centerPosition);
-        bent_result = BoundDirectionalVisibility(bent_center + bent_sum / bent_weight_sum, receiver_normal);
+      if (specular_weight_sum > 0.0 && all(isfinite(specular_sum))) {
+        // Average angular areas, not their ratios. Keep this pixel's roughness
+        // and confidence so filtering cannot spread them onto other surfaces.
+        const float2 masses = max(specular_center.xy + specular_sum / specular_weight_sum, 0.0);
+        specular_result.xy = float2(min(masses.x, masses.y), masses.y);
       }
     }
   }
 
   giOutput[pixel] = giResult;
   aoOutput[pixel] = aoResult;
-  if (directional_active) {
-    bent_normal_output[pixel] = bent_result;
+  if (specular_active) {
+    specular_output[pixel] = specular_result;
   }
-  if (CUSTOM_MGSV_GI_DEBUG_VIEW == 11.0) diagnosticOutput[pixel] = float4(aoResult.rrr, 1.0);
+  if (CUSTOM_MGSV_GT_DEBUG_VIEW == 10.0) diagnosticOutput[pixel] = float4(aoResult.rrr, 1.0);
 }

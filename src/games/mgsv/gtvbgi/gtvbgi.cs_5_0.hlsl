@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 // Copyright and license notices: README.md#credits-and-license.
 
-// MGSV bidirectional, cosine-weighted GT-VBGI with AO visibility output.
-// Runs after native second subsurface scatter, producing separate AO visibility.
-// One geometry search writes AO visibility to u0 and bounce/validity to u1.
-// The host applies AO to existing diffuse before adding this visibility-integrated GI.
+// Search visible geometry in both directions along each slice. The same depth
+// samples supply AO, diffuse bounce, and specular visibility after skin scattering.
+// Keep the outputs separate: the application pass darkens native diffuse with AO,
+// adds the bounce, and resolves specular visibility for deferred composition.
 
 #include "../gbuffer.hlsli"
 #include "../shared.h"
-#include "directional_visibility.hlsli"
+#include "specular_occlusion.hlsli"
 
 #define AO_PI               3.14159265358979323846
 #define AO_SECTORS          32u
@@ -18,6 +18,8 @@ Texture2D<float4> depth_buffer : register(t0);
 Texture2D<float4> normal_buffer : register(t1);
 Texture2D<float4> depth_mips : register(t2);
 Texture2DArray<float2> fast_noise : register(t6);
+Texture2D<float4> native_material : register(t7);
+Texture2D<float4> environment_specular : register(t8);
 RWTexture2D<float2> ao_output : register(u0);
 
 Texture2D<float4> source_diffuse : register(t3);
@@ -25,12 +27,13 @@ Texture2D<float4> source_albedo : register(t4);
 Texture2D<float4> source_specular : register(t5);
 RWTexture2D<float4> gi_output : register(u1);
 RWTexture2D<float4> diagnostic_output : register(u2);
-RWTexture2D<float4> bent_normal_output : register(u3);
+// RG stores visible/open angular areas relative to the whole reflection cone.
+// B is native roughness; A is sampling confidence, with -1 for missing data.
+RWTexture2D<float4> specular_output : register(u3);
 
-// Follow the same floor-sized, odd-edge-inclusive max reductions as AO depth
-// preparation. Prefer the sampled child on ties, otherwise the first maximum.
-// This matches radiance/normal to the depth owner without changing the existing
-// conservative assignment of that depth to the continuous slice position.
+// A coarse depth texel keeps the nearest surface in its block. Find that
+// surface's full-resolution pixel before reading its color or normal. Match
+// depth-pyramid edge handling and prefer the original sample when depths tie.
 bool ResolveDepthOwner(int2 sample_pixel, int mip_level, float sampled_depth, out int2 owner) {
   owner = sample_pixel;
   if (mip_level == 0) return true;
@@ -118,8 +121,6 @@ float SliceRelCDFCos(float x, float normal_angle, float cos_n, bool direction_is
          / (4.0 * (cos_n + normal_angle * sin_n));
 }
 
-#include "bent_normals.hlsli"
-
 float LoadTraceDepth(int2 sample_pixel, int mip_level) {
   float sampled_depth = 0.0;
   [branch]
@@ -134,9 +135,9 @@ float LoadTraceDepth(int2 sample_pixel, int mip_level) {
   return sampled_depth;
 }
 
-uint CoverageMask(float2 sample_position, float sample_depth, float thickness,
-                  float3 position, float3 view_direction, float side, float normal_angle, float cos_n,
-                  float sector_offset) {
+uint2 CoverageMasks(float2 sample_position, float sample_depth, float thickness,
+                    float3 position, float3 view_direction, float side, float normal_angle, float cos_n,
+                    float sector_offset, float4 specular_interval, bool2 unfinished) {
   const float sample_z = LinearZ(sample_depth);
   // Native reverse-Z zero is background, not a finite surface slab.
   if (!(sample_depth > 0.0 && sample_z > 0.0) || sample_z > 1.0e6) return 0u;
@@ -147,29 +148,45 @@ uint CoverageMask(float2 sample_position, float sample_depth, float thickness,
   const float2 lengths_squared = float2(dot(front, front), dot(back, back));
   if (any(lengths_squared < 1e-12)) return 0u;
   const float2 horizon_cos = clamp(float2(dot(front, view_direction), dot(back, view_direction)) * rsqrt(lengths_squared), -1.0, 1.0);
-  float2 horizon = saturate(acos(horizon_cos) * (side / AO_PI) + normal_angle / AO_PI + 0.5);
-  if (side < 0.0) horizon = horizon.yx;
-  horizon.x = SliceRelCDFCos(horizon.x, normal_angle, cos_n, side > 0.0);
-  horizon.y = SliceRelCDFCos(horizon.y, normal_angle, cos_n, side > 0.0);
-  const uint2 sectors = (uint2)floor(saturate(horizon + sector_offset) * float(AO_SECTORS));
-  return SectorMask(sectors.x, sectors.y);
+  uint specular_mask = 0u;
+  [branch]
+  if (unfinished.y && specular_interval.w > 0.0) {
+    float2 measure = side * (1.0 - horizon_cos);
+    if (side < 0.0) measure = measure.yx;
+    float2 fraction = saturate((measure - specular_interval.x) * specular_interval.z);
+    fraction = (measure >= specular_interval.y ? 1.0 : fraction);
+    const uint2 sectors = (uint2)floor(saturate(fraction + sector_offset) * float(AO_SECTORS));
+    specular_mask = SectorMask(sectors.x, sectors.y);
+  }
+  uint diffuse_mask = 0u;
+  [branch]
+  if (unfinished.x) {
+    float2 horizon = saturate(acos(horizon_cos) * (side / AO_PI) + normal_angle / AO_PI + 0.5);
+    if (side < 0.0) horizon = horizon.yx;
+    horizon.x = SliceRelCDFCos(horizon.x, normal_angle, cos_n, side > 0.0);
+    horizon.y = SliceRelCDFCos(horizon.y, normal_angle, cos_n, side > 0.0);
+    const uint2 sectors = (uint2)floor(saturate(horizon + sector_offset) * float(AO_SECTORS));
+    diffuse_mask = SectorMask(sectors.x, sectors.y);
+  }
+  return uint2(diffuse_mask, specular_mask);
 }
 
 [numthreads(8, 8, 1)]
+
 void main(uint3 tid : SV_DispatchThreadID) {
   const uint2 ao_pixel = tid.xy;
   uint ao_width, ao_height;
   ao_output.GetDimensions(ao_width, ao_height);
   if (ao_pixel.x >= ao_width || ao_pixel.y >= ao_height) return;
   gi_output[ao_pixel] = 0.0;
-  const bool directional_active = CUSTOM_MGSV_DIRECTIONAL_ACTIVE >= 0.5;
-  if (directional_active) {
-    bent_normal_output[ao_pixel] = float4(0.0, 0.0, 0.0, -1.0);
+  const bool specular_active = CUSTOM_MGSV_SPECULAR_ACTIVE >= 0.5;
+  if (specular_active) {
+    specular_output[ao_pixel] = float4(0.0, 0.0, 0.0, -1.0);
   }
-  const int diagnostic = (int)CUSTOM_MGSV_GI_DEBUG_VIEW;
-  if (diagnostic >= 2 && diagnostic <= 12 && diagnostic != 7) {
+  const int diagnostic = (int)CUSTOM_MGSV_GT_DEBUG_VIEW;
+  if (diagnostic >= 2 && diagnostic <= 11) {
     diagnostic_output[ao_pixel] = diagnostic == 4 ? float4(1.0, 0.0, 0.0, 1.0) : float4(0.0, 0.0, 0.0, 1.0);
-    if (diagnostic >= 9 && diagnostic <= 11) diagnostic_output[ao_pixel] = 1.0;
+    if (diagnostic >= 8 && diagnostic <= 10) diagnostic_output[ao_pixel] = 1.0;
   }
 
   const float scale = max(CUSTOM_MGSV_GT_RESOLUTION_DIVISOR, 1.0);
@@ -184,6 +201,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
 
   const float2 pixel = float2(receiver_pixel);
   float3 normal = DecodeNormal(normal_buffer.Load(int3(receiver_pixel, 0)).xyz);
+  const float3 native_normal = normal;
   const float3 surface_position = ViewPos(pixel, z);
   // Source normals and native shading retain their original orientation.
   const float3 surface_view = normalize(-surface_position);
@@ -229,12 +247,39 @@ void main(uint3 tid : SV_DispatchThreadID) {
   const float3 axis_y = float3(-view_direction.x * view_direction.y * basis_scale, 1.0 - view_direction.y * view_direction.y * basis_scale, view_direction.y);
   const float2 normal_xy = float2(dot(normal, axis_x), dot(normal, axis_y));
 
+  bool specular_valid = false;
+  float roughness = 0.0;
+  float3 reflection = 0.0;
+  float specular_radius = 0.0;
+  float inverse_open_area = 0.0;
+  float specular_support = 0.0;
+  float2 specular_mass = 0.0;
+  if (specular_active) {
+    const float4 captured = environment_specular.Load(int3(receiver_pixel, 0));
+    roughness = native_material.Load(int3(receiver_pixel, 0)).r;
+    const float3 native_view = normalize(-ViewPos(pixel + 0.5, z));
+    const float normal_view = dot(native_normal, native_view);
+    if (captured.a > 0.5 && all(isfinite(captured)) && isfinite(roughness)
+        && roughness >= 0.0 && roughness <= 1.0 && normal_view > 0.0
+        && dot(native_normal, view_direction) > 0.0 && dot(native_normal, normal) > 0.99999) {
+      reflection = reflect(-native_view, native_normal);
+      specular_radius = SpecularConeRadius(roughness);
+      const float open_area = SpecularOpenArea(specular_radius, dot(native_normal, reflection));
+      if (isfinite(open_area) && open_area > 1e-6) {
+        inverse_open_area = rcp(open_area);
+        specular_support = smoothstep(0.0, 0.2, normal_view)
+                           * SpecularSliceSupport(length(normal_xy), dot(reflection, view_direction), specular_radius, float(slices));
+        const float view_difference = acos(clamp(dot(native_view, view_direction), -1.0, 1.0));
+        specular_support *= 1.0 - smoothstep(0.1 * specular_radius, 0.25 * specular_radius, view_difference);
+        specular_valid = true;
+      }
+    }
+  }
+
   float visibility = 0.0;
   float3 indirect = 0.0;
   float accepted_coverage = 0.0;
   bool gi_valid = true;
-  float3 visible_moment = 0.0;
-  float3 open_moment = 0.0;
 
   const uint noise_frame = (CUSTOM_TAA != 0.0 || CUSTOM_MGSV_GI_TEMPORAL_ACTIVE > 0.5 || CUSTOM_MGSV_AO_TEMPORAL_ACTIVE > 0.5)
                                ? (uint)CUSTOM_MGSV_GT_NOISE_FRAME
@@ -242,6 +287,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
   const uint2 noise_pixel = ao_pixel & 127u;
 
   [loop]
+
   for (int slice = 0; slice < slices; ++slice) {
     // Use the stored uniform channels directly.
     // A separated R2 offset supplies the third variate, following EA's guidance.
@@ -264,10 +310,6 @@ void main(uint3 tid : SV_DispatchThreadID) {
     const float projected_length_squared = dot(projected_normal, projected_normal);
     if (projected_length_squared < 1e-12) {
       visibility += 1.0;
-      if (directional_active) {
-        visible_moment += normal * (2.0 / 3.0);
-        open_moment += normal * (2.0 / 3.0);
-      }
       continue;
     }
     const float projected_inverse_length = rsqrt(projected_length_squared);
@@ -278,9 +320,23 @@ void main(uint3 tid : SV_DispatchThreadID) {
     const float sector_offset = phases.z / float(AO_SECTORS);
     const float radial_phase = phases.y;
     uint occupied = 0u;
+    uint specular_occupied = 0u;
+    float4 specular_interval = 0.0;
+    float specular_weight = 0.0;
+    if (specular_valid) {
+      specular_interval = SpecularSliceInterval(float2(dot(native_normal, view_direction), dot(native_normal, slice_direction_3d)),
+                                                float2(dot(reflection, view_direction), dot(reflection, slice_direction_3d)),
+                                                cos(specular_radius));
+      if (specular_interval.w > 0.0) {
+        const float normal_length = length(normal_xy);
+        const float cosine_azimuth = normal_length > 0.0 ? saturate(dot(normal_xy, slice_direction) / normal_length) : 1.0;
+        specular_weight = SpecularSliceWeight(normal_length, cosine_azimuth);
+      }
+    }
 
     [loop]
-    for (int side = 0; side < 2 && occupied != 0xFFFFFFFFu; ++side) {
+
+    for (int side = 0; side < 2 && (occupied != 0xFFFFFFFFu || (specular_interval.w > 0.0 && specular_occupied != 0xFFFFFFFFu)); ++side) {
       const float side_sign = side == 0 ? -1.0 : 1.0;
       const float2 ray_direction = screen_direction * side_sign;
       const float side_phase = side == 0 ? radial_phase : 1.0 - radial_phase;
@@ -300,7 +356,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
           mip_level = clamp((int)floor(log2(max(sample_distance, 1.0)) - 3.3), 0, AO_DEPTH_MIP_LEVELS);
         }
         const float sample_depth = LoadTraceDepth(sample_pixel, mip_level);
-        const uint covered = CoverageMask(sample_position, sample_depth, thickness, position, view_direction, side_sign, normal_angle, cos_n, sector_offset);
+        const uint2 coverage = CoverageMasks(sample_position, sample_depth, thickness, position, view_direction, side_sign,
+                                             normal_angle, cos_n, sector_offset, specular_interval,
+                                             bool2(occupied != 0xFFFFFFFFu, specular_occupied != 0xFFFFFFFFu));
+        const uint covered = coverage.x;
+        specular_occupied |= coverage.y;
         uint fresh = covered & ~occupied;
         if (fresh != 0u) {
           int2 owner;
@@ -352,38 +412,28 @@ void main(uint3 tid : SV_DispatchThreadID) {
         }
         // Rejected or invalid source radiance must not make geometry transparent.
         occupied |= covered;
-        if (occupied == 0xFFFFFFFFu) break;
+        if (occupied == 0xFFFFFFFFu && (specular_interval.w <= 0.0 || specular_occupied == 0xFFFFFFFFu)) break;
       }
     }
     // Importance sampling already accounts for slice weight. Fractional band
     // compensation would no longer describe which surface owns each sector.
     visibility += 1.0 - float(countbits(occupied)) / float(AO_SECTORS);
-    [branch]
-    if (directional_active) {
-      float2 slice_open_moment;
-      const float2 slice_moment = VisibleCosineSliceMoment(occupied, sector_offset, normal_angle,
-                                                           cos_n, slice_open_moment);
-      visible_moment += view_direction * slice_moment.x + slice_direction_3d * slice_moment.y;
-      open_moment += view_direction * slice_open_moment.x + slice_direction_3d * slice_open_moment.y;
+    if (specular_valid) {
+      const float open_mass = specular_interval.w * specular_weight;
+      specular_mass += float2(1.0 - float(countbits(specular_occupied)) / 32.0, 1.0) * open_mass;
     }
   }
 
   const float occlusion = saturate(1.0 - visibility / float(slices));
-  [branch]
-  if (directional_active) {
-    const float raw_visibility = 1.0 - occlusion;
-    // Remove the finite-slice open-hemisphere bias without changing closed
-    // pixels. A fully open cosine hemisphere has first moment (2/3) * N.
-    float3 moment = visible_moment / float(slices)
-                    + raw_visibility * (normal * (2.0 / 3.0) - open_moment / float(slices));
-    if (all(isfinite(moment))) {
-      const float4 bounded_moment = BoundDirectionalVisibility(float4(moment, raw_visibility), normal);
-      bent_normal_output[ao_pixel] = bounded_moment;
+  if (specular_valid) {
+    const float2 masses = specular_mass * (inverse_open_area / float(slices));
+    if (all(isfinite(masses)) && all(masses >= 0.0) && all(masses <= 65504.0)) {
+      specular_output[ao_pixel] = float4(min(masses.x, masses.y), masses.y, roughness, specular_support);
     }
   }
   const float applied = saturate(occlusion * CUSTOM_MGSV_AO_STRENGTH);
   ao_output[ao_pixel] = float2(1.0 - applied, 1.0);
-  if (diagnostic >= 9 && diagnostic <= 11) {
+  if (diagnostic >= 8 && diagnostic <= 10) {
     diagnostic_output[ao_pixel] = float4((1.0 - applied).xxx, 1.0);
   }
   // No-hit and black-source results remain valid zero. Missing qualification

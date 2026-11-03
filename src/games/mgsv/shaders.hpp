@@ -1,6 +1,5 @@
 /*
- * Copyright (C) 2024 Musa Haji
- * Copyright (C) 2026 ZioPao
+ * Copyright (C) 2026 Musa Haji
  * SPDX-License-Identifier: MIT
  */
 
@@ -81,7 +80,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
     bool lighting_enabled = false;
     {
       const std::shared_lock lock(renodx::utils::mutex::global_mutex);
-      lighting_enabled = shader_injection->lighting_mode >= 0.5f;
+      lighting_enabled = shader_injection->gt_enabled >= 0.5f;
     }
     mgsv::lighting::environment_specular::BeginCapture(cmd_list, lighting_enabled);
     return true;
