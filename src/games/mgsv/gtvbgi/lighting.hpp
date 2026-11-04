@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <shared_mutex>
 #include <span>
 #include <sstream>
@@ -82,6 +83,54 @@ inline reshade::api::resource noise_resource = {0};
 inline reshade::api::resource_view noise_view = {0};
 inline std::atomic<uint32_t> noise_frame = 0u;
 inline bool noise_creation_failed = false;
+inline std::shared_mutex noise_mutex;
+inline reshade::api::device* noise_device = nullptr;
+
+// Soft shadows and GT-VBGI share the same immutable texture and frame phase.
+// Return an owned view so device retirement cannot invalidate a borrowed handle.
+inline Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> GetNoiseView(reshade::api::device* device) {
+  if (inputs::ReadSelection(device).device == nullptr) return {};
+  {
+    const std::shared_lock lock(noise_mutex);
+    if (noise_device == device && noise_view.handle != 0) {
+      return Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>(reinterpret_cast<ID3D11ShaderResourceView*>(noise_view.handle));  // NOLINT(performance-no-int-to-ptr)
+    }
+    if (noise_creation_failed || (noise_device != nullptr && noise_device != device)) return {};
+  }
+  const std::unique_lock lock(noise_mutex);
+  if (noise_device != nullptr && noise_device != device) return {};
+  noise_device = device;
+  if (noise_view.handle == 0 && !noise_creation_failed) {
+    static_assert(FAST_NOISE_RG8.size() == 128u * 128u * 32u * 2u);
+    const reshade::api::resource_desc noise_desc(
+        128u, 128u, 32u, 1u, reshade::api::format::r8g8_unorm, 1u,
+        reshade::api::memory_heap::gpu_only, reshade::api::resource_usage::shader_resource);
+    std::array<reshade::api::subresource_data, 32> initial_data = {};
+    for (uint32_t slice = 0; slice < initial_data.size(); ++slice) {
+      // ReShade's upload API takes a mutable pointer but does not modify input data.
+      initial_data[slice] = {.data = const_cast<uint8_t*>(FAST_NOISE_RG8.data() + (slice * 128u * 128u * 2u)),
+                             .row_pitch = 256u,
+                             .slice_pitch = 128u * 128u * 2u};
+    }
+    if (device->create_resource(noise_desc, initial_data.data(), noise_desc.usage, &noise_resource)
+        && device->create_resource_view(noise_resource, reshade::api::resource_usage::shader_resource,
+                                        reshade::api::resource_view_desc(reshade::api::resource_view_type::texture_2d_array,
+                                                                         reshade::api::format::r8g8_unorm, 0u, 1u, 0u, 32u),
+                                        &noise_view)) {
+      LogLight(reshade::log::level::info, "IS-FAST noise created; 128x128x32 RG8_UNORM");
+    } else {
+      if (noise_resource.handle != 0) {
+        device->destroy_resource(noise_resource);
+        noise_resource = {0};
+      }
+      static std::atomic_flag failed = {};
+      noise_creation_failed = true;
+      LogLightOnce(&failed, reshade::log::level::warning, "IS-FAST noise unavailable until device recreation; PCSS uses a fixed disk and GT-VBGI is skipped");
+    }
+  }
+  if (noise_view.handle == 0) return {};
+  return Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>(reinterpret_cast<ID3D11ShaderResourceView*>(noise_view.handle));  // NOLINT(performance-no-int-to-ptr)
+}
 
 inline void DestroyLightTarget(reshade::api::device* device, LightTarget* target) {
   if (target->uav.handle != 0) {
@@ -208,6 +257,9 @@ inline void DestroyLightPass(reshade::api::device* device, LightPass* pass) {
 }
 
 inline void DestroyLightPassLayout(reshade::api::device* device) {
+  const std::unique_lock lock(noise_mutex);
+  if (noise_device != nullptr && noise_device != device) return;
+  noise_device = nullptr;
   if (noise_view.handle != 0) {
     device->destroy_resource_view(noise_view);
     noise_view = {0};
@@ -1091,35 +1143,8 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   constants.gt_previous_jitter_x = il::history.jitter_uv[0];
   constants.gt_previous_jitter_y = il::history.jitter_uv[1];
   constants.gt_velocity_jitter_scale = temporal.velocity_projection_jitter_scale;
-  if (lighting::noise_view.handle == 0 && !lighting::noise_creation_failed) {
-    static_assert(FAST_NOISE_RG8.size() == 128u * 128u * 32u * 2u);
-    const reshade::api::resource_desc noise_desc(
-        128u, 128u, 32u, 1u, reshade::api::format::r8g8_unorm, 1u,
-        reshade::api::memory_heap::gpu_only, reshade::api::resource_usage::shader_resource);
-    std::array<reshade::api::subresource_data, 32> initial_data = {};
-    for (uint32_t slice = 0; slice < initial_data.size(); ++slice) {
-      // ReShade's upload API takes a mutable pointer but does not modify input data.
-      initial_data[slice] = {.data = const_cast<uint8_t*>(FAST_NOISE_RG8.data() + (slice * 128u * 128u * 2u)),
-                             .row_pitch = 256u,
-                             .slice_pitch = 128u * 128u * 2u};
-    }
-    if (device->create_resource(noise_desc, initial_data.data(), noise_desc.usage, &lighting::noise_resource)
-        && device->create_resource_view(lighting::noise_resource, reshade::api::resource_usage::shader_resource,
-                                        reshade::api::resource_view_desc(reshade::api::resource_view_type::texture_2d_array,
-                                                                         reshade::api::format::r8g8_unorm, 0u, 1u, 0u, 32u),
-                                        &lighting::noise_view)) {
-      LogLight(reshade::log::level::info, "IS-FAST noise created; 128x128x32 RG8_UNORM");
-    } else {
-      if (lighting::noise_resource.handle != 0) {
-        device->destroy_resource(lighting::noise_resource);
-        lighting::noise_resource = {0};
-      }
-      static std::atomic_flag failed = {};
-      lighting::noise_creation_failed = true;
-      LogLightOnce(&failed, reshade::log::level::warning, "IS-FAST noise unavailable; skipping custom AO/GI until device recreation");
-    }
-  }
-  if (lighting::noise_view.handle == 0) return;
+  const auto noise = lighting::GetNoiseView(device);
+  if (noise == nullptr) return;
   const uint32_t width = (frame.width + scale - 1u) / scale;
   const uint32_t height = (frame.height + scale - 1u) / scale;
 
@@ -1367,7 +1392,7 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
       frame.light_source,
       frame.albedo,
       frame.specular,
-      lighting::noise_view,
+      reshade::api::resource_view{reinterpret_cast<uintptr_t>(noise.Get())},
       constants.gt_specular_active >= 0.5f ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->material.Get())} : GetFallbackView(cmd_list),
       constants.gt_specular_active >= 0.5f ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->srv.Get())} : GetFallbackView(cmd_list),
       GetFallbackView(cmd_list),

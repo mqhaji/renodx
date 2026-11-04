@@ -35,19 +35,15 @@ struct ShaderInjectData {
   float swap_chain_output_preset;
   float custom_motion_blur;
 
-  // Contact-hardening shadows for the directional light (sun or moon).
-  float sun_contact_hardening;
-  float sun_shadow_softness;
-  float sun_shadow_k;
-  float sun_shadow_blur_pixels;
+  // One switch controls PCSS for sun, moon, spot, and point lights.
+  float soft_shadows_enabled;
 
-  // Spotlights use their own softness and response settings.
-  float spot_contact_hardening;
-  float spot_shadow_softness;
-  float spot_shadow_k;
-  float spot_shadow_blur_pixels;
-  float spot_shadow_darkness;
-  float spot_cone_falloff;
+  // Spotlight PCSS controls. Distances use native game units.
+  float spot_pcss_light_radius;
+  float spot_pcss_max_radius;
+  float spot_pcss_blocker_samples;
+  float spot_pcss_filter_samples;
+  float spot_pcss_debug_view;
 
   // Extra directional shadows from objects visible on screen.
   float screen_space_shadows;
@@ -57,11 +53,11 @@ struct ShaderInjectData {
   float spot_screen_space_shadows;
   float spot_ss_samples;
   // Point-light shadow filtering and screen-space shadows.
-  float point_contact_hardening;
-  float point_shadow_softness;
-  float point_shadow_k;
-  float point_shadow_blur_pixels;
-  float point_shadow_darkness;
+  float point_pcss_light_radius;
+  float point_pcss_max_radius;
+  float point_pcss_blocker_samples;
+  float point_pcss_filter_samples;
+  float point_pcss_debug_view;
   float point_screen_space_shadows;
   float point_ss_samples;
 
@@ -128,6 +124,14 @@ struct ShaderInjectData {
   float ss_spot_budget;         // Maximum spotlight evaluations per lighting-buffer fill; 0 = unlimited.
   float ss_local_sampling;      // Pixel count: 0 = full, 1 = 1/2 (checkerboard), 2 = 1/4.
   float ss_local_culling;
+
+  // Sun/moon PCSS controls and the shared IS-FAST frame phase.
+  float sun_pcss_angle;       // Angular radius in radians.
+  float sun_pcss_max_radius;  // Search and filter radius in native game units.
+  float sun_pcss_blocker_samples;
+  float sun_pcss_filter_samples;
+  float sun_pcss_debug_view;
+  float shadow_noise_frame;
 };
 
 #ifndef __cplusplus
@@ -164,17 +168,20 @@ cbuffer RenoDXSettings : register(b13) {
 #define CUSTOM_TAA                    shader_injection.custom_taa
 #define CUSTOM_UNCLAMP_MOTION_VECTORS shader_injection.unclamp_motion_vectors
 
-#define CUSTOM_DIRECTIONAL_CONTACT_HARDENING         shader_injection.sun_contact_hardening
-#define CUSTOM_DIRECTIONAL_SHADOW_SOFTNESS           shader_injection.sun_shadow_softness
-#define CUSTOM_DIRECTIONAL_PENUMBRA_RESPONSE         shader_injection.sun_shadow_k
-#define CUSTOM_DIRECTIONAL_PENUMBRA_SMOOTHING_RADIUS shader_injection.sun_shadow_blur_pixels
+#define CUSTOM_SOFT_SHADOWS_ENABLED (shader_injection.soft_shadows_enabled >= 0.5)
 
-#define CUSTOM_SPOT_CONTACT_HARDENING shader_injection.spot_contact_hardening
-#define CUSTOM_SPOT_SHADOW_SOFTNESS   shader_injection.spot_shadow_softness
-#define CUSTOM_SPOT_SHADOW_K          shader_injection.spot_shadow_k
-#define CUSTOM_SPOT_BLUR_PIXELS       shader_injection.spot_shadow_blur_pixels
-#define CUSTOM_SPOT_SHADOW_DARKNESS   shader_injection.spot_shadow_darkness
-#define CUSTOM_SPOT_CONE_FALLOFF      shader_injection.spot_cone_falloff
+#define CUSTOM_SUN_PCSS_ANGLE           shader_injection.sun_pcss_angle
+#define CUSTOM_SUN_PCSS_MAX_RADIUS      shader_injection.sun_pcss_max_radius
+#define CUSTOM_SUN_PCSS_BLOCKER_SAMPLES shader_injection.sun_pcss_blocker_samples
+#define CUSTOM_SUN_PCSS_FILTER_SAMPLES  shader_injection.sun_pcss_filter_samples
+#define CUSTOM_SUN_PCSS_DEBUG_VIEW      shader_injection.sun_pcss_debug_view
+#define CUSTOM_SHADOW_NOISE_FRAME       shader_injection.shadow_noise_frame
+
+#define CUSTOM_SPOT_PCSS_LIGHT_RADIUS    shader_injection.spot_pcss_light_radius
+#define CUSTOM_SPOT_PCSS_MAX_RADIUS      shader_injection.spot_pcss_max_radius
+#define CUSTOM_SPOT_PCSS_BLOCKER_SAMPLES shader_injection.spot_pcss_blocker_samples
+#define CUSTOM_SPOT_PCSS_FILTER_SAMPLES  shader_injection.spot_pcss_filter_samples
+#define CUSTOM_SPOT_PCSS_DEBUG_VIEW      shader_injection.spot_pcss_debug_view
 
 #define CUSTOM_SS_CONTRAST    shader_injection.ss_shadow_contrast
 #define CUSTOM_SS_DEBUG_VIEW  shader_injection.ss_shadow_debug_view
@@ -194,11 +201,11 @@ cbuffer RenoDXSettings : register(b13) {
 #define CUSTOM_SS_SPOT_SHADOWS shader_injection.spot_screen_space_shadows
 #define CUSTOM_SS_SPOT_SAMPLES shader_injection.spot_ss_samples
 
-#define CUSTOM_POINT_CONTACT_HARDENING shader_injection.point_contact_hardening
-#define CUSTOM_POINT_SHADOW_SOFTNESS   shader_injection.point_shadow_softness
-#define CUSTOM_POINT_SHADOW_K          shader_injection.point_shadow_k
-#define CUSTOM_POINT_BLUR_PIXELS       shader_injection.point_shadow_blur_pixels
-#define CUSTOM_POINT_SHADOW_DARKNESS   shader_injection.point_shadow_darkness
+#define CUSTOM_POINT_PCSS_LIGHT_RADIUS    shader_injection.point_pcss_light_radius
+#define CUSTOM_POINT_PCSS_MAX_RADIUS      shader_injection.point_pcss_max_radius
+#define CUSTOM_POINT_PCSS_BLOCKER_SAMPLES shader_injection.point_pcss_blocker_samples
+#define CUSTOM_POINT_PCSS_FILTER_SAMPLES  shader_injection.point_pcss_filter_samples
+#define CUSTOM_POINT_PCSS_DEBUG_VIEW      shader_injection.point_pcss_debug_view
 
 #define CUSTOM_SS_POINT_SHADOWS shader_injection.point_screen_space_shadows
 #define CUSTOM_SS_POINT_SAMPLES shader_injection.point_ss_samples

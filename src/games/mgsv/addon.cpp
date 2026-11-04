@@ -383,6 +383,8 @@ void OnPresent(
     const reshade::api::rect* dirty_rects) {
   bool temporal_lighting_enabled = false;
   bool lighting_enabled = false;
+  bool selected_present = false;
+  uint32_t shadow_noise_frame = 0u;
   {
     const std::shared_lock settings_lock(renodx::utils::mutex::global_mutex);
     lighting_enabled = shader_injection.gt_enabled >= 0.5f;
@@ -397,8 +399,13 @@ void OnPresent(
       }
       mgsv::lighting::temporal_inputs::enabled.store(temporal_lighting_enabled, std::memory_order_release);
       mgsv::lighting::temporal_inputs::BeginFrame(queue->get_device());
-      mgsv::lighting::noise_frame.fetch_add(1u, std::memory_order_relaxed);
+      shadow_noise_frame = mgsv::lighting::noise_frame.fetch_add(1u, std::memory_order_relaxed) + 1u;
+      selected_present = true;
     }
+  }
+  if (selected_present) {
+    const std::unique_lock settings_lock(renodx::utils::mutex::global_mutex);
+    shader_injection.shadow_noise_frame = static_cast<float>(shadow_noise_frame & 31u);
   }
   (void)source_rect;
   (void)dest_rect;

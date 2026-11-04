@@ -45,7 +45,7 @@ Native captures show that later passes also copy the diffuse-light buffer to mea
 ## Input and layout contracts
 
 - Lighting uses the scatter pass's existing 64-byte geometry constants at compute `b0`. Pixel shaders use `b0` for different data.
-- `ShaderInjectData` is 101 floats: 404 CPU bytes and 416 padded GPU bytes at `b13`. User controls follow their feature groups; effect-local copies hold scale, filter steps, history flags, and the current Bend light type. Bend surface thickness and the bilinear threshold are fixed constants. The shared SDK `PrepareConstants` layout remains 96 bytes.
+- `ShaderInjectData` is 103 floats: 412 CPU bytes and 416 padded GPU bytes at `b13`. It contains the sun, spot, and point PCSS controls; the retired soft-shadow fields have been removed. Effect-local copies hold scale, filter steps, history flags, and the current Bend light type. Bend surface thickness and the bilinear threshold are fixed constants. The shared SDK `PrepareConstants` layout remains 96 bytes.
 - Temporal `b1/b2` hold current/previous native scene data, not duplicate settings. Copy the actual native constant-buffer allocation and preserve its bound range; the reflected scene structure is 480 bytes. History owns another GPU copy because replaying a producer command list can overwrite its snapshot.
 - AO raw, history, and filter textures use RG16F: R is visibility and G is validity. GI uses RGBA16F with validity in alpha. One shared pair of R32G32_UINT geometry textures stores FP32 linear-depth bits and two packed 16-bit normal coordinates. Shader calculations use FP32; no radiance variance textures are allocated.
 - Lighting has eleven texture-input slots (SRVs) and five writable-output slots (UAVs). Unused outputs use distinct placeholder textures so they cannot conflict with inputs or each other.
@@ -73,7 +73,7 @@ Default tracing uses 60 samples, contrast 4, four hard samples, and eight end-fa
 
 ## Settings and reconstruction
 
-Screen-Space Lighting appears under Indirect Lighting, uses Off / GT-VBGI, defaults to enabled, and uses the key `FxIndirectLightingEnabled`. AO, GI, and specular-occlusion strengths appear before Lighting Resolution. Sampling and filtering controls remain in the collapsed advanced section. Preset Off disables lighting and the six shadow switches while leaving reconstruction selected.
+Screen-Space Lighting appears under Indirect Lighting, uses Off / GT-VBGI, defaults to enabled, and uses the key `FxIndirectLightingEnabled`. AO, GI, and specular-occlusion strengths appear before Lighting Resolution. Sampling and filtering controls remain in the collapsed advanced section. Preset Off disables lighting, Soft Shadows, and the three contact-shadow switches while leaving reconstruction selected.
 
 Lighting Resolution labels describe total pixel count: Full, 1/4, 1/16, and 1/64 use axis divisors of 1, 2, 4, and 8. The default is 1/16, with each axis divided by 4. Reduced texture extents round up at odd dimensions, so the fractions are nominal.
 

@@ -30,9 +30,32 @@ m_shadowProjection2
 m_shadowMapResolutions = 8192, 4096, 8192, 4096
 ```
 
-A projection diagonal changes with rotation; the length of a row or column gives the scale for this captured uniformly scaled transform. Spotlight perspective-depth reconstruction and point-light seam handling require their own checks before changing the soft-shadow math.
+A projection diagonal changes with rotation; the length of a row or column gives the scale for this captured uniformly scaled transform. The PCSS fixtures check each light's depth convention independently. These synthetic checks do not establish runtime quality or performance.
+
+The sun PCSS filter uses row-vector projection: `q = mul(float4(view_position, 1), m_shadowProjection).xyz`. Cascade 0 uses `q`; cascades 1 through 3 use `q * m_shadowProjection2[cascade - 1].w + m_shadowProjection2[cascade - 1].xyz`. Native shadow depth is `(1 + q.z) * m_shadowProjection2._m30`. Larger stored depth is closer to the light, so blockers have depth greater than the receiver. Dividing their positive depth gap by `length(m_shadowProjection._m02_m12_m22) * abs(cascade_scale * m_shadowProjection2._m30)` gives separation in game units. PCSS multiplies that separation by the tangent of the light's angular radius; it does not divide by raw blocker depth.
+
+Spot shadow coordinates are already mapped to texture UV by `m_shadowProjection`; divide by projected `w` without another clip-to-UV conversion. Let `w_axis = M._m03_m13_m23`, `a = dot(M._m02_m12_m22, w_axis) / dot(w_axis, w_axis)`, and `b = M._m32 - a * M._m33`. Stored depth is `a + b / w`, and light-axis distance is `b / ((depth - a) * length(w_axis))`. This handles a rotated or translated perspective matrix. The native cone mask and distance fade are applied after filtering. Local PCSS uses emitter radius times the separation between receiver and blocker divided by blocker distance, bounded by the configured maximum radius.
+
+Point shadow depth is `1 - distance * lightParams[7].z`. The native path offsets the receiver's camera-space Z before transforming it, reverses X in the light-relative vector, and projects into two paraboloid halves. PCSS keeps that input construction. Its projection matches the native two-texel hemisphere shrink and negative half-texel offset; each sample chooses its hemisphere from the sign of its light-space Z. Samples crossing the equator therefore read the other half, rather than clamping to the original tile. Radial comparisons intersect the sample direction with the receiver plane to reduce slope self-shadowing.
 
 Increasing cascade range spreads the same texels over more ground. Increasing resolution alone cannot add absent casters. Virtual shadow maps would also require page allocation, caster rendering, and cache invalidation; changing a sampling shader would not supply those systems.
+
+## Native light sizes
+
+Read-only replay of the two Graphical Enhancements captures and the temporal/filter menu capture verified size inputs in the native highlight calculations. These captures predate the current PCSS implementation. Shader bytecode matched the native dump, and 13 selected constant blocks agreed between raw-byte and reflected-variable reads.
+
+| Input | Native location | Observed values |
+|---|---|---|
+| Directional highlight size | PS b3, lightParams[1].w, byte 28 | 0.04361938685178757 in all three captures |
+| Local-light source size | PS b3, lightParams[4].w, byte 76 | 0 in all 138 spotlight and 12 point-light draws inspected |
+
+The local-light dump names the input size and its conversion AdjustLightSizeFromDistance. It computes approximately saturate(0.9 * size / adjusted_receiver_distance), then uses the result to adjust the specular light direction. Zero size also appears alongside nonzero RGB, so these are not merely empty light buffers. Draw counts include repeated volume draws and are not unique-light counts.
+
+The directional value is passed into the same highlight-size role without the local-distance conversion. It numerically equals sin(2.5 degrees), within float precision. This is evidence for an angular proxy, not proof that the visible sun or a physical emitter has a 2.5-degree radius. Converting it to a 2.5-degree PCSS setting would give roughly 9.265 times our 0.27-degree setting's uncapped radius for the same blocker gap.
+
+The captures include shadowed spotlights, but their point-light draws use unshadowed variants. They do not directly qualify the shadowed-point or distance-spot permutation, a separate moonlight case, or any nonzero local emitter size. The observations do not establish that every MGSV light always has size zero.
+
+PCSS therefore keeps its manual source-size controls. A pure native-size multiplier would leave the observed local sources at zero and remove the added softness. Any future automatic policy needs a deliberate minimum or override for zero-size lights and separate directional calibration. Light range and cone angle describe where illumination reaches; they are not substitute emitter dimensions.
 
 ## Foliage
 
