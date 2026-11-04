@@ -110,6 +110,11 @@ struct Snapshot {
   Materials materials;
 };
 
+struct Selection {
+  reshade::api::device* device = nullptr;
+  uint64_t generation = 0u;
+};
+
 namespace internal {
 
 struct State {
@@ -165,11 +170,17 @@ inline bool IsSelectedSwapchain(reshade::api::swapchain* swapchain) {
 }
 
 inline Snapshot Read(reshade::api::device* device) {
-  if (!IsSelectedDevice(device)) return {};
   const std::shared_lock lock(internal::state.mutex);
   if (!internal::state.accepting || device == nullptr || internal::state.snapshot.device != device) return {};
   // Copying owned ComPtrs under this leaf lock is the only permitted native reference acquisition here.
   return internal::state.snapshot;
+}
+
+// Consumers that only need retirement metadata do not copy retained views.
+inline Selection ReadSelection(reshade::api::device* device) {
+  const std::shared_lock lock(internal::state.mutex);
+  if (!internal::state.accepting || device == nullptr || internal::state.snapshot.device != device) return {};
+  return {.device = device, .generation = internal::state.snapshot.generation};
 }
 
 inline void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {

@@ -12,7 +12,7 @@ Reconstruction settings stay independent of RenoDX presets. DLSS requires a comp
 
 **Screen-Space Lighting** selects Off or GT-VBGI. One search through scene depth supplies AO contact shading, GI light bouncing from visible surfaces, and specular visibility for environment reflections. AO, GI, and Specular Occlusion have separate strengths; resolution and sampling controls are shared.
 
-Defaults are GT-VBGI, all three strengths at 75%, Quarter resolution, a 2000-pixel radius, 40 samples per side, three sampling directions, surface thickness 0.15, and surface offset 1/1024 in the game's view-space units. Full/Half/Quarter/Eighth scale both image dimensions, so Quarter processes 1/16 as many pixels. Coarse depth sampling and GI backface rejection default to Off; reflections contribute zero to the GI source by default. Noise uses IS-FAST.
+Defaults are GT-VBGI, all three strengths at 75%, 1/16 resolution, a 2000-pixel radius, 40 samples per side, three sampling directions, surface thickness 0.15, and surface offset 1/1024 in the game's view-space units. Full/1/4/1/16/1/64 describe total pixel count: the reduced options divide each axis by 2, 4, or 8. Coarse depth sampling and GI backface rejection default to Off; reflections contribute zero to the GI source by default. Noise uses IS-FAST.
 
 Surface Thickness controls the assumed depth of sampled geometry. Search Radius changes reach; samples and directions control coverage quality. **Specular Occlusion Strength** blends from native environment occlusion at 0% to the bitmask estimate at 100%, reduced where sampling is unreliable. It can darken blocked reflections or restore reflections that native AO darkens too much. **Reject Backfacing GI Sources** suppresses source light while retaining its occlusion. **Reflections in GI Source** adds a view-dependent specular approximation to the bounce source.
 
@@ -32,9 +32,13 @@ Preset Off disables combined lighting and the six shadow enhancement switches wh
 
 ## Shadows
 
-Contact-hardening shadows soften supported sun, spot, and point shadows as estimated blocker separation grows. Screen-space shadows supplement shadow maps with nearby visible geometry. These are replacements inside existing lighting draws, with independent controls for each light type.
+Contact-hardening filters soften the native sun, spot, and point shadow maps. Bend screen-space shadows add nearby contact detail from visible geometry before each supported light draw. They affect direct diffuse and specular lighting while preserving environment reflections and native alpha. Each light type has its own switch, with sample count under Screen-Space Shadows (Advanced).
 
-See the [sun](shadows/MGSV_SunShadow_ContactHardening.md), [spot](shadows/MGSV_SpotLight_ContactHardening.md), and [screen-space shadow](shadows/MGSV_ScreenSpaceShadows.md) notes for native bindings, filtering, and limitations.
+Defaults are 60 samples, contrast 4, Spot Contact Shadow Budget 10, Full local sampling, and Skip Unlit Areas On. Surface thickness is fixed at 0.5% and the bilinear depth threshold at 2%. Local Shadow Sampling measures evaluated pixel count: Full, 1/2 (Checkerboard), or 1/4. The 1/4 option can shimmer in motion; Full remains the default. Checkerboard retains shared depth reads and adds reconstruction, so it may cost about as much as Full.
+
+Spot Contact Shadow Budget admits the first eligible spotlight evaluations between native lighting-buffer clears. Zero is Unlimited. Local distance and minimum-coverage limits can skip extra detail; both default to disabled, with a 25% distance-fade range. Skipped work keeps native lighting and shadow maps. These controls limit GPU work while CPU submission still runs.
+
+See the [shadow guide](shadows/README.md) for controls, debug views, and testing.
 
 ## Precision and rendering structure
 
@@ -52,9 +56,9 @@ Generic copy shader `0x83272BCB` is upgraded only when the surrounding draws est
 
 The [architecture guide](docs/ARCHITECTURE.md) explains which files manage each feature, rendering order, required input formats, and what has been verified. The [shader name map](docs/MGSV_PixelShader_NameMap.md) and [Fox Engine reference](docs/Fox_Engine_Render_Pipeline_Reference.md) retain findings from inspecting the game.
 
-## Building & Deployment
+## Build and deploy
 
-Build the `mgsv` target through CMake Tools with the approved configuration and MGSV fully stopped. Deploy the matching `renodx-mgsv.addon64` beside `mgsvtpp.exe`, then restart. Camera hooks stay installed until the game exits, so do not unload or replace the addon while playing. Replace the DLSS DLL only with the game stopped too.
+Build the `mgsv` target through CMake Tools with the approved configuration. Builds are allowed while MGSV runs. Stop the game before deploying `renodx-mgsv.addon64` beside `mgsvtpp.exe`, then restart. Camera hooks stay installed until the game exits, so do not unload or replace the addon while playing. Replace the DLSS DLL only with the game stopped too.
 
 After shader or shared-layout changes, verify that generated headers match the compiled shaders and that the deployed addon contains those bytes. The lighting outputs are `gtvbgi`, `gtvbgi_depth_mips`, `gtvbgi_temporal`, `gtvbgi_filter`, and `gtvbgi_add` under `build/mgsv.include/embed`. A successful build or automated test still needs gameplay checks.
 
@@ -62,7 +66,7 @@ After shader or shared-layout changes, verify that generated headers match the c
 
 1. Confirm RenoDX loads in ReShade and saved settings survive restart. Exercise Reset All and Preset Off; reconstruction must remain independently selected.
 2. Compare Screen-Space Lighting Off/GT-VBGI with the camera and other settings fixed. Vary AO, GI, and Specular Occlusion strengths independently. Check contact shading, color bounce, rough and smooth reflections, hair, foliage, and screen edges. Specular strength 0% should restore native environment occlusion. Check transitions into low-confidence regions, which retain native occlusion.
-3. Check Full/Half/Quarter/Eighth and coarse depth sampling Off/On, including odd render dimensions. Look for shifted output, edge strips, leaks, and loss of thin geometry.
+3. Check Full/1/4/1/16/1/64 and coarse depth sampling Off/On, including odd render dimensions. Look for shifted output, edge strips, leaks, and loss of thin geometry.
 4. Check fog, rain, skin scattering, SDR/HDR, camera motion, and reconstruction Off/On. Direct highlights and separate rain reflections should retain their existing treatment. Check cold startup, gameplay, and returning to the menu for missing or stale specular data.
 5. Compare temporal and spatial filtering separately and together. Set either history weight to zero to check the other signal independently. Check stationary noise, moving characters, newly revealed surfaces, exposure changes, and the temporal/filtered/history debug views. Toggling filtering should not shift the image or change overall brightness.
 6. Follow the [reconstruction validation matrix](reconstruction/README.md#manual-validation) for method changes, animation, special views, and lifecycle checks.

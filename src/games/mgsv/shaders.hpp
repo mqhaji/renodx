@@ -16,6 +16,7 @@
 #include "gtvbgi/lighting.hpp"
 #include "inputs.hpp"
 #include "resource_upgrades.hpp"
+#include "shadows/screen_space_shadows.hpp"
 #include "shared.h"
 
 // Explicit registrations precede the generated shader entries.
@@ -75,6 +76,17 @@ namespace mgsv::game {
 
 // The supplied shader data must outlive this registry and its draw callbacks.
 inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shader_injection) {
+  const auto begin_shadows = [shader_injection](reshade::api::command_list* cmd_list, uint32_t light_type) {
+    ShaderInjectData constants = {};
+    {
+      const std::shared_lock lock(renodx::utils::mutex::global_mutex);
+      const float enabled = (light_type == 0u ? shader_injection->screen_space_shadows
+                                              : (light_type == 2u ? shader_injection->point_screen_space_shadows : shader_injection->spot_screen_space_shadows));
+      if (enabled < 0.5f) return;
+      constants = *shader_injection;
+    }
+    mgsv::shadows::screen_space::Begin(cmd_list, constants, light_type);
+  };
   const auto capture_environment = [shader_injection](reshade::api::command_list* cmd_list) {
     mgsv::lighting::temporal_inputs::CaptureScene(cmd_list);
     bool lighting_enabled = false;
@@ -88,6 +100,28 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
   const auto capture_active = [](reshade::api::command_list* cmd_list) {
     const auto* saved = cmd_list->get_private_data<mgsv::lighting::environment_specular::DrawState>();
     return saved != nullptr && saved->active;
+  };
+  const auto begin_directional = [shader_injection](reshade::api::command_list* cmd_list) {
+    ShaderInjectData constants = {};
+    bool shadows_enabled = false, lighting_enabled = false;
+    {
+      const std::shared_lock lock(renodx::utils::mutex::global_mutex);
+      shadows_enabled = shader_injection->screen_space_shadows >= 0.5f;
+      lighting_enabled = shader_injection->gt_enabled >= 0.5f;
+      if (shadows_enabled) {
+        constants = *shader_injection;
+      }
+    }
+    if (shadows_enabled) {
+      mgsv::shadows::screen_space::Begin(cmd_list, constants, 0u);
+    }
+    mgsv::lighting::temporal_inputs::CaptureScene(cmd_list);
+    mgsv::lighting::environment_specular::BeginCapture(cmd_list, lighting_enabled);
+    return true;
+  };
+  const auto end_directional = [](reshade::api::command_list* cmd_list) {
+    mgsv::lighting::environment_specular::EndCapture(cmd_list);
+    mgsv::shadows::screen_space::End(cmd_list);
   };
   return {
       // DOF_ScatterCompositeNear
@@ -168,8 +202,8 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
           {
               .crc32 = 0x5AFD2E17,
               .code = __0x5AFD2E17,
-              .on_draw = capture_environment,
-              .on_drawn = &mgsv::lighting::environment_specular::EndCapture,
+              .on_draw = begin_directional,
+              .on_drawn = end_directional,
               .get_replacement_pipeline = [](reshade::api::command_list* cmd_list) { return mgsv::lighting::environment_specular::GetShadowedCapturePipeline(cmd_list, __sun_environment_capture); },
           },
       },
@@ -178,10 +212,48 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
           {
               .crc32 = 0x712F7222,
               .code = __0x712F7222,
-              .on_replace = capture_active,
-              .on_inject = [](reshade::api::command_list*) { return false; },
-              .on_draw = capture_environment,
-              .on_drawn = &mgsv::lighting::environment_specular::EndCapture,
+              .on_replace = [capture_active](reshade::api::command_list* cmd_list) {
+                const auto* state = cmd_list->get_private_data<mgsv::shadows::screen_space::DrawState>();
+                return capture_active(cmd_list) || (state != nullptr && state->active && state->replacement_safe);
+              },
+              .on_draw = begin_directional,
+              .on_drawn = end_directional,
+          },
+      },
+      {
+          0x08292A5E,
+          {
+              .crc32 = 0x08292A5E,
+              .code = __0x08292A5E,
+              .on_draw = [begin_shadows](reshade::api::command_list* cmd_list) {
+                begin_shadows(cmd_list, 1u);
+                return true;
+              },
+              .on_drawn = &mgsv::shadows::screen_space::End,
+          },
+      },
+      {
+          0x1D4DB9C5,
+          {
+              .crc32 = 0x1D4DB9C5,
+              .code = __0x1D4DB9C5,
+              .on_draw = [begin_shadows](reshade::api::command_list* cmd_list) {
+                begin_shadows(cmd_list, 3u);
+                return true;
+              },
+              .on_drawn = &mgsv::shadows::screen_space::End,
+          },
+      },
+      {
+          0x80F0A0BC,
+          {
+              .crc32 = 0x80F0A0BC,
+              .code = __0x80F0A0BC,
+              .on_draw = [begin_shadows](reshade::api::command_list* cmd_list) {
+                begin_shadows(cmd_list, 2u);
+                return true;
+              },
+              .on_drawn = &mgsv::shadows::screen_space::End,
           },
       },
       {

@@ -18,6 +18,7 @@
 
 // The addon's injected settings, which carry the tunables below.
 #include "../shared.h"
+#include "screen_space_shadows.hlsli"
 
 // To iterate through the devkit instead, pin them here: that path replaces the
 // shader without supplying RenoDXSettings, and D3D11 returns 0 for an unbound constant
@@ -33,36 +34,8 @@
 // #define CUSTOM_POINT_BLUR_PIXELS       24.0
 // #undef  CUSTOM_POINT_SHADOW_DARKNESS
 // #define CUSTOM_POINT_SHADOW_DARKNESS   1.0
-// #undef  CUSTOM_SS_POINT_SHADOWS
-// #define CUSTOM_SS_POINT_SHADOWS        1.0
-// #undef  CUSTOM_SS_POINT_REACH
-// #define CUSTOM_SS_POINT_REACH          0.05
-// #undef  CUSTOM_SS_POINT_THICKNESS
-// #define CUSTOM_SS_POINT_THICKNESS      0.005
-// #undef  CUSTOM_SS_POINT_STRENGTH
-// #define CUSTOM_SS_POINT_STRENGTH       2.0
-// #undef  CUSTOM_SS_POINT_FADE_END
-// #define CUSTOM_SS_POINT_FADE_END       40.0
-// #undef  CUSTOM_SS_POINT_MATERIAL_MAX
-// #define CUSTOM_SS_POINT_MATERIAL_MAX   0.25
 
 #define POINT_MIN_TEXELS 6.0
-
-// ---- Screen-space shadow complement -----------------------------------------
-//
-// Same march as the sun and spot, but once per point draw. The direction toward
-// the light is per pixel and comes from m_lightParams[3].xyz, exactly as the spot
-// block does; an omni light has a position, not a direction.
-//
-// A scene can hold several point lights and each draw runs this pass, so the
-// term has its own toggle; it defaults on, like the spot term.
-//
-// These constants are the spot shader's, unchanged.
-#define SS_STEPS        48
-#define SS_NORMAL_BIAS  0.0
-#define SS_REACH_MAX_M  6.00
-#define SS_CASTER_MAX_M 0.25
-#define SS_CASTER_PER_M 0.010
 
 // Vogel disk, precomputed. Only the per-pixel rotation varies.
 static const float2 kPcssVogelDisk[32] = {
@@ -620,79 +593,7 @@ void main(
   r2.xyz = r2.xyz;
   r2.xyzw = r2.xyzw;
   r2.xyzw = r2.xyzw;
-  // =========================================================================
-  // Screen-space shadow complement (point light).
-  //
-  // The point map cannot resolve centimetre contact detail either, so this
-  // supplies the high-frequency half: march the depth buffer toward the light
-  // and attenuate where the ray passes behind a nearer surface.
-  //
-  // The direction toward the light is per pixel: m_lightParams[3].xyz is the
-  // light's view-space position, exactly as in the spot port. An omni light has
-  // no cone constant, so this is the only light-specific input.
-  //
-  // Only the diffuse accumulation (r2, SV_Target0) is scaled, as in the sun and
-  // spot shaders. The specular target (r0) is left alone.
-  // =========================================================================
-  {
-    const float2 uv = v0.xy / max(g_psScene.m_viewportSize.xy, float2(1.0, 1.0));
-    const float d = g_DepthTexture.SampleLevel(g_samplerPoint_Clamp_s, uv, 0).x;
-    const float viewZ = g_psScene.m_projectionParam.z / max(d - g_psScene.m_projectionParam.w, 1e-6);
-
-    const float band = g_SpecularTexture.SampleLevel(g_samplerPoint_Wrap_s, uv, 0).z;
-
-    if (CUSTOM_SS_POINT_SHADOWS != 0.f
-        && band < CUSTOM_SS_POINT_MATERIAL_MAX
-        && viewZ < CUSTOM_SS_POINT_FADE_END
-        && max(r2.x, max(r2.y, r2.z)) > 0.0) {
-      const float jitter = PcssInterleavedGradientNoise(v0.xy);
-      const float fadeStart = 40.0;
-      const float fade = 1.0 - saturate((viewZ - fadeStart) / max(CUSTOM_SS_POINT_FADE_END - fadeStart, 1e-3));
-
-      const float2 ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
-      const float3 viewPos = float3(ndc.x * viewZ / g_psScene.m_projection._m00,
-                                    ndc.y * viewZ / g_psScene.m_projection._m11,
-                                    viewZ);
-
-      const float3 lightDir = normalize(g_psLight.m_lightParams[3].xyz - viewPos);
-
-      const float3 gbufN = g_NormalTexture.SampleLevel(g_samplerPoint_Clamp_s, uv, 0).xyz;
-      const float3 normal = normalize(float3(gbufN.xy * 2.0 - 1.0, gbufN.z * gbufN.z * 2.0 - 1.0));
-
-      const float marchStep = min(CUSTOM_SS_POINT_REACH * viewZ / abs(g_psScene.m_projection._m11), SS_REACH_MAX_M) / (float)SS_STEPS;
-      const float3 rayDir = lightDir * marchStep;
-      const float3 rayStart = viewPos + normal * SS_NORMAL_BIAS;
-      const float4 clipStart = mul(float4(rayStart, 1.0), g_psScene.m_projection);
-      const float4 clipStep = mul(float4(rayDir, 0.0), g_psScene.m_projection);
-
-      const float occSaturated = SS_STEPS / max(CUSTOM_SS_POINT_STRENGTH * fade, 1e-6);
-
-      float occ = 0.0;
-      for (int s = 0; s < SS_STEPS; ++s) {
-        const float u = ((float)s + jitter) / (float)SS_STEPS;
-        const float t = (0.25 * u + 0.75 * u * u) * (float)SS_STEPS;
-        const float4 clip = clipStart + clipStep * t;
-        if (clip.w <= 1e-6) break;
-        const float2 suv = clip.xy / clip.w * float2(0.5, -0.5) + 0.5;
-        if (any(suv < 0.0) || any(suv > 1.0)) break;
-        if (occ >= occSaturated) break;
-        const float sd = g_DepthTexture.SampleLevel(g_samplerPoint_Clamp_s, suv, 0).x;
-        const float sz = g_psScene.m_projectionParam.z / max(sd - g_psScene.m_projectionParam.w, 1e-6);
-        const float sep = rayStart.z + rayDir.z * t - sz;
-        if (sep > CUSTOM_SS_POINT_THICKNESS
-            && sep < max(SS_CASTER_MAX_M, viewZ * SS_CASTER_PER_M)) {
-          if (CUSTOM_SS_POINT_MATERIAL_MAX >= 0.999
-              || g_SpecularTexture.SampleLevel(g_samplerPoint_Wrap_s, suv, 0).z < CUSTOM_SS_POINT_MATERIAL_MAX) {
-            occ += 1.0;
-          }
-        }
-      }
-
-      const float ssOcc = (occ / (float)SS_STEPS) * fade;
-      r2.xyz *= saturate(1.0 - ssOcc * CUSTOM_SS_POINT_STRENGTH);
-    }
-  }
-
+  ApplyBendShadow(v0.xy, 2u, g_DepthTexture, g_psScene.m_projectionParam.zw, r2.xyz, r0.xyz);
   o0.xyzw = r2.xyzw;
   o1.xyzw = r0.xyzw;
   return;

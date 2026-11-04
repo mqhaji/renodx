@@ -110,7 +110,7 @@ inline void Record(reshade::api::command_list* cmd_list, Producer producer) {
 
 inline void CaptureScene(reshade::api::command_list* cmd_list) {
   if (cmd_list == nullptr || !enabled.load(std::memory_order_acquire)) return;
-  const auto selected = inputs::Read(cmd_list->get_device());
+  const auto selected = inputs::ReadSelection(cmd_list->get_device());
   if (selected.device == nullptr) return;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   if (context == nullptr) return;
@@ -199,7 +199,7 @@ inline void Submit(ID3D11CommandList* list) {
 }
 
 inline Snapshot Read(reshade::api::device* device, reshade::api::resource_view scatter_depth) {
-  const auto selected = inputs::Read(device);
+  const auto selected = inputs::ReadSelection(device);
   if (selected.device == nullptr || scatter_depth.handle == 0u) return {};
   auto* depth_view = reinterpret_cast<ID3D11ShaderResourceView*>(scatter_depth.handle);  // NOLINT(performance-no-int-to-ptr)
   Microsoft::WRL::ComPtr<ID3D11Resource> depth;

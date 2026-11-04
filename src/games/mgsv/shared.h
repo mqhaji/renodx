@@ -51,20 +51,11 @@ struct ShaderInjectData {
 
   // Extra directional shadows from objects visible on screen.
   float screen_space_shadows;
-  float ss_shadow_reach;
-  float ss_shadow_thickness;
-  float ss_shadow_strength;
-  float ss_shadow_fade_end;
-  float ss_shadow_material_max;
+  float ss_shadow_samples;
 
   // Extra spotlight shadows run separately for each light.
   float spot_screen_space_shadows;
-  // Spotlight tuning is independent of directional shadows.
-  float spot_ss_reach;
-  float spot_ss_thickness;
-  float spot_ss_strength;
-  float spot_ss_fade_end;
-  float spot_ss_material_max;
+  float spot_ss_samples;
   // Point-light shadow filtering and screen-space shadows.
   float point_contact_hardening;
   float point_shadow_softness;
@@ -72,18 +63,14 @@ struct ShaderInjectData {
   float point_shadow_blur_pixels;
   float point_shadow_darkness;
   float point_screen_space_shadows;
-  float point_ss_reach;
-  float point_ss_thickness;
-  float point_ss_strength;
-  float point_ss_fade_end;
-  float point_ss_material_max;
+  float point_ss_samples;
 
   // Indirect Lighting controls, in GUI order.
   float gt_enabled;  // 0 = Off, 1 = GT-VBGI.
   float ao_strength;
   float gi_strength;
   float specular_occlusion_strength;
-  float gt_resolution;  // 0 = full, 1 = half, 2 = quarter, 3 = eighth.
+  float gt_resolution;  // Pixel count: 0 = full, 1 = 1/4, 2 = 1/16, 3 = 1/64.
   float gt_search_radius_pixels;
   float gt_surface_thickness;  // Native view-depth units.
   float gt_surface_offset;     // Receiver offset along the shading normal, in native view-space units.
@@ -127,6 +114,20 @@ struct ShaderInjectData {
   float ao_temporal_active;
   float gt_specular_active;  // Dispatch-local input/output availability.
   float gt_specular_history_valid;
+
+  // Bend contact-shadow controls and values copied for this light draw.
+  float ss_shadow_contrast;
+  float ss_shadow_debug_view;
+  float ss_shadow_debug_light;
+  float ss_shadow_light_type;  // 0 = directional, 1 = spot, 2 = point, 3 = distance spot.
+
+  // Optional local-light limits. Zero distance or coverage keeps full detail.
+  float ss_local_max_distance;  // Forward camera depth in native game units.
+  float ss_local_fade_fraction;
+  float ss_local_min_coverage;  // Fraction of the viewport covered by the receiver bounds.
+  float ss_spot_budget;         // Maximum spotlight evaluations per lighting-buffer fill; 0 = unlimited.
+  float ss_local_sampling;      // Pixel count: 0 = full, 1 = 1/2 (checkerboard), 2 = 1/4.
+  float ss_local_culling;
 };
 
 #ifndef __cplusplus
@@ -175,19 +176,23 @@ cbuffer RenoDXSettings : register(b13) {
 #define CUSTOM_SPOT_SHADOW_DARKNESS   shader_injection.spot_shadow_darkness
 #define CUSTOM_SPOT_CONE_FALLOFF      shader_injection.spot_cone_falloff
 
-#define CUSTOM_SS_SHADOWS      shader_injection.screen_space_shadows
-#define CUSTOM_SS_REACH        shader_injection.ss_shadow_reach
-#define CUSTOM_SS_THICKNESS    shader_injection.ss_shadow_thickness
-#define CUSTOM_SS_STRENGTH     shader_injection.ss_shadow_strength
-#define CUSTOM_SS_FADE_END     shader_injection.ss_shadow_fade_end
-#define CUSTOM_SS_MATERIAL_MAX shader_injection.ss_shadow_material_max
+#define CUSTOM_SS_CONTRAST    shader_injection.ss_shadow_contrast
+#define CUSTOM_SS_DEBUG_VIEW  shader_injection.ss_shadow_debug_view
+#define CUSTOM_SS_DEBUG_LIGHT shader_injection.ss_shadow_debug_light
+#define CUSTOM_SS_LIGHT_TYPE  shader_injection.ss_shadow_light_type
 
-#define CUSTOM_SS_SPOT_SHADOWS      shader_injection.spot_screen_space_shadows
-#define CUSTOM_SS_SPOT_REACH        shader_injection.spot_ss_reach
-#define CUSTOM_SS_SPOT_THICKNESS    shader_injection.spot_ss_thickness
-#define CUSTOM_SS_SPOT_STRENGTH     shader_injection.spot_ss_strength
-#define CUSTOM_SS_SPOT_FADE_END     shader_injection.spot_ss_fade_end
-#define CUSTOM_SS_SPOT_MATERIAL_MAX shader_injection.spot_ss_material_max
+#define CUSTOM_SS_LOCAL_MAX_DISTANCE  shader_injection.ss_local_max_distance
+#define CUSTOM_SS_LOCAL_FADE_FRACTION shader_injection.ss_local_fade_fraction
+#define CUSTOM_SS_LOCAL_MIN_COVERAGE  shader_injection.ss_local_min_coverage
+#define CUSTOM_SS_SPOT_BUDGET         shader_injection.ss_spot_budget
+#define CUSTOM_SS_LOCAL_SAMPLING      shader_injection.ss_local_sampling
+#define CUSTOM_SS_LOCAL_CULLING       shader_injection.ss_local_culling
+
+#define CUSTOM_SS_SHADOWS shader_injection.screen_space_shadows
+#define CUSTOM_SS_SAMPLES shader_injection.ss_shadow_samples
+
+#define CUSTOM_SS_SPOT_SHADOWS shader_injection.spot_screen_space_shadows
+#define CUSTOM_SS_SPOT_SAMPLES shader_injection.spot_ss_samples
 
 #define CUSTOM_POINT_CONTACT_HARDENING shader_injection.point_contact_hardening
 #define CUSTOM_POINT_SHADOW_SOFTNESS   shader_injection.point_shadow_softness
@@ -195,12 +200,8 @@ cbuffer RenoDXSettings : register(b13) {
 #define CUSTOM_POINT_BLUR_PIXELS       shader_injection.point_shadow_blur_pixels
 #define CUSTOM_POINT_SHADOW_DARKNESS   shader_injection.point_shadow_darkness
 
-#define CUSTOM_SS_POINT_SHADOWS      shader_injection.point_screen_space_shadows
-#define CUSTOM_SS_POINT_REACH        shader_injection.point_ss_reach
-#define CUSTOM_SS_POINT_THICKNESS    shader_injection.point_ss_thickness
-#define CUSTOM_SS_POINT_STRENGTH     shader_injection.point_ss_strength
-#define CUSTOM_SS_POINT_FADE_END     shader_injection.point_ss_fade_end
-#define CUSTOM_SS_POINT_MATERIAL_MAX shader_injection.point_ss_material_max
+#define CUSTOM_SS_POINT_SHADOWS shader_injection.point_screen_space_shadows
+#define CUSTOM_SS_POINT_SAMPLES shader_injection.point_ss_samples
 
 #define CUSTOM_MGSV_LIGHTING_ENABLED            (shader_injection.gt_enabled >= 0.5)
 #define CUSTOM_MGSV_AO_STRENGTH                 shader_injection.ao_strength
