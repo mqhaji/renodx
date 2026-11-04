@@ -41,7 +41,7 @@ All methods save and restore compute, graphics, and render-target state, includi
 1. The main `SetViewMatrixState` hook records the camera's view and projection matrices before jitter, offsets the gameplay projection at `ShaderManager+0x680`, and records its frame, sample, dimensions, and source camera.
 2. Other supported camera paths use that recorded camera data without advancing camera history.
 3. `MotionBlurCameraVelocity` supplies depth, object motion, composed motion, and the matching camera data. All methods receive the same checked `ValidatedFrameInputs`.
-4. Reconstruction runs at one suitable insertion: preferably full-resolution `DOF_ScatterBakeFirst` (`0xFE1DC3F8`), otherwise a checked post-DoF copy, post-motion-blur-preparation copy, or late tonemap/LUT draw. Lower-resolution candidates are skipped.
+4. Reconstruction runs before the completed scene is reduced for bloom (`0x72C1D157`). This requires the active scene-color clone role and matching depth/motion dimensions. The first DoF preparation (`0xFE1DC3F8`) remains a fallback, followed by a checked post-DoF copy, post-motion-blur-preparation copy, or late tonemap/LUT draw. Smaller and unrelated reduction inputs are skipped.
 5. One resolve per frame writes the reconstructed scene back in MGSV's expected encoding and restores game state. Camera history advances only if the result still matches the current reset counter and sample.
 6. With reconstruction enabled, the FXAA shader skips its filter but keeps its other scene processing.
 
@@ -129,17 +129,17 @@ Earlier runtime checks established RGBA16F object/final velocity sampling and FS
 
 ## Manual validation
 
-These checks cover scene reconstruction; the [GT-VBGI guide](../gtvbgi/README.md) describes its separate accumulator and filter. Build or replace DLLs only with MGSV stopped, following the [addon instructions](../README.md#building--deployment). Use one matching addon without live shader overrides and restart after replacement.
+These checks cover scene reconstruction; the [GT-VBGI guide](../gtvbgi/README.md) describes its separate accumulator and filter. Stop MGSV before replacing its addon, following the [addon instructions](../README.md#building--deployment). Use one matching addon without live shader overrides and restart after replacement.
 
 1. Check fresh settings: FSR3, DLSS model F, ten projection scales at `1x`, diagnostic UI enabled, and no Alternate Stream slider. Presets must leave reconstruction selected. Off must restore FXAA and the original projection without a lasting shift.
 2. Start Analytical and FSR without first selecting DLSS. Check that accumulation starts without NGX loading, restarts only when needed, and does not repeatedly reset in static menus or at smaller DoF draws.
-3. Check static detail, animated characters, hair, wires, foliage, camera motion, binoculars, cuts, menus, pause/resume, DoF, motion blur, rain, transparency, night vision, and size/device changes. Record wobble separately from ghost trails.
+3. Check static detail, animated characters, hair, wires, foliage, camera motion, binoculars, cuts, menus, pause/resume, bloom around bright lights, visible near/far DoF and focus changes, motion blur, rain, transparency, night vision, and size/device changes. Record wobble separately from ghost trails.
 4. Check experimental projection paths against the actual render/depth grid, including unusual slider values, missing or unrelated cameras, UI boundaries, rapid setting changes, and normal exit.
 5. Cycle all reconstruction modes. For DLSS, check saved and manual selection, cancellation, missing-DLL/non-NVIDIA explanations, pause/resume of retained resources, and model/size changes. Look for repeated history restarts, skipped reconstruction, query warnings, or submission failures.
 6. Keep Unclamp Off for baseline gameplay. Any motion-source or clamp comparison must also check motion blur and animation trails. Previous Auto/Direct comparisons did not resolve wobble.
 7. Check the settled waveform under Analytical, FSR3, and DLSS with stationary and moving cameras, menus, and method changes. Keep the older Preset M rail flicker separate from Alternate Stream instability.
 
-Logs report startup, availability, selection, first camera data, resource creation, history restarts, pause/resume, disable, and the expected notice for a smaller insertion candidate. Repeated restarts with unchanged settings or recurring input/dispatch warnings need investigation. Recording a dispatch does not prove the GPU completed it.
+Logs report startup, availability, selection, first camera data, resource creation, history restarts, pause/resume, disable, and the expected notice for a smaller insertion candidate. The backend's accumulation-start message reports `insertion=BeforeBloom` when the new preferred point is used; a later insertion name identifies a fallback. Repeated restarts with unchanged settings or recurring input/dispatch warnings need investigation. Recording a dispatch does not prove the GPU completed it.
 
 ## Source map
 

@@ -37,6 +37,7 @@ namespace runtime = ::mgsv::reconstruction;
 
 inline bool logged_tonemap = false;
 inline bool logged_tonemap_lut = false;
+inline bool logged_bloom_reduction = false;
 inline bool logged_scatter_bake = false;
 inline bool logged_dof_gate = false;
 inline bool logged_mb_gate = false;
@@ -46,14 +47,17 @@ inline bool logged_gbuffer_masked_velocity = false;
 
 namespace shader_hashes {
 
-// Primary insertion hash. MGSV can issue this shader with both full-resolution
-// scene color and lower-resolution DoF inputs, so the resolve accepts only the
-// draw whose SRV t0 dimensions match captured depth and motion.
+// The first reduction of the completed scene prepares bloom. The source must
+// have the scene-color role; this shader also reduces unrelated images.
+inline constexpr uint32_t COPY_REDUCTION_X4_PS = 0x72C1D157u;
+
+// First fallback. MGSV can issue this shader with both scene color and smaller
+// DoF inputs, so validation still checks t0 against captured depth and motion.
 inline constexpr uint32_t DOF_SCATTER_BAKE_FIRST_PS = 0xFE1DC3F8u;
 
 // Later fallback insertion point: CopyRenderBuffer is invoked as the
 // pre-DoF-Final snapshot and as the post-MB upsample in the same frame. Used
-// only if both earlier full-res color gates did not fire. HandleDraw gates by
+// only if the earlier scene-color gates did not fire. HandleDraw gates by
 // frame-sequence markers (DoF or MB tile-prep having fired earlier in the
 // frame).
 inline constexpr uint32_t COPY_RENDER_BUFFER_PS = 0x83272BCBu;
@@ -96,7 +100,8 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list, const ShaderInjectD
                              || pixel_hash == shader_hashes::DOF_FINAL_PS;
   const bool is_mb_marker = pixel_hash == shader_hashes::MB_TILE_MAX_PS
                             || pixel_hash == shader_hashes::MB_TILE_REFINE_PS;
-  const bool is_insertion = pixel_hash == shader_hashes::DOF_SCATTER_BAKE_FIRST_PS
+  const bool is_insertion = pixel_hash == shader_hashes::COPY_REDUCTION_X4_PS
+                            || pixel_hash == shader_hashes::DOF_SCATTER_BAKE_FIRST_PS
                             || pixel_hash == shader_hashes::COPY_RENDER_BUFFER_PS
                             || pixel_hash == shader_hashes::TONEMAP_PS
                             || pixel_hash == shader_hashes::TONEMAP_1DLUT_PS;
@@ -183,7 +188,7 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list, const ShaderInjectD
   }
 
   // Sequence markers arm the later CopyRenderBuffer fallbacks. The DoF
-  // composite passes follow the primary ScatterBakeFirst insertion point;
+  // composite passes follow the ScatterBakeFirst fallback;
   // motion-blur tile preparation follows the DoF sequence. The next eligible
   // copy after either marker becomes that path's fallback. BeginFrame clears
   // both flags.
@@ -196,18 +201,27 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list, const ShaderInjectD
 
   if (runtime::state::frame_state.reconstruction_completed) return false;
 
-  // Priority 1: DOF_ScatterBakeFirst. The shader hash is reused at multiple
-  // resolutions. MaybeRun accepts the full-resolution scene-color draw and
-  // leaves lower-resolution DoF candidates for the later fallback cascade.
+  // Reconstruct the source before bloom downsamples it. Role and frame-input
+  // checks reject unrelated reductions and the subsequent smaller bloom images.
+  if (pixel_hash == shader_hashes::COPY_REDUCTION_X4_PS) {
+    if (upgrades::ResourceViewMatchesCloneTarget(data->pixel_srv_t0, &upgrades::scene_tonemap_upgrade_info)) {
+      log_observed_shader("pixel", "scene reduction before bloom", pixel_hash, &logged_bloom_reduction);
+      runtime::coordinator::MaybeRunLocked(cmd_list, *data, "BeforeBloom");
+    }
+    return false;
+  }
+
+  // The first DoF preparation remains a fallback for scenes without the bloom
+  // reduction. Validation leaves smaller inputs to the later candidates.
   if (pixel_hash == shader_hashes::DOF_SCATTER_BAKE_FIRST_PS) {
     log_observed_shader("pixel", "DOF_ScatterBakeFirst", pixel_hash, &logged_scatter_bake);
     runtime::coordinator::MaybeRunLocked(cmd_list, *data, "DOF_ScatterBakeFirst");
     return false;
   }
 
-  // Priority 2 + 3: CRB fallbacks if ScatterBakeFirst was not observed.
-  // After a DoF pass fires (priority 2) or after MB tile prep fires
-  // (priority 3), the next CopyRenderBuffer is a valid insertion point.
+  // Later CRB fallbacks if neither early insertion ran.
+  // After a DoF pass fires or after MB tile prep fires,
+  // the next eligible CopyRenderBuffer is a valid insertion point.
   // Both gates run TAA on the same pixel SRV t0.
   if (pixel_hash == shader_hashes::COPY_RENDER_BUFFER_PS) {
     if (runtime::state::frame_state.dof_fired) {
@@ -222,7 +236,7 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list, const ShaderInjectD
     }
   }
 
-  // Priority 4 (last fallback): tonemap. Used when none of the above
+  // Last fallback: tonemap. Used when none of the above
   // fired — e.g. menu screens, cutscene transitions, or graphics settings
   // with both DoF and motion blur disabled.
   const bool is_tonemap = pixel_hash == shader_hashes::TONEMAP_PS;
