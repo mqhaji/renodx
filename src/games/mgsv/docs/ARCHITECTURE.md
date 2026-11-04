@@ -32,7 +32,7 @@ The original second skin-scattering pass (`0xB2601810`) runs once per intercepte
 6. Reconstruct full-resolution results, write `diffuse * AO + GI` while preserving alpha, and resolve specular visibility/confidence.
 7. Restore the game's compute and graphics bindings.
 
-The game then multiplies diffuse lighting by surface color, adds specular lighting with the environment correction, applies fog, and runs its early tone curve. The default complete chain adds six compute dispatches: trace, temporal accumulation, three spatial-filter iterations, and lighting application. Specular visibility shares these passes without another dispatch. Depth reductions add four. A-Trous uses one filter dispatch per iteration; Separable uses two. The callback count can vary, and dispatch counts do not measure GPU time. The first scattering pass uses a generated replacement; the second keeps the native shader with a callback.
+The game then multiplies diffuse lighting by surface color, adds specular lighting with the environment correction, applies fog, and runs its early tone curve. The default complete chain adds six compute dispatches: trace, temporal accumulation, three spatial-filter iterations, and lighting application. Specular visibility shares these passes without another dispatch. Depth reductions add four. Each spatial iteration uses one dispatch for all three signals. The callback count can vary, and dispatch counts do not measure GPU time. The first scattering pass uses a generated replacement; the second keeps the native shader with a callback.
 
 Missing trace inputs skip custom lighting while preserving the original game pass. Missing temporal inputs use current samples and still allow spatial filtering. An unsplit deferred fallback never writes submitted history. The shared submission bridge preserves native work around lighting and later scene reconstruction; replays cannot advance history twice. It relies on serialized immediate-context submission, as the existing scene reconstruction does.
 
@@ -45,7 +45,7 @@ Native captures show that later passes also copy the diffuse-light buffer to mea
 ## Input and layout contracts
 
 - Lighting uses the scatter pass's existing 64-byte geometry constants at compute `b0`. Pixel shaders use `b0` for different data.
-- `ShaderInjectData` is 79 floats: 316 CPU bytes and 320 padded GPU bytes at `b13`. One softness value controls all source sizes; map diagnostics share the contact-light selector. Sampling counts and search bounds are fixed. Effect-local copies hold scale, filter steps, history flags, and the current Bend light type. Bend surface thickness and the bilinear threshold are fixed constants. The shared SDK `PrepareConstants` layout remains 96 bytes.
+- `ShaderInjectData` is 76 floats: 304 CPU bytes and 304 padded GPU bytes at `b13`. One softness value controls all source sizes; map diagnostics share the contact-light selector. Shadow-map sampling counts and search bounds are fixed; Contact Shadow Reach controls the shared Bend sample count. Effect-local copies hold scale, filter steps, history flags, and the current Bend light type. Bend surface thickness and the bilinear threshold are fixed constants. The shared SDK `PrepareConstants` layout remains 96 bytes.
 - Temporal `b1/b2` hold current/previous native scene data, not duplicate settings. Copy the actual native constant-buffer allocation and preserve its bound range; the reflected scene structure is 480 bytes. History owns another GPU copy because replaying a producer command list can overwrite its snapshot.
 - AO raw, history, and filter textures use RG16F: R is visibility and G is validity. GI uses RGBA16F with validity in alpha. One shared pair of R32G32_UINT geometry textures stores FP32 linear-depth bits and two packed 16-bit normal coordinates. Shader calculations use FP32; no radiance variance textures are allocated.
 - Lighting has eleven texture-input slots (SRVs) and five writable-output slots (UAVs). Unused outputs use distinct placeholder textures so they cannot conflict with inputs or each other.
@@ -54,6 +54,8 @@ Native captures show that later passes also copy the diffuse-light buffer to mea
 - The albedo sRGB view decodes base color. Native diffuse/specular lighting is linear and already scaled by exposure. Copied diffuse alpha identifies skin-scattering materials, not every shaded pixel. GI alpha identifies valid results and remains separate from AO visibility.
 - The first accepted Present selects one device/swapchain. Resize and destruction invalidate old resource versions. Resizing textures does not rebuild unchanged shader pipelines.
 - Holding COM texture references keeps objects alive while the game can still overwrite their pixels. Matching sizes or context/Present identifiers alone cannot prove matching scene content, fresh writes, or execution order.
+
+GT-VBGI uses one A-Trous filter with stochastic 1/4 neighbor sampling. It reads the existing noise texture at filter t5 with a different spatial offset from the trace. The pass binder clears previous input views before binding ping-pong outputs, avoiding D3D11 automatic-unbinding hazards. Surrounding game state is restored once after the chain.
 
 ## Screen-space shadows
 
@@ -67,7 +69,7 @@ Spot Contact Shadow Budget defaults to 13. A 16-byte GPU counter belongs to the 
 
 Budget and culling skips publish metadata state 2 with empty clear/trace arguments; consumers must not read the previous mask. State 0 means unavailable inputs, and state 1 means an active trace. Setup resets only the two actual indirect argument triples; active sweep entries are overwritten before use, and the published count excludes unused entries. Five sun/spot projection values occupy bytes 348-367 of the 368-byte dispatch buffer and are computed before contact tracing can be skipped. Pixel shaders fall back to matrix calculations when those values are unavailable.
 
-Tracing uses 60 samples, contrast 4, four hard samples, and eight end-fade samples at full resolution. Surface thickness is fixed at 0.005 and the bilinear depth threshold at 0.02. All four farther-sample groups are evaluated; fully blocked hard contacts skip their reduction. Only required shared-depth blocks are read. Shader/sampler objects and immutable view descriptions are cached; current native bindings are still checked per draw. See the [shadow guide](../shadows/README.md) for controls and limitations.
+Tracing defaults to a 60-pixel reach, shared by all light types, with contrast 4, four hard samples, and eight end-fade samples at full resolution. Surface thickness is fixed at 0.005 and the bilinear depth threshold at 0.02. All four farther-sample groups are evaluated; fully blocked hard contacts skip their reduction. Only required shared-depth blocks are read. Shader/sampler objects and immutable view descriptions are cached; current native bindings are still checked per draw. See the [shadow guide](../shadows/README.md) for controls and limitations.
 
 ## Settings and reconstruction
 

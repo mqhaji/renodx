@@ -24,7 +24,6 @@ RWTexture2D<float2> ao_output : register(u0);
 
 Texture2D<float4> source_diffuse : register(t3);
 Texture2D<float4> source_albedo : register(t4);
-Texture2D<float4> source_specular : register(t5);
 RWTexture2D<float4> gi_output : register(u1);
 RWTexture2D<float4> diagnostic_output : register(u2);
 // RG stores visible/open angular areas relative to the whole reflection cone.
@@ -52,8 +51,7 @@ bool ResolveDepthOwner(int2 sample_pixel, int mip_level, float sampled_depth, ou
     [branch]
     if (level == 1) {
       owner_depth = depth_buffer.Load(int3(selected, 0)).x;
-    }
-    else {
+    } else {
       owner_depth = depth_mips.Load(int3(selected, level - 2)).x;
     }
     [loop]
@@ -66,8 +64,7 @@ bool ResolveDepthOwner(int2 sample_pixel, int mip_level, float sampled_depth, ou
         [branch]
         if (level == 1) {
           candidate = depth_buffer.Load(int3(x, y, 0)).x;
-        }
-        else {
+        } else {
           candidate = depth_mips.Load(int3(x, y, level - 2)).x;
         }
         if (candidate > owner_depth) {
@@ -126,8 +123,7 @@ float LoadTraceDepth(int2 sample_pixel, int mip_level) {
   [branch]
   if (mip_level == 0) {
     sampled_depth = depth_buffer.Load(int3(sample_pixel, 0)).x;
-  }
-  else {
+  } else {
     const int2 coarse_size = max(int2(cBufferWidth, cBufferHeight) >> mip_level, 1);
     const int2 coarse_pixel = clamp(sample_pixel >> mip_level, int2(0, 0), coarse_size - 1);
     sampled_depth = depth_mips.Load(int3(coarse_pixel, mip_level - 1)).x;
@@ -172,7 +168,6 @@ uint2 CoverageMasks(float2 sample_position, float sample_depth, float thickness,
 }
 
 [numthreads(8, 8, 1)]
-
 void main(uint3 tid : SV_DispatchThreadID) {
   const uint2 ao_pixel = tid.xy;
   uint ao_width, ao_height;
@@ -238,7 +233,6 @@ void main(uint3 tid : SV_DispatchThreadID) {
   const float radius_px = max(CUSTOM_MGSV_GT_SEARCH_RADIUS_PIXELS, 1.0);
   const float thickness = max(CUSTOM_MGSV_GT_SURFACE_THICKNESS, 0.0);
   const float step_multiplier = pow(radius_px, 1.0 / float(steps));
-  const float specular_contribution = max(CUSTOM_MGSV_GI_SOURCE_SPECULAR_WEIGHT, 0.0);
 
   // Align slices with the view direction. Positive view depth avoids the
   // quaternion's singularity at the opposite direction.
@@ -287,7 +281,6 @@ void main(uint3 tid : SV_DispatchThreadID) {
   const uint2 noise_pixel = ao_pixel & 127u;
 
   [loop]
-
   for (int slice = 0; slice < slices; ++slice) {
     // Use the stored uniform channels directly.
     // A separated R2 offset supplies the third variate, following EA's guidance.
@@ -335,7 +328,6 @@ void main(uint3 tid : SV_DispatchThreadID) {
     }
 
     [loop]
-
     for (int side = 0; side < 2 && (occupied != 0xFFFFFFFFu || (specular_interval.w > 0.0 && specular_occupied != 0xFFFFFFFFu)); ++side) {
       const float side_sign = side == 0 ? -1.0 : 1.0;
       const float2 ray_direction = screen_direction * side_sign;
@@ -393,13 +385,12 @@ void main(uint3 tid : SV_DispatchThreadID) {
               }
             }
             if (fresh != 0u) {
-              // Albedo is already decoded by its sRGB SRV. Diffuse/specular
-              // are native linear pre-exposed light; source alpha is an SSS
+              // Albedo is already decoded by its sRGB SRV. Diffuse lighting
+              // is linear and pre-exposed; source alpha is an SSS
               // mask and must not reject non-skin or valid black samples.
               const float3 albedo = source_albedo.Load(int3(owner, 0)).rgb;
               const float3 diffuse = source_diffuse.Load(int3(owner, 0)).rgb;
-              float3 radiance = albedo * diffuse;
-              if (specular_contribution > 0.0) radiance += specular_contribution * source_specular.Load(int3(owner, 0)).rgb;
+              const float3 radiance = albedo * diffuse;
               if (any(!isfinite(radiance))) {
                 gi_valid = false;
               } else {
@@ -447,7 +438,6 @@ void main(uint3 tid : SV_DispatchThreadID) {
     if (diagnostic == 4) value = gi_valid ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
     if (diagnostic == 5) {
       value = source_albedo.Load(int3(receiver_pixel, 0)).rgb * source_diffuse.Load(int3(receiver_pixel, 0)).rgb;
-      if (specular_contribution > 0.0) value += specular_contribution * source_specular.Load(int3(receiver_pixel, 0)).rgb;
       value = all(isfinite(value)) ? clamp(value, 0.0, 65504.0) : float3(1.0, 0.0, 0.0);
     }
     diagnostic_output[ao_pixel] = float4(value, 1.0);

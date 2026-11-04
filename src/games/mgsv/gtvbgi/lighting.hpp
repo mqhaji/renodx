@@ -378,6 +378,21 @@ inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* p
                               reshade::api::resource_view fifth_target,
                               uint32_t width, uint32_t height) {
   cmd_list->bind_pipeline(reshade::api::pipeline_stage::all_compute, pass->pipeline);
+  const auto bind_sources = [cmd_list](const std::array<reshade::api::resource_view, 11>& inputs) {
+    cmd_list->push_descriptors(
+        reshade::api::shader_stage::all_compute, light_pass_layout, 0u,
+        {
+            .table = {0u},
+            .binding = 0u,
+            .array_offset = 0u,
+            .count = static_cast<uint32_t>(inputs.size()),
+            .type = reshade::api::descriptor_type::texture_shader_resource_view,
+            .descriptors = inputs.data(),
+        });
+  };
+  // Retire prior reads before reusing ping-pong textures as writable outputs.
+  // The surrounding game state is restored once after the complete chain.
+  bind_sources({});
   const std::array<reshade::api::resource_view, 5> targets = {
       target,  // u0
       second_target,
@@ -395,16 +410,7 @@ inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* p
           .type = reshade::api::descriptor_type::texture_unordered_access_view,
           .descriptors = targets.data(),
       });
-  cmd_list->push_descriptors(
-      reshade::api::shader_stage::all_compute, light_pass_layout, 0u,
-      {
-          .table = {0u},
-          .binding = 0u,
-          .array_offset = 0u,
-          .count = static_cast<uint32_t>(sources.size()),
-          .type = reshade::api::descriptor_type::texture_shader_resource_view,
-          .descriptors = sources.data(),
-      });
+  bind_sources(sources);
   cmd_list->push_constants(
       reshade::api::shader_stage::all_compute, light_pass_layout, 2u, 0u,
       static_cast<uint32_t>(sizeof(constants) / sizeof(uint32_t)), &constants);
@@ -690,7 +696,7 @@ inline std::array<lighting::temporal_inputs::Scene, 2> history_scenes;
 
 // Updated only by the serialized immediate submission callback.
 struct History {
-  std::array<float, 12> parameters = {};
+  std::array<float, 11> parameters = {};
   std::array<float, 11> ao_parameters = {};
   std::array<float, 10> specular_parameters = {};
   std::array<float, 2> jitter_uv = {};
@@ -880,17 +886,6 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .is_visible = [shader_injection] { return shader_injection->gt_enabled >= 0.5f; },
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingGISourceSpecularWeight",
-          .binding = &shader_injection->gi_source_specular_weight,
-          .default_value = 0.f,
-          .label = "Reflections in GI Source",
-          .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Adds sampled reflections to the light that can bounce onto nearby surfaces. Zero uses diffuse light only. Reflections depend on the camera view and can produce bright artifacts.",
-          .max = 100.f,
-          .parse = [](float value) { return value * 0.01f; },
-          .is_visible = [shader_injection] { return shader_injection->gt_enabled >= 0.5f; },
-      },
-      new renodx::utils::settings::Setting{
           .key = "FxIndirectLightingTemporalAccumulationEnabled",
           .binding = &shader_injection->gt_temporal_enabled,
           .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
@@ -1010,28 +1005,17 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .is_visible = [shader_injection] { return shader_injection->gt_enabled >= 0.5f; },
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingFilterType",
-          .binding = &shader_injection->gt_filter_type,
-          .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-          .default_value = 1.f,
-          .label = "Filter Type",
-          .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Separable filters horizontally then vertically. A-Trous uses a two-dimensional kernel whose spacing can grow between passes.",
-          .labels = {"Separable", "A-Trous"},
-          .is_visible = is_spatial_visible,
-      },
-      new renodx::utils::settings::Setting{
           .key = "FxIndirectLightingFilterRadius",
           .binding = &shader_injection->gt_filter_radius,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
           .default_value = 8.f,
           .label = "Filter Radius",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Controls Gaussian width in Separable. In A-Trous it limits spacing after the first pass; with one pass, Taps controls the footprint and Radius has no effect. Units are lighting pixels.",
+          .tooltip = "Limits sample spacing after the first pass, in lighting pixels. With one pass, Filter Width determines the footprint and this setting has no effect.",
           .min = 1.f,
           .max = 8.f,
           .format = "%d",
-          .is_enabled = [shader_injection] { return shader_injection->gt_filter_type < 0.5f || shader_injection->gt_filter_passes > 1.f; },
+          .is_enabled = [shader_injection] { return shader_injection->gt_filter_passes > 1.f; },
           .is_visible = is_spatial_visible,
       },
       new renodx::utils::settings::Setting{
@@ -1048,31 +1032,16 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .is_visible = is_spatial_visible,
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingFilterTapsSeparable",
-          .binding = &shader_injection->gt_filter_taps_separable,
+          .key = "FxIndirectLightingFilterTaps",
+          .binding = &shader_injection->gt_filter_taps,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
           .default_value = 5.f,
-          .label = "Separable Taps",
+          .label = "Filter Width",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Samples per horizontal or vertical pass. Even values round up to the next odd count. More taps cost more texture reads.",
-          .min = 3.f,
-          .max = 17.f,
-          .format = "%d",
-          .is_enabled = [shader_injection] { return shader_injection->gt_filter_type < 0.5f; },
-          .is_visible = is_spatial_visible,
-      },
-      new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingFilterTapsAtrous",
-          .binding = &shader_injection->gt_filter_taps_atrous,
-          .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-          .default_value = 5.f,
-          .label = "A-Trous Taps",
-          .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Samples per axis of the two-dimensional kernel. Five means 25 taps per iteration. Even values round up to the next odd count.",
+          .tooltip = "Width of the two-dimensional filter before sparse sampling. Each pass keeps the center and one quarter of neighboring taps. Even values round up to the next odd width.",
           .min = 3.f,
           .max = 9.f,
           .format = "%d",
-          .is_enabled = [shader_injection] { return shader_injection->gt_filter_type >= 0.5f; },
           .is_visible = is_spatial_visible,
       },
       new renodx::utils::settings::Setting{
@@ -1211,7 +1180,7 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   const auto scratch3 = GetFallbackUav(cmd_list, 3);
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   const bool immediate = context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE;
-  const std::array<float, 12> parameters = {
+  const std::array<float, 11> parameters = {
       constants.gt_search_radius_pixels,
       constants.gt_surface_thickness,
       constants.gt_surface_offset,
@@ -1219,7 +1188,6 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
       constants.gt_samples_per_side,
       constants.gt_depth_mips_enabled,
       constants.gi_reject_backfaces,
-      constants.gi_source_specular_weight,
       constants.gt_resolution,
       constants.gt_temporal_enabled,
       constants.custom_taa,
@@ -1391,7 +1359,7 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
       (depth_mip_chain.ready ? depth_mip_chain.view : GetFallbackView(cmd_list)),
       frame.light_source,
       frame.albedo,
-      frame.specular,
+      GetFallbackView(cmd_list),
       reshade::api::resource_view{reinterpret_cast<uintptr_t>(noise.Get())},
       constants.gt_specular_active >= 0.5f ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->material.Get())} : GetFallbackView(cmd_list),
       constants.gt_specular_active >= 0.5f ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->srv.Get())} : GetFallbackView(cmd_list),
@@ -1493,24 +1461,21 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
     }
   }
   if (filter_ready) {
-    const bool separable = constants.gt_filter_type < 0.5f;
     const uint32_t iterations = (std::isfinite(constants.gt_filter_passes)
                                      ? static_cast<uint32_t>(std::clamp(constants.gt_filter_passes, 1.f, 4.f))
                                      : 1u);
     const uint32_t radius = (std::isfinite(constants.gt_filter_radius)
                                  ? static_cast<uint32_t>(std::clamp(constants.gt_filter_radius, 1.f, 8.f))
                                  : 2u);
-    const uint32_t pass_count = iterations * (separable ? 2u : 1u);
-    for (uint32_t index = 0u; index < pass_count; ++index) {
-      constants.gt_filter_step = (separable ? 1.f : static_cast<float>(std::min(1u << index, std::max(1u, radius / 2u))));
-      constants.gt_filter_direction = (separable ? static_cast<float>(index & 1u) : 2.f);
+    for (uint32_t index = 0u; index < iterations; ++index) {
+      constants.gt_filter_step = static_cast<float>(std::min(1u << index, std::max(1u, radius / 2u)));
       const std::array<reshade::api::resource_view, 11> filter_sources = {
           gi_source,
           frame.depth,
           frame.normal,
           ao_source,
           specular_source,
-          GetFallbackView(cmd_list),
+          reshade::api::resource_view{reinterpret_cast<uintptr_t>(noise.Get())},
           GetFallbackView(cmd_list),
           GetFallbackView(cmd_list),
           GetFallbackView(cmd_list),
@@ -1564,13 +1529,11 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
                " thickness=", constants.gt_surface_thickness,
                " ao_strength=", constants.ao_strength,
                " gi_backface=", constants.gi_reject_backfaces,
-               " gi_specular=", constants.gi_source_specular_weight,
                " gi_strength=", constants.gi_strength,
                " gt_depth_mips_enabled=", constants.gt_depth_mips_enabled,
                " debug_view=", constants.gt_debug_view,
                " temporal=", constants.gt_temporal_enabled,
                " spatial=", constants.gt_spatial_enabled,
-               " filter_type=", constants.gt_filter_type,
                " filter_passes=", constants.gt_filter_passes,
                "; command submission is not GPU completion");
 

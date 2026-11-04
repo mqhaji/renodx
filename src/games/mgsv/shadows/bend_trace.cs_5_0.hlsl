@@ -80,7 +80,8 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
   const int2 output_pixel = int2(floor(sample_pixel));
   const precise float pixel_distance = major_start - thread_step + fraction;
   const float direction = -light.w;
-  const uint samples = BEND_SAMPLES;
+  const uint samples = (uint)clamp(isfinite(CUSTOM_SS_SHADOW_REACH) ? CUSTOM_SS_SHADOW_REACH : 60.0,
+                                   16.0, float(BEND_MAX_SAMPLES));
   const float thickness = 0.005;
   // The last receiver reads through shared index 63 + samples.
   const uint reads = ((samples + BEND_GROUP_SIZE - 1u) >> 6) + 1u;
@@ -150,7 +151,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
       const float distance = length(delta);
       // Keep uncertain pixels near the light boundary.
       const float margin = length(2.0 * bend_projection_param.xy * view_depth * inverse_size)
-                         + view_depth * 0.00001 + distance * 0.00002;
+                           + view_depth * 0.00001 + distance * 0.00002;
       bool lit = local_range <= 0.0 || distance <= local_range + margin;
       const float3 axis = bend_light_params[5].xyz;
       const float3 cone = bend_light_params[7].xyz;
@@ -193,6 +194,17 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
       float4 separation = abs(reference - depths * depth_scale);
       soft = min(soft, separation);
     }
+    // Typed reach values need not end on a four-sample boundary.
+    [loop]
+    for (; soft_index < samples - fade_samples; ++soft_index) {
+      const float separation = abs(reference - shared_depth[first_sample + soft_index] * depth_scale);
+      switch (soft_index & 3u) {
+        case 0u: soft.x = min(soft.x, separation); break;
+        case 1u: soft.y = min(soft.y, separation); break;
+        case 2u: soft.z = min(soft.z, separation); break;
+        case 3u: soft.w = min(soft.w, separation); break;
+      }
+    }
     // The eight fade samples form two groups of four. Align their minima once
     // with the existing groups instead of selecting a component for every sample.
     float4 fade = 1.0;
@@ -203,6 +215,12 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
                                    shared_depth[address + 2u], shared_depth[address + 3u]);
       const float4 fade_offset = (float4(1, 2, 3, 4) + fade_block * 4u) / float(fade_samples + 1u) * 0.75;
       fade = min(fade, abs(reference - depths * depth_scale) + fade_offset);
+    }
+    // Match the fade lanes to the same four minima as the preceding samples.
+    switch ((samples - fade_samples) & 3u) {
+      case 1u: fade = fade.wxyz; break;
+      case 2u: fade = fade.zwxy; break;
+      case 3u: fade = fade.yzwx; break;
     }
     soft = min(soft, fade);
     soft_visibility = dot(saturate(soft * contrast + 1.0 - contrast), 0.25);

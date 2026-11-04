@@ -39,6 +39,7 @@ struct ShaderInjectData {
   float enhanced_shadows_enabled;
 
   float shadow_softness;  // Multiplies tuned source sizes; 1 keeps the default softness.
+  float ss_shadow_reach;  // Contact-shadow search length in render pixels, shared by all light types.
   float shadow_map_debug_view;
 
   // Indirect Lighting controls, in GUI order.
@@ -54,7 +55,6 @@ struct ShaderInjectData {
   float gt_samples_per_side;
   float gt_depth_mips_enabled;  // User choice; each dispatch copy records whether the mips are ready.
   float gi_reject_backfaces;
-  float gi_source_specular_weight;
   float gt_temporal_enabled;
   // AO and specular visibility share these history checks, with separate clamps.
   float occlusion_history_weight;
@@ -67,11 +67,9 @@ struct ShaderInjectData {
   float gi_normal_rejection;
   float gi_history_clamp;
   float gt_spatial_enabled;
-  float gt_filter_type;  // 0 = separable bilateral, 1 = a-trous.
   float gt_filter_radius;
   float gt_filter_passes;
-  float gt_filter_taps_separable;
-  float gt_filter_taps_atrous;
+  float gt_filter_taps;
   float gt_debug_view;
 
   // Dispatch-local values, separate from user controls.
@@ -80,7 +78,6 @@ struct ShaderInjectData {
   float gi_history_valid;
   float gi_temporal_active;
   float gt_filter_step;
-  float gt_filter_direction;  // 0 = horizontal, 1 = vertical, 2 = two-dimensional.
   float gt_current_jitter_x;
   float gt_current_jitter_y;
   float gt_previous_jitter_x;
@@ -141,6 +138,7 @@ cbuffer RenoDXSettings : register(b13) {
 #define CUSTOM_ENHANCED_SHADOWS_ENABLED (shader_injection.enhanced_shadows_enabled >= 0.5)
 
 #define CUSTOM_SHADOW_SOFTNESS       shader_injection.shadow_softness
+#define CUSTOM_SS_SHADOW_REACH       shader_injection.ss_shadow_reach
 #define CUSTOM_SHADOW_MAP_DEBUG_VIEW shader_injection.shadow_map_debug_view
 #define CUSTOM_SHADOW_NOISE_FRAME    shader_injection.shadow_noise_frame
 
@@ -162,7 +160,6 @@ cbuffer RenoDXSettings : register(b13) {
 #define CUSTOM_MGSV_GT_SAMPLES_PER_SIDE         shader_injection.gt_samples_per_side
 #define CUSTOM_MGSV_GT_DEPTH_MIPS_ENABLED       shader_injection.gt_depth_mips_enabled
 #define CUSTOM_MGSV_GI_REJECT_BACKFACES         shader_injection.gi_reject_backfaces
-#define CUSTOM_MGSV_GI_SOURCE_SPECULAR_WEIGHT   shader_injection.gi_source_specular_weight
 #define CUSTOM_MGSV_GT_TEMPORAL_ENABLED         shader_injection.gt_temporal_enabled
 #define CUSTOM_MGSV_OCCLUSION_HISTORY_WEIGHT    shader_injection.occlusion_history_weight
 #define CUSTOM_MGSV_OCCLUSION_DEPTH_REJECTION   shader_injection.occlusion_depth_rejection
@@ -174,10 +171,7 @@ cbuffer RenoDXSettings : register(b13) {
 #define CUSTOM_MGSV_GI_NORMAL_REJECTION         shader_injection.gi_normal_rejection
 #define CUSTOM_MGSV_GI_HISTORY_CLAMP            shader_injection.gi_history_clamp
 #define CUSTOM_MGSV_GT_SPATIAL_ENABLED          shader_injection.gt_spatial_enabled
-#define CUSTOM_MGSV_GT_FILTER_TYPE              shader_injection.gt_filter_type
-#define CUSTOM_MGSV_GT_FILTER_RADIUS            shader_injection.gt_filter_radius
-#define CUSTOM_MGSV_GT_FILTER_TAPS_SEPARABLE    shader_injection.gt_filter_taps_separable
-#define CUSTOM_MGSV_GT_FILTER_TAPS_ATROUS       shader_injection.gt_filter_taps_atrous
+#define CUSTOM_MGSV_GT_FILTER_TAPS              shader_injection.gt_filter_taps
 #define CUSTOM_MGSV_GT_DEBUG_VIEW               shader_injection.gt_debug_view
 
 #define CUSTOM_MGSV_GT_RESOLUTION_DIVISOR    shader_injection.gt_resolution_divisor
@@ -185,7 +179,6 @@ cbuffer RenoDXSettings : register(b13) {
 #define CUSTOM_MGSV_GI_HISTORY_VALID         shader_injection.gi_history_valid
 #define CUSTOM_MGSV_GI_TEMPORAL_ACTIVE       shader_injection.gi_temporal_active
 #define CUSTOM_MGSV_GT_FILTER_STEP           shader_injection.gt_filter_step
-#define CUSTOM_MGSV_GT_FILTER_DIRECTION      shader_injection.gt_filter_direction
 #define CUSTOM_MGSV_GT_CURRENT_JITTER_X      shader_injection.gt_current_jitter_x
 #define CUSTOM_MGSV_GT_CURRENT_JITTER_Y      shader_injection.gt_current_jitter_y
 #define CUSTOM_MGSV_GT_PREVIOUS_JITTER_X     shader_injection.gt_previous_jitter_x

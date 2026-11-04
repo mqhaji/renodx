@@ -8,8 +8,7 @@
 #include "../shared.h"
 
 #define BEND_GROUP_SIZE      64
-#define BEND_MAX_SAMPLES     64
-#define BEND_SAMPLES         60
+#define BEND_MAX_SAMPLES     256
 #define BEND_DISPATCH_HEADER 48
 #define BEND_DISPATCH_STRIDE 32
 #define BEND_TILE_ROW_BITS   15

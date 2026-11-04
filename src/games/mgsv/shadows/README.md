@@ -38,7 +38,7 @@ Depth comparisons account for the receiver's slope to reduce self-shadowing. Sun
 
 ### Controls
 
-Shadows contains Enhanced Shadows (Off / On) and Shadow Softness, which ranges from 0% to the default 100%. The budget, light culling, and diagnostics are in Shadows (Advanced), collapsed by default. Controls are visible while Enhanced Shadows is On. Preset Off disables the feature; Reset All restores its defaults.
+Shadows contains Enhanced Shadows (Off / On) and Shadow Softness, which ranges from 0% to the default 100%. Contact reach, the budget, light culling, and diagnostics are in Shadows (Advanced), collapsed by default. Controls are visible while Enhanced Shadows is On. Preset Off disables the feature; Reset All restores its defaults.
 
 Sampling is fixed at 12 sun/moon blocker samples, 4 spot/point blocker samples, and 4 filter samples. Default source sizes are 0.27 degrees for sun/moon and 0.05 game units for local lights. Shadow Softness scales these sizes together without changing light intensity or reflections. At 0%, native map filtering and Bend contact detail remain active. Searches and final edge radii are bounded at 0.25 game units. This bound is not a quality level: a wider search would spread the same samples farther apart and could miss thin casters. Game units have not been calibrated to meters.
 
@@ -62,10 +62,11 @@ Shadow-map resolution and caster coverage still limit detail. Filtering cannot r
 
 PCSS reads depth from the light's viewpoint; Bend reads depth from the camera's viewpoint. Native shadow maps provide offscreen casters, while Bend supplies nearby visible detail they may miss. The [host](screen_space_shadows.hpp) checks the current draw's inputs and restores changed bindings. Missing contact inputs and intentional quality skips leave shadow-map lighting available. See [ARCHITECTURE.md](../docs/ARCHITECTURE.md#screen-space-shadows) for ownership and buffer layouts.
 
-Contact shadows follow Enhanced Shadows and run at full resolution with all sample groups. They need no noise texture or per-light temporal history. The spotlight budget and Skip Unlit Areas controls are under Shadows (Advanced). Skipped contact tracing still allows PCSS to soften the native shadow map.
+Contact shadows follow Enhanced Shadows and run at full resolution with all sample groups. They need no noise texture or per-light temporal history. Contact Shadow Reach, the spotlight budget, and Skip Unlit Areas are under Shadows (Advanced). Skipped contact tracing still allows PCSS to soften the native shadow map.
 
 | Control | Default | Effect |
 |---|---:|---|
+| Contact Shadow Reach | 60 px | Search length along the ray's main screen axis, shared by every light; range 16–256 render pixels |
 | Spot Contact Shadow Budget | 13 | Limits added spotlight evaluations between lighting-buffer clears; 0 is unlimited |
 | Skip Unlit Areas | On | Skips contact-shadow work outside a light's cone or range |
 
@@ -73,7 +74,9 @@ The spotlight budget follows GPU execution order, including deferred replay. It 
 
 Every lane supplies the casting depths needed by nearby receivers, including lanes outside the current light bounds. Receiver culling happens after shared depth loading. Fully blocked hard contacts skip the farther reduction; other receivers evaluate all four farther-sample groups.
 
-Fixed Bend settings are 60 samples per light, contrast 4, 0.5% surface thickness, a 2% bilinear depth threshold, four hard-contact samples, eight end-fade samples, and 64 threads per group. Thickness is relative to nonlinear depth, rather than game units. The depth threshold stops interpolation across edges. Optional edge discard, precision offset, ray-aligned sampling, and group depth-bound early-out are disabled.
+One sample advances roughly one render pixel along the ray's main screen axis. Reach controls search length, not sample density or shadow softness. It is screen-space reach, so its physical distance varies with depth and camera projection. Higher reach reads more shared-depth blocks and checks more potential casters.
+
+Fixed Bend settings are contrast 4, 0.5% surface thickness, a 2% bilinear depth threshold, four hard-contact samples, eight end-fade samples, and 64 threads per group. Thickness is relative to nonlinear depth, rather than game units. The depth threshold stops interpolation across edges. Optional edge discard, precision offset, ray-aligned sampling, and group depth-bound early-out are disabled.
 
 ## Debug views and verification
 
