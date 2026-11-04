@@ -18,6 +18,7 @@
 // Every MGSV replacement shares this header; it declares cbuffer RenoDXSettings, a register
 // the vanilla shader does not use.
 #include "../shared.h"
+#include "screen_space_shadows.hlsli"
 
 cbuffer cPSScene : register(b2)
 {
@@ -168,123 +169,10 @@ Texture2D<float4> g_SkyReflectTexture : register(t15);
                                        // the stock cascade range it changes nothing.
                                        // Six texels is also about the most a 32 tap
                                        // gather PCF resolves cleanly.
-// ---- Screen-space shadow complement -----------------------------------------
-//
-// Tunables come from the addon, through RenoDXSettings:
-//
-//   CUSTOM_SS_SHADOWS       the on/off toggle (off by default)
-//   CUSTOM_SS_REACH         reach, as a fraction of screen height (ndc.y units)
-//   CUSTOM_SS_THICKNESS     how far in front of the ray a surface must sit, metres
-//   CUSTOM_SS_STRENGTH      attenuation per unit of occlusion
-//   CUSTOM_SS_FADE_END      metres, gone past this
-//   CUSTOM_SS_MATERIAL_MAX  material index the term is allowed on
-//
-// The fade's start distance is fixed at 40 m in the body: it had a knob and never
-// needed one, since the end distance is what decides where the term is gone.
-//
-// All are declared in ../shared.h and set from the Shadows section of the
-// overlay. To iterate through the devkit instead, pin them here: the devkit
-// live-shader path replaces the shader without supplying RenoDXSettings, and D3D11 returns
-// 0 for an unbound constant buffer, so anything read from RenoDXSettings - including the
-// toggle - comes back as 0 and the effect disappears.
-//
-// TEST BUILD - character casters only. The devkit live path supplies no RenoDXSettings, so
-// the values are pinned here. MATERIAL_MAX splits the character band (>=) from
-// everything else (<); this build accepts a hit only when the *caster* is in the
-// character band, so any shadow that appears is Snake's and not the term working
-// as a whole.
-// #undef  CUSTOM_SS_SHADOWS
-// #define CUSTOM_SS_SHADOWS      1.0
-// #undef  CUSTOM_SS_REACH
-// #define CUSTOM_SS_REACH        0.10
-// #undef  CUSTOM_SS_THICKNESS
-// #define CUSTOM_SS_THICKNESS    0.005
-// #undef  CUSTOM_SS_STRENGTH
-// #define CUSTOM_SS_STRENGTH     2.0
-// #undef  CUSTOM_SS_FADE_END
-// #define CUSTOM_SS_FADE_END     122.9
-// #undef  CUSTOM_SS_MATERIAL_MAX
-// #define CUSTOM_SS_MATERIAL_MAX 1.0
-
-#define SS_STEPS        48     // depth-buffer march steps toward the light, sized to
-                               // the *screen* resolution of the reach rather than to
-                               // the thickness. The reach is 2.5% of screen height -
-                               // 54 px at 2160p - and the depth buffer holds nothing
-                               // finer than a pixel, so 256 steps was 0.21 px per
-                               // step: four fifths of them re-read a pixel the
-                               // previous step had already read. 64 is 0.85 px.
-                               //
-                               // A step longer than the thickness would matter for a
-                               // test of the form "the ray meets the caster". This
-                               // one is "the ray is behind the caster", which stays
-                               // true for every step after the ray passes it, so a
-                               // caster is caught by any later sample inside its
-                               // screen footprint instead of only by the step that
-                               // meets it. What has to be resolved is the footprint,
-                               // and that is one pixel wide.
-                               //
-                               // NOT unrolled: 512 unrolled steps is ~8000
-                               // instructions with every iteration's registers live
-                               // at once, which fails pipeline creation and crashes
-                               // the device. The loop breaks on off-screen anyway.
-//
-// The reach is a screen-space length, not a world one, and that is the whole
-// point. A fixed world reach covers a screen distance that grows as the receiver
-// comes closer - 1 m at 2 m of depth is a quarter of the screen width - so the ray
-// sweeps a huge swath of the frame and everything along it that happens to be
-// nearer than the ray registers as an occluder. That was a shadow the size of the
-// surrounding terrain around a character standing near the camera, and it stayed
-// oversized even after the reach came down from a depth-proportional 2.5 m to a
-// fixed 1 m.
-//
-// A screen-space reach is proportional to depth, which was tried and rejected: it
-// made the ray 2.5 m long at 4 m of depth. The fault there was the constant, not
-// the proportionality. Constant screen length *is* proportionality to depth, and
-// the projection fixes the constant: 2.5% of the screen height is 0.029 m per
-// metre of depth, so 12 cm at 4 m rather than 2.5 m.
-#define SS_SLOPE_BIAS   1.0    // multiples of the receiver's screen-space depth
-                               // gradient added to the bias. A fixed bias cannot
-                               // work: too small and a sloped surface occludes
-                               // itself, too large and grass is missed.
-#define SS_NORMAL_BIAS  0.0  // TEST: zeroed. This is the only thing that can put the
-                               // ray's start behind the receiver's own surface, so
-                               // zeroing it separates "the start intersects the
-                               // surface" from "a distant caster was found".
-                               // Was 0.003.
-#define SS_REACH_MAX_M  6.00   // world-space cap on the reach. Set above the fade's
-                               // own reach everywhere inside it - 3.6 m at 122.9 m - so
-                               // the search stays a constant 54 px of screen. The 1.5 m
-                               // cap this replaces began binding at 52 m and cut the
-                               // screen reach to 27 px by 100 m and 5.6 px by 500 m.
-#define SS_CASTER_MAX_M 0.25   // metres. Floor on the maximum separation between the ray
-                               // and the sample for it to count as the caster: contact
-                               // has to be near the ray, not merely in front of it.
-#define SS_CASTER_PER_M 0.010  // metres of that bound per metre of depth, so the bound
-                               // is max(SS_CASTER_MAX_M, depth * this). An absolute
-                               // bound cannot work at range: one pixel of depth is
-                               // 54 mm at 100 m and 272 mm at 500 m, so a fixed 25 cm
-                               // is 0.9 px out there and nothing can qualify. 1 cm per
-                               // metre holds 25 cm out to 25 m - close-range contact and
-                               // the character fix untouched - and gives 1 m at 100 m,
-                               // 2 m at 200 m.
-                               //
-                               // The character artifact lived in the *ratio* of the
-                               // bound to the pixel size rather than in its absolute
-                               // value, which is why scaling it is safe.
-
-#define PCSS_FILTER_MAX_TEXELS   128.0 // sampling guard, texels; rarely binds
-#define PCSS_FILTER_MIN_TEXELS   0.5   // never harder than vanilla's 0.5 texel PCF
-
-// Tap counts are literals in the body, not defines: they have to be compile-time
-// loop bounds for the unroll to fold the sample positions and the disk constants.
-//
-// The mask is nine taps because it is the low-frequency half of the effect. Each
-// costs a linear-PCF fetch, four texels, plus a point read for the blocker depth,
-// so nine is 45 texels against the filter's 128 - and 25 taps, which it started
-// at, was 125.
+#define PCSS_FILTER_MAX_TEXELS 128.0
+#define PCSS_FILTER_MIN_TEXELS 0.5
 
 // Vogel disk, precomputed.
-//
 // The samples are fixed - only the per-pixel rotation varies - so the golden
 // angle is baked into the table instead of evaluated per tap. Evaluating it at
 // runtime costs a sincos per tap, and phi is a runtime value, so the compiler
@@ -1035,6 +923,7 @@ void main(
   // Exact environment contribution, before it is added to direct specular.
   const float3 environment_specular = r1.xyz;
 #endif
+  ApplyBendShadow(v0.xy, 0u, g_DepthTexture, g_psScene.m_projectionParam.zw, r2.xyz, r0.yzw);
   r0.xyz = r1.xyz + r0.yzw;
   r2.xyz = r2.xyz;
   r0.xyz = r0.xyz;
@@ -1052,166 +941,6 @@ void main(
   r2.xyz = r2.xyz;
   r2.xyzw = r2.xyzw;
   r2.xyzw = r2.xyzw;
-  // =========================================================================
-  // Screen-space shadow complement.
-  //
-  // The cascade map cannot afford centimetre detail over a hundred metres of
-  // range, so this supplies the high-frequency half: ray-march the depth buffer
-  // toward the light and occlude where the ray passes behind a nearer surface.
-  // Deliberately complementary - it only sees casters on screen and fades with
-  // distance, which is where the cascades take over.
-  //
-  // View space throughout. m_dominantLightDir is view space, and the view
-  // position is unprojected from the same depth being marched, using the
-  // projection matrix's own scale: m_projectionParam.xy produced a scale error,
-  // confirmed by probe.
-  // =========================================================================
-  {
-    const float2 uv    = v2.xy / v2.z;
-    const float  d     = g_DepthTexture.SampleLevel(g_samplerPoint_Clamp_s, uv, 0).x;
-    const float  viewZ = g_psScene.m_projectionParam.z / max(d - g_psScene.m_projectionParam.w, 1e-6);
-
-    // Material band, sampled the way the vanilla shader samples it so the band
-    // matches the one that was measured. Both gates read it: this one as the
-    // receiver, and the one in the loop as the caster.
-    const float band = g_SpecularTexture.SampleLevel(g_samplerPoint_Wrap_s, uv, 0).z;
-
-    // See the screen-space shadow block at the top of this file. The march is the
-    // expensive part of this shader by an order of magnitude, so it runs only where
-    // it can change the output: the setting is on, the receiver is a material the
-    // term is allowed on, the pixel is inside the fade, and the sun contribution is
-    // not already zero. A fully shadowed pixel is scaled by (1 - ssOcc) either way,
-    // and zero scaled is still zero.
-    if (CUSTOM_SS_SHADOWS != 0.f
-        && band < CUSTOM_SS_MATERIAL_MAX
-        && viewZ < CUSTOM_SS_FADE_END
-        && max(r2.x, max(r2.y, r2.z)) > 0.0) {
-    const float2 ndc   = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
-    const float3 viewPos = float3(ndc.x * viewZ / g_psScene.m_projection._m00,
-                                  ndc.y * viewZ / g_psScene.m_projection._m11,
-                                  viewZ);
-
-    // The direction of the light *this pass renders*, not the scene's dominant
-    // light. m_dominantLightDir comes from the engine's DominantLightSearchJob,
-    // which picks whichever light wins a scene-wide search and interpolates the
-    // result over time; Utility::LuaInterface::SetDominantLightDirection lets
-    // scripts set it outright. A spot light coming into view can therefore take it
-    // over, and this term - which belongs to the sun pass - would march toward that
-    // spot instead of the sun. The direction drifts rather than snaps, because the
-    // job interpolates, which is why it read as the shadows being slightly off
-    // rather than as a broken shadow.
-    //
-    // m_lightParams[0] is the sun's own direction and the vanilla lighting already
-    // uses it: r2 is the decoded surface normal (the reflection at 884-888 only
-    // reduces to 2(N.V)N - V when it is), so dot(m_lightParams[0], r2) at 881 is
-    // N.L and must be positive on a lit surface. It points *toward* the light, the
-    // opposite convention to m_dominantLightDir, so it needs no negation. View
-    // space, like N and V, since 896-899 mixes it with that reflection.
-    const float3 lightDir = normalize(g_psLight.m_lightParams[0].xyz);
-
-    // The G-buffer normal, view space, packed the way the spot shader decodes it.
-    const float3 gbufN = g_NormalTexture.SampleLevel(g_samplerPoint_Clamp_s, uv, 0).xyz;
-    const float3 normal = normalize(float3(gbufN.xy * 2.0 - 1.0, gbufN.z * gbufN.z * 2.0 - 1.0));
-
-    // Reach is a screen-space length converted to metres at this pixel's depth.
-    // ndc.y = viewY * m11 / viewZ, so a world offset of d across the view plane
-    // moves ndc.y by d * m11 / viewZ, and the reach spanning CUSTOM_SS_REACH is
-    // CUSTOM_SS_REACH * viewZ / m11. See the block at the top of this file for why
-    // that is proportional to depth and why the earlier fixed world reach failed.
-    //
-    // The step is the reach over the step count, i.e. SS_STEPS is the number of
-    // samples along the reach and CUSTOM_SS_REACH / SS_STEPS is their spacing on
-    // screen; see SS_STEPS for why that is the quantity to size it by.
-    const float marchStep = min(CUSTOM_SS_REACH * viewZ / abs(g_psScene.m_projection._m11), SS_REACH_MAX_M) / (float)SS_STEPS;
-    // Slope-scaled bias: the receiver's own screen-space depth gradient, so a
-    // steeply sloped surface gets a proportionally larger bias and does not
-    // occlude itself, while a flat one keeps a bias small enough to catch grass.
-    const float slopeBias = (abs(ddx(viewZ)) + abs(ddy(viewZ))) * SS_SLOPE_BIAS;
-    const float thickness = CUSTOM_SS_THICKNESS + slopeBias;
-
-    // Per-pixel jitter of the start offset, so any residual banding reads as
-    // noise rather than stripes.
-    const float jitter = PcssInterleavedGradientNoise(v0.xy);
-
-    // Fade out with distance: beyond this the cascade map is the right tool and
-    // screen space has too little of the caster on screen to be reliable. Taken
-    // before the loop, because the loop's saturation exit needs it. Full strength
-    // begins at 40 m; that used to be a knob and never needed to be one, since the
-    // end distance is what decides where the term is gone.
-    const float fadeStart = 40.0;
-    const float fade = 1.0 - saturate((viewZ - fadeStart) / max(CUSTOM_SS_FADE_END - fadeStart, 1e-3));
-
-    // Project the ray's start and its direction once. The ray is a straight line,
-    // so its clip coordinates are affine in the step parameter - step t is just
-    // clipStart + clipStep * t - and projecting inside the loop was 64
-    // matrix-vector multiplies to compute a value the first two already fix.
-    const float3 rayDir   = lightDir * marchStep;
-    const float3 rayStart = viewPos + normal * SS_NORMAL_BIAS;
-    const float4 clipStart = mul(float4(rayStart, 1.0), g_psScene.m_projection);
-    const float4 clipStep  = mul(float4(rayDir,   0.0), g_psScene.m_projection);
-
-    // Once the result saturates, later steps cannot change it: the output is
-    // saturate(1 - (occ / SS_STEPS) * fade * CUSTOM_SS_STRENGTH), so occ past this
-    // is indistinguishable from this. Saturated pixels are the dense ones - the
-    // inside of a grass tuft - and they are exactly the ones that would otherwise
-    // run the loop to the end.
-    const float occSaturated = SS_STEPS / max(CUSTOM_SS_STRENGTH * fade, 1e-6);
-
-    float occ = 0.0;
-    for (int s = 0; s < SS_STEPS; ++s) {
-      // Quadratic step distribution: dense near the receiver, where contact-sized
-      // casters are, and sparser further out where only large ones can register.
-      // At 48 steps over a 108 px reach that is 0.56 px per step in the near field -
-      // finer than the 64-step uniform march it replaces - rising to 3.9 px at the
-      // far end. The near field is what the reach increase was for, so spending the
-      // budget there and taking 25% fewer depth fetches is a straight trade.
-      const float u = ((float)s + jitter) / (float)SS_STEPS;
-      const float t = (0.25 * u + 0.75 * u * u) * (float)SS_STEPS;
-      const float4 clip = clipStart + clipStep * t;
-      const float2 suv  = clip.xy / clip.w * float2(0.5, -0.5) + 0.5;
-      if (any(suv < 0.0) || any(suv > 1.0)) break;
-      if (occ >= occSaturated) break;
-      const float  sd = g_DepthTexture.SampleLevel(g_samplerPoint_Clamp_s, suv, 0).x;
-      const float  sz = g_psScene.m_projectionParam.z / max(sd - g_psScene.m_projectionParam.w, 1e-6);
-      // The caster is gated as well as the receiver. Excluding a character as a
-      // receiver only stops his body shadowing itself; the ground is still a valid
-      // receiver below him, so he goes on casting onto it. The material at the
-      // ray's screen position is the caster's, and it is the only thing that can
-      // identify him: the cascade map already shadows characters, and this term
-      // exists for detail it cannot resolve.
-      //
-      // Read only where the depth test already passed. Most steps are in front of
-      // nothing, and skipping their material read halves the loop's texture
-      // traffic for a branch that resolves to the same answer.
-      // Bounded separation: the caster has to be near the ray, not merely in front
-      // of it. Too close and it is the receiver's own surface; too far and it is
-      // unrelated geometry the ray's screen path happens to cross.
-      const float sep = rayStart.z + rayDir.z * t - sz;
-      if (sep > CUSTOM_SS_THICKNESS
-          && sep < max(SS_CASTER_MAX_M, viewZ * SS_CASTER_PER_M)) {
-        // The material fetch only earns its keep when the limit can reject
-        // something. At 1.0 it cannot, and hits are common enough that paying for
-        // it on every one of them is the largest avoidable cost in the loop: up to
-        // half the depth fetches have a second fetch stapled to them.
-        if (CUSTOM_SS_MATERIAL_MAX >= 0.999
-            || g_SpecularTexture.SampleLevel(g_samplerPoint_Wrap_s, suv, 0).z < CUSTOM_SS_MATERIAL_MAX) {
-          occ += 1.0;
-        }
-      }
-    }
-
-    const float ssOcc = (occ / (float)SS_STEPS) * fade;
-
-    // Scale the light rather than replacing the output. The render target is a
-    // light accumulation with a one/one blend, so anything written here is
-    // *added*. Writing 1 - ssOcc added a full unit of light everywhere and
-    // washed the frame out; what is wanted is to attenuate the light that this
-    // pass contributes where the march found an occluder.
-    r2.xyz *= saturate(1.0 - ssOcc * CUSTOM_SS_STRENGTH);
-    }
-  }
-
-  // PROBE removed; see docs for the measured first-hit distribution.
   o0.xyzw = r2.xyzw;
   o1.xyzw = r0.xyzw;
 #ifdef MGSV_CAPTURE_ENVIRONMENT_SPECULAR

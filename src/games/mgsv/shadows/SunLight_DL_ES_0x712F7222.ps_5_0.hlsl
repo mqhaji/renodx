@@ -1,3 +1,5 @@
+#include "screen_space_shadows.hlsli"
+
 // Native sun baseline; the extra output captures environment specular before addition.
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:27 2026
 
@@ -285,6 +287,7 @@ void main(
   r1.xyz = float3(-0, -0, -0) + r1.xyz;
   r0.xyz = r0.xyz * r0.www;
   const float3 environment_specular = r0.xyz;
+  ApplyBendShadow(v0.xy, 0u, g_DepthTexture, g_psScene.m_projectionParam.zw, r1.xyz, r2.xyz);
   r0.xyz = r2.xyz + r0.xyz;
   r1.xyz = r1.xyz;
   r0.xyz = r0.xyz;

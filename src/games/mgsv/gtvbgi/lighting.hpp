@@ -745,8 +745,8 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .default_value = 2.f,
           .label = "Lighting Resolution",
           .section = "Indirect Lighting",
-          .tooltip = "Scales both width and height of the shared lighting trace. Quarter uses 1/16 as many pixels; Eighth uses 1/64. Lower resolutions can lose thin geometry and contact detail. Search radii stay in full-resolution pixels.",
-          .labels = {"Full", "Half", "Quarter", "Eighth"},
+          .tooltip = "Fraction of the full-resolution pixel count used by the shared lighting trace. 1/4 halves each axis; 1/16 divides each axis by 4; 1/64 divides each axis by 8. Lower resolutions can lose thin geometry and contact detail. Search radii stay in full-resolution pixels.",
+          .labels = {"Full", "1/4", "1/16", "1/64"},
           .is_visible = [shader_injection] { return shader_injection->gt_enabled >= 0.5f; },
       },
       new renodx::utils::settings::Setting{

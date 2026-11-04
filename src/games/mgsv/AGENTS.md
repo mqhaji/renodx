@@ -35,6 +35,9 @@ Scope: `src/games/mgsv/**`. This file adds MGSV-specific rules to the [root guid
 
 ## Local workflow
 
-- Never build while `mgsvtpp.exe` is running; keep the agreed toolchain.
+- Builds are allowed while `mgsvtpp.exe` is running. Never deploy while it is running; keep the agreed toolchain.
 - Tests are local-only: never stage or commit `test/mgsv_rendering`, temporary registration, or test artifacts. Remove task-added test wiring and verify the standalone addon build; leave unrelated local work untouched.
 - For structural changes, compare compiled shaders, effective registrations, settings, and shared layouts. Report fixture results separately from actual-game evidence; use the linked verification guides rather than treating a build as visual validation.
+- Follow the repository `.clang-format` and `.clang-tidy` rules when writing or editing C++; do not leave new formatting or lint violations for later cleanup.
+- Before handing off changes for commit, run `clang-format` on changed C++ files and `clang-tidy` on their affected translation units using the active compilation database. Include changed headers in the lint scope, fix diagnostics introduced by the changes, and verify formatting with `clang-format --dry-run --Werror`.
+- Keep formatting and lint fixes scoped to the requested changes. Do not weaken checks or add suppressions merely to silence diagnostics; report unavailable tooling, analysis failures, or unresolved diagnostics instead of claiming the checks passed.
