@@ -76,16 +76,42 @@ namespace mgsv::game {
 
 // The supplied shader data must outlive this registry and its draw callbacks.
 inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shader_injection) {
-  const auto begin_shadows = [shader_injection](reshade::api::command_list* cmd_list, uint32_t light_type) {
+  const auto begin_shadows = [shader_injection](reshade::api::command_list* cmd_list, uint32_t light_type,
+                                                bool has_shadow_map = true) {
     ShaderInjectData constants = {};
+    bool shadows_enabled = false, pcss_enabled = false;
     {
       const std::shared_lock lock(renodx::utils::mutex::global_mutex);
-      const float enabled = (light_type == 0u ? shader_injection->screen_space_shadows
-                                              : (light_type == 2u ? shader_injection->point_screen_space_shadows : shader_injection->spot_screen_space_shadows));
-      if (enabled < 0.5f) return;
-      constants = *shader_injection;
+      pcss_enabled = has_shadow_map && shader_injection->soft_shadows_enabled >= 0.5f;
+      switch (light_type) {
+        case 0u:
+          shadows_enabled = shader_injection->screen_space_shadows >= 0.5f;
+          break;
+        case 2u:
+          shadows_enabled = shader_injection->point_screen_space_shadows >= 0.5f;
+          break;
+        default:
+          shadows_enabled = shader_injection->spot_screen_space_shadows >= 0.5f;
+          break;
+      }
+      if (shadows_enabled) {
+        constants = *shader_injection;
+      }
     }
-    mgsv::shadows::screen_space::Begin(cmd_list, constants, light_type);
+    if (!shadows_enabled && !pcss_enabled) return;
+    if (shadows_enabled) {
+      mgsv::shadows::screen_space::Begin(cmd_list, constants, light_type);
+    }
+    if (pcss_enabled) {
+      auto* state = cmd_list->get_private_data<mgsv::shadows::screen_space::DrawState>();
+      if (state != nullptr) {
+        const auto noise = mgsv::lighting::GetNoiseView(cmd_list->get_device());
+        auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
+        context->PSGetShaderResources(20u, 1u, state->displaced_pcss_noise.ReleaseAndGetAddressOf());
+        context->PSSetShaderResources(20u, 1u, noise.GetAddressOf());
+        state->pcss_noise_active = true;
+      }
+    }
   };
   const auto capture_environment = [shader_injection](reshade::api::command_list* cmd_list) {
     mgsv::lighting::temporal_inputs::CaptureScene(cmd_list);
@@ -101,19 +127,13 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
     const auto* saved = cmd_list->get_private_data<mgsv::lighting::environment_specular::DrawState>();
     return saved != nullptr && saved->active;
   };
-  const auto begin_directional = [shader_injection](reshade::api::command_list* cmd_list) {
-    ShaderInjectData constants = {};
-    bool shadows_enabled = false, lighting_enabled = false;
+  const auto begin_directional = [shader_injection, begin_shadows](reshade::api::command_list* cmd_list,
+                                                                   bool has_shadow_map = true) {
+    begin_shadows(cmd_list, 0u, has_shadow_map);
+    bool lighting_enabled = false;
     {
       const std::shared_lock lock(renodx::utils::mutex::global_mutex);
-      shadows_enabled = shader_injection->screen_space_shadows >= 0.5f;
       lighting_enabled = shader_injection->gt_enabled >= 0.5f;
-      if (shadows_enabled) {
-        constants = *shader_injection;
-      }
-    }
-    if (shadows_enabled) {
-      mgsv::shadows::screen_space::Begin(cmd_list, constants, 0u);
     }
     mgsv::lighting::temporal_inputs::CaptureScene(cmd_list);
     mgsv::lighting::environment_specular::BeginCapture(cmd_list, lighting_enabled);
@@ -214,9 +234,8 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
               .code = __0x712F7222,
               .on_replace = [capture_active](reshade::api::command_list* cmd_list) {
                 const auto* state = cmd_list->get_private_data<mgsv::shadows::screen_space::DrawState>();
-                return capture_active(cmd_list) || (state != nullptr && state->active && state->replacement_safe);
-              },
-              .on_draw = begin_directional,
+                return capture_active(cmd_list) || (state != nullptr && state->active && state->replacement_safe); },
+              .on_draw = [begin_directional](reshade::api::command_list* cmd_list) { return begin_directional(cmd_list, false); },
               .on_drawn = end_directional,
           },
       },

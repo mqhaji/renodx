@@ -28,11 +28,11 @@ With Screen-Space Lighting enabled, the six composition shaders skip the game's 
 
 The diffuse bypass follows the setting: if custom lighting cannot run while enabled, diffuse receives neither the game's AO nor custom AO at that insertion. Custom AO darkens all accumulated diffuse light, including direct lighting; GI is added afterward. Applying diffuse AO selectively to ambient light remains future work.
 
-Preset Off disables combined lighting and the six shadow enhancement switches while leaving reconstruction selected. Reset All restores defaults.
+Preset Off disables combined lighting, Soft Shadows, and the three contact-shadow switches while leaving reconstruction selected. Reset All restores defaults.
 
 ## Shadows
 
-Contact-hardening filters soften the native sun, spot, and point shadow maps. Bend screen-space shadows add nearby contact detail from visible geometry before each supported light draw. They affect direct diffuse and specular lighting while preserving environment reflections and native alpha. Each light type has its own switch, with sample count under Screen-Space Shadows (Advanced).
+Contact-hardening filters soften the native sun, spot, and point shadow maps. Bend screen-space shadows add nearby contact detail from visible geometry before each supported light draw. They affect direct diffuse and specular lighting while preserving environment reflections and native alpha. Soft Shadows controls all native map filters together. Bend retains separate switches for each light type, with sample count under Screen-Space Shadows (Advanced).
 
 Defaults are 60 samples, contrast 4, Spot Contact Shadow Budget 10, Full local sampling, and Skip Unlit Areas On. Surface thickness is fixed at 0.5% and the bilinear depth threshold at 2%. Local Shadow Sampling measures evaluated pixel count: Full, 1/2 (Checkerboard), or 1/4. The 1/4 option can shimmer in motion; Full remains the default. Checkerboard retains shared depth reads and adds reconstruction, so it may cost about as much as Full.
 

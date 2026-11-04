@@ -62,6 +62,8 @@ struct __declspec(uuid("F5591171-16BF-4AC9-B341-D74C1F56BDE2")) DrawState {
   Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> fallback_budget;
   Microsoft::WRL::ComPtr<ID3D11RenderTargetView> budget_target;
   Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> budget;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> displaced_pcss_noise;
+  bool pcss_noise_active = false;
 };
 
 inline void OnInitDevice(reshade::api::device* device) {
@@ -93,14 +95,22 @@ inline void OnResetCommandList(reshade::api::command_list* cmd_list) {
     state->displaced = {};
     state->active = false;
     state->replacement_safe = false;
+    state->displaced_pcss_noise.Reset();
+    state->pcss_noise_active = false;
   }
 }
 
 inline void End(reshade::api::command_list* cmd_list) {
   if (cmd_list == nullptr) return;
   auto* state = cmd_list->get_private_data<DrawState>();
-  if (state == nullptr || !state->active) return;
+  if (state == nullptr) return;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
+  if (state->pcss_noise_active) {
+    context->PSSetShaderResources(20u, 1u, state->displaced_pcss_noise.GetAddressOf());
+    state->displaced_pcss_noise.Reset();
+    state->pcss_noise_active = false;
+  }
+  if (!state->active) return;
   const std::array<ID3D11ShaderResourceView*, 2> original = {state->displaced[0].Get(), state->displaced[1].Get()};
   context->PSSetShaderResources(18u, static_cast<UINT>(original.size()), original.data());
   state->displaced = {};
