@@ -173,47 +173,33 @@ void main(
   r10.x = -0.5 / g_psScene.m_shadowMapResolutions.z;
   r10.y = -0.5 / g_psScene.m_shadowMapResolutions.w;
   r9.yz = r10.xy + r8.xz;
-  r0.xyzw = r0.xyzw / float4(2, 2, 2, 2);
-  r0.xyzw = frac(r0.xyzw);
-  r0.xyzw = cmp(r0.xyzw >= float4(0.300000012, 0.300000012, 0.300000012, 0.300000012));
-  r0.xyzw = r0.xyzw ? float4(1, 1, 1, 1) : float4(0, 0, 0, 0);
-  r0.xyzw = float4(2, 2, 2, 2) * r0.xyzw;
-  r0.xyzw = float4(-1, -1, -1, -1) + r0.xyzw;
-  r0.xyzw = float4(0.125, 0.125, 0.125, 0.125) * r0.xyzw;
-  r0.xyzw = float4(0.5, 0.5, -0.5, -0.5) + r0.xyzw;
-  r8.xyzw = float4(1, 1, 1, 1) / g_psScene.m_shadowMapResolutions.zwzw;
-  r0.xyzw = r8.xyzw * r0.xyzw;
-  r8.xy = r9.yz + r0.xy;
-  r8.z = r9.w;
-  r1.yzw = r8.xyz / float3(1, 1, 1);
-  r1.y = g_ShadowTexture.SampleCmp(g_samplerComparisonLess_Linear_Clmap_s, r1.yz, r1.w).x;
-  r1.y = 0 + r1.y;
-  r10.xy = r9.yz + r0.zy;
-  r10.z = r8.z;
-  r10.xyz = r10.xyz / float3(1, 1, 1);
-  r0.y = g_ShadowTexture.SampleCmp(g_samplerComparisonLess_Linear_Clmap_s, r10.xy, r10.z).x;
-  r0.y = r1.y + r0.y;
-  r10.xy = r9.yz + r0.xw;
-  r10.z = r8.z;
-  r1.yzw = r10.xyz / float3(1, 1, 1);
-  r0.x = g_ShadowTexture.SampleCmp(g_samplerComparisonLess_Linear_Clmap_s, r1.yz, r1.w).x;
-  r0.x = r0.y + r0.x;
-  r8.xy = r9.yz + r0.zw;
-  r0.yzw = r8.xyz / float3(1, 1, 1);
-  r0.y = g_ShadowTexture.SampleCmp(g_samplerComparisonLess_Linear_Clmap_s, r0.yz, r0.w).x;
-  r0.x = r0.x + r0.y;
-  r0.x = 0.25 * r0.x;
-  r0.x = 1 * r0.x;
-  r0.x = -r0.x;
-  r0.x = 1 + r0.x;
-  r0.x = r0.x * r0.x;
+  const BendShadow contact_shadow = ReadBendShadow(v0.xy, 2u);
+  const bool map_debug = CUSTOM_ENHANCED_SHADOWS_ENABLED && CUSTOM_SHADOW_MAP_DEBUG_VIEW >= 0.5
+                         && uint(CUSTOM_SS_DEBUG_LIGHT) == 2u;
+  const bool shadow_required = contact_shadow.visibility > 0.0 || contact_shadow.diagnostic
+                               || map_debug;
   PcssResult point_pcss = (PcssResult)0;
-  if (CUSTOM_SOFT_SHADOWS_ENABLED) {
-    point_pcss = FilterPointShadow(g_ShadowTexture, g_samplerComparisonLess_Linear_Clmap_s,
-                                   point_shadow_position, point_shadow_dx, point_shadow_dy,
-                                   g_psLight.m_lightParams[7].z, sqrt(saturate(r0.x)), PcssNoise(v0.xy));
-    r0.x = point_pcss.visibility * point_pcss.visibility;
+  float map_visibility = 1.0;
+  [branch]
+  if (shadow_required) {
+    [branch]
+    if (CUSTOM_ENHANCED_SHADOWS_ENABLED) {
+      point_pcss = FilterPointShadow(g_ShadowTexture, g_samplerComparisonLess_Linear_Clmap_s,
+                                     point_shadow_position, point_shadow_dx, point_shadow_dy,
+                                     g_psLight.m_lightParams[7].z, PcssNoise(v0.xy));
+    }
+    // Only evaluate native taps when the custom filter could not supply visibility.
+    [branch]
+    if (point_pcss.filtered) {
+      map_visibility = point_pcss.visibility;
+    }
+    else {
+      map_visibility = NativeShadowVisibility(g_ShadowTexture, g_samplerComparisonLess_Linear_Clmap_s,
+                                              float4(r9.yz, r9.w, 1.0), g_psScene.m_shadowMapResolutions.zw, v0.xy);
+    }
   }
+  point_pcss.visibility = map_visibility;
+  r0.x = map_visibility * map_visibility;
   r0.y = g_psMaterial.m_materials[7].y;
   r0.z = g_psMaterial.m_materials[7].z;
   r0.y = -r0.y;
@@ -225,7 +211,15 @@ void main(
   r0.z = 1 + r0.z;
   r0.y = r0.y * r0.z;
   r0.x = r0.x + r0.y;
-  r0.y = r0.x;
+  const float shadow_visibility = (1.0 + (r0.x - 1.0) * g_psLight.m_lightParams[8].z) * contact_shadow.visibility;
+  // Derivatives above must run for the entire quad before any pixel exits.
+  // Native material and BRDF lookup textures have one mip level.
+  [branch]
+  if (shadow_visibility == 0.0 && !contact_shadow.diagnostic && !map_debug) {
+    o0 = float4(0.0, 0.0, 0.0, 1.0);
+    o1 = float4(0.0, 0.0, 0.0, 1.0);
+    return;
+  }
   r1.xyz = r5.yzw;
   r0.z = dot(r1.xyz, r2.xyz);
   r6.xyz = -r6.xyz;
@@ -258,11 +252,11 @@ void main(
   r0.w = min(1, r0.w);
   r1.x = dot(r5.xyz, r1.xyz);
   r3.y = 0.25;
-  r2.xyzw = g_MaterialTexture.Sample(g_samplerPoint_Clamp_s, r3.zy).xyzw;
+  r2.xyzw = g_MaterialTexture.SampleLevel(g_samplerPoint_Clamp_s, r3.zy, 0.0).xyzw;
   r3.y = 0.75;
-  r4.xz = g_MaterialTexture.Sample(g_samplerPoint_Clamp_s, r3.zy).xw;
+  r4.xz = g_MaterialTexture.SampleLevel(g_samplerPoint_Clamp_s, r3.zy, 0.0).xw;
   r1.y = r4.x;
-  r1.x = g_lut1.Sample(g_samplerLinear_Clamp_s, r1.xy).x;
+  r1.x = g_lut1.SampleLevel(g_samplerLinear_Clamp_s, r1.xy, 0.0).x;
   r1.y = r0.z * r0.z;
   r1.y = -r1.y;
   r1.y = 1 + r1.y;
@@ -278,7 +272,7 @@ void main(
   r3.xyz = r4.xyz * r4.xyz;
   r3.xyz = float3(0.984375, 0.9375, 0.9375) * r3.xyz;
   r3.xyz = float3(0.0078125, 0.03125, 0.03125) + r3.xyz;
-  r1.zw = g_lut2.Sample(g_samplerLinear_Clamp_s, r3.xyz).xy;
+  r1.zw = g_lut2.SampleLevel(g_samplerLinear_Clamp_s, r3.xyz, 0.0).xy;
   r1.zw = r1.zw * r1.zw;
   r0.w = r1.z / r1.w;
   r0.w = r1.x * r0.w;
@@ -291,27 +285,21 @@ void main(
   r0.z = 1 * r1.y;
   r0.z = 1 * r0.z;
   r2.xyz = r0.zzz * r7.xyz;
-  r0.x = -1 + r0.x;
-  r0.x = g_psLight.m_lightParams[8].z * r0.x;
-  r0.x = 1 + r0.x;
-  r0.y = -1 + r0.y;
-  r0.y = g_psLight.m_lightParams[8].z * r0.y;
-  r0.y = 1 + r0.y;
-  r0.xzw = r2.xyz * r0.xxx;
+  r0.xzw = r2.xyz * shadow_visibility;
   r1.y = g_psLight.m_lightParams[8].y;
   r0.xzw = r1.yyy * r0.xzw;
   r2.xyz = float3(1, 1, 1) * r0.xzw;
-  r0.xyz = r1.xzw * r0.yyy;
+  r0.xyz = r1.xzw * shadow_visibility;
   r0.w = g_psLight.m_lightParams[8].x;
   r0.xyz = r0.xyz * r0.www;
   r0.xyz = float3(1, 1, 1) * r0.xyz;
   r0.w = 1;
   r2.w = 1;
-  ApplyBendShadow(v0.xy, 2u, g_DepthTexture, g_psScene.m_projectionParam.zw, r2.xyz, r0.xyz);
+  ApplyBendDebug(contact_shadow, r2.xyz, r0.xyz);
   o0.xyzw = r2.xyzw;
   o1.xyzw = r0.xyzw;
-  if (CUSTOM_SOFT_SHADOWS_ENABLED && CUSTOM_POINT_PCSS_DEBUG_VIEW >= 0.5) {
-    o0.rgb = PcssDebug(point_pcss, uint(CUSTOM_POINT_PCSS_DEBUG_VIEW), CUSTOM_POINT_PCSS_MAX_RADIUS);
+  if (map_debug) {
+    o0.rgb = PcssDebug(point_pcss, uint(CUSTOM_SHADOW_MAP_DEBUG_VIEW), PCSS_MAX_RADIUS);
   }
   return;
 }

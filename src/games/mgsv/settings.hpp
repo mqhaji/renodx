@@ -373,10 +373,7 @@ inline void ApplyPresetOff(renodx::utils::settings::Settings* registry, ShaderIn
       {"FxSunBrightnessBoostEnabled", 0.f},
       {"FxFilmGrainStrength", 0.f},
       {"FxMotionBlurStrength", 100.f},
-      {"FxSoftShadowsEnabled", 0.f},
-      {"FxDirectionalScreenSpaceShadows", 0.f},
-      {"FxSpotScreenSpaceShadows", 0.f},
-      {"FxPointScreenSpaceShadows", 0.f},
+      {"FxEnhancedShadowsEnabled", 0.f},
       {"FxIndirectLightingEnabled", 0.f},
   });
   {

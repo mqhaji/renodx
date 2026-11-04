@@ -79,33 +79,16 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
   const auto begin_shadows = [shader_injection](reshade::api::command_list* cmd_list, uint32_t light_type,
                                                 bool has_shadow_map = true) {
     ShaderInjectData constants = {};
-    bool shadows_enabled = false, pcss_enabled = false;
     {
       const std::shared_lock lock(renodx::utils::mutex::global_mutex);
-      pcss_enabled = has_shadow_map && shader_injection->soft_shadows_enabled >= 0.5f;
-      switch (light_type) {
-        case 0u:
-          shadows_enabled = shader_injection->screen_space_shadows >= 0.5f;
-          break;
-        case 2u:
-          shadows_enabled = shader_injection->point_screen_space_shadows >= 0.5f;
-          break;
-        default:
-          shadows_enabled = shader_injection->spot_screen_space_shadows >= 0.5f;
-          break;
-      }
-      if (shadows_enabled) {
-        constants = *shader_injection;
-      }
+      if (shader_injection->enhanced_shadows_enabled < 0.5f) return;
+      constants = *shader_injection;
     }
-    if (!shadows_enabled && !pcss_enabled) return;
-    if (shadows_enabled) {
-      mgsv::shadows::screen_space::Begin(cmd_list, constants, light_type);
-    }
-    if (pcss_enabled) {
+    mgsv::shadows::screen_space::Begin(cmd_list, constants, light_type);
+    if (has_shadow_map) {
+      const auto noise = mgsv::lighting::GetNoiseView(cmd_list->get_device());
       auto* state = cmd_list->get_private_data<mgsv::shadows::screen_space::DrawState>();
       if (state != nullptr) {
-        const auto noise = mgsv::lighting::GetNoiseView(cmd_list->get_device());
         auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
         context->PSGetShaderResources(20u, 1u, state->displaced_pcss_noise.ReleaseAndGetAddressOf());
         context->PSSetShaderResources(20u, 1u, noise.GetAddressOf());

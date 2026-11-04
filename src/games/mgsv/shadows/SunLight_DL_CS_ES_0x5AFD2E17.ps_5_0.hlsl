@@ -132,6 +132,7 @@ void main(
   r9.x = dot(r4.xyzw, g_psScene.m_shadowProjection._m00_m10_m20_m30);
   r9.y = dot(r4.xyzw, g_psScene.m_shadowProjection._m01_m11_m21_m31);
   r9.z = dot(r4.xyzw, g_psScene.m_shadowProjection._m02_m12_m22_m32);
+  const float3 shadow_projected = r9.xyz;
   r4.xy = r0.zw;
   r2.w = 1 / g_psScene.m_shadowMapResolutions.x;
   r4.z = 8 * r2.w;
@@ -246,50 +247,36 @@ void main(
   r9.y = 0.5 * r2.w;
   r8.zw = r9.xy + r8.zw;
   r4.yz = r8.zw + r8.xy;
-  r0.xyzw = r0.xyzw / float4(2, 2, 2, 2);
-  r0.xyzw = frac(r0.xyzw);
-  r0.xyzw = cmp(r0.xyzw >= float4(0.300000012, 0.300000012, 0.300000012, 0.300000012));
-  r0.xyzw = r0.xyzw ? float4(1, 1, 1, 1) : float4(0, 0, 0, 0);
-  r0.xyzw = float4(2, 2, 2, 2) * r0.xyzw;
-  r0.xyzw = float4(-1, -1, -1, -1) + r0.xyzw;
-  r0.xyzw = float4(0.125, 0.125, 0.125, 0.125) * r0.xyzw;
-  r0.xyzw = float4(0.5, 0.5, -0.5, -0.5) + r0.xyzw;
-  r8.xyzw = float4(1, 1, 1, 1) / g_psScene.m_shadowMapResolutions.xxxx;
-  r0.xyzw = r8.xyzw * r0.xyzw;
-  r8.xy = r4.yz + r0.xy;
-  r8.z = r4.w;
-  r9.xyz = r8.xyz / float3(1, 1, 1);
-  r2.w = g_ShadowTexture.SampleCmp(g_samplerComparisonLess_Linear_Clmap_s, r9.xy, r9.z).x;
-  r2.w = 0 + r2.w;
-  r9.xy = r4.yz + r0.zy;
-  r9.z = r8.z;
-  r9.xyz = r9.xyz / float3(1, 1, 1);
-  r0.y = g_ShadowTexture.SampleCmp(g_samplerComparisonLess_Linear_Clmap_s, r9.xy, r9.z).x;
-  r0.y = r2.w + r0.y;
-  r9.xy = r4.yz + r0.xw;
-  r9.z = r8.z;
-  r9.xyz = r9.xyz / float3(1, 1, 1);
-  r0.x = g_ShadowTexture.SampleCmp(g_samplerComparisonLess_Linear_Clmap_s, r9.xy, r9.z).x;
-  r0.x = r0.y + r0.x;
-  r8.xy = r4.yz + r0.zw;
-  r0.yzw = r8.xyz / float3(1, 1, 1);
-  r0.y = g_ShadowTexture.SampleCmp(g_samplerComparisonLess_Linear_Clmap_s, r0.yz, r0.w).x;
-  r0.x = r0.x + r0.y;
-  r0.x = 0.25 * r0.x;
-  r0.x = 1 * r0.x;
-  r0.x = -r0.x;
-  r0.x = 1 + r0.x;
-  r0.x = r0.x * r0.x;
-
+  const BendShadow contact_shadow = ReadBendShadow(v0.xy, 0u);
+  const bool map_debug = CUSTOM_ENHANCED_SHADOWS_ENABLED && CUSTOM_SHADOW_MAP_DEBUG_VIEW >= 0.5
+                         && uint(CUSTOM_SS_DEBUG_LIGHT) == 0u;
+  const bool shadow_required = contact_shadow.visibility > 0.0 || contact_shadow.diagnostic
+                               || map_debug;
   PcssResult sun_pcss = (PcssResult)0;
-  if (CUSTOM_SOFT_SHADOWS_ENABLED) {
-    float2 noise = PcssNoise(v0.xy);
-    sun_pcss = FilterSunShadow(g_ShadowTexture, g_samplerComparisonLess_Linear_Clmap_s,
-                               r5.xyz, receiver_dx, receiver_dy, r4.yz, sqrt(saturate(r0.x)),
-                               g_psScene.m_shadowProjection, g_psScene.m_shadowProjection2, noise);
-    // Keep the native lighting response, cloud shadow, and distance fade.
-    r0.x = sun_pcss.visibility * sun_pcss.visibility;
+  float map_visibility = 1.0;
+  [branch]
+  if (shadow_required) {
+    [branch]
+    if (CUSTOM_ENHANCED_SHADOWS_ENABLED) {
+      sun_pcss = FilterSunShadow(g_ShadowTexture, g_samplerComparisonLess_Linear_Clmap_s,
+                                 shadow_projected,
+                                 mul(float4(receiver_dx, 0.0), g_psScene.m_shadowProjection).xyz,
+                                 mul(float4(receiver_dy, 0.0), g_psScene.m_shadowProjection).xyz, r4.yz,
+                                 ReadPcssProjection(g_psScene.m_shadowProjection, g_psScene.m_shadowProjection2, true),
+                                 g_psScene.m_shadowProjection2, PcssNoise(v0.xy));
+    }
+    // Only evaluate native taps when the custom filter could not supply visibility.
+    [branch]
+    if (sun_pcss.filtered) {
+      map_visibility = sun_pcss.visibility;
+    }
+    else {
+      map_visibility = NativeShadowVisibility(g_ShadowTexture, g_samplerComparisonLess_Linear_Clmap_s,
+                                              float4(r4.yz, r4.w, 1.0), g_psScene.m_shadowMapResolutions.xx, v0.xy);
+    }
   }
+  sun_pcss.visibility = map_visibility;
+  r0.x = map_visibility * map_visibility;
 
   r4.xy = float2(-0, -0);
   r4.z = -g_psLight.m_lightParams[8].x;
@@ -450,9 +437,9 @@ void main(
   r0.z = r0.z * r3.x;
   r1.xyz = r1.xzw * r0.zzz;
   r1.xyz = r1.xyz * r5.xyz;
-  r2.xyz = r3.yzw * r0.xxx;
+  r2.xyz = r3.yzw * (r0.x * contact_shadow.visibility);
   r2.xyz = float3(1, 1, 1) * r2.xyz;
-  r0.yzw = r4.xyz * r0.yyy;
+  r0.yzw = r4.xyz * (r0.y * contact_shadow.visibility);
   r0.yzw = float3(1, 1, 1) * r0.yzw;
   r0.x = max(g_psLight.m_lightParams[2].x, r0.x);
   r0.x = g_psLight.m_lightParams[2].y * r0.x;
@@ -462,15 +449,15 @@ void main(
   // Exact environment contribution, before it is added to direct specular.
   const float3 environment_specular = r1.xyz;
 #endif
-  ApplyBendShadow(v0.xy, 0u, g_DepthTexture, g_psScene.m_projectionParam.zw, r2.xyz, r0.yzw);
+  ApplyBendDebug(contact_shadow, r2.xyz, r0.yzw);
   r0.xyz = r1.xyz + r0.yzw;
   r0.w = 1;
   r2.w = 1;
   o0.xyzw = r2.xyzw;
   o1.xyzw = r0.xyzw;
   // Only replace diffuse RGB. Preserve alpha and the captured environment term.
-  if (CUSTOM_SOFT_SHADOWS_ENABLED && CUSTOM_SUN_PCSS_DEBUG_VIEW >= 0.5) {
-    o0.rgb = PcssDebug(sun_pcss, uint(CUSTOM_SUN_PCSS_DEBUG_VIEW), CUSTOM_SUN_PCSS_MAX_RADIUS);
+  if (map_debug) {
+    o0.rgb = PcssDebug(sun_pcss, uint(CUSTOM_SHADOW_MAP_DEBUG_VIEW), PCSS_MAX_RADIUS);
   }
 #ifdef MGSV_CAPTURE_ENVIRONMENT_SPECULAR
   o2 = float4(environment_specular, 1.0);
