@@ -287,7 +287,10 @@ void main(
   r1.xyz = float3(-0, -0, -0) + r1.xyz;
   r0.xyz = r0.xyz * r0.www;
   const float3 environment_specular = r0.xyz;
-  ApplyBendShadow(v0.xy, 0u, g_DepthTexture, g_psScene.m_projectionParam.zw, r1.xyz, r2.xyz);
+  const BendShadow contact_shadow = ReadBendShadow(v0.xy, 0u);
+  r1.xyz *= contact_shadow.visibility;
+  r2.xyz *= contact_shadow.visibility;
+  ApplyBendDebug(contact_shadow, r1.xyz, r2.xyz);
   r0.xyz = r2.xyz + r0.xyz;
   r1.xyz = r1.xyz;
   r0.xyz = r0.xyz;

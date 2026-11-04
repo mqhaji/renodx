@@ -28,15 +28,15 @@ With Screen-Space Lighting enabled, the six composition shaders skip the game's 
 
 The diffuse bypass follows the setting: if custom lighting cannot run while enabled, diffuse receives neither the game's AO nor custom AO at that insertion. Custom AO darkens all accumulated diffuse light, including direct lighting; GI is added afterward. Applying diffuse AO selectively to ambient light remains future work.
 
-Preset Off disables combined lighting, Soft Shadows, and the three contact-shadow switches while leaving reconstruction selected. Reset All restores defaults.
+Preset Off disables combined lighting and Enhanced Shadows while leaving reconstruction selected. Reset All restores defaults.
 
 ## Shadows
 
-Contact-hardening filters soften the native sun, spot, and point shadow maps. Bend screen-space shadows add nearby contact detail from visible geometry before each supported light draw. They affect direct diffuse and specular lighting while preserving environment reflections and native alpha. Soft Shadows controls all native map filters together. Bend retains separate switches for each light type, with sample count under Screen-Space Shadows (Advanced).
+Contact-hardening filters soften the native sun, spot, and point shadow maps. Bend screen-space shadows add nearby contact detail from visible geometry before each supported light draw. They affect direct diffuse and specular lighting while preserving environment reflections and native alpha. Enhanced Shadows enables both methods for all supported light types. Shadows contains Enhanced Shadows and Shadow Softness, which ranges from 0% to the default 100%. The spotlight budget, light culling, and diagnostics are in Shadows (Advanced).
 
-Defaults are 60 samples, contrast 4, Spot Contact Shadow Budget 10, Full local sampling, and Skip Unlit Areas On. Surface thickness is fixed at 0.5% and the bilinear depth threshold at 2%. Local Shadow Sampling measures evaluated pixel count: Full, 1/2 (Checkerboard), or 1/4. The 1/4 option can shimmer in motion; Full remains the default. Checkerboard retains shared depth reads and adds reconstruction, so it may cost about as much as Full.
+Sampling is fixed at 12 sun/moon blocker samples, 4 local blocker samples, 4 map-filter samples, 60 contact samples, and contrast 4. Contact shadows run at full resolution with all sample groups. Surface thickness is fixed at 0.5% and the bilinear depth threshold at 2%. Skip Unlit Areas defaults to On.
 
-Spot Contact Shadow Budget admits the first eligible spotlight evaluations between native lighting-buffer clears. Zero is Unlimited. Local distance and minimum-coverage limits can skip extra detail; both default to disabled, with a 25% distance-fade range. Skipped work keeps native lighting and shadow maps. These controls limit GPU work while CPU submission still runs.
+Spot Contact Shadow Budget defaults to 13 and admits the first eligible spotlight evaluations between native lighting-buffer clears. Zero is unlimited. Lights beyond the budget retain shadow-map filtering. The budget limits GPU work while CPU submission still runs.
 
 See the [shadow guide](shadows/README.md) for controls, debug views, and testing.
 

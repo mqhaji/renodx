@@ -35,31 +35,11 @@ struct ShaderInjectData {
   float swap_chain_output_preset;
   float custom_motion_blur;
 
-  // One switch controls PCSS for sun, moon, spot, and point lights.
-  float soft_shadows_enabled;
+  // One switch controls PCSS and contact shadows for every supported light.
+  float enhanced_shadows_enabled;
 
-  // Spotlight PCSS controls. Distances use native game units.
-  float spot_pcss_light_radius;
-  float spot_pcss_max_radius;
-  float spot_pcss_blocker_samples;
-  float spot_pcss_filter_samples;
-  float spot_pcss_debug_view;
-
-  // Extra directional shadows from objects visible on screen.
-  float screen_space_shadows;
-  float ss_shadow_samples;
-
-  // Extra spotlight shadows run separately for each light.
-  float spot_screen_space_shadows;
-  float spot_ss_samples;
-  // Point-light shadow filtering and screen-space shadows.
-  float point_pcss_light_radius;
-  float point_pcss_max_radius;
-  float point_pcss_blocker_samples;
-  float point_pcss_filter_samples;
-  float point_pcss_debug_view;
-  float point_screen_space_shadows;
-  float point_ss_samples;
+  float shadow_softness;  // Multiplies tuned source sizes; 1 keeps the default softness.
+  float shadow_map_debug_view;
 
   // Indirect Lighting controls, in GUI order.
   float gt_enabled;  // 0 = Off, 1 = GT-VBGI.
@@ -112,25 +92,15 @@ struct ShaderInjectData {
   float gt_specular_history_valid;
 
   // Bend contact-shadow controls and values copied for this light draw.
-  float ss_shadow_contrast;
   float ss_shadow_debug_view;
   float ss_shadow_debug_light;
   float ss_shadow_light_type;  // 0 = directional, 1 = spot, 2 = point, 3 = distance spot.
 
-  // Optional local-light limits. Zero distance or coverage keeps full detail.
-  float ss_local_max_distance;  // Forward camera depth in native game units.
-  float ss_local_fade_fraction;
-  float ss_local_min_coverage;  // Fraction of the viewport covered by the receiver bounds.
-  float ss_spot_budget;         // Maximum spotlight evaluations per lighting-buffer fill; 0 = unlimited.
-  float ss_local_sampling;      // Pixel count: 0 = full, 1 = 1/2 (checkerboard), 2 = 1/4.
+  // Local-light contact work limits.
+  float ss_spot_budget;  // Maximum spotlight evaluations per lighting-buffer fill; 0 = unlimited.
   float ss_local_culling;
 
-  // Sun/moon PCSS controls and the shared IS-FAST frame phase.
-  float sun_pcss_angle;       // Angular radius in radians.
-  float sun_pcss_max_radius;  // Search and filter radius in native game units.
-  float sun_pcss_blocker_samples;
-  float sun_pcss_filter_samples;
-  float sun_pcss_debug_view;
+  // Shared IS-FAST frame phase.
   float shadow_noise_frame;
 };
 
@@ -168,47 +138,18 @@ cbuffer RenoDXSettings : register(b13) {
 #define CUSTOM_TAA                    shader_injection.custom_taa
 #define CUSTOM_UNCLAMP_MOTION_VECTORS shader_injection.unclamp_motion_vectors
 
-#define CUSTOM_SOFT_SHADOWS_ENABLED (shader_injection.soft_shadows_enabled >= 0.5)
+#define CUSTOM_ENHANCED_SHADOWS_ENABLED (shader_injection.enhanced_shadows_enabled >= 0.5)
 
-#define CUSTOM_SUN_PCSS_ANGLE           shader_injection.sun_pcss_angle
-#define CUSTOM_SUN_PCSS_MAX_RADIUS      shader_injection.sun_pcss_max_radius
-#define CUSTOM_SUN_PCSS_BLOCKER_SAMPLES shader_injection.sun_pcss_blocker_samples
-#define CUSTOM_SUN_PCSS_FILTER_SAMPLES  shader_injection.sun_pcss_filter_samples
-#define CUSTOM_SUN_PCSS_DEBUG_VIEW      shader_injection.sun_pcss_debug_view
-#define CUSTOM_SHADOW_NOISE_FRAME       shader_injection.shadow_noise_frame
+#define CUSTOM_SHADOW_SOFTNESS       shader_injection.shadow_softness
+#define CUSTOM_SHADOW_MAP_DEBUG_VIEW shader_injection.shadow_map_debug_view
+#define CUSTOM_SHADOW_NOISE_FRAME    shader_injection.shadow_noise_frame
 
-#define CUSTOM_SPOT_PCSS_LIGHT_RADIUS    shader_injection.spot_pcss_light_radius
-#define CUSTOM_SPOT_PCSS_MAX_RADIUS      shader_injection.spot_pcss_max_radius
-#define CUSTOM_SPOT_PCSS_BLOCKER_SAMPLES shader_injection.spot_pcss_blocker_samples
-#define CUSTOM_SPOT_PCSS_FILTER_SAMPLES  shader_injection.spot_pcss_filter_samples
-#define CUSTOM_SPOT_PCSS_DEBUG_VIEW      shader_injection.spot_pcss_debug_view
-
-#define CUSTOM_SS_CONTRAST    shader_injection.ss_shadow_contrast
 #define CUSTOM_SS_DEBUG_VIEW  shader_injection.ss_shadow_debug_view
 #define CUSTOM_SS_DEBUG_LIGHT shader_injection.ss_shadow_debug_light
 #define CUSTOM_SS_LIGHT_TYPE  shader_injection.ss_shadow_light_type
 
-#define CUSTOM_SS_LOCAL_MAX_DISTANCE  shader_injection.ss_local_max_distance
-#define CUSTOM_SS_LOCAL_FADE_FRACTION shader_injection.ss_local_fade_fraction
-#define CUSTOM_SS_LOCAL_MIN_COVERAGE  shader_injection.ss_local_min_coverage
-#define CUSTOM_SS_SPOT_BUDGET         shader_injection.ss_spot_budget
-#define CUSTOM_SS_LOCAL_SAMPLING      shader_injection.ss_local_sampling
-#define CUSTOM_SS_LOCAL_CULLING       shader_injection.ss_local_culling
-
-#define CUSTOM_SS_SHADOWS shader_injection.screen_space_shadows
-#define CUSTOM_SS_SAMPLES shader_injection.ss_shadow_samples
-
-#define CUSTOM_SS_SPOT_SHADOWS shader_injection.spot_screen_space_shadows
-#define CUSTOM_SS_SPOT_SAMPLES shader_injection.spot_ss_samples
-
-#define CUSTOM_POINT_PCSS_LIGHT_RADIUS    shader_injection.point_pcss_light_radius
-#define CUSTOM_POINT_PCSS_MAX_RADIUS      shader_injection.point_pcss_max_radius
-#define CUSTOM_POINT_PCSS_BLOCKER_SAMPLES shader_injection.point_pcss_blocker_samples
-#define CUSTOM_POINT_PCSS_FILTER_SAMPLES  shader_injection.point_pcss_filter_samples
-#define CUSTOM_POINT_PCSS_DEBUG_VIEW      shader_injection.point_pcss_debug_view
-
-#define CUSTOM_SS_POINT_SHADOWS shader_injection.point_screen_space_shadows
-#define CUSTOM_SS_POINT_SAMPLES shader_injection.point_ss_samples
+#define CUSTOM_SS_SPOT_BUDGET   shader_injection.ss_spot_budget
+#define CUSTOM_SS_LOCAL_CULLING shader_injection.ss_local_culling
 
 #define CUSTOM_MGSV_LIGHTING_ENABLED            (shader_injection.gt_enabled >= 0.5)
 #define CUSTOM_MGSV_AO_STRENGTH                 shader_injection.ao_strength

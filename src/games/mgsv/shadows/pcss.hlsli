@@ -9,11 +9,51 @@ struct PcssResult {
   float radius;  // Soft edge radius in game units, before projection to texture UV.
   uint region;   // Sun cascade or point-light hemisphere, for diagnostics.
   bool valid;
+  bool filtered;  // False asks the caller to evaluate the native four-tap fallback.
 };
+
+// Fixed sampling budgets keep the shadow path small and predictable.
+static const uint PCSS_SUN_BLOCKER_SAMPLES = 12u;
+static const uint PCSS_LOCAL_BLOCKER_SAMPLES = 4u;
+static const uint PCSS_FILTER_SAMPLES = 4u;
+static const float PCSS_MAX_RADIUS = 0.25;
+static const uint PCSS_PROJECTION_OFFSET = 348u;
+
+struct PcssProjection {
+  float2 uv_scale;
+  float depth_scale;
+  float depth_a;
+  float depth_b;
+};
+
+// These values depend on the light matrix, not the shaded pixel. The setup
+// dispatch calculates them once; the pixel fallback also uses this function.
+PcssProjection CalculatePcssProjection(float4x4 projection, float4x4 cascades, bool directional) {
+  PcssProjection result = (PcssProjection)0;
+  if (directional) {
+    result.uv_scale = 0.25 * float2(length(projection._m00_m10_m20), length(projection._m01_m11_m21));
+    result.depth_scale = length(projection._m02_m12_m22) * abs(cascades._m30);
+  } else {
+    float3 w_axis = projection._m03_m13_m23;
+    float w_scale_squared = dot(w_axis, w_axis);
+    if (w_scale_squared <= 0.0) return result;
+    result.depth_scale = sqrt(w_scale_squared);
+    // Native perspective depth is a + b / w. Use the W axis so camera
+    // rotation and translation do not contaminate the depth conversion.
+    result.depth_a = dot(projection._m02_m12_m22, w_axis) / w_scale_squared;
+    result.depth_b = projection._m32 - result.depth_a * projection._m33;
+    float3 u_axis = projection._m00_m10_m20;
+    float3 v_axis = projection._m01_m11_m21;
+    result.uv_scale = float2(length(u_axis - w_axis * (dot(u_axis, w_axis) / w_scale_squared)),
+                             length(v_axis - w_axis * (dot(v_axis, w_axis) / w_scale_squared)))
+                      / result.depth_scale;
+  }
+  return result;
+}
 
 // Golden-angle directions form a disk when combined with the radial spacing below.
 // Precomputing them avoids trigonometry for every sample.
-static const float2 PCSS_DIRECTIONS[32] = {
+static const float2 PCSS_DIRECTIONS[12] = {
     float2(1.00000000, 0.00000000),
     float2(-0.73736888, 0.67549029),
     float2(0.08742572, -0.99617104),
@@ -25,27 +65,7 @@ static const float2 PCSS_DIRECTIONS[32] = {
     float2(0.93932130, 0.34303863),
     float2(-0.92434556, 0.38155641),
     float2(0.42384600, -0.90573427),
-    float2(0.29928386, 0.95416412),
-    float2(-0.86521121, -0.50140758),
-    float2(0.97667577, -0.21471943),
-    float2(-0.57512943, 0.81806243),
-    float2(-0.12851069, -0.99170812),
-    float2(0.76464900, 0.64444698),
-    float2(-0.99914605, 0.04131783),
-    float2(0.70882941, -0.70537994),
-    float2(-0.04619145, 0.99893261),
-    float2(-0.64070914, -0.76778369),
-    float2(0.99106941, 0.13334699),
-    float2(-0.82085834, 0.57113185),
-    float2(0.21948137, -0.97561669),
-    float2(0.49718087, 0.86764692),
-    float2(-0.95269278, -0.30393498),
-    float2(0.90779113, -0.41942253),
-    float2(-0.38606108, 0.92247322),
-    float2(-0.33845228, -0.94098356),
-    float2(0.88518944, 0.46523076),
-    float2(-0.96697001, 0.25489019),
-    float2(0.54083774, -0.84112695)};
+    float2(0.29928386, 0.95416412)};
 
 Texture2DArray<float2> shadow_noise : register(t20);
 
@@ -61,6 +81,22 @@ float2 PcssNoise(float2 pixel) {
   // RG chooses disk rotation and radial offset. The 32-layer sequence repeats;
   // this sample jitter is independent of camera-projection jitter.
   return shadow_noise.Load(int4(uint2(pixel) & 127u, uint(CUSTOM_SHADOW_NOISE_FRAME) & 31u, 0));
+}
+
+// The four native taps share this pattern for every light projection. Keep
+// projected-W scaling before division, matching the spotlight's native order.
+float NativeShadowVisibility(Texture2D<float4> shadow_map, SamplerComparisonState comparison,
+                             float4 projected, float2 map_size, float2 pixel) {
+  float4 pattern = frac((pixel.xyxy - 0.5) * 0.5) >= 0.300000012
+                       ? float4(0.625, 0.625, -0.375, -0.375)
+                       : float4(0.375, 0.375, -0.625, -0.625);
+  float4 offset = (projected.wwww / map_size.xyxy) * pattern;
+  float reference = projected.z / projected.w;
+  float occlusion = shadow_map.SampleCmpLevelZero(comparison, (projected.xy + offset.xy) / projected.w, reference).x;
+  occlusion += shadow_map.SampleCmpLevelZero(comparison, (projected.xy + offset.zy) / projected.w, reference).x;
+  occlusion += shadow_map.SampleCmpLevelZero(comparison, (projected.xy + offset.xw) / projected.w, reference).x;
+  occlusion += shadow_map.SampleCmpLevelZero(comparison, (projected.xy + offset.zw) / projected.w, reference).x;
+  return 1.0 - occlusion * 0.25;
 }
 
 float2 PcssDepthGradient(float2 uv_dx, float2 uv_dy, float depth_dx, float depth_dy) {
@@ -93,23 +129,19 @@ float3 PcssDebug(PcssResult value, uint view, float max_radius) {
 }
 
 PcssResult FilterSunShadow(Texture2D<float4> shadow_map, SamplerComparisonState comparison,
-                           float3 position, float3 position_dx, float3 position_dy,
-                           float2 native_uv, float native_visibility,
-                           float4x4 projection, float4x4 cascades, float2 noise) {
+                           float3 projected, float3 projected_dx, float3 projected_dy,
+                           float2 native_uv,
+                           PcssProjection projection, float4x4 cascades, float2 noise) {
   PcssResult result = (PcssResult)0;
-  result.visibility = native_visibility;
   result.region = min(uint(native_uv.x * 2.0), 1u) + 2u * min(uint(native_uv.y * 2.0), 1u);
 
   uint width, height;
   shadow_map.GetDimensions(width, height);
   float2 texel = rcp(float2(width, height));
-  float3 projected = mul(float4(position, 1.0), projection).xyz;
-  float3 projected_dx = mul(float4(position_dx, 0.0), projection).xyz;
-  float3 projected_dy = mul(float4(position_dy, 0.0), projection).xyz;
-  float2 base_scale = 0.25 * float2(length(projection._m00_m10_m20), length(projection._m01_m11_m21));
-  float depth_scale = length(projection._m02_m12_m22) * abs(cascades._m30);
-  float max_radius = max(CUSTOM_SUN_PCSS_MAX_RADIUS, 0.0);
-  if (width < 4u || height < 4u || min(base_scale.x, base_scale.y) <= 0.0 || depth_scale <= 0.0) return result;
+  float2 base_scale = projection.uv_scale;
+  float depth_scale = projection.depth_scale;
+  float max_radius = PCSS_MAX_RADIUS;
+  if (width < 4u || height < 4u || min(base_scale.x, base_scale.y) <= 0.0 || depth_scale <= 0.0 || CUSTOM_SHADOW_SOFTNESS <= 0.0) return result;
 
   float4 cascade_transform = float4(0.0, 0.0, 0.0, 1.0);
   float3 clip = projected;
@@ -146,8 +178,8 @@ PcssResult FilterSunShadow(Texture2D<float4> shadow_map, SamplerComparisonState 
   float2 rotation;
   sincos(noise.x * 6.28318530718, rotation.y, rotation.x);
   float radial_jitter = clamp(noise.y, 0.001, 0.999);
-  uint blocker_samples = uint(clamp(CUSTOM_SUN_PCSS_BLOCKER_SAMPLES, 1.0, 32.0));
-  uint filter_samples = uint(clamp(CUSTOM_SUN_PCSS_FILTER_SAMPLES, 1.0, 32.0));
+  const uint blocker_samples = PCSS_SUN_BLOCKER_SAMPLES;
+  const uint filter_samples = PCSS_FILTER_SAMPLES;
   float gap_sum = 0.0;
   float closest_blocker_gap = 1.0;
   uint blockers = 0u;
@@ -172,7 +204,7 @@ PcssResult FilterSunShadow(Texture2D<float4> shadow_map, SamplerComparisonState 
   // Sparse searches can miss thin casters. Keep the native filter on a miss.
   if (blockers == 0u) return result;
   result.blocker_gap = gap_sum / (float(blockers) * depth_per_unit);
-  result.radius = min(max_radius, result.blocker_gap * tan(max(CUSTOM_SUN_PCSS_ANGLE, 0.0)));
+  result.radius = min(max_radius, result.blocker_gap * tan(max(CUSTOM_SHADOW_SOFTNESS, 0.0) * (0.27 * 0.01745329252)));
   float2 uv_radius = result.radius * uv_scale;
   if (max(uv_radius.x / texel.x, uv_radius.y / texel.y) <= 0.5) return result;
   // A local plane is unreliable if extending it across the filter reaches a
@@ -188,33 +220,24 @@ PcssResult FilterSunShadow(Texture2D<float4> shadow_map, SamplerComparisonState 
     occlusion += shadow_map.SampleCmpLevelZero(comparison, sample_uv, reference).x;
   }
   result.visibility = saturate(1.0 - occlusion / float(filter_samples));
+  result.filtered = true;
   return result;
 }
 
 PcssResult FilterSpotShadow(Texture2D<float4> shadow_map, SamplerComparisonState comparison,
                             float4 projected, float4 projected_dx, float4 projected_dy,
-                            float4x4 projection, float native_visibility, float2 noise) {
+                            PcssProjection projection, float2 noise) {
   PcssResult result = (PcssResult)0;
-  result.visibility = native_visibility;
   uint width, height;
   shadow_map.GetDimensions(width, height);
-  float3 w_axis = projection._m03_m13_m23;
-  float w_scale_squared = dot(w_axis, w_axis);
-  if (width < 2u || height < 2u || projected.w <= 0.0 || w_scale_squared <= 0.0) return result;
-  float w_scale = sqrt(w_scale_squared);
-  // For a rotated, translated perspective matrix, depth = a + b / w.
-  // Reading its diagonal would mix camera rotation and translation into depth.
-  float a = dot(projection._m02_m12_m22, w_axis) / w_scale_squared;
-  float b = projection._m32 - a * projection._m33;
-  if (b <= 0.0) return result;
+  float w_scale = projection.depth_scale;
+  float a = projection.depth_a;
+  float b = projection.depth_b;
+  if (width < 2u || height < 2u || projected.w <= 0.0 || w_scale <= 0.0 || b <= 0.0) return result;
   float3 coordinate = projected.xyz / projected.w;
   if (any(coordinate.xy < 0.0) || any(coordinate.xy > 1.0) || coordinate.z < 0.0 || coordinate.z > 1.0) return result;
   float receiver_distance = projected.w / w_scale;
-  float3 u_axis = projection._m00_m10_m20;
-  float3 v_axis = projection._m01_m11_m21;
-  float2 focal = float2(length(u_axis - w_axis * (dot(u_axis, w_axis) / w_scale_squared)),
-                        length(v_axis - w_axis * (dot(v_axis, w_axis) / w_scale_squared)))
-                 / w_scale;
+  float2 focal = projection.uv_scale;
   float2 texel = rcp(float2(width, height));
   float3 dx = (projected_dx.xyz - coordinate * projected_dx.w) / projected.w;
   float3 dy = (projected_dy.xyz - coordinate * projected_dy.w) / projected.w;
@@ -223,10 +246,10 @@ PcssResult FilterSpotShadow(Texture2D<float4> shadow_map, SamplerComparisonState
   float2 rotation;
   sincos(noise.x * 6.28318530718, rotation.y, rotation.x);
   float radial_jitter = clamp(noise.y, 0.001, 0.999);
-  float max_radius = max(CUSTOM_SPOT_PCSS_MAX_RADIUS, 0.0);
-  float light_radius = max(CUSTOM_SPOT_PCSS_LIGHT_RADIUS, 0.0);
-  uint blocker_samples = uint(clamp(CUSTOM_SPOT_PCSS_BLOCKER_SAMPLES, 1.0, 32.0));
-  uint filter_samples = uint(clamp(CUSTOM_SPOT_PCSS_FILTER_SAMPLES, 1.0, 32.0));
+  const float max_radius = PCSS_MAX_RADIUS;
+  float light_radius = 0.05 * max(CUSTOM_SHADOW_SOFTNESS, 0.0);
+  const uint blocker_samples = PCSS_LOCAL_BLOCKER_SAMPLES;
+  const uint filter_samples = PCSS_FILTER_SAMPLES;
   float2 uv_per_unit = focal / receiver_distance;
   float blocker_sum = 0.0;
   uint blockers = 0u;
@@ -260,6 +283,7 @@ PcssResult FilterSpotShadow(Texture2D<float4> shadow_map, SamplerComparisonState
     occlusion += shadow_map.SampleCmpLevelZero(comparison, uv, reference).x;
   }
   result.visibility = saturate(1.0 - occlusion / float(filter_samples));
+  result.filtered = true;
   return result;
 }
 
@@ -284,9 +308,8 @@ float3 UnprojectPointShadow(float2 uv, float2 size) {
 
 PcssResult FilterPointShadow(Texture2D<float4> shadow_map, SamplerComparisonState comparison,
                              float3 position, float3 position_dx, float3 position_dy,
-                             float inverse_range, float native_visibility, float2 noise) {
+                             float inverse_range, float2 noise) {
   PcssResult result = (PcssResult)0;
-  result.visibility = native_visibility;
   result.region = position.z > 0.0 ? 1u : 0u;
   uint width, height;
   shadow_map.GetDimensions(width, height);
@@ -314,10 +337,10 @@ PcssResult FilterPointShadow(Texture2D<float4> shadow_map, SamplerComparisonStat
   float2 rotation;
   sincos(noise.x * 6.28318530718, rotation.y, rotation.x);
   float radial_jitter = clamp(noise.y, 0.001, 0.999);
-  float max_radius = max(CUSTOM_POINT_PCSS_MAX_RADIUS, 0.0);
-  float light_radius = max(CUSTOM_POINT_PCSS_LIGHT_RADIUS, 0.0);
-  uint blocker_samples = uint(clamp(CUSTOM_POINT_PCSS_BLOCKER_SAMPLES, 1.0, 32.0));
-  uint filter_samples = uint(clamp(CUSTOM_POINT_PCSS_FILTER_SAMPLES, 1.0, 32.0));
+  const float max_radius = PCSS_MAX_RADIUS;
+  float light_radius = 0.05 * max(CUSTOM_SHADOW_SOFTNESS, 0.0);
+  const uint blocker_samples = PCSS_LOCAL_BLOCKER_SAMPLES;
+  const uint filter_samples = PCSS_FILTER_SAMPLES;
   float blocker_sum = 0.0;
   uint blockers = 0u;
   result.valid = true;
@@ -367,7 +390,10 @@ PcssResult FilterPointShadow(Texture2D<float4> shadow_map, SamplerComparisonStat
     occlusion += shadow_map.SampleCmpLevelZero(comparison, uv, 1.0 - sample_distance * inverse_range + bias).x;
     ++samples;
   }
-  if (samples > 0u) result.visibility = saturate(1.0 - occlusion / float(samples));
+  if (samples > 0u) {
+    result.visibility = saturate(1.0 - occlusion / float(samples));
+    result.filtered = true;
+  }
   return result;
 }
 

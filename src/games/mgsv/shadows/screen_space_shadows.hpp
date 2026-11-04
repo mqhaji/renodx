@@ -58,7 +58,7 @@ struct __declspec(uuid("F5591171-16BF-4AC9-B341-D74C1F56BDE2")) DrawState {
   uint64_t generation = 0u;
   bool active = false;
   bool replacement_safe = false;
-  uint32_t resolution_divisor = 0u;
+  uint32_t resolution_divisor = 0u;  // Reserved private-data layout slot.
   Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> fallback_budget;
   Microsoft::WRL::ComPtr<ID3D11RenderTargetView> budget_target;
   Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> budget;
@@ -140,9 +140,7 @@ inline bool OnClearRenderTarget(reshade::api::command_list* cmd_list, reshade::a
 inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& settings, uint32_t light_type) {
   if (cmd_list == nullptr || light_type >= 4u || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return;
   const uint32_t light_group = (light_type == 3u ? 1u : light_type);
-  const float enabled = (light_group == 0u ? settings.screen_space_shadows
-                                           : (light_group == 1u ? settings.spot_screen_space_shadows : settings.point_screen_space_shadows));
-  if (enabled < 0.5f) return;
+  if (settings.enhanced_shadows_enabled < 0.5f) return;
   auto* state = cmd_list->get_private_data<DrawState>();
   auto* device_state = cmd_list->get_device()->get_private_data<DeviceState>();
   if (state == nullptr || state->active) return;
@@ -304,11 +302,10 @@ inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& 
     state->shaders = std::move(shaders);
     state->border = std::move(border);
   }
-  const uint32_t divisor = (light_group != 0u && settings.ss_local_sampling == 2.f ? 2u : 1u);
-  const uint32_t mask_width = (depth_description.Width + divisor - 1u) / divisor;
-  const uint32_t mask_height = (depth_description.Height + divisor - 1u) / divisor;
+  const uint32_t mask_width = depth_description.Width;
+  const uint32_t mask_height = depth_description.Height;
   if (state->mask == nullptr || state->width != mask_width || state->height != mask_height
-      || state->generation != selected.generation || state->resolution_divisor != divisor) {
+      || state->generation != selected.generation) {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> mask;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
@@ -320,8 +317,7 @@ inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& 
         .Height = mask_height,
         .MipLevels = 1u,
         .ArraySize = 1u,
-        .Format = (divisor == 2u ? DXGI_FORMAT_R16G16B16A16_FLOAT
-                                 : (compact ? DXGI_FORMAT_R8G8_UNORM : DXGI_FORMAT_R16G16_FLOAT)),
+        .Format = (compact ? DXGI_FORMAT_R8G8_UNORM : DXGI_FORMAT_R16G16_FLOAT),
         .SampleDesc = {.Count = 1u},
         .Usage = D3D11_USAGE_DEFAULT,
         .BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
@@ -338,7 +334,6 @@ inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& 
     state->width = description.Width;
     state->height = description.Height;
     state->generation = selected.generation;
-    state->resolution_divisor = divisor;
   }
   if (state->dispatch == nullptr) {
     constexpr UINT dispatch_bytes = 48u + 10u * 32u;

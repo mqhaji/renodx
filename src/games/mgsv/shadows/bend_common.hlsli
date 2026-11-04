@@ -7,19 +7,22 @@
 
 #include "../shared.h"
 
-#define BEND_GROUP_SIZE             64
-#define BEND_MAX_SAMPLES            256
-#define BEND_DISPATCH_HEADER        48
-#define BEND_DISPATCH_STRIDE        32
-#define BEND_COVERAGE_WEIGHT_OFFSET (BEND_DISPATCH_HEADER + 8 * BEND_DISPATCH_STRIDE + 12)
-#define BEND_SOURCE_INFO_OFFSET     (BEND_DISPATCH_HEADER + 8 * BEND_DISPATCH_STRIDE + 16)
-#define BEND_TILE_ROW_BITS          15
-#define BEND_TILE_ROWS              (1 << BEND_TILE_ROW_BITS)
+#define BEND_GROUP_SIZE      64
+#define BEND_MAX_SAMPLES     64
+#define BEND_SAMPLES         60
+#define BEND_DISPATCH_HEADER 48
+#define BEND_DISPATCH_STRIDE 32
+#define BEND_TILE_ROW_BITS   15
+#define BEND_TILE_ROWS       (1 << BEND_TILE_ROW_BITS)
 
 // These are the light draw's native buffers, with their original offsets.
 // They are bound with the same D3D11 constant-buffer ranges as the pixel shader.
 cbuffer BendScene : register(b2) {
   float4x4 bend_projection : packoffset(c4);
+#ifdef MGSV_BEND_SETUP
+  float4x4 bend_shadow_projection : packoffset(c12);
+  float4x4 bend_shadow_cascades : packoffset(c16);
+#endif
   float4 bend_projection_param : packoffset(c21);
   float4 bend_viewport : packoffset(c22);
   float4 bend_camera_center : packoffset(c28);

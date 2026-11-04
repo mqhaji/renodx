@@ -1,10 +1,10 @@
 # Shadows
 
-Soft Shadows filters the game's shadow maps for sun, moon, spot, and point lights. Bend contact shadows add fine detail from geometry visible to the camera. The two features meet in the native light shader, before subsurface scattering, GT-VBGI, and deferred composition. Each affects direct diffuse and specular light while preserving the native environment-reflection contribution and output alpha.
+Enhanced Shadows combines PCSS filtering of the game's shadow maps with Bend contact shadows for sun, moon, spot, and point lights. The two features meet in the native light shader, before subsurface scattering, GT-VBGI, and deferred composition. Each affects direct diffuse and specular light while preserving the native environment-reflection contribution and output alpha.
 
 ## Soft shadows
 
-The default-on Soft Shadows switch enables every supported PCSS filter. PCSS means percentage-closer soft shadows: it estimates how much of a light source is visible and lets shadow edges soften as the distance between a caster and the receiving surface increases. A caster is the object blocking the light; the receiver is the surface on which its shadow falls.
+The default-on Enhanced Shadows switch enables both methods for every supported light. Off retains the game's original shadow filtering. PCSS means percentage-closer soft shadows: it estimates how much of a light source is visible and lets shadow edges soften as the distance between a caster and the receiving surface increases. A caster is the object blocking the light; the receiver is the surface on which its shadow falls.
 
 ### How the filter works
 
@@ -12,7 +12,7 @@ The default-on Soft Shadows switch enables every supported PCSS filter. PCSS mea
 2. Calculate a soft edge radius from that separation and the chosen light-source size. A shadow stays sharp near contact and can become wider farther from its caster.
 3. Compare several depths across that radius and average their visibility. This is percentage-closer filtering, or PCF.
 
-The implementation bounds both the search and the final edge radius. If the search misses every blocker, the calculated footprint is smaller than half a shadow texel, or the coordinates are unavailable, it retains the game's original four-tap result. This keeps a sparse search from deleting a thin native shadow. The original four taps are still calculated for that fallback.
+The implementation bounds both the search and the final edge radius. If the search misses every blocker, the calculated footprint is smaller than half a shadow texel, or the coordinates are unavailable, it retains the game's original four-tap result. This keeps a sparse search from deleting a thin native shadow. The original four taps run only when that fallback is needed. A valid contact-shadow result that completely blocks direct light skips both PCSS and the native map taps, except when a diagnostic view needs them.
 
 The returned visibility follows the native squared response, cone masks, cloud shadows, and distance fades. Source size is a static tuning input; the actual edge radius is calculated per pixel from current geometry. PCSS is a shadow-map approximation based on average blocker distance, so it does not reproduce every overlap or broad area-light shadow exactly.
 
@@ -20,7 +20,7 @@ The returned visibility follows the native squared response, cone masks, cloud s
 
 Stochastic sampling uses an irregular, changing set of sample positions to estimate visibility with fewer lookups. A fixed sparse grid can produce visible bands or repeated shapes along a soft edge. Changing the pattern distributes that error across pixels and frames.
 
-Our sample directions follow a precomputed golden-angle spiral. Square-root radial spacing spreads the samples across the disk's area. The current sample count determines that spacing: reducing the count keeps the same search and filter footprints, with fewer samples covering them.
+Our sample directions follow a precomputed golden-angle spiral. Square-root radial spacing spreads the fixed sample budgets across the search and filter disks.
 
 PCSS reads the existing IS-FAST noise texture shared with GT-VBGI. It contains two channels in a 128x128 tile with 32 temporal layers. One channel rotates the disk; the other shifts samples within their radial bands. The selected swapchain's Present bookkeeping advances the layer, wrapping after 32 phases. The data is precomputed and deterministic, rather than generated anew on the GPU each frame.
 
@@ -38,27 +38,15 @@ Depth comparisons account for the receiver's slope to reduce self-shadowing. Sun
 
 ### Controls
 
-The main Contact-Hardening Shadows section contains one Soft Shadows switch. All tuning and debug controls are in Contact-Hardening Shadows (Advanced), collapsed by default and visible while Soft Shadows is On. Preset Off disables the feature; Reset All restores its defaults.
+Shadows contains Enhanced Shadows (Off / On) and Shadow Softness, which ranges from 0% to the default 100%. The budget, light culling, and diagnostics are in Shadows (Advanced), collapsed by default. Controls are visible while Enhanced Shadows is On. Preset Off disables the feature; Reset All restores its defaults.
 
-| Control | Default | Purpose |
-|---|---:|---|
-| Sun / Moon Angular Radius | 0.27 degrees | Sets the apparent source size for directional shadows |
-| Spot Light Radius | 0.05 game units | Sets source size for spot shadows |
-| Point Light Radius | 0.05 game units | Sets source size for point shadows |
-| Maximum Soft Edge Radius | 0.25 game units per light type | Bounds search reach and final edge width |
-| Blocker Samples | 12 for Sun / Moon; 4 for Spot and Point | Controls the reliability of the blocker-distance estimate |
-| Filter Samples | 4 per light type | Controls noise in the filtered visibility |
-| Debug View | Off per light type | Shows blocker distance, radius, visibility, or map region |
-
-Both sample controls accept typed values, with up to 32 samples per loop. Sun / Moon uses 12 blocker samples to better detect thin casters such as wires. All light types use 4 filter samples; Spot and Point also use 4 blocker samples. Higher counts can help thin casters and broad edges.
-
-Maximum Soft Edge Radius is a bound, not a quality level. Start at 0.25, choose the desired softness with Angular Radius or Light Radius, then raise the maximum only if it restricts that result. A larger search spreads the same samples farther apart and can miss thin geometry or become less stable. Sample counts are the main cost controls; footprint size can also affect filtering early-outs and texture-cache behavior. Game units have not been calibrated to meters.
+Sampling is fixed at 12 sun/moon blocker samples, 4 spot/point blocker samples, and 4 filter samples. Default source sizes are 0.27 degrees for sun/moon and 0.05 game units for local lights. Shadow Softness scales these sizes together without changing light intensity or reflections. At 0%, native map filtering and Bend contact detail remain active. Searches and final edge radii are bounded at 0.25 game units. This bound is not a quality level: a wider search would spread the same samples farther apart and could miss thin casters. Game units have not been calibrated to meters.
 
 Source sizes are deliberate manual inputs. The inspected native local lights have zero in their highlight-size field, while the directional field is an angular proxy that differs substantially from our setting. See [native light sizes](NATIVE_LIGHTING.md#native-light-sizes) for the measurements and limits of that evidence. These fields are not automatically connected to PCSS.
 
 ### Cost and supported paths
 
-PCSS runs inside the existing light draw. It adds no dispatches, shadow textures, shadow-map rendering, or separate temporal work. Disk directions are precomputed, disk rotation is calculated once per filter invocation, and point lights rotate their sampling basis once. A search miss or subpixel footprint skips the wider filter. The noise texture is uploaded once per device and reused, including with GT-VBGI Off; its displaced shader binding is restored after each draw. The unshadowed sun path skips PCSS noise binding.
+PCSS runs inside the existing light draw. Bend setup also calculates the sun/spot projection scales once per light and stores five floats in unused dispatch-buffer space. The pixel shader calculates them itself if setup data is unavailable. This adds no dispatches, textures, shadow-map rendering, or separate temporal work. Disk directions are precomputed, disk rotation is calculated once per filter invocation, and point lights rotate their sampling basis once. A search miss or subpixel footprint skips the wider filter. The noise texture is uploaded once per device and reused, including with GT-VBGI Off; its displaced shader binding is restored after each draw. The unshadowed sun path skips PCSS noise binding.
 
 | Light | Supported shaders |
 |---|---|
@@ -70,40 +58,35 @@ Shadow-map resolution and caster coverage still limit detail. Filtering cannot r
 
 ## Bend contact shadows
 
-[Bend Studio's method](https://www.bendstudio.com/blog/inside-bend-screen-space-shadows/) traces toward each light through camera-visible scene depth, sharing depth reads between nearby pixels. Before each supported light draw, [setup](bend_setup.cs_5_0.hlsl) finds its bounds, an indirect dispatch [clears](bend_clear.cs_5_0.hlsl) that area, and another [traces](bend_trace.cs_5_0.hlsl) the shadow. The [light shader](screen_space_shadows.hlsli) applies that visibility to direct lighting alongside the shadow-map result.
+[Bend Studio's method](https://www.bendstudio.com/blog/inside-bend-screen-space-shadows/) traces toward each light through camera-visible scene depth, sharing depth reads between nearby pixels. Before each supported light draw, [setup](bend_setup.cs_5_0.hlsl) finds its bounds, an indirect dispatch [clears](bend_clear.cs_5_0.hlsl) that area, and another [traces](bend_trace.cs_5_0.hlsl) the shadow. The [light shader](screen_space_shadows.hlsli) combines that visibility with native map masks and fades before coloring direct light. Fully blocked local-light pixels skip the remaining shading and lookup reads. Required derivatives run before any pixel exits; material and BRDF lookups use explicit level zero because their native textures have one mip. Sun diffuse floors, cloud shadows, environment reflections, and alpha retain their native roles.
 
-PCSS reads depth from the light's viewpoint; Bend reads depth from the camera's viewpoint. Native shadow maps provide offscreen casters, while Bend supplies nearby visible detail they may miss. The [host](screen_space_shadows.hpp) checks the current draw's inputs and restores changed bindings. Missing inputs and intentional quality skips retain native lighting. See [ARCHITECTURE.md](../docs/ARCHITECTURE.md#screen-space-shadows) for ownership and buffer layouts.
+PCSS reads depth from the light's viewpoint; Bend reads depth from the camera's viewpoint. Native shadow maps provide offscreen casters, while Bend supplies nearby visible detail they may miss. The [host](screen_space_shadows.hpp) checks the current draw's inputs and restores changed bindings. Missing contact inputs and intentional quality skips leave shadow-map lighting available. See [ARCHITECTURE.md](../docs/ARCHITECTURE.md#screen-space-shadows) for ownership and buffer layouts.
 
-The three contact-shadow switches default to On. Their sampling and performance controls are under Screen-Space Shadows (Advanced).
+Contact shadows follow Enhanced Shadows and run at full resolution with all sample groups. They need no noise texture or per-light temporal history. The spotlight budget and Skip Unlit Areas controls are under Shadows (Advanced). Skipped contact tracing still allows PCSS to soften the native shadow map.
 
 | Control | Default | Effect |
 |---|---:|---|
-| Sun / Moon, Spot, Point Samples | 60 each | Sets search reach and sample count in render pixels |
-| Contact Shadow Contrast | 4 | Darkens and sharpens contact shadows |
-| Spot Contact Shadow Budget | 10 | Limits added spotlight evaluations between lighting-buffer clears; 0 is Unlimited |
-| Local Shadow Sampling | Full | Evaluates all pixels, 1/2 with checkerboard, or 1/4 by halving both axes |
+| Spot Contact Shadow Budget | 13 | Limits added spotlight evaluations between lighting-buffer clears; 0 is unlimited |
 | Skip Unlit Areas | On | Skips contact-shadow work outside a light's cone or range |
-| Local Shadow Distance | 0 | Limits forward camera depth in game units; 0 is Unlimited |
-| Local Shadow Fade Range | 25% | Fades over the last part of the distance limit; distance 40 starts fading at 30 |
-| Minimum Light Coverage | 0% | Skips small projected bounds and fades to full detail at twice the threshold; 0 disables the limit |
 
-The spotlight budget follows GPU execution order, including deferred replay. It counts evaluations rather than unique lights and does not rank them. Skipped lights keep native shadows; CPU submission still costs time.
+The spotlight budget follows GPU execution order, including deferred replay. It counts evaluations rather than unique lights and does not rank them. Skipped contact work leaves shadow-map filtering active; CPU submission still costs time.
 
-Checkerboard retains full-grid casting depths and reconstructs skipped pixels, so it can cost about as much as Full. The 1/4 path uses nearest depth from each 2x2 block and can shimmer in motion. Both reconstruct from current depth and light bounds, without per-light temporal history. Sun / Moon always uses Full.
+Every lane supplies the casting depths needed by nearby receivers, including lanes outside the current light bounds. Receiver culling happens after shared depth loading. Fully blocked hard contacts skip the farther reduction; other receivers evaluate all four farther-sample groups.
 
-Fixed Bend settings are 0.5% surface thickness, a 2% bilinear depth threshold, four hard-contact samples, eight end-fade samples, and 64 threads per group. Thickness is relative to nonlinear depth, rather than game units. The depth threshold stops interpolation across edges. Optional edge discard, precision offset, ray-aligned sampling, and group depth-bound early-out are disabled.
+Fixed Bend settings are 60 samples per light, contrast 4, 0.5% surface thickness, a 2% bilinear depth threshold, four hard-contact samples, eight end-fade samples, and 64 threads per group. Thickness is relative to nonlinear depth, rather than game units. The depth threshold stops interpolation across edges. Optional edge discard, precision offset, ray-aligned sampling, and group depth-bound early-out are disabled.
 
 ## Debug views and verification
 
-Soft-shadow debug views offer Blocker Distance, Filter Radius, and Map Visibility. Sun / Moon also offers Cascade; Point also offers Hemisphere. Blocker Distance displays distance / (1 + distance), Filter Radius displays radius / maximum radius, and Map Visibility shows visibility before native masks, squaring, and fades. Cascade colors are red, green, blue, and yellow from nearest to farthest; point hemispheres are red and green. Magenta marks unavailable coordinates.
+Shadow Map Debug View offers Blocker Distance, Filter Radius, Map Visibility, and Region. Both map and contact diagnostics use the same Debug Light selector. Region identifies the sun cascade or point hemisphere; spotlights have one region. Blocker Distance displays distance / (1 + distance), Filter Radius displays radius / maximum radius, and Map Visibility shows visibility before native masks, squaring, and fades. Cascade colors are red, green, blue, and yellow from nearest to farthest; point hemispheres are red and green. Magenta marks unavailable coordinates.
 
 Contact Shadow Debug View offers Visibility, Depth Edges, Ray Layout, Shadow Detail, and Without Contact Shadows. Debug Light selects Sun / Moon, Spot, or Point. Shadow Detail distinguishes evaluated and skipped areas. Without Contact Shadows hides Bend's result while keeping its calculations running.
 
 Both sets of diagnostics replace or modify lighting within the selected light draw. Surface color, other lights, GI, fog, and later processing still affect the image. Turn debug views Off before judging final appearance or performance.
 
-1. Compare Soft Shadows Off/On at a fixed camera with the chosen reconstruction mode, first with contact shadows Off and then On. Check contact edges, broad shadows, slopes, foliage, fences, cascade transitions, spotlight rims, and point-light seams.
+1. Compare Enhanced Shadows Off/On at a fixed camera with the chosen reconstruction mode. Check contact edges, broad shadows, slopes, foliage, fences, cascade transitions, spotlight rims, and point-light seams.
 2. Move the camera and characters, reveal previously hidden surfaces, and check startup, resize, odd dimensions, and different native shadow quality settings. Inspect daylight, moonlight, and overlapping spotlights at Mother Base at night.
-3. Compare Full, 1/2, and 1/4 contact-shadow sampling with budget, distance, and coverage limits disabled. Then test those limits separately. Check for lost shadows, cutoff lines, and motion shimmer.
+3. Compare Shadow Softness at 0%, 50%, and 100%. Check that PCSS changes edge softness while contact detail remains active.
+4. At Mother Base at night, compare spotlight budgets including the default 13 and 0 (unlimited). Check which lights lose contact detail and confirm that their shadow maps remain active.
 
 Build the mgsv target and stop the game before deploying. Focused CPU, WARP, hardware, and ReShade fixtures check layouts, settings, projection math, atlas boundaries, and state restoration. They do not replace gameplay checks. The existing native-only RenderDoc captures establish native inputs and order, not current addon execution, history quality, or performance.
 

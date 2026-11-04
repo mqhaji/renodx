@@ -4,6 +4,7 @@
 
 #define MGSV_BEND_SETUP
 #include "bend_common.hlsli"
+#include "pcss.hlsli"
 
 struct BendDispatch {
   int3 groups;
@@ -22,12 +23,17 @@ void main() {
   bend_dispatch.Store3(BEND_DISPATCH_HEADER + 8 * BEND_DISPATCH_STRIDE, 0u);
   bend_dispatch.Store3(BEND_DISPATCH_HEADER + 9 * BEND_DISPATCH_STRIDE, 0u);
   const bool directional = CUSTOM_SS_LIGHT_TYPE < 0.5;
-  const uint divisor = !directional && CUSTOM_SS_LOCAL_SAMPLING == 2.0 ? 2u : 1u;
-  const bool checkerboard = !directional && CUSTOM_SS_LOCAL_SAMPLING == 1.0;
+  // Keep PCSS available even when this light skips contact tracing. Point
+  // shadows use their native radial projection and need no cached matrix data.
+  PcssProjection shadow_projection = (PcssProjection)0;
+  if (CUSTOM_SS_LIGHT_TYPE != 2.0) {
+    shadow_projection = CalculatePcssProjection(bend_shadow_projection, bend_shadow_cascades, directional);
+  }
+  bend_dispatch.Store4(PCSS_PROJECTION_OFFSET, asuint(float4(shadow_projection.uv_scale, shadow_projection.depth_scale, shadow_projection.depth_a)));
+  bend_dispatch.Store(PCSS_PROJECTION_OFFSET + 16u, asuint(shadow_projection.depth_b));
   const uint2 source_size = uint2(bend_viewport.xy + 0.5);
   if (width == 0 || height == 0 || any(source_size == 0)
-      || any((source_size + divisor - 1u) / divisor != uint2(width, height))) return;
-  bend_dispatch.Store4(BEND_SOURCE_INFO_OFFSET, uint4(source_size, divisor, checkerboard ? 1u : (divisor == 2u ? 2u : 0u)));
+      || any(source_size != uint2(width, height))) return;
   const uint spot_budget = !directional && CUSTOM_SS_LIGHT_TYPE != 2.0
                                    && isfinite(CUSTOM_SS_SPOT_BUDGET) && CUSTOM_SS_SPOT_BUDGET >= 1.0
                                ? uint(min(CUSTOM_SS_SPOT_BUDGET, 2147483520.0))
@@ -38,9 +44,6 @@ void main() {
     bend_dispatch.Store(40, 2u);
     return;
   }
-  const float max_distance = CUSTOM_SS_LOCAL_MAX_DISTANCE;
-  const bool distance_limit = !directional && isfinite(max_distance) && max_distance > 0.0
-                              && all(isfinite(bend_projection_param.zw)) && bend_projection_param.z > 0.0;
   const float4 position = directional ? float4(bend_light_params[0].xyz, 0.0)
                                       : float4(bend_light_params[3].xyz, 1.0);
   const float4 projected = mul(position, bend_projection);
@@ -48,7 +51,7 @@ void main() {
   // Preserve light depth at infinity. A small XY divisor avoids overflow when
   // the sun lies almost parallel to the camera plane.
   const float xy_divisor = (projected.w < 0.0 ? -1.0 : 1.0) * max(abs(projected.w), 0.000002 * BEND_GROUP_SIZE);
-  const float2 projection_size = float2(source_size) / float(divisor);
+  const float2 projection_size = float2(source_size);
   const float4 light = float4((projected.xy / xy_divisor * float2(0.5, -0.5) + 0.5) * projection_size,
                               projected.w == 0.0 ? 0.0 : projected.z / projected.w,
                               projected.w > 0.0 ? 1.0 : -1.0);
@@ -98,15 +101,6 @@ void main() {
       }
     }
     if (isfinite(radius) && upper_corner.z <= 0.0) return;
-    if (distance_limit && isfinite(radius) && all(isfinite(lower_corner)) && all(isfinite(upper_corner))) {
-      // Limit receivers only. Depth reads along their shadow rays still reach
-      // outside this volume, so nearby surfaces keep all available blockers.
-      if (lower_corner.z >= max_distance) {
-        bend_dispatch.Store(40, 2u);
-        return;
-      }
-      upper_corner.z = min(upper_corner.z, max_distance);
-    }
     // A bound crossing the eye plane still needs the full viewport.
     if (isfinite(radius) && lower_corner.z > 0.0) {
       float2 lower = float2(width, height);
@@ -130,20 +124,6 @@ void main() {
     }
   }
   if (any(maximum <= minimum)) return;
-
-  float coverage_weight = 1.0;
-  const float minimum_coverage = CUSTOM_SS_LOCAL_MIN_COVERAGE;
-  if (!directional && isfinite(minimum_coverage) && minimum_coverage > 0.0) {
-    const float2 extent = float2(maximum - minimum);
-    const float coverage = extent.x * extent.y / (float(width) * float(height));
-    if (coverage <= minimum_coverage) {
-      // State 2 means the quality controls intentionally kept native shadows.
-      // Both indirect dispatches remain empty, and the pixel shader skips the mask.
-      bend_dispatch.Store(40, 2u);
-      return;
-    }
-    coverage_weight = smoothstep(minimum_coverage, minimum_coverage * 2.0, coverage);
-  }
 
   BendDispatch dispatches[8];
   uint count = 0;
@@ -224,8 +204,6 @@ void main() {
   bend_dispatch.Store4(0, asuint(light));
   bend_dispatch.Store4(16, uint4(minimum, maximum));
   bend_dispatch.Store4(32, uint4(width, height, 1, count));
-  // The clear call uses only the first three words of its dispatch slot.
-  bend_dispatch.Store(BEND_COVERAGE_WEIGHT_OFFSET, asuint(coverage_weight));
   uint tiles = 0;
   [loop]
   for (uint index = 0; index < count; ++index) {
