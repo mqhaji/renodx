@@ -75,7 +75,7 @@ Tracing defaults to a 60-pixel reach, shared by all light types, with contrast 4
 
 Screen-Space Lighting appears under Indirect Lighting, uses Off / GT-VBGI, defaults to enabled, and uses the key `FxIndirectLightingEnabled`. AO, GI, and specular-occlusion strengths appear before Lighting Resolution. Sampling and filtering controls remain in the collapsed advanced section. Enhanced Shadows uses `FxEnhancedShadowsEnabled`, defaults to On, and enables PCSS and Bend for all supported lights. `ShadowSoftness` ranges from 0% to its 100% default. The spotlight budget, light culling, and shared diagnostics are in Advanced. Preset Off disables lighting and Enhanced Shadows while leaving reconstruction selected.
 
-Lighting Resolution labels describe total pixel count: Full, 1/4, 1/16, and 1/64 use axis divisors of 1, 2, 4, and 8. The default is 1/16, with each axis divided by 4. Reduced texture extents round up at odd dimensions, so the fractions are nominal.
+Lighting Resolution labels describe total pixel count: Full, 1/4, 1/16, and 1/64 use axis divisors of 1, 2, 4, and 8. The default is 1/4, with each axis divided by 2. Reduced texture extents round up at odd dimensions, so the fractions are nominal.
 
 Temporal Accumulation, Spatial Filtering, and filter controls are shared through `FxIndirectLightingTemporalAccumulationEnabled`, `FxIndirectLightingSpatialFilteringEnabled`, and `FxIndirectLightingFilter*` keys. AO and specular visibility share history weight and depth/normal rejection, with separate history clamps. GI retains its own controls. Their histories and validity stay separate. Either history weight can be zero while the other signals continue accumulating.
 

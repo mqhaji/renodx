@@ -796,7 +796,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .key = "FxIndirectLightingResolution",
           .binding = &shader_injection->gt_resolution,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-          .default_value = 2.f,
+          .default_value = 1.f,
           .label = "Lighting Resolution",
           .section = "Indirect Lighting",
           .tooltip = "Fraction of the full-resolution pixel count used by the shared lighting trace. 1/4 halves each axis; 1/16 divides each axis by 4; 1/64 divides each axis by 8. Lower resolutions can lose thin geometry and contact detail. Search radii stay in full-resolution pixels.",
