@@ -16,6 +16,7 @@
 #include "../../utils/resource.hpp"
 #include "../../utils/resource_upgrade.hpp"
 #include "../../utils/swapchain.hpp"
+#include "./reconstruction/postprocess/runtime.hpp"
 
 namespace mgsv::rendering::resource_upgrades {
 
@@ -363,9 +364,14 @@ inline bool MarkCloneTarget(
     reshade::api::device* device = nullptr) {
   if (rtv.handle == 0u || upgrade_info == nullptr) return false;
 
-  const auto back_buffer_desc = device == nullptr
-                                    ? reshade::api::resource_desc{}
-                                    : renodx::utils::swapchain::GetBackBufferDesc(device);
+  auto back_buffer_desc = device == nullptr
+                              ? reshade::api::resource_desc{}
+                              : renodx::utils::swapchain::GetBackBufferDesc(device);
+  const auto render = mgsv::reconstruction::resolution::ReadActual();
+  if (render.width != 0u && render.height != 0u) {
+    back_buffer_desc.texture.width = render.width;
+    back_buffer_desc.texture.height = render.height;
+  }
 
   reshade::api::resource resource = {0u};
   bool view_destroyed = false;
@@ -437,6 +443,9 @@ inline void UpgradeDeferredSceneColorTarget(reshade::api::command_list* cmd_list
 
   auto rtvs = renodx::utils::swapchain::GetRenderTargets(cmd_list);
   auto* device = cmd_list->get_device();
+  Microsoft::WRL::ComPtr<ID3D11DepthStencilView> native_depth;
+  auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
+  context->OMGetRenderTargets(0u, nullptr, &native_depth);
   bool changed = false;
 
   // Rain/fog deferred paths can bind extra GBuffer/material RTVs alongside the scene-color output.
@@ -445,6 +454,15 @@ inline void UpgradeDeferredSceneColorTarget(reshade::api::command_list* cmd_list
   if (!rtvs.empty() && rtvs[0].handle != 0u) {
     MarkSceneTonemapCloneTarget(rtvs[0], device);
     changed = ActivateCloneHotSwapIfTracked(device, rtvs[0]) || changed;
+    const auto original = GetOriginalResourceFromView(rtvs[0]);
+    if (native_depth == nullptr && original.handle != 0u) {
+      native_depth = mgsv::reconstruction::post_process::ReadSceneDepth(reinterpret_cast<ID3D11Resource*>(original.handle));  // NOLINT(performance-no-int-to-ptr)
+    }
+    const auto clone = renodx::utils::resource::upgrade::GetResourceClone(original, {.allow_create = false});
+    if (clone.handle != 0u) {
+      auto* scene = reinterpret_cast<ID3D11Resource*>(clone.handle);  // NOLINT(performance-no-int-to-ptr)
+      scene->SetPrivateDataInterface(mgsv::reconstruction::post_process::SCENE_DEPTH_GUID, native_depth.Get());
+    }
     ArmTonemapCopyResourcePropagationForRTV(device, rtvs[0]);
   }
 
@@ -535,6 +553,7 @@ inline bool OnCopyTonemapOutputResource(
     reshade::api::resource dest) {
   if (cmd_list == nullptr) return false;
   if (source.handle == dest.handle) return false;
+  if (mgsv::reconstruction::post_process::OnCopyResource(cmd_list, source, dest)) return false;
 
   bool source_active = false;
   const auto found_source = renodx::utils::resource::GetResourceInfo(
@@ -545,23 +564,37 @@ inline bool OnCopyTonemapOutputResource(
                         && info.clone_enabled;
       });
   if (!found_source || !source_active) return false;
-  if (!tonemap_copy_state.propagation_allowed) return false;
+  const auto post_output = mgsv::reconstruction::post_process::GetActive(cmd_list);
+  if (!tonemap_copy_state.propagation_allowed && post_output == nullptr) return false;
+  auto source_clone = renodx::utils::resource::upgrade::GetResourceClone(source);
+  const bool separate_output = post_output != nullptr
+                               && source_clone.handle == reinterpret_cast<uint64_t>(post_output->source.Get());
+  if (!tonemap_copy_state.propagation_allowed && !separate_output) return false;
 
   tonemap_copy_state.propagation_allowed = false;
   const auto expected_source = tonemap_copy_state.source;
   tonemap_copy_state.source = {0u};
-  if (source.handle != expected_source.handle) return false;
+  if (source.handle != expected_source.handle && !separate_output) return false;
+  if (separate_output) {
+    source_clone = post_output->target.resource;
+  }
 
   std::vector<uint64_t> dest_view_handles;
   bool marked_dest = false;
   bool dest_conflicting_clone_target = false;
-  const auto back_buffer_desc = renodx::utils::swapchain::GetBackBufferDesc(cmd_list);
+  auto back_buffer_desc = renodx::utils::swapchain::GetBackBufferDesc(cmd_list);
+  const auto render = mgsv::reconstruction::resolution::ReadActual();
+  if (render.width != 0u && render.height != 0u) {
+    back_buffer_desc.texture.width = render.width;
+    back_buffer_desc.texture.height = render.height;
+  }
   const auto found_dest = renodx::utils::resource::UpdateResourceInfo(
       dest,
       [&dest_view_handles,
        &marked_dest,
        &dest_conflicting_clone_target,
-       back_buffer_desc](renodx::utils::resource::ResourceInfo* info) {
+       back_buffer_desc,
+       separate_output](renodx::utils::resource::ResourceInfo* info) {
         if (info->destroyed || info->is_swap_chain) return;
 
         const bool dest_matches_upgrade = scene_tonemap_upgrade_info.CheckResourceDesc(
@@ -571,6 +604,14 @@ inline bool OnCopyTonemapOutputResource(
         if (!dest_matches_upgrade) return;
         if (info->clone_target != nullptr
             && info->clone_target != &scene_tonemap_upgrade_info) {
+          // Scoped DoF/MB copies can already own a compatible float clone.
+          // Preserve that role instead of replacing its descriptor identity.
+          if (separate_output && info->clone_enabled
+              && (info->clone_target == &dof_final_copy_upgrade_info
+                  || info->clone_target == &motion_blur_upgrade_info)) {
+            marked_dest = true;
+            return;
+          }
           dest_conflicting_clone_target = true;
           return;
         }
@@ -582,15 +623,22 @@ inline bool OnCopyTonemapOutputResource(
       });
   if (!found_dest || dest_conflicting_clone_target || !marked_dest) return false;
 
-  renodx::utils::resource::upgrade::UpdateResourceViewsCloneState(
-      dest_view_handles,
-      true,
-      false,
-      &scene_tonemap_upgrade_info);
+  if (!dest_view_handles.empty()) {
+    renodx::utils::resource::upgrade::UpdateResourceViewsCloneState(
+        dest_view_handles,
+        true,
+        false,
+        &scene_tonemap_upgrade_info);
+  }
 
-  auto source_clone = renodx::utils::resource::upgrade::GetResourceClone(source);
   auto dest_clone = renodx::utils::resource::upgrade::GetResourceClone(dest);
   if (source_clone.handle == 0u || dest_clone.handle == 0u) return false;
+  if (post_output != nullptr && post_output->IsScaled()) {
+    if (!mgsv::reconstruction::post_process::OnCopyResource(cmd_list, source, dest)) {
+      mgsv::reconstruction::resolution::Fail("cannot forward a scaled scene copy");
+    }
+    return false;
+  }
 
   cmd_list->copy_resource(source_clone, dest_clone);
   return true;

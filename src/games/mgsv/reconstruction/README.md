@@ -1,8 +1,12 @@
 # MGSV Temporal Anti-Aliasing
 
-Temporal reconstruction combines samples from several frames to smooth edges and recover detail. A small camera offset, called jitter, changes which parts of each edge are sampled. MGSV supports Analytical TAA, AMD FSR 3.1.5, and NVIDIA DLSS at the game's render resolution.
+Temporal reconstruction combines samples from several frames to smooth edges and recover detail. A small camera offset, called jitter, changes which parts of each edge are sampled. MGSV supports Analytical TAA at native resolution and AMD FSR 3.1.5 or NVIDIA DLSS at native or reduced rendering resolution. Upscaling runs before bloom preparation and depth of field; interface rendering uses the output resolution.
+
+Upscaling Quality defaults to Auto for FSR and DLSS. Auto follows NVIDIA's [UI guidelines](https://github.com/NVIDIA/DLSS/blob/main/doc/RTX%20UI%20Developer%20Guidelines.pdf), using total output pixels: Native below 1920x1080, Quality through 2560x1440, Performance through 3840x2160, and Ultra Performance above that. This also handles ultrawide displays by pixel count. Auto selects a fixed mode for the current output size; it does not measure frame rate or run dynamic resolution. DLSS still queries its SDK for the selected mode's supported input size. Manual choices override Auto.
 
 See the [addon guide](../README.md) for precision upgrades and build instructions, the [roadmap](ROADMAP.md) for unfinished work, and [FSR credits](fsr3/README.md) for SDK versions and licenses.
+
+FSR and DLSS add `log2(actual render width / output width) - 1` to the game's pixel-sampler mip bias. This keeps finer texture detail available to reconstruction. Native adds -1; Off and Analytical retain the game's bias. The cache keeps one bias value at a time. Existing contexts and command lists keep their own sampler references when that cache changes. Materials that shimmer can be reviewed after gameplay testing.
 
 ## Code ownership
 
@@ -10,19 +14,32 @@ See the [addon guide](../README.md) for precision upgrades and build instruction
 
 The shared [input owner](../inputs.hpp) keeps references to native material and motion textures and selects one device and swapchain. Velocity precision upgrades work even with reconstruction Off. [input_capture.hpp](input_capture.hpp) selects the motion and camera data for reconstruction and checks that their frame, size, and texture layouts match.
 
-[frame_inputs.hpp](frame_inputs.hpp) defines the common inputs, outputs, and 96-byte preparation constants. Each backend converts color and motion into its required form. The [state guard](../d3d11_compute_state.hpp) restores the game's graphics bindings after reconstruction.
+[frame_inputs.hpp](frame_inputs.hpp) keeps the render dimensions separate from the output target. Each backend reports the result it produced, and the coordinator checks it before copying to that target. Native uses the existing scene target; reduced-resolution FSR and DLSS use a separate output. The shared preparation constants remain 96 bytes. The [state guard](../d3d11_compute_state.hpp) restores the game's graphics bindings after reconstruction.
+
+[resolution.hpp](resolution.hpp) requests a lower scene size through the native renderer's normal update. Resource rebuilds happen when that request changes, never around individual draws. Native DoF helpers receive output-based rectangle and sprite-grid dimensions; physical blur terms are copied and converted without modifying the shared native view. Off and Analytical restore the engine's own size. Native hooks check the executable and expected code before installation. This implementation supports the native scatter DoF path; an unsupported DoF path requests recovery to native rendering.
+
+[postprocess/resources.hpp](postprocess/resources.hpp) owns the output textures, matching views, depth/stencil copies, and cached intermediate images. [postprocess/runtime.hpp](postprocess/runtime.hpp) routes the native draws, copies, and clears to those images and restores their original bindings afterward. It matches the actual scene resource or its float clone and identifies native 2D shaders through their embedded source names; no external dump is needed at runtime. The helper shaders live beside these headers and share their 32-byte copy constants in [copy_constants.hlsli](postprocess/copy_constants.hlsli).
+
+Source geometry depth is resampled separately from UI depth/stencil, accounting for current camera jitter. Native depth values and all eight stencil bits are retained. Copies, clears, scissors, viewports, and the relevant size fields in copied constants follow the output dimensions. DoF sprites read prepared color and masks in the vertex shader; those inputs follow the enlarged bake targets too. Queued outputs stay alive through submission. If reconstruction is canceled or replayed, the current native scene fills the output before the game's remaining commands run.
+
+Bloom retains the native 246x138 working region inside its output-sized buffers. Cached size constants supply the matching reduction offsets, fullscreen-flare center and edge fade, and final bloom-copy crop. The native shaders and effect strengths remain unchanged, and these corrections add no shader dispatches.
+
+Native lens flares include a depth-tested sprite pass (`0x93A0C8D8`). Its half-size color layer follows output resolution after its bound depth is matched to the current scene geometry. The native shader, typed views, depth test, and blend equations are retained. The layer's clear color and alpha are carried into its enlarged target, and the later blended copy uses that same layer. Native keeps the original route.
+
+For resized draws, a bound hardware depth/stencil target is detached when both tests are disabled, then restored after the draw. Shader texture reads of scene depth remain intact. Active depth or stencil tests still require a qualified output-sized target; rejection logs identify the pass and its depth/stencil state.
 
 [GT-VBGI](../gtvbgi/README.md) keeps separate GI history and uses the same command-submission bridge. Native motion and sun-camera data are tracked through their producer commands, including with reconstruction Off. GI advances history only at its own submitted insertion; it does not borrow scene reconstruction's previous frame. Keeping a texture alive does not prevent the game from overwriting its pixels.
 
 ## Usage and defaults
 
-The **Temporal Anti-Aliasing** section contains the reconstruction mode and DLSS model. The remaining controls are under **Temporal Anti-Aliasing (Advanced)**, collapsed by default:
+The **Temporal Anti-Aliasing** section contains the reconstruction mode, DLSS model, and upscaling quality. Tuning and diagnostic controls are under **Temporal Anti-Aliasing (Advanced)**, collapsed by default:
 
 | Control | Behavior and default |
 |---|---|
 | **Temporal Reconstruction** | Off (Vanilla FXAA), Analytical TAA, AMD FSR 3.1.5, NVIDIA DLSS. New profiles default to FSR3. |
 | **DLSS Model** | Presets A-F and J-M when supported by the DLL. Default/reset is F, saved as 6. Unsupported hints fall back to the DLL default. |
-| **TAA Jitter Pattern** | Analytical uses an eight-phase Halton pattern or diagnostic Off. FSR3/DLSS always use Halton without changing the saved Analytical choice. |
+| **Upscaling Quality** | Auto, Native, Quality, Balance, Performance, Ultra Performance. Default Auto. Shown for FSR/DLSS on the supported executable. DLSS queries its supported input dimensions. |
+| **TAA Jitter Pattern** | Analytical uses an eight-phase Halton pattern or diagnostic Off. FSR3/DLSS use Halton with a phase count based on the actual upscaling ratio. The saved Analytical choice stays independent. |
 | **TAA Clip Tightness** | Controls the allowed range of history colors. Default `0.50`. |
 | **TAA History Clip Strength** | Controls how strongly history is restricted to that range. Default `1.00`. |
 | **TAA Current Frame Blend** | Maximum weight of the filtered current frame. Default `0.15`. |
@@ -31,6 +48,18 @@ The **Temporal Anti-Aliasing** section contains the reconstruction mode and DLSS
 | **TAA Diagnostic View / Velocity View Range / Object Motion Source** | Default Temporal Resolve, `8 px`, Auto-Corrected Native Object Velocity. |
 
 These settings appear above the preset slider and remain independent of RenoDX presets. Off restores the original projection and FXAA. Changes that affect history restart accumulation; changing the visualization range alone does not. Weaker history clipping can reduce shimmer while increasing trails behind moving objects.
+
+FSR uses approximately 2/3, 1/1.7, 1/2, or 1/3 of each output axis for Quality through Ultra Performance, rounded to even dimensions. At 3840x2160 output these are 2560x1440, 2258x1270, 1920x1080, and 1280x720. DLSS queries its own supported sizes. Both use `ceil(8 * (output width / actual render width)^2)` jitter phases, with a minimum of eight. Native keeps eight phases. The renderer updates the count when its actual size changes, before camera setup uses the new dimensions.
+
+Geometry, lighting, and native screen-space reflections use the input size. DoF, motion-blur color work, grading, and UI use output-based sizes. GT-VBGI and Bend retain their relative resolution choices. Their pixel-based search reach is converted from output to render pixels so changing upscaling quality does not extend the search on screen.
+
+A failed output allocation, unsupported native path, or repeatedly unsuccessful qualified dispatch requests native-size recovery. The requested quality remains saved, and the menu displays that upscaling is disabled. Select Native, then another quality mode to retry. Missing camera/motion observations during startup can recover normally. Changing quality rebuilds resources and restarts history when their dimensions change.
+
+Generic CopyRenderBuffer draws must read a routed image at t0 before they can resize a destination; unused bound texture slots do not establish that relationship. Fixed-size UI, utility, and scene-thumbnail targets keep their own dimensions. Required output-sized DoF and motion-blur targets still request native recovery if they cannot be created or matched.
+
+Bloom reductions, the bright pass, lens flares, blur, and the final bloom copy use the native fractions of output resolution. At 3840x2160 output, the quarter-axis bloom buffers stay 960x540 across quality modes. Their native UNORM/sRGB views and brightness math remain intact. Blur offsets and reciprocal dimensions follow the enlarged buffers, and cropped reductions retain the native cleared padding. These passes are selected through their actual routed color input, so unrelated uses of the same shaders keep their native targets.
+
+MGSV reuses intermediate textures for different effects. General scene/UI images require a current-frame producer before their output-sized copies can be sampled. The dedicated lens-flare layer keeps its mapping across frames because the game can record its scene copy before recording the sprite draws on another thread. Native clears follow their original command lists, including clears recorded before reconstruction publishes its output; a frame with no flares therefore keeps a neutral layer. This preserves the game's GPU dependencies without treating CPU recording order as execution order. In native DoF scopes, both pixel- and vertex-shader buffer-size constants use the enlarged grid, including its reciprocal dimensions, while native view values and unrelated fields remain intact.
 
 Diagnostic UI is enabled by `ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS` and `ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS` in [state.hpp](state.hpp). FSR3/DLSS use fixed `1x` correction on the six original and four enabled experimental paths. Alternate Stream stays at `0x`, including builds without diagnostic UI. Without motion diagnostic UI, rendering uses Temporal Resolve, `8 px`, and corrected native object motion.
 
@@ -42,7 +71,7 @@ All methods save and restore compute, graphics, and render-target state, includi
 2. Other supported camera paths use that recorded camera data without advancing camera history.
 3. `MotionBlurCameraVelocity` supplies depth, object motion, composed motion, and the matching camera data. All methods receive the same checked `ValidatedFrameInputs`.
 4. Reconstruction runs before the completed scene is reduced for bloom (`0x72C1D157`). This requires the active scene-color clone role and matching depth/motion dimensions. The first DoF preparation (`0xFE1DC3F8`) remains a fallback, followed by a checked post-DoF copy, post-motion-blur-preparation copy, or late tonemap/LUT draw. Smaller and unrelated reduction inputs are skipped.
-5. One resolve per frame writes the reconstructed scene back in MGSV's expected encoding and restores game state. Camera history advances only if the result still matches the current reset counter and sample.
+5. One resolve per frame writes the reconstructed scene back in MGSV's expected encoding and restores game state. Scheduling and post-processing routing share one draw dispatcher, which selects the destination before routing the first consuming draw. Camera history advances only if the result still matches the current reset counter and sample.
 6. With reconstruction enabled, the FXAA shader skips its filter but keeps its other scene processing.
 
 Inputs must match the device, dimensions, texture layout, presentation interval, and temporal sample. A callback can cross Present, so data from the immediately preceding interval is allowed only when the sample also matches. Older or mismatched data is rejected. Missing full-resolution work preserves history; a matching draw that fails at every insertion invalidates it. Creation, resize, relevant setting changes, and missing previous camera data restart accumulation.
@@ -51,11 +80,12 @@ All three methods run on the immediate D3D11 context. Deferred command lists are
 
 | Signal | Required form |
 |---|---|
-| Scene color | Full-resolution RGBA16F replacement texture containing MGSV's sRGB-encoded scene color; decode before combining light values. |
+| Scene color | Render-sized RGBA16F replacement texture containing MGSV's sRGB-encoded scene color; decode before combining light values. |
 | Scene alpha | Preserve current-frame alpha for downstream DoF and highlights. |
-| Depth | Full-resolution reverse-Z from the velocity pass. Larger raw values are nearer. |
+| Depth | Render-sized reverse-Z from the velocity pass. Larger raw values are nearer. |
 | Object/final velocity | Separate RGBA16F textures; native motion is packed in `.ba`, with the object mask in `.r`. |
-| SDK inputs | Linear RGBA16F color and signed RG16F motion; DLSS also receives an R32F reverse-Z depth copy. Render and output sizes are equal. |
+| SDK inputs | Linear RGBA16F color and signed RG16F motion at render size; DLSS also receives an R32F reverse-Z depth copy. |
+| Reconstruction output | Native uses the existing scene target. Reduced-resolution FSR/DLSS write a separate output before post-processing. Analytical requires equal render/output sizes. |
 | Camera history | Double-precision matrices without jitter, saved only after a successful matching result. |
 
 State restoration includes compute shaders and their bindings, graphics texture inputs, render targets, depth/stencil, blending, and tracked compute descriptors. FSR must keep the same full state preservation as the other methods.
@@ -105,6 +135,8 @@ The three velocity replacements preserve native encoding and alpha tests. **Uncl
 
 FSR3 follows AMD's 3.1.5 host schedule using a local D3D11/Shader Model 5 backend. It has no external reactive, transparency, or exposure texture; its internal analysis still identifies changing shading and newly visible surfaces. `preExposure = 1`. Sharpening and the separate mask-generation API are disabled. AMD does not provide this D3D11 integration; see [credits and licenses](fsr3/README.md).
 
+FSR and DLSS can produce a larger output from a smaller input. Shared output encoding maps current-frame alpha onto that output with clamped bilinear sampling; equal-size output preserves alpha exactly. Native renderer resizing and output routing follow the quality control. Isolated GPU checks cover unequal output sizes, odd edges, depth/stencil, constant ranges, scissors, copies, and fallback. Resampling depth does not recover geometry missing from the lower-resolution input.
+
 DLSS requires a compatible `nvngx_dlss.dll` beside the game executable and NVIDIA's installed NGX core. The addon does not bundle that DLL. Startup checks the rendering GPU's vendor; other or unidentified vendors see a disabled option with an explanation. An NVIDIA GPU alone does not guarantee DLSS support.
 
 - DLSS libraries are inspected and loaded only after explicit or saved DLSS selection. Opening the dropdown does not start DLSS. Initialization is requested at Present, outside draw callbacks.
@@ -115,9 +147,11 @@ DLSS requires a compatible `nvngx_dlss.dll` beside the game executable and NVIDI
 - Leaving DLSS keeps one feature and texture set for reuse. Matching device, context, size, and model resume it with fresh history; incompatible requests recreate it. At 4K the retained adapter textures use about 253 MiB, plus NGX allocations. Switching does not retain another set each time.
 - Teardown checks for GPU completion before releasing NGX resources. If completion or release cannot be confirmed within the allowed wait, retain the resources and disable DLSS.
 
-DLSS uses native-resolution quality, automatic exposure, no sharpening, and the supported model hint. Submission, state, query, or NGX failures request a switch to Off. Inactive Analytical/FSR resources are released. Keeping DLSS resources across switches reduces teardown risk; it does not identify the original heap-corruption cause.
+DLSS uses the selected quality mode, automatic exposure, no sharpening, and the matching supported model hint. Model rejection is tracked separately for each quality mode. Submission, state, query, or NGX failures request a switch to Off. Inactive Analytical/FSR resources are released. Keeping DLSS resources across switches reduces teardown risk; it does not identify the original heap-corruption cause.
 
 ## Known limitations and validation status
+
+The user tested the resolution-scaling and jitter cleanup and reported working gameplay. The November 5 log records Native, Performance, and Ultra Performance sizes, Auto selecting Performance at 4K, and 32 jitter phases at Performance. GT-VBGI size changes in that run follow the upscaling switches with its lighting divisor unchanged. These observations support the tested paths; they do not establish coverage of every special view, display change, or recovery case. The later file reorganization and sampler-cache cleanup still need a gameplay check.
 
 - Character wobble remains unexplained. Previous gameplay comparisons found no improvement from Analytical Jitter Off or Auto versus Direct object motion. Matrix Camera Everywhere caused too much ghosting to judge wobble. DLSS also showed wobble, although newer models hid it better. Motion ownership and submission changes have not established a fix.
 - Previous readbacks did not prove that the same character's color, motion, geometry, and accumulated history matched. Correspondence between native previous bones/object transforms and the last accumulated frame remains unverified. Camera-only comparisons do not establish a native-pose cause.
@@ -131,15 +165,18 @@ Earlier runtime checks established RGBA16F object/final velocity sampling and FS
 
 These checks cover scene reconstruction; the [GT-VBGI guide](../gtvbgi/README.md) describes its separate accumulator and filter. Stop MGSV before replacing its addon, following the [addon instructions](../README.md#building--deployment). Use one matching addon without live shader overrides and restart after replacement.
 
-1. Check fresh settings: FSR3, DLSS model F, ten projection scales at `1x`, diagnostic UI enabled, and no Alternate Stream slider. Presets must leave reconstruction selected. Off must restore FXAA and the original projection without a lasting shift.
+1. Check fresh settings: FSR3, Auto quality, DLSS model F, ten projection scales at `1x`, and diagnostic UI enabled. Presets must leave reconstruction selected. Off must restore FXAA and the original projection without a lasting shift.
 2. Start Analytical and FSR without first selecting DLSS. Check that accumulation starts without NGX loading, restarts only when needed, and does not repeatedly reset in static menus or at smaller DoF draws.
 3. Check static detail, animated characters, hair, wires, foliage, camera motion, binoculars, cuts, menus, pause/resume, bloom around bright lights, visible near/far DoF and focus changes, motion blur, rain, transparency, night vision, and size/device changes. Record wobble separately from ghost trails.
 4. Check experimental projection paths against the actual render/depth grid, including unusual slider values, missing or unrelated cameras, UI boundaries, rapid setting changes, and normal exit.
 5. Cycle all reconstruction modes. For DLSS, check saved and manual selection, cancellation, missing-DLL/non-NVIDIA explanations, pause/resume of retained resources, and model/size changes. Look for repeated history restarts, skipped reconstruction, query warnings, or submission failures.
 6. Keep Unclamp Off for baseline gameplay. Any motion-source or clamp comparison must also check motion blur and animation trails. Previous Auto/Direct comparisons did not resolve wobble.
 7. Check the settled waveform under Analytical, FSR3, and DLSS with stationary and moving cameras, menus, and method changes. Keep the older Preset M rail flicker separate from Alternate Stream instability.
+8. Compare FSR Performance with Native. Check moving hair/foliage, wires, SSR, GT-VBGI reach, contact shadows, near/far DoF and highlights, motion blur, text sharpness, subtitles, UI clipping and menus. Repeat under DLSS, then test each quality mode and DLSS model switching. Check windowed/fullscreen transitions, resizing, cold startup, loading, special views, and Off/Analytical restoration. Input/output dimensions in the log must match the selected mode. Investigate the logged cause of an upscaling failure before retrying.
 
-Logs report startup, availability, selection, first camera data, resource creation, history restarts, pause/resume, disable, and the expected notice for a smaller insertion candidate. The backend's accumulation-start message reports `insertion=BeforeBloom` when the new preferred point is used; a later insertion name identifies a fallback. Repeated restarts with unchanged settings or recurring input/dispatch warnings need investigation. Recording a dispatch does not prove the GPU completed it.
+Scaled output adds depth preparation and output-sized intermediates as needed. Native UI depth is copied in one draw, then stencil is restored in eight masked draws. All copies share one dimensions/jitter update; the stencil bit selectors are fixed buffers reused across frames and size changes. Sampled geometry depth stays separate from UI depth. Pixel shaders that need their native view-to-buffer ratio converted use a small system-constant update dispatch; shaders without those constant reads skip it, and native DoF views that were already resized need only a buffer-size copy. A draw that needs several constant updates saves compute state once and restores it before the native draw. Native DoF radius limits and its first-bake cutoff follow output width. These costs reduce the saving from rendering fewer scene pixels. Size changes reuse helper shaders and fixed depth/stencil states. Leaving scaled mode retires textures while outstanding command lists retain the resources they still reference; device teardown also releases the pipeline cache. Dispatch recording and retained references do not prove GPU completion or scene correspondence.
+
+Logs report startup, availability, selection, first camera data, resource creation, history restarts, pause/resume, disable, and the expected notice for a smaller insertion candidate. The backend's accumulation-start message reports `insertion=BeforeBloom` at the preferred point; later names identify native-resolution fallbacks. FSR/DLSS report render and output dimensions separately. They match under Native and differ under upscaling. Repeated restarts with unchanged settings or recurring input/dispatch warnings need investigation. Recording a dispatch does not prove the GPU completed it.
 
 ## Source map
 
@@ -152,5 +189,8 @@ Logs report startup, availability, selection, first camera data, resource creati
 | [frame_inputs.hpp](frame_inputs.hpp), [prepare_inputs.hlsli](prepare_inputs.hlsli), [encode_output.hlsli](encode_output.hlsli) | Common input/output data and color/motion conversions |
 | [coordinator.hpp](coordinator.hpp), [d3d11_compute_state.hpp](../d3d11_compute_state.hpp) | Command ordering, GPU queries, copy-back, state restoration, and camera-history updates |
 | [logging.hpp](logging.hpp) | Reconstruction logs |
+| [resolution.hpp](resolution.hpp) | Quality selection, native size requests, mip/jitter calculations, and DoF argument adaptation |
+| [postprocess/resources.hpp](postprocess/resources.hpp), [postprocess/runtime.hpp](postprocess/runtime.hpp) | Output resources, native post-processing/UI routing, depth/stencil, and current-frame fallback |
+| [mip_bias.hpp](mip_bias.hpp) | Cached pixel samplers with the scaling-based mip adjustment and restoration of native bindings |
 | [analytical/](analytical), [motion/](../motion) | Analytical history/resolve and native velocity replacements |
 | [fsr3/](fsr3), [dlss/](dlss) | Backend resources, lifecycle, and SDK integration |

@@ -19,6 +19,7 @@
 #include "../../../utils/settings.hpp"
 #include "../../../utils/shader.hpp"
 #include "../../../utils/state.hpp"
+#include "../../../utils/swapchain.hpp"
 #include "../inputs.hpp"
 #include "../resource_upgrades.hpp"
 #include "../shared.h"
@@ -28,7 +29,9 @@
 #include "./dlss/runtime.hpp"
 #include "./input_capture.hpp"
 #include "./logging.hpp"
+#include "./mip_bias.hpp"
 #include "./projection_jitter.hpp"
+#include "./resolution.hpp"
 #include "./state.hpp"
 
 namespace mgsv::game::reconstruction {
@@ -266,6 +269,7 @@ namespace mgsv::reconstruction::settings {
 struct State {
   renodx::utils::settings::Setting* temporal_mode_setting = nullptr;
   renodx::utils::settings::Setting* dlss_model_setting = nullptr;
+  renodx::utils::settings::Setting* upscaling_quality_setting = nullptr;
   // Float-backed CPU preferences adapt Setting::binding's float*; runtime normalizes enum choices.
   float dlss_model = static_cast<float>(dlss::DEFAULT_MODEL);
   float jitter_pattern = static_cast<float>(state::DEFAULT_JITTER_PATTERN);
@@ -280,6 +284,7 @@ struct State {
   float clip_tightness = state::DEFAULT_CLIP_TIGHTNESS;
   float history_clip_strength = state::DEFAULT_HISTORY_CLIP_STRENGTH;
   float current_frame_blend = state::DEFAULT_CURRENT_FRAME_BLEND;
+  float upscaling_quality = static_cast<float>(resolution::Quality::AUTO);
 };
 
 inline bool UpdateSetting(renodx::utils::settings::Setting* setting, float value) {
@@ -623,6 +628,13 @@ inline void OnDestroyDevice(reshade::api::device* device) {
   // trampoline reclamation or in-flight wait occurs at device destruction.
   projection_jitter::StopAdmission();
   {
+    const std::unique_lock lock(resolution::sizing_state.mutex);
+    resolution::sizing_state.renderer = nullptr;
+    resolution::sizing_state.requested = {};
+    resolution::sizing_state.actual = {};
+    ++resolution::sizing_state.generation;
+  }
+  {
     const coordinator::ExecutionGuard execution_guard;
     coordinator::Destroy(device);
   }
@@ -707,11 +719,94 @@ inline void OnPresent(
   }
   const coordinator::ExecutionGuard execution_guard;
   const auto mode = state::GetTemporalMode();
+  const auto display = renodx::utils::swapchain::GetBackBufferDesc(device);
+  const auto previous_plan = resolution::Read();
+  auto plan = resolution::MakePlan({.width = display.texture.width, .height = display.texture.height}, mode,
+                                   resolution::quality.load(std::memory_order_acquire));
+  if (!resolution::installed.load(std::memory_order_acquire) || resolution::failed.load(std::memory_order_acquire)) {
+    plan = resolution::MakePlan(plan.output, mode, resolution::Quality::NATIVE_AA);
+  }
+  if (plan.IsScaled() && mode == state::TemporalMode::NVIDIA_DLSS) {
+    if (previous_plan.output == plan.output && previous_plan.quality == plan.quality && previous_plan.mode == mode) {
+      plan.render = previous_plan.render;
+    } else if (dlss::runtime_ready.load(std::memory_order_acquire)) {
+      NVSDK_NGX_Parameter* capabilities = nullptr;
+      uint32_t minimum_width = 0u;
+      uint32_t minimum_height = 0u;
+      uint32_t maximum_width = 0u;
+      uint32_t maximum_height = 0u;
+      float sharpness = 0.f;
+      const bool queried = NVSDK_NGX_SUCCEED(NVSDK_NGX_D3D11_GetCapabilityParameters(&capabilities))
+                           && capabilities != nullptr
+                           && NVSDK_NGX_SUCCEED(NGX_DLSS_GET_OPTIMAL_SETTINGS(
+                               capabilities, plan.output.width, plan.output.height, dlss::GetPerformanceQuality(plan.quality),
+                               &plan.render.width, &plan.render.height, &maximum_width, &maximum_height,
+                               &minimum_width, &minimum_height, &sharpness));
+      if (capabilities != nullptr) {
+        NVSDK_NGX_D3D11_DestroyParameters(capabilities);
+      }
+      plan.render.width = std::min((plan.render.width + 1u) & ~1u, maximum_width & ~1u);
+      plan.render.height = std::min((plan.render.height + 1u) & ~1u, maximum_height & ~1u);
+      if (!queried || plan.render.width < minimum_width || plan.render.height < minimum_height
+          || plan.render.width == 0u || plan.render.height == 0u
+          || plan.render.width > plan.output.width || plan.render.height > plan.output.height) {
+        resolution::Fail("DLSS did not provide a supported render size");
+        plan = resolution::MakePlan(plan.output, mode, resolution::Quality::NATIVE_AA);
+      }
+    } else {
+      plan = resolution::MakePlan(plan.output, mode, resolution::Quality::NATIVE_AA);
+    }
+  }
+  uint64_t size_generation = 0u;
+  bool size_changed = false;
+  {
+    const std::unique_lock lock(resolution::sizing_state.mutex);
+    size_changed = resolution::sizing_state.requested != plan;
+    resolution::sizing_state.requested = plan;
+    size_generation = resolution::sizing_state.generation;
+  }
+  static uint64_t observed_size_generation = 0u;
+  if (size_changed || observed_size_generation != size_generation) {
+    observed_size_generation = size_generation;
+    coordinator::ResetTemporalState("render/output size changed");
+    if (previous_plan.IsScaled() && !plan.IsScaled()) {
+      post_process::Reset();
+    }
+    if (size_changed) {
+      logging::Info("upscaling plan render=", plan.render.width, "x", plan.render.height,
+                    " output=", plan.output.width, "x", plan.output.height,
+                    " quality=", resolution::QUALITY_LABELS[static_cast<size_t>(plan.quality)]);
+    }
+  }
+  const auto actual = resolution::ReadActual();
+  const uint32_t jitter_phases = plan.JitterPhaseCount(actual);
+  state::runtime_jitter_phases.store(jitter_phases, std::memory_order_release);
+  const float mip_bias = (resolution::failed.load(std::memory_order_acquire) ? 0.f : plan.MipBias(actual));
+  resolution::mip_bias.store(mip_bias, std::memory_order_release);
+  static float logged_mip_bias = 0.f;
+  if (logged_mip_bias != mip_bias || size_changed) {
+    logged_mip_bias = mip_bias;
+    logging::Info("texture mip bias adjustment=", mip_bias, " jitter_phases=", jitter_phases);
+  }
   coordinator::ReleaseInactiveResources(device, mode);
+  static uint32_t missed_scaled_dispatches = 0u;
+  if (!plan.IsScaled() || !state::frame_state.scaled_inputs_valid
+      || state::frame_state.reconstruction_scheduled || state::frame_state.reconstruction_completed) {
+    missed_scaled_dispatches = 0u;
+  }
   if (mode != state::TemporalMode::OFF
       && state::frame_state.full_resolution_candidate_seen
       && !state::frame_state.reconstruction_scheduled
       && !state::frame_state.reconstruction_completed) {
+    // Missing camera/motion during startup is not a permanent upscale failure.
+    // Only count frames where checked scene inputs were actually available.
+    if (plan.IsScaled() && state::frame_state.scaled_inputs_valid) {
+      if (++missed_scaled_dispatches >= 8u) {
+        resolution::Fail("qualified early reconstruction repeatedly could not execute");
+      }
+    } else {
+      missed_scaled_dispatches = 0u;
+    }
     // Candidate insertion draws may be lower-resolution DoF work. Preserve
     // history when no new full-resolution scene was submitted, and reset only
     // after a matching candidate was seen but no resolve completed.
@@ -731,9 +826,11 @@ inline void Use(DWORD fdw_reason, const settings::State& settings_state) {
       const auto* option = transitions::FindTemporalModeOption(state::GetTemporalMode());
       logging::Info("initial temporal state enabled=", logging::Bool{state::IsEnabled()},
                     " mode=", option == nullptr ? "unknown" : option->label,
-                    " jitter_pattern=", state::GetJitterPattern() == 0u ? "off" : "halton_8");
+                    " jitter_pattern=", state::GetJitterPattern() == 0u ? "off" : "halton_2_3");
       logging::Info("DLSS startup=vendor-only; DLL inspection, NGX and hooks are selection-driven");
       projection_jitter::Use(fdw_reason);
+      resolution::Use(fdw_reason);
+      mip_bias::Use(fdw_reason);
 
       // These return before QI/locks until a temporal method installs the shared bridge.
       reshade::register_event<reshade::addon_event::init_command_list>(coordinator::OnInitCommandList);
@@ -752,6 +849,8 @@ inline void Use(DWORD fdw_reason, const settings::State& settings_state) {
       // DllMain holds the loader lock. Runtime transitions and resource
       // quiescence happen in destroy_device; process detach only unregisters.
       projection_jitter::Use(fdw_reason);
+      resolution::Use(fdw_reason);
+      mip_bias::Use(fdw_reason);
 
       reshade::unregister_event<reshade::addon_event::init_command_list>(coordinator::OnInitCommandList);
       reshade::unregister_event<reshade::addon_event::destroy_command_list>(coordinator::OnDestroyCommandList);

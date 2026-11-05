@@ -148,6 +148,7 @@ Method: the DXBC embeds `#line` directives pointing at the original build path, 
 | `0x6966F759` | `blur_box2D_ps.hlsl` |
 | `0x1AC1A5EF` | `SSLensFlarePass1_ps.hlsl` |
 | `0x265053A6` | `SSLensFlarePass2_ps.hlsl` |
+| `0x93A0C8D8` | `Draw2D_TppLensFlare_ps.hlsl` |
 
 ### UI / 2D / utility
 

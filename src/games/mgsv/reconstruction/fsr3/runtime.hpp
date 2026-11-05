@@ -69,8 +69,10 @@ struct Resources {
   Texture dilated_depth;
   Texture dilated_motion;
 
-  uint32_t width = 0u;
-  uint32_t height = 0u;
+  uint32_t render_width = 0u;
+  uint32_t render_height = 0u;
+  uint32_t output_width = 0u;
+  uint32_t output_height = 0u;
   bool context_created = false;
   bool initialized = false;
   std::chrono::steady_clock::time_point previous_dispatch_time;
@@ -168,8 +170,10 @@ inline void Destroy() {
     texture->uav.Reset();
     texture->description = {};
   }
-  resources.width = 0u;
-  resources.height = 0u;
+  resources.render_width = 0u;
+  resources.render_height = 0u;
+  resources.output_width = 0u;
+  resources.output_height = 0u;
   resources.initialized = false;
   resources.previous_dispatch_time = {};
 }
@@ -177,8 +181,8 @@ inline void Destroy() {
 inline void ReleaseTemporalResources(reshade::api::device* device) {
   (void)device;
   if (!resources.context_created) return;
-  const uint32_t width = resources.width;
-  const uint32_t height = resources.height;
+  const uint32_t width = resources.render_width;
+  const uint32_t height = resources.render_height;
   Destroy();
   logging::Info("released inactive AMD FSR3.1 resources size=", width, "x", height);
 }
@@ -195,13 +199,21 @@ inline bool CreateComputeShader(
          && SUCCEEDED(device->CreateComputeShader(code.data(), code.size(), nullptr, &output));
 }
 
-inline bool CreateResources(ID3D11Device* device, uint32_t width, uint32_t height) {
+inline bool CreateResources(ID3D11Device* device, const ValidatedFrameInputs& inputs) {
+  if (inputs.render_width == 0u || inputs.render_height == 0u
+      || inputs.output.width < inputs.render_width || inputs.output.height < inputs.render_height
+      || inputs.output.width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION
+      || inputs.output.height > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) return false;
+  const uint32_t width = inputs.render_width;
+  const uint32_t height = inputs.render_height;
   Destroy();
   if (device == nullptr || device->GetFeatureLevel() < D3D_FEATURE_LEVEL_11_0) return false;
 
   resources.device = device;
-  resources.width = width;
-  resources.height = height;
+  resources.render_width = width;
+  resources.render_height = height;
+  resources.output_width = inputs.output.width;
+  resources.output_height = inputs.output.height;
   const size_t scratch_size = dx11::GetScratchMemorySize(FFX_FSR3UPSCALER_CONTEXT_COUNT);
   resources.backend_scratch.resize(
       (scratch_size + sizeof(std::max_align_t) - 1u) / sizeof(std::max_align_t));
@@ -223,7 +235,7 @@ inline bool CreateResources(ID3D11Device* device, uint32_t width, uint32_t heigh
   context_description.flags = FFX_FSR3UPSCALER_ENABLE_HIGH_DYNAMIC_RANGE
                               | FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED;
   context_description.maxRenderSize = {.width = width, .height = height};
-  context_description.maxUpscaleSize = {.width = width, .height = height};
+  context_description.maxUpscaleSize = {.width = inputs.output.width, .height = inputs.output.height};
   context_description.backendInterface = backend_interface;
   result = ffxFsr3UpscalerContextCreate(&resources.context, &context_description);
   if (result != FFX_OK) {
@@ -285,12 +297,12 @@ inline bool CreateResources(ID3D11Device* device, uint32_t width, uint32_t heigh
       || !CreateTexture(
           device,
           resources.linear_output,
-          MakeDescription(FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT, width, height, sampled_uav),
+          MakeDescription(FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT, inputs.output.width, inputs.output.height, sampled_uav),
           LocalView::SRV)
       || !CreateTexture(
           device,
           resources.encoded_output,
-          MakeDescription(FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT, width, height, sampled_uav),
+          MakeDescription(FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT, inputs.output.width, inputs.output.height, sampled_uav),
           LocalView::UAV)) {
     Destroy();
     return false;
@@ -321,7 +333,7 @@ inline bool CreateResources(ID3D11Device* device, uint32_t width, uint32_t heigh
 
   logging::Info("FSR3.1 D3D11 context probe succeeded feature_level=",
                 static_cast<uint32_t>(device->GetFeatureLevel()),
-                " size=", width, "x", height,
+                " render=", width, "x", height, " output=", inputs.output.width, "x", inputs.output.height,
                 " host_version=", FFX_FSR3UPSCALER_VERSION_MAJOR, ".",
                 FFX_FSR3UPSCALER_VERSION_MINOR, ".", FFX_FSR3UPSCALER_VERSION_PATCH,
                 " backend_interface=", FFX_SDK_VERSION_MAJOR, ".",
@@ -329,14 +341,16 @@ inline bool CreateResources(ID3D11Device* device, uint32_t width, uint32_t heigh
   return true;
 }
 
-inline bool EnsureResources(ID3D11Device* device, uint32_t width, uint32_t height) {
+inline bool EnsureResources(ID3D11Device* device, const ValidatedFrameInputs& inputs) {
   if (resources.context_created
       && resources.device.Get() == device
-      && resources.width == width
-      && resources.height == height) {
+      && resources.render_width == inputs.render_width
+      && resources.render_height == inputs.render_height
+      && resources.output_width == inputs.output.width
+      && resources.output_height == inputs.output.height) {
     return true;
   }
-  return CreateResources(device, width, height);
+  return CreateResources(device, inputs);
 }
 
 inline void UnbindComputeResources(ID3D11DeviceContext* context) {
@@ -364,10 +378,10 @@ inline bool PrepareGameInputs(
       .current_jitter_uv = {inputs.camera.jitter_uv_x, inputs.camera.jitter_uv_y},
       .velocity_projection_jitter_scale = state::GetProjectionJitterScale(state::ProjectionJitterPath::VELOCITY),
       .camera_reprojection_valid = !reset && inputs.camera.camera_reprojection_valid ? 1.f : 0.f,
-      .render_size = {resources.width, resources.height},
+      .render_size = {resources.render_width, resources.render_height},
       .reciprocal_render_size = {
-          1.f / static_cast<float>(resources.width),
-          1.f / static_cast<float>(resources.height),
+          1.f / static_cast<float>(resources.render_width),
+          1.f / static_cast<float>(resources.render_height),
       },
       .current_to_previous_clip = inputs.camera.current_to_previous_clip,
   };
@@ -391,8 +405,8 @@ inline bool PrepareGameInputs(
   context->CSSetConstantBuffers(0u, 1u, &constant_buffer);
   context->CSSetShader(resources.prepare_shader.Get(), nullptr, 0u);
   context->Dispatch(
-      (resources.width + THREAD_GROUP_SIZE - 1u) / THREAD_GROUP_SIZE,
-      (resources.height + THREAD_GROUP_SIZE - 1u) / THREAD_GROUP_SIZE,
+      (resources.render_width + THREAD_GROUP_SIZE - 1u) / THREAD_GROUP_SIZE,
+      (resources.render_height + THREAD_GROUP_SIZE - 1u) / THREAD_GROUP_SIZE,
       1u);
   UnbindComputeResources(context);
   return true;
@@ -410,9 +424,10 @@ inline void EncodeGameOutput(
   context->CSSetShaderResources(0u, static_cast<UINT>(srvs.size()), srvs.data());
   context->CSSetUnorderedAccessViews(0u, 1u, &output, nullptr);
   context->CSSetShader(resources.encode_shader.Get(), nullptr, 0u);
+  context->CSSetConstantBuffers(0u, 1u, resources.prepare_constant_buffer.GetAddressOf());
   context->Dispatch(
-      (resources.width + THREAD_GROUP_SIZE - 1u) / THREAD_GROUP_SIZE,
-      (resources.height + THREAD_GROUP_SIZE - 1u) / THREAD_GROUP_SIZE,
+      (resources.output_width + THREAD_GROUP_SIZE - 1u) / THREAD_GROUP_SIZE,
+      (resources.output_height + THREAD_GROUP_SIZE - 1u) / THREAD_GROUP_SIZE,
       1u);
   UnbindComputeResources(context);
 }
@@ -472,15 +487,15 @@ inline bool DispatchHost(
         FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
     dispatch.output = MakeResource(resources.linear_output, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
     dispatch.jitterOffset = {
-        .x = inputs.camera.jitter_uv_x * static_cast<float>(resources.width),
-        .y = inputs.camera.jitter_uv_y * static_cast<float>(resources.height),
+        .x = inputs.camera.jitter_uv_x * static_cast<float>(resources.render_width),
+        .y = inputs.camera.jitter_uv_y * static_cast<float>(resources.render_height),
     };
     dispatch.motionVectorScale = {
-        .x = static_cast<float>(resources.width),
-        .y = static_cast<float>(resources.height),
+        .x = static_cast<float>(resources.render_width),
+        .y = static_cast<float>(resources.render_height),
     };
-    dispatch.renderSize = {.width = resources.width, .height = resources.height};
-    dispatch.upscaleSize = {.width = resources.width, .height = resources.height};
+    dispatch.renderSize = {.width = resources.render_width, .height = resources.render_height};
+    dispatch.upscaleSize = {.width = resources.output_width, .height = resources.output_height};
     dispatch.enableSharpening = false;
     dispatch.sharpness = 0.f;
     dispatch.frameTimeDelta = FrameDeltaMilliseconds(reset);
@@ -500,7 +515,7 @@ inline bool DispatchHost(
   return succeeded;
 }
 
-inline bool Dispatch(const ValidatedFrameInputs& inputs, MethodOutput& output) {
+inline bool Dispatch(const ValidatedFrameInputs& inputs, ColorTarget* output) {
   auto* device = inputs.device;
   if (device == nullptr || device->get_api() != reshade::api::device_api::d3d11) return false;
 
@@ -517,7 +532,7 @@ inline bool Dispatch(const ValidatedFrameInputs& inputs, MethodOutput& output) {
   }
 
   auto* native_device = reinterpret_cast<ID3D11Device*>(device->get_native());  // NOLINT(performance-no-int-to-ptr)
-  if (!EnsureResources(native_device, inputs.width, inputs.height)) {
+  if (!EnsureResources(native_device, inputs)) {
     return false;
   }
 
@@ -533,12 +548,16 @@ inline bool Dispatch(const ValidatedFrameInputs& inputs, MethodOutput& output) {
                   " frame=", inputs.frame_token,
                   " native_frame=", inputs.camera.frame_token,
                   " sample=", inputs.sample_index,
-                  " size=", resources.width, "x", resources.height);
+                  " render=", resources.render_width, "x", resources.render_height,
+                  " output=", resources.output_width, "x", resources.output_height);
   }
   resources.initialized = true;
-  output = {
+  *output = {
       .resource = reshade::api::resource{reinterpret_cast<uint64_t>(resources.encoded_output.texture.Get())},
-      .final_usage = reshade::api::resource_usage::unordered_access,
+      .width = resources.output_width,
+      .height = resources.output_height,
+      .format = reshade::api::format::r16g16b16a16_float,
+      .usage = reshade::api::resource_usage::unordered_access,
   };
   return true;
 }

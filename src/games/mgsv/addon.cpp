@@ -17,6 +17,7 @@
 #include <functional>
 #include <mutex>
 #include <shared_mutex>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -36,6 +37,7 @@
 
 #include "../../mods/shader.hpp"
 #include "../../mods/swapchain_v2.hpp"
+#include "../../utils/command_action.hpp"
 #include "../../utils/mutex.hpp"
 #include "../../utils/random.hpp"
 #include "../../utils/resource.hpp"
@@ -50,6 +52,7 @@
 #include "./output/output.hpp"
 #include "./reconstruction/coordinator.hpp"
 #include "./reconstruction/input_capture.hpp"
+#include "./reconstruction/postprocess/runtime.hpp"
 #include "./reconstruction/runtime.hpp"
 #include "./reconstruction/settings.hpp"
 #include "./resource_upgrades.hpp"
@@ -327,17 +330,19 @@ void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool resize) {
   mgsv::inputs::OnDestroySwapchain(swapchain, resize);
   mgsv::lighting::environment_specular::Reset();
   mgsv::reconstruction::coordinator::ResetTemporalState("input swapchain retired");
+  mgsv::reconstruction::post_process::Reset();
   // Cancel reconstruction but retain every original game prefix/post list for its existing replay path.
-  std::vector<std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 4>> retired_views;
+  std::vector<std::array<Microsoft::WRL::ComPtr<ID3D11DeviceChild>, 5>> retired_resources;
   std::vector<std::function<void(reshade::api::command_list*, bool)>> retired_lighting;
   {
     const std::unique_lock submission_lock(mgsv::reconstruction::coordinator::submission.mutex);
     for (auto& pending : mgsv::reconstruction::coordinator::submission.pending_dispatches) {
-      retired_views.push_back({
+      retired_resources.push_back({
           std::move(pending.color_srv),
           std::move(pending.velocity_srv),
           std::move(pending.depth_srv),
           std::move(pending.object_velocity_srv),
+          std::move(pending.output_resource),
       });
       pending.inputs = {};
       if (pending.is_lighting) retired_lighting.push_back(std::move(pending.lighting_callback));
@@ -345,34 +350,15 @@ void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool resize) {
   }
 }
 
-bool OnDraw(reshade::api::command_list* cmd_list, uint32_t vertex_count, uint32_t instance_count,
-            uint32_t first_vertex, uint32_t first_instance) {
-  (void)vertex_count;
-  (void)instance_count;
-  (void)first_vertex;
-  (void)first_instance;
-  return mgsv::game::reconstruction::HandleDraw(cmd_list, &shader_injection);
-}
-
-bool OnDrawIndexed(reshade::api::command_list* cmd_list, uint32_t index_count, uint32_t instance_count,
-                   uint32_t first_index, int32_t vertex_offset, uint32_t first_instance) {
-  (void)index_count;
-  (void)instance_count;
-  (void)first_index;
-  (void)vertex_offset;
-  (void)first_instance;
-  return mgsv::game::reconstruction::HandleDraw(cmd_list, &shader_injection);
-}
-
-bool OnDrawOrDispatchIndirect(reshade::api::command_list* cmd_list, reshade::api::indirect_command type,
-                              reshade::api::resource buffer, uint64_t offset, uint32_t draw_count, uint32_t stride) {
-  (void)type;
-  (void)buffer;
-  (void)offset;
-  (void)draw_count;
-  (void)stride;
-  return mgsv::game::reconstruction::HandleDraw(cmd_list, &shader_injection);
-}
+// Scheduling must precede the pipeline actions that redirect this same draw.
+// Keeping both in command_action also preserves order when DevKit owns its hook.
+constexpr auto RECONSTRUCTION_DRAW = [](auto& command) {
+  using Context = std::remove_reference_t<decltype(command)>;
+  if (command.IsDispatch()) return renodx::utils::command_action::CallbackResult<Context>{};
+  return renodx::utils::command_action::CallbackResult<Context>{
+      .bypass = mgsv::game::reconstruction::HandleDraw(command.cmd_list),
+  };
+};
 
 void OnPresent(
     reshade::api::command_queue* queue,
@@ -549,9 +535,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     reshade::register_event<reshade::addon_event::destroy_command_list>(mgsv::inputs::descriptor_tracker::OnDestroyCommandList);
     reshade::register_event<reshade::addon_event::reset_command_list>(mgsv::inputs::descriptor_tracker::OnResetCommandList);
     reshade::register_event<reshade::addon_event::push_descriptors>(mgsv::inputs::descriptor_tracker::OnPushDescriptors);
-    reshade::register_event<reshade::addon_event::draw>(OnDraw);
-    reshade::register_event<reshade::addon_event::draw_indexed>(OnDrawIndexed);
-    reshade::register_event<reshade::addon_event::draw_or_dispatch_indirect>(OnDrawOrDispatchIndirect);
   } else if (fdw_reason == DLL_PROCESS_DETACH) {
     reshade::unregister_event<reshade::addon_event::init_device>(mgsv::shadows::screen_space::OnInitDevice);
     reshade::unregister_event<reshade::addon_event::destroy_device>(mgsv::shadows::screen_space::OnDestroyDevice);
@@ -570,9 +553,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     reshade::unregister_event<reshade::addon_event::destroy_command_list>(mgsv::inputs::descriptor_tracker::OnDestroyCommandList);
     reshade::unregister_event<reshade::addon_event::reset_command_list>(mgsv::inputs::descriptor_tracker::OnResetCommandList);
     reshade::unregister_event<reshade::addon_event::push_descriptors>(mgsv::inputs::descriptor_tracker::OnPushDescriptors);
-    reshade::unregister_event<reshade::addon_event::draw>(OnDraw);
-    reshade::unregister_event<reshade::addon_event::draw_indexed>(OnDrawIndexed);
-    reshade::unregister_event<reshade::addon_event::draw_or_dispatch_indirect>(OnDrawOrDispatchIndirect);
   }
   mgsv::reconstruction::Use(fdw_reason, reconstruction_settings);
 
@@ -580,7 +560,19 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
 
   renodx::mods::swapchain::v2::Use(fdw_reason, &shader_injection);
 
+  if (fdw_reason == DLL_PROCESS_ATTACH) {
+    // Register before the shared dispatcher selects its draw events. Its global
+    // callback publishes reconstruction output before per-shader scene routing.
+    renodx::utils::command_action::Register(RECONSTRUCTION_DRAW,
+                                            {.command_types = renodx::utils::command_action::COMMAND_TYPE_DIRECT_DRAW | renodx::utils::command_action::COMMAND_TYPE_INDIRECT});
+  } else if (fdw_reason == DLL_PROCESS_DETACH) {
+    mgsv::reconstruction::post_process::Use(fdw_reason);
+    renodx::utils::command_action::Unregister(RECONSTRUCTION_DRAW);
+  }
   renodx::mods::shader::Use(fdw_reason, custom_shaders, &shader_injection);
+  if (fdw_reason == DLL_PROCESS_ATTACH) {
+    mgsv::reconstruction::post_process::Use(fdw_reason);
+  }
 
   return TRUE;
 }

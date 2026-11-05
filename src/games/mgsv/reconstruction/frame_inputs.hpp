@@ -22,6 +22,14 @@ struct alignas(16) PrepareConstants {
 
 static_assert(sizeof(PrepareConstants) == 96u, "MGSV SDK input constants must occupy 24 dwords");
 
+struct ColorTarget {
+  reshade::api::resource resource = {0};
+  uint32_t width = 0u;
+  uint32_t height = 0u;
+  reshade::api::format format = reshade::api::format::unknown;
+  reshade::api::resource_usage usage = reshade::api::resource_usage::shader_resource;
+};
+
 struct ValidatedFrameInputs {
   reshade::api::command_list* cmd_list = nullptr;
   reshade::api::device* device = nullptr;
@@ -43,14 +51,17 @@ struct ValidatedFrameInputs {
   camera_state::CameraFrame camera = {};
   uint64_t frame_token = 0u;
   uint32_t sample_index = 0u;
-  uint32_t width = 0u;
-  uint32_t height = 0u;
+  uint32_t render_width = 0u;
+  uint32_t render_height = 0u;
+  ColorTarget output = {};
   const char* insertion_name = "unknown";
-};
 
-struct MethodOutput {
-  reshade::api::resource resource = {0};
-  reshade::api::resource_usage final_usage = reshade::api::resource_usage::unordered_access;
+  // Analytical TAA keeps native resolution. SDK backends can use a distinct,
+  // larger destination when the output-sized post-processing route is active.
+  [[nodiscard]] bool HasNativeOutputSize() const {
+    return render_width != 0u && render_height != 0u
+           && render_width == output.width && render_height == output.height;
+  }
 };
 
 }  // namespace mgsv::reconstruction

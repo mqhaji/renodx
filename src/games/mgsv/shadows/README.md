@@ -66,7 +66,7 @@ Contact shadows follow Enhanced Shadows and run at full resolution with all samp
 
 | Control | Default | Effect |
 |---|---:|---|
-| Contact Shadow Reach | 60 px | Search length along the ray's main screen axis, shared by every light; range 16–256 render pixels |
+| Contact Shadow Reach | 60 px | Search length along the ray's main screen axis, shared by every light; range 16–256 output pixels, converted to render pixels when upscaling |
 | Spot Contact Shadow Budget | 13 | Limits added spotlight evaluations between lighting-buffer clears; 0 is unlimited |
 | Skip Unlit Areas | On | Skips contact-shadow work outside a light's cone or range |
 
