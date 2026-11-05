@@ -12,7 +12,7 @@ Reconstruction settings stay independent of RenoDX presets. DLSS requires a comp
 
 **Screen-Space Lighting** selects Off or GT-VBGI. One search through scene depth supplies AO contact shading, GI light bouncing from visible surfaces, and specular visibility for environment reflections. AO, GI, and Specular Occlusion have separate strengths; resolution and sampling controls are shared.
 
-Defaults are GT-VBGI, all three strengths at 75%, 1/16 resolution, a 2000-pixel radius, 40 samples per side, three sampling directions, surface thickness 0.15, and surface offset 1/1024 in the game's view-space units. Full/1/4/1/16/1/64 describe total pixel count: the reduced options divide each axis by 2, 4, or 8. Coarse depth sampling and GI backface rejection default to Off. GI sources use diffuse light and albedo. Noise uses IS-FAST.
+Defaults are GT-VBGI, all three strengths at 75%, 1/4 resolution, a 2000-pixel radius, 40 samples per side, three sampling directions, surface thickness 0.15, and surface offset 1/1024 in the game's view-space units. Full/1/4/1/16/1/64 describe total pixel count: the reduced options divide each axis by 2, 4, or 8. Coarse depth sampling and GI backface rejection default to Off. GI sources use diffuse light and albedo. Noise uses IS-FAST.
 
 Surface Thickness controls the assumed depth of sampled geometry. Search Radius changes reach; samples and directions control coverage quality. **Specular Occlusion Strength** blends from native environment occlusion at 0% to the bitmask estimate at 100%, reduced where sampling is unreliable. It can darken blocked reflections or restore reflections that native AO darkens too much. **Reject Backfacing GI Sources** suppresses source light while retaining its occlusion.
 
