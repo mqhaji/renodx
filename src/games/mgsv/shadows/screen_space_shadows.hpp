@@ -19,6 +19,7 @@
 #include <include/reshade.hpp>
 
 #include "../inputs.hpp"
+#include "../reconstruction/resolution.hpp"
 #include "../shared.h"
 
 namespace mgsv::shadows::screen_space {
@@ -434,6 +435,10 @@ inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& 
   }
 
   auto constants = settings;
+  const auto plan = reconstruction::resolution::Read();
+  if (plan.IsScaled() && plan.render == reconstruction::resolution::Size{.width = mask_width, .height = mask_height}) {
+    constants.ss_shadow_reach *= static_cast<float>(mask_width) / static_cast<float>(plan.output.width);
+  }
   constants.ss_shadow_light_type = static_cast<float>(light_type);
   std::array<std::byte, constant_bytes> bytes = {};
   std::memcpy(bytes.data(), &constants, sizeof(constants));

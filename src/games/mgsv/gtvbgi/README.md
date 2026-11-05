@@ -10,6 +10,8 @@ MGSV supplies normals and positions in camera coordinates. The albedo texture's 
 
 One Off / GT-VBGI control enables the complete effect, with separate AO, GI, and specular-occlusion strengths. Missing or incompatible trace inputs skip custom lighting. Missing specular inputs retain native specular occlusion while AO/GI continue. IS-FAST noise advances when scene reconstruction or qualified AO or GI accumulation can combine frames.
 
+When the lighting size changes, one log message reports the scene dimensions, trace dimensions, and divisor for each axis. This distinguishes a scene resize from a change to Lighting Resolution without reporting every texture allocation.
+
 ## Specular occlusion
 
 Each slice keeps a separate 32-bit visibility mask over the reflection cone, whose direction comes from the native shading normal and whose width comes from material roughness. The same geometry samples update diffuse and specular coverage. The trace sums visible and open angular areas; filtering combines these areas before dividing to obtain visibility. GI source rejection and AO strength do not change specular coverage.

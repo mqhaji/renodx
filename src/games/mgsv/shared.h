@@ -39,7 +39,7 @@ struct ShaderInjectData {
   float enhanced_shadows_enabled;
 
   float shadow_softness;  // Multiplies tuned source sizes; 1 keeps the default softness.
-  float ss_shadow_reach;  // Contact-shadow search length in render pixels, shared by all light types.
+  float ss_shadow_reach;  // Contact-shadow search length in output pixels; effect-local copies convert to render pixels.
   float shadow_map_debug_view;
 
   // Indirect Lighting controls, in GUI order.

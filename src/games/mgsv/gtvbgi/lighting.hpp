@@ -30,6 +30,7 @@
 #include "../d3d11_compute_state.hpp"
 #include "../inputs.hpp"
 #include "../reconstruction/coordinator.hpp"
+#include "../reconstruction/resolution.hpp"
 #include "../shared.h"
 #include "environment_specular.hpp"
 #include "temporal_inputs.hpp"
@@ -157,8 +158,6 @@ inline bool EnsureLightTarget(reshade::api::device* device, LightTarget* target,
     return true;
   }
 
-  const uint32_t previous_width = target->width;
-  const uint32_t previous_height = target->height;
   DestroyLightTarget(device, target);
   target->format = format;
 
@@ -188,9 +187,6 @@ inline bool EnsureLightTarget(reshade::api::device* device, LightTarget* target,
 
   target->width = width;
   target->height = height;
-  LogLight(reshade::log::level::info, "created lighting texture; previous_size=",
-           previous_width, "x", previous_height, " size=", width, "x", height,
-           " format=", static_cast<uint32_t>(format));
   return true;
 }
 
@@ -813,7 +809,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .default_value = 2000.f,
           .label = "Search Radius",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Search distance in full-resolution pixels for AO, GI, and specular occlusion. Larger values reach farther surfaces but spread samples farther apart.",
+          .tooltip = "Search distance in output pixels for AO, GI, and specular occlusion. Converted to the current render size when upscaling. Larger values reach farther surfaces but spread samples farther apart.",
           .min = 1.f,
           .max = 4096.f,
           .format = "%.0f px",
@@ -1082,6 +1078,10 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
                   ShaderInjectData constants, const lighting::temporal_inputs::Snapshot& temporal,
                   bool history_allowed) {
   auto* device = cmd_list->get_device();
+  const auto plan = reconstruction::resolution::Read();
+  if (plan.IsScaled() && plan.render == reconstruction::resolution::Size{.width = frame.width, .height = frame.height}) {
+    constants.gt_search_radius_pixels *= static_cast<float>(frame.width) / static_cast<float>(plan.output.width);
+  }
   uint32_t scale = 1u;
   if (constants.gt_resolution > 2.5f) {
     scale = 8u;
@@ -1116,6 +1116,7 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   if (noise == nullptr) return;
   const uint32_t width = (frame.width + scale - 1u) / scale;
   const uint32_t height = (frame.height + scale - 1u) / scale;
+  const bool size_changed = visibility_target.width != width || visibility_target.height != height;
 
   if (!EnsureLightTarget(device, &visibility_target, width, height, reshade::api::format::r16g16_float)
       || !EnsureLightTarget(device, &il::bounce_target, width, height)
@@ -1126,6 +1127,12 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
     LogLightOnce(&failed, reshade::log::level::warning,
                  "GT-VBGI setup failed; skipping custom lighting; effect=", width, "x", height);
     return;
+  }
+
+  if (size_changed) {
+    // One message distinguishes a scene resize from a change to Lighting Resolution.
+    LogLight(reshade::log::level::info, "GT-VBGI resolution: scene=", frame.width, "x", frame.height,
+             " trace=", width, "x", height, " axis_divisor=", scale);
   }
 
   const bool diagnostic_requested = (constants.gt_debug_view >= 2.f && constants.gt_debug_view <= 11.f)

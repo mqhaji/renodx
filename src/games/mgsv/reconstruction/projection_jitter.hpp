@@ -31,6 +31,7 @@
 
 #include "./camera_state.hpp"
 #include "./logging.hpp"
+#include "./resolution.hpp"
 #include "./state.hpp"
 
 namespace mgsv::reconstruction::projection_jitter {
@@ -350,7 +351,11 @@ inline bool LooksLikeGameplayProjection(
     uint32_t height,
     uint8_t flags,
     const void* camera) {
-  if (projection == nullptr || width < 640u || height < 360u || (flags & 1u) == 0u || camera == nullptr) return false;
+  if (projection == nullptr || (flags & 1u) == 0u || camera == nullptr) return false;
+  if (width < 640u || height < 360u) {
+    const std::shared_lock lock(resolution::sizing_state.mutex);
+    if (!resolution::sizing_state.requested.IsScaled() || resolution::sizing_state.actual != resolution::Size{.width = width, .height = height}) return false;
+  }
   return std::isfinite(projection[0])
          && std::isfinite(projection[5])
          && std::abs(projection[0]) > 1.f

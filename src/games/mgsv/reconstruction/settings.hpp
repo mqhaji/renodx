@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -11,6 +12,7 @@
 #include "../../../utils/settings.hpp"
 #include "../shared.h"
 #include "./dlss/runtime.hpp"
+#include "./logging.hpp"
 #include "./runtime.hpp"
 #include "./state.hpp"
 
@@ -49,6 +51,24 @@ inline void AppendSettings(
       .label = "DLSS Model",
       .section = "Temporal Anti-Aliasing",
       .max = static_cast<float>(dlss::Model::M),
+      .is_visible = [] { return false; },
+  };
+  settings_state->upscaling_quality_setting = new renodx::utils::settings::Setting{
+      .key = "FxUpscalingQuality",
+      .binding = &settings_state->upscaling_quality,
+      .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+      .default_value = static_cast<float>(resolution::Quality::AUTO),
+      .label = "Upscaling Quality",
+      .section = "Temporal Anti-Aliasing",
+      .labels = {resolution::QUALITY_LABELS.begin(), resolution::QUALITY_LABELS.end()},
+      .max = static_cast<float>(resolution::QUALITY_LABELS.size() - 1u),
+      .parse = [](float value) {
+        const auto selected = static_cast<resolution::Quality>(static_cast<uint32_t>(std::clamp(value, 0.f, static_cast<float>(resolution::QUALITY_LABELS.size() - 1u))));
+        if (resolution::quality.exchange(selected, std::memory_order_acq_rel) != selected) {
+          resolution::failed.store(false, std::memory_order_release);
+          logging::Info("upscaling quality selected ", resolution::QUALITY_LABELS[static_cast<size_t>(selected)]);
+        }
+        return static_cast<float>(selected); },
       .is_visible = [] { return false; },
   };
 
@@ -160,6 +180,53 @@ inline void AppendSettings(
             return changed; },
           .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::NVIDIA_DLSS; },
       },
+      settings_state->upscaling_quality_setting,
+      new renodx::utils::settings::Setting{
+          .value_type = renodx::utils::settings::SettingValueType::CUSTOM,
+          .can_reset = false,
+          .label = "Upscaling Quality",
+          .section = "Temporal Anti-Aliasing",
+          .on_draw = [settings_state] {
+            if (settings_state->upscaling_quality_setting == nullptr) return false;
+            const auto current = static_cast<size_t>(std::clamp(settings_state->upscaling_quality_setting->GetValue(), 0.f, static_cast<float>(resolution::QUALITY_LABELS.size() - 1u)));
+            const bool open = ImGui::BeginCombo("Upscaling Quality", resolution::QUALITY_LABELS[current]);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
+              ImGui::SetTooltip("Renders the scene at a lower resolution, then reconstructs it before post-processing and UI. Auto chooses by output pixel count: Native below 1080p, Quality through 1440p, Performance through 4K, and Ultra Performance above 4K. Native keeps the game's resolution. Changing quality rebuilds size-dependent game resources and restarts history.");
+            }
+            if (!open) return false;
+            bool changed = false;
+            for (size_t index = 0u; index < resolution::QUALITY_LABELS.size(); ++index) {
+              const bool selected = index == current;
+              if (ImGui::Selectable(resolution::QUALITY_LABELS[index], selected) && !selected) {
+                changed = UpdateSetting(settings_state->upscaling_quality_setting, static_cast<float>(index));
+              }
+              if (selected) {
+                ImGui::SetItemDefaultFocus();
+              }
+            }
+            ImGui::EndCombo();
+            return changed; },
+          .is_visible = [] {
+            const auto mode = state::GetTemporalMode();
+            return resolution::installed.load(std::memory_order_acquire)
+                   && (mode == state::TemporalMode::AMD_FSR3 || mode == state::TemporalMode::NVIDIA_DLSS); },
+      },
+      new renodx::utils::settings::Setting{
+          .value_type = renodx::utils::settings::SettingValueType::CUSTOM,
+          .can_reset = false,
+          .label = "Upscaling Status",
+          .section = "Temporal Anti-Aliasing",
+          .on_draw = [] {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 0.2f, 0.2f, 1.f));
+            ImGui::TextWrapped("Upscaling disabled. Select Native, then choose a quality mode to retry.");
+            ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) { ImGui::SetTooltip("The ReShade log contains the reason the upscale path could not run."); }
+            return false; },
+          .is_visible = [] {
+            const auto mode = state::GetTemporalMode();
+            return resolution::failed.load(std::memory_order_acquire)
+                   && (mode == state::TemporalMode::AMD_FSR3 || mode == state::TemporalMode::NVIDIA_DLSS); },
+      },
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
       new renodx::utils::settings::Setting{
           .key = "FxTaaDiagnosticView",
@@ -197,9 +264,9 @@ inline void AppendSettings(
           .label = "TAA Jitter Pattern",
           .section = "Temporal Anti-Aliasing (Advanced)",
           .tooltip = "Diagnostic projection sampling pattern. Off keeps analytical TAA active with zero projection jitter. "
-                     "FSR3 and DLSS enforce the eight-phase Halton sequence. Changing modes resets temporal history "
+                     "FSR3 and DLSS always use Halton, with more phases at lower render resolutions. Changing modes resets temporal history "
                      "and the sample sequence.",
-          .labels = {"Off", "Halton (2,3) - 8 Phase"},
+          .labels = {"Off", "Halton (2,3)"},
           .on_change_value = [](float previous, float current) {
             if (static_cast<uint32_t>(previous) == static_cast<uint32_t>(current)) return;
             transitions::TransitionJitterPattern(current); },

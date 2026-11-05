@@ -13,6 +13,7 @@
 #include "./camera_state.hpp"
 #include "./frame_inputs.hpp"
 #include "./logging.hpp"
+#include "./resolution.hpp"
 #include "./state.hpp"
 
 namespace mgsv::reconstruction::input_capture {
@@ -228,13 +229,22 @@ inline bool BuildValidatedFrameInputsLocked(
     return false;
   }
 
+  const auto color_format = GetTypedViewFormat(device, color_srv);
+  const auto plan = resolution::Read();
+  if (plan.IsScaled() && plan.render == resolution::Size{.width = width, .height = height}
+      && color_format == reshade::api::format::r16g16b16a16_float) {
+    state::frame_state.scaled_inputs_valid = true;
+  }
+  if (plan.IsScaled()
+      && (plan.render != resolution::Size{.width = width, .height = height}
+          || (std::strcmp(insertion_name, "BeforeBloom") != 0 && std::strcmp(insertion_name, "DOF_ScatterBakeFirst") != 0))) return false;
   output = {
       .cmd_list = cmd_list,
       .device = device,
       .color_srv = color_srv,
       .color_resource = color_resource,
       .color_description = color_description,
-      .color_format = GetTypedViewFormat(device, color_srv),
+      .color_format = color_format,
       .velocity_srv = velocity_srv,
       .velocity_resource = motion.velocity_resource,
       .depth_srv = depth_srv,
@@ -244,8 +254,16 @@ inline bool BuildValidatedFrameInputsLocked(
       .camera = resources.camera,
       .frame_token = frame_token,
       .sample_index = sample_index,
-      .width = width,
-      .height = height,
+      .render_width = width,
+      .render_height = height,
+      // A scaled request has no destination until the coordinator allocates
+      // the output route. Never describe the smaller source as that target.
+      .output = {
+          .resource = (plan.IsScaled() ? reshade::api::resource{0u} : color_resource),
+          .width = (plan.IsScaled() ? plan.output.width : width),
+          .height = (plan.IsScaled() ? plan.output.height : height),
+          .format = color_format,
+      },
       .insertion_name = insertion_name,
   };
   return true;

@@ -20,6 +20,7 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include <nvsdk_ngx.h>
+#include <nvsdk_ngx_helpers.h>
 #include <winver.h>
 #include <wrl/client.h>
 
@@ -30,6 +31,7 @@
 #include "../camera_state.hpp"
 #include "../frame_inputs.hpp"
 #include "../logging.hpp"
+#include "../resolution.hpp"
 #include "../state.hpp"
 #include "./model.hpp"
 
@@ -82,9 +84,12 @@ struct Resources {
   Texture depth_input;
   Texture linear_output;
   Texture encoded_output;
-  uint32_t width = 0u;
-  uint32_t height = 0u;
+  uint32_t render_width = 0u;
+  uint32_t render_height = 0u;
+  uint32_t output_width = 0u;
+  uint32_t output_height = 0u;
   Model feature_model = Model::DEFAULT;
+  resolution::Quality feature_quality = resolution::Quality::NATIVE_AA;
   bool ngx_initialized = false;
   bool probe_complete = false;
   bool work_submitted = false;
@@ -101,7 +106,7 @@ inline std::atomic<bool> dll_present = false;
 inline std::atomic<uint32_t> snippet_version = 0u;
 inline std::atomic<Availability> availability = Availability::UNCHECKED;
 inline std::atomic<Model> selected_model = DEFAULT_MODEL;
-inline std::atomic<uint32_t> rejected_models = 0u;
+inline std::array<std::atomic<uint32_t>, resolution::QUALITY_LABELS.size()> rejected_models;
 inline std::atomic<bool> fatal_failure_pending = false;
 inline std::atomic<bool> activation_requested = false;
 inline std::atomic<bool> runtime_ready = false;
@@ -189,7 +194,9 @@ inline bool IsModelAvailable(Model model) {
   // NGX exposes preset hints but no API that enumerates accepted presets.
   // Filter their stable numeric identifiers by the feature DLL generation.
   if (model == Model::DEFAULT) return true;
-  if ((rejected_models.load(std::memory_order_acquire) & (1u << static_cast<uint32_t>(model))) != 0u) return false;
+  if ((rejected_models[static_cast<size_t>(resolution::Read().quality)].load(std::memory_order_acquire)
+       & (1u << static_cast<uint32_t>(model)))
+      != 0u) return false;
 
   const uint32_t major = VersionMajor();
   // Preserve the saved hint without inspecting the DLL before a DLSS request.
@@ -327,8 +334,10 @@ inline bool ReleaseFeatureResources() {
     texture->srv.Reset();
     texture->uav.Reset();
   }
-  resources.width = 0u;
-  resources.height = 0u;
+  resources.render_width = 0u;
+  resources.render_height = 0u;
+  resources.output_width = 0u;
+  resources.output_height = 0u;
   resources.feature_model = Model::DEFAULT;
   resources.work_submitted = false;
   resources.history_initialized = false;
@@ -352,7 +361,7 @@ inline void Shutdown(bool reset_probe = true) {
     activation_requested.store(false, std::memory_order_release);
     fatal_failure_pending.store(false, std::memory_order_release);
     snippet_version.store(0u, std::memory_order_release);
-    rejected_models.store(0u, std::memory_order_release);
+    for (auto& rejected : rejected_models) rejected.store(0u, std::memory_order_release);
     availability.store(Availability::UNCHECKED, std::memory_order_release);
   }
 }
@@ -525,7 +534,7 @@ inline void SuspendTemporalResources(reshade::api::device* device) {
       && reinterpret_cast<ID3D11Device*>(device->get_native()) != resources.device.Get()) {  // NOLINT(performance-no-int-to-ptr)
     return;
   }
-  if (resources.suspended || (resources.feature == nullptr && resources.width == 0u)) return;
+  if (resources.suspended || (resources.feature == nullptr && resources.render_width == 0u)) return;
 
   // Present does not own all immediate-context submissions. Retain one bundle
   // across method switches rather than waiting/releasing NGX on that thread.
@@ -534,7 +543,7 @@ inline void SuspendTemporalResources(reshade::api::device* device) {
   resources.suspended = true;
   resources.history_initialized = false;
   resources.previous_dispatch_time = {};
-  logging::Info("suspended NVIDIA DLSS; retaining resources size=", resources.width, "x", resources.height);
+  logging::Info("suspended NVIDIA DLSS; retaining resources size=", resources.render_width, "x", resources.render_height);
 }
 
 inline void InvalidateHistory() {
@@ -563,15 +572,37 @@ inline bool CreateComputeShader(
   return SUCCEEDED(device->CreateComputeShader(code.data(), code.size(), nullptr, &output));
 }
 
+inline NVSDK_NGX_PerfQuality_Value GetPerformanceQuality(resolution::Quality selected) {
+  switch (selected) {
+    case resolution::Quality::QUALITY:           return NVSDK_NGX_PerfQuality_Value_MaxQuality;
+    case resolution::Quality::BALANCED:          return NVSDK_NGX_PerfQuality_Value_Balanced;
+    case resolution::Quality::PERFORMANCE:       return NVSDK_NGX_PerfQuality_Value_MaxPerf;
+    case resolution::Quality::ULTRA_PERFORMANCE: return NVSDK_NGX_PerfQuality_Value_UltraPerformance;
+    default:                                     return NVSDK_NGX_PerfQuality_Value_DLAA;
+  }
+}
+
 inline void SetModelHint(NVSDK_NGX_Parameter* parameters, Model model) {
-  parameters->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, static_cast<uint32_t>(model));
+  const auto selected = resolution::Read().quality;
+  const char* key = NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA;
+  switch (selected) {
+    case resolution::Quality::QUALITY:           key = NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality; break;
+    case resolution::Quality::BALANCED:          key = NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced; break;
+    case resolution::Quality::PERFORMANCE:       key = NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance; break;
+    case resolution::Quality::ULTRA_PERFORMANCE: key = NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance; break;
+    default:                                     break;
+  }
+  parameters->Set(key, static_cast<uint32_t>(model));
 }
 
 inline bool CreateResources(
     reshade::api::device* device,
     ID3D11DeviceContext* context,
-    uint32_t width,
-    uint32_t height) {
+    const ValidatedFrameInputs& inputs) {
+  if (inputs.render_width == 0u || inputs.render_height == 0u
+      || inputs.output.width < inputs.render_width || inputs.output.height < inputs.render_height) return false;
+  const uint32_t width = inputs.render_width;
+  const uint32_t height = inputs.render_height;
   if (!runtime_ready.load(std::memory_order_acquire) || !resources.ngx_initialized
       || device != resources.adapter_device
       || context == nullptr || context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) return false;
@@ -586,8 +617,8 @@ inline bool CreateResources(
       || !CreateTexture(native_device, DXGI_FORMAT_R16G16B16A16_FLOAT, width, height, resources.linear_input)
       || !CreateTexture(native_device, DXGI_FORMAT_R16G16_FLOAT, width, height, resources.motion_input)
       || !CreateTexture(native_device, DXGI_FORMAT_R32_FLOAT, width, height, resources.depth_input)
-      || !CreateTexture(native_device, DXGI_FORMAT_R16G16B16A16_FLOAT, width, height, resources.linear_output)
-      || !CreateTexture(native_device, DXGI_FORMAT_R16G16B16A16_FLOAT, width, height, resources.encoded_output)) {
+      || !CreateTexture(native_device, DXGI_FORMAT_R16G16B16A16_FLOAT, inputs.output.width, inputs.output.height, resources.linear_output)
+      || !CreateTexture(native_device, DXGI_FORMAT_R16G16B16A16_FLOAT, inputs.output.width, inputs.output.height, resources.encoded_output)) {
     ReleaseFeatureResources();
     return false;
   }
@@ -612,9 +643,9 @@ inline bool CreateResources(
   }
   resources.parameters->Set(NVSDK_NGX_Parameter_Width, width);
   resources.parameters->Set(NVSDK_NGX_Parameter_Height, height);
-  resources.parameters->Set(NVSDK_NGX_Parameter_OutWidth, width);
-  resources.parameters->Set(NVSDK_NGX_Parameter_OutHeight, height);
-  resources.parameters->Set(NVSDK_NGX_Parameter_PerfQualityValue, static_cast<int>(NVSDK_NGX_PerfQuality_Value_DLAA));
+  resources.parameters->Set(NVSDK_NGX_Parameter_OutWidth, inputs.output.width);
+  resources.parameters->Set(NVSDK_NGX_Parameter_OutHeight, inputs.output.height);
+  resources.parameters->Set(NVSDK_NGX_Parameter_PerfQualityValue, static_cast<int>(GetPerformanceQuality(resolution::Read().quality)));
   resources.parameters->Set(
       NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,
       static_cast<int>(NVSDK_NGX_DLSS_Feature_Flags_IsHDR
@@ -634,7 +665,7 @@ inline bool CreateResources(
       resources.parameters,
       &resources.feature);
   if (NVSDK_NGX_FAILED(create_result) && model != Model::DEFAULT) {
-    rejected_models.fetch_or(1u << static_cast<uint32_t>(model), std::memory_order_acq_rel);
+    rejected_models[static_cast<size_t>(resolution::Read().quality)].fetch_or(1u << static_cast<uint32_t>(model), std::memory_order_acq_rel);
     SetModelHint(resources.parameters, Model::DEFAULT);
     create_result = NVSDK_NGX_D3D11_CreateFeature(
         context,
@@ -654,10 +685,14 @@ inline bool CreateResources(
     return false;
   }
 
-  resources.width = width;
-  resources.height = height;
+  resources.render_width = width;
+  resources.render_height = height;
+  resources.output_width = inputs.output.width;
+  resources.output_height = inputs.output.height;
   resources.feature_model = effective_model;
-  logging::Info("NVIDIA DLSS feature created size=", width, "x", height,
+  resources.feature_quality = resolution::Read().quality;
+  logging::Info("NVIDIA DLSS feature created render=", width, "x", height,
+                " output=", inputs.output.width, "x", inputs.output.height,
                 " model=", FindModelOption(effective_model)->label);
   return true;
 }
@@ -665,8 +700,7 @@ inline bool CreateResources(
 inline bool EnsureResources(
     reshade::api::device* device,
     ID3D11DeviceContext* context,
-    uint32_t width,
-    uint32_t height) {
+    const ValidatedFrameInputs& inputs) {
   if (!runtime_ready.load(std::memory_order_acquire)) return false;
   const Model model = NormalizeModel(static_cast<float>(GetModel()));
   if (resources.feature != nullptr
@@ -674,19 +708,23 @@ inline bool EnsureResources(
       && device != nullptr
       && reinterpret_cast<ID3D11Device*>(device->get_native()) == resources.device.Get()  // NOLINT(performance-no-int-to-ptr)
       && context == resources.context.Get()
-      && resources.width == width
-      && resources.height == height
-      && resources.feature_model == model) {
+      && resources.render_width == inputs.render_width
+      && resources.render_height == inputs.render_height
+      && resources.output_width == inputs.output.width
+      && resources.output_height == inputs.output.height
+      && resources.feature_model == model
+      && resources.feature_quality == resolution::Read().quality) {
     if (resources.suspended) {
       resources.suspended = false;
       resources.history_initialized = false;
       resources.previous_dispatch_time = {};
-      logging::Info("resumed NVIDIA DLSS with retained resources size=", width, "x", height,
+      logging::Info("resumed NVIDIA DLSS with retained resources render=", inputs.render_width, "x", inputs.render_height,
+                    " output=", inputs.output.width, "x", inputs.output.height,
                     " model=", FindModelOption(model)->label);
     }
     return true;
   }
-  return CreateResources(device, context, width, height);
+  return CreateResources(device, context, inputs);
 }
 
 inline void UnbindComputeResources(ID3D11DeviceContext* context) {
@@ -712,10 +750,10 @@ inline bool PrepareGameInputs(ID3D11DeviceContext* context, const ValidatedFrame
       .current_jitter_uv = {inputs.camera.jitter_uv_x, inputs.camera.jitter_uv_y},
       .velocity_projection_jitter_scale = state::GetProjectionJitterScale(state::ProjectionJitterPath::VELOCITY),
       .camera_reprojection_valid = !reset && inputs.camera.camera_reprojection_valid ? 1.f : 0.f,
-      .render_size = {resources.width, resources.height},
+      .render_size = {resources.render_width, resources.render_height},
       .reciprocal_render_size = {
-          1.f / static_cast<float>(resources.width),
-          1.f / static_cast<float>(resources.height),
+          1.f / static_cast<float>(resources.render_width),
+          1.f / static_cast<float>(resources.render_height),
       },
       .current_to_previous_clip = inputs.camera.current_to_previous_clip,
   };
@@ -734,8 +772,8 @@ inline bool PrepareGameInputs(ID3D11DeviceContext* context, const ValidatedFrame
   context->CSSetConstantBuffers(0u, 1u, &constant_buffer);
   context->CSSetShader(resources.prepare_shader.Get(), nullptr, 0u);
   context->Dispatch(
-      (resources.width + THREAD_GROUP_SIZE - 1u) / THREAD_GROUP_SIZE,
-      (resources.height + THREAD_GROUP_SIZE - 1u) / THREAD_GROUP_SIZE,
+      (resources.render_width + THREAD_GROUP_SIZE - 1u) / THREAD_GROUP_SIZE,
+      (resources.render_height + THREAD_GROUP_SIZE - 1u) / THREAD_GROUP_SIZE,
       1u);
   resources.work_submitted = true;
   UnbindComputeResources(context);
@@ -752,9 +790,10 @@ inline void EncodeGameOutput(ID3D11DeviceContext* context, reshade::api::resourc
   context->CSSetShaderResources(0u, static_cast<uint32_t>(srvs.size()), srvs.data());
   context->CSSetUnorderedAccessViews(0u, 1u, &output, nullptr);
   context->CSSetShader(resources.encode_shader.Get(), nullptr, 0u);
+  context->CSSetConstantBuffers(0u, 1u, resources.prepare_constant_buffer.GetAddressOf());
   context->Dispatch(
-      (resources.width + THREAD_GROUP_SIZE - 1u) / THREAD_GROUP_SIZE,
-      (resources.height + THREAD_GROUP_SIZE - 1u) / THREAD_GROUP_SIZE,
+      (resources.output_width + THREAD_GROUP_SIZE - 1u) / THREAD_GROUP_SIZE,
+      (resources.output_height + THREAD_GROUP_SIZE - 1u) / THREAD_GROUP_SIZE,
       1u);
   UnbindComputeResources(context);
 }
@@ -769,7 +808,7 @@ inline float FrameDeltaMilliseconds(bool reset) {
   return std::clamp(milliseconds, 1.f, 1000.f);
 }
 
-inline bool Dispatch(const ValidatedFrameInputs& inputs, MethodOutput& output) {
+inline bool Dispatch(const ValidatedFrameInputs& inputs, ColorTarget* output) {
   if (inputs.device == nullptr || inputs.device->get_api() != reshade::api::device_api::d3d11) {
     QueueFatalFailure();
     return false;
@@ -793,7 +832,7 @@ inline bool Dispatch(const ValidatedFrameInputs& inputs, MethodOutput& output) {
     QueueFatalFailure();
     return false;
   }
-  if (!EnsureResources(inputs.device, context, inputs.width, inputs.height)) {
+  if (!EnsureResources(inputs.device, context, inputs)) {
     QueueFatalFailure();
     return false;
   }
@@ -810,15 +849,15 @@ inline bool Dispatch(const ValidatedFrameInputs& inputs, MethodOutput& output) {
   resources.parameters->Set(NVSDK_NGX_Parameter_MotionVectors, resources.motion_input.texture.Get());
   resources.parameters->Set(
       NVSDK_NGX_Parameter_Jitter_Offset_X,
-      inputs.camera.jitter_uv_x * static_cast<float>(resources.width));
+      inputs.camera.jitter_uv_x * static_cast<float>(resources.render_width));
   resources.parameters->Set(
       NVSDK_NGX_Parameter_Jitter_Offset_Y,
-      inputs.camera.jitter_uv_y * static_cast<float>(resources.height));
+      inputs.camera.jitter_uv_y * static_cast<float>(resources.render_height));
   resources.parameters->Set(NVSDK_NGX_Parameter_Reset, reset ? 1 : 0);
-  resources.parameters->Set(NVSDK_NGX_Parameter_MV_Scale_X, static_cast<float>(resources.width));
-  resources.parameters->Set(NVSDK_NGX_Parameter_MV_Scale_Y, static_cast<float>(resources.height));
-  resources.parameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, resources.width);
-  resources.parameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, resources.height);
+  resources.parameters->Set(NVSDK_NGX_Parameter_MV_Scale_X, static_cast<float>(resources.render_width));
+  resources.parameters->Set(NVSDK_NGX_Parameter_MV_Scale_Y, static_cast<float>(resources.render_height));
+  resources.parameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, resources.render_width);
+  resources.parameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, resources.render_height);
   resources.parameters->Set(NVSDK_NGX_Parameter_DLSS_Pre_Exposure, 1.f);
   resources.parameters->Set(NVSDK_NGX_Parameter_DLSS_Exposure_Scale, 1.f);
   resources.parameters->Set(NVSDK_NGX_Parameter_Sharpness, 0.f);
@@ -841,13 +880,17 @@ inline bool Dispatch(const ValidatedFrameInputs& inputs, MethodOutput& output) {
     logging::Info("NVIDIA DLSS accumulation started insertion=", inputs.insertion_name,
                   " frame=", inputs.frame_token,
                   " sample=", inputs.sample_index,
-                  " size=", resources.width, "x", resources.height,
+                  " render=", resources.render_width, "x", resources.render_height,
+                  " output=", resources.output_width, "x", resources.output_height,
                   " model=", FindModelOption(resources.feature_model)->label);
   }
   resources.history_initialized = true;
-  output = {
+  *output = {
       .resource = reshade::api::resource{reinterpret_cast<uint64_t>(resources.encoded_output.texture.Get())},
-      .final_usage = reshade::api::resource_usage::unordered_access,
+      .width = resources.output_width,
+      .height = resources.output_height,
+      .format = reshade::api::format::r16g16b16a16_float,
+      .usage = reshade::api::resource_usage::unordered_access,
   };
   return true;
 }

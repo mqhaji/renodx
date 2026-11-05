@@ -15,6 +15,7 @@
 #include "../../utils/mutex.hpp"
 #include "gtvbgi/lighting.hpp"
 #include "inputs.hpp"
+#include "reconstruction/postprocess/resources.hpp"
 #include "resource_upgrades.hpp"
 #include "shadows/screen_space_shadows.hpp"
 #include "shared.h"
@@ -60,18 +61,6 @@ namespace mgsv::game {
           },                                                                               \
           .on_drawn = &mgsv::lighting::environment_specular::EndComposite,                 \
       },                                                                                   \
-  }
-
-#define MGSV_TRACK_MOTION_BLUR_TILE_PREP(value)     \
-  {                                                 \
-      value,                                        \
-      {                                             \
-          .crc32 = (value),                         \
-          .on_inject = [](auto*) { return false; }, \
-          .on_draw = [](auto* cmd_list) {                                                     \
-            mgsv::rendering::resource_upgrades::ArmMotionBlurCopyRenderBufferWindow(cmd_list); \
-                        return true; },        \
-      },                                            \
   }
 
 // The supplied shader data must outlive this registry and its draw callbacks.
@@ -137,8 +126,30 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
       MGSV_UPGRADE_RTV_REPLACE_SHADER_CALLBACK(
           0xFC5542BB, mgsv::rendering::resource_upgrades::DisarmDofFinalCopyRenderBufferAfterDofFinal),
 
-      MGSV_TRACK_MOTION_BLUR_TILE_PREP(0xF05DCBFD),
-      MGSV_TRACK_MOTION_BLUR_TILE_PREP(0x512E2B48),
+      {
+          0xF05DCBFD,
+          {
+              .crc32 = 0xF05DCBFD,
+              .on_inject = [](auto*) { return false; },
+              .on_draw = [](auto* cmd_list) {
+                mgsv::rendering::resource_upgrades::ArmMotionBlurCopyRenderBufferWindow(cmd_list);
+                return true; },
+          },
+      },
+      {
+          0x512E2B48,
+          {
+              .crc32 = 0x512E2B48,
+              .code = __0x512E2B48,
+              .on_replace = [](auto* cmd_list) {
+                const auto output = mgsv::reconstruction::post_process::GetActive(cmd_list);
+                return output != nullptr && output->IsScaled(); },
+              .on_inject = [](auto*) { return false; },
+              .on_draw = [](auto* cmd_list) {
+                mgsv::rendering::resource_upgrades::ArmMotionBlurCopyRenderBufferWindow(cmd_list);
+                return true; },
+          },
+      },
       {
           0x83272BCB,
           {
@@ -288,6 +299,5 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
 #undef MGSV_UPGRADE_RTV_REPLACE_SHADER_CALLBACK
 #undef MGSV_UPGRADE_RTV_SHADER
 #undef MGSV_UPGRADE_DEFERRED_TONEMAP_OUTPUT_RTV
-#undef MGSV_TRACK_MOTION_BLUR_TILE_PREP
 
 }  // namespace mgsv::game

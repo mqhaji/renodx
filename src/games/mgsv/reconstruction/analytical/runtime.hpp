@@ -278,8 +278,8 @@ inline bool EnsureHistory(const ValidatedFrameInputs& inputs, bool& history_seed
   }
 
   const bool matches = resources.history[0].resource.handle != 0u
-                       && resources.width == inputs.width
-                       && resources.height == inputs.height
+                       && resources.width == inputs.render_width
+                       && resources.height == inputs.render_height
                        && resources.resource_format == resource_format
                        && resources.view_format == view_format;
   if (matches) {
@@ -299,8 +299,8 @@ inline bool EnsureHistory(const ValidatedFrameInputs& inputs, bool& history_seed
   reshade::api::resource_desc description = {};
   description.type = reshade::api::resource_type::texture_2d;
   description.texture = {
-      .width = inputs.width,
-      .height = inputs.height,
+      .width = inputs.render_width,
+      .height = inputs.render_height,
       .depth_or_layers = 1,
       .levels = 1,
       .format = resource_format,
@@ -342,8 +342,8 @@ inline bool EnsureHistory(const ValidatedFrameInputs& inputs, bool& history_seed
     }
   }
 
-  resources.width = inputs.width;
-  resources.height = inputs.height;
+  resources.width = inputs.render_width;
+  resources.height = inputs.render_height;
   resources.resource_format = resource_format;
   resources.view_format = view_format;
   resources.color_srv = inputs.color_srv;
@@ -426,7 +426,8 @@ inline void DispatchCompute(
   inputs.cmd_list->dispatch((resources.width + 7u) / 8u, (resources.height + 7u) / 8u, 1u);
 }
 
-inline bool Dispatch(const ValidatedFrameInputs& inputs, MethodOutput& output) {
+inline bool Dispatch(const ValidatedFrameInputs& inputs, ColorTarget* output) {
+  if (!inputs.HasNativeOutputSize()) return false;
   if (resources.initialized && !inputs.camera.camera_reprojection_valid) {
     InvalidateHistory("native camera matrix history unavailable");
   }
@@ -464,9 +465,12 @@ inline bool Dispatch(const ValidatedFrameInputs& inputs, MethodOutput& output) {
                   " size=", resources.width, "x", resources.height);
   }
   resources.accum_index = previous;
-  output = {
+  *output = {
       .resource = resources.history[current].resource,
-      .final_usage = reshade::api::resource_usage::shader_resource,
+      .width = resources.width,
+      .height = resources.height,
+      .format = resources.view_format,
+      .usage = reshade::api::resource_usage::shader_resource,
   };
   return true;
 }

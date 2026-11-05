@@ -60,7 +60,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .default_value = 60.f,
               .label = "Contact Shadow Reach",
               .section = "Shadows (Advanced)",
-              .tooltip = "Search length in render pixels along the ray's main screen axis, shared by all lights. Higher values catch farther visible casters and increase cost. This changes reach, not sample density.",
+              .tooltip = "Search length in output pixels along the ray's main screen axis, shared by all lights. Converted to the current render size when upscaling. Higher values catch farther visible casters and increase cost. This changes reach, not sample density.",
               .min = 16.f,
               .max = 256.f,
               .format = "%d px",

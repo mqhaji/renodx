@@ -6,8 +6,8 @@
  * Owns:
  *  - The availability-validated effective temporal mode.
  *  - Per-frame counters used to gate dispatch and advance the jitter sample.
- *  - Diagnostic Off and eight-sample base-(2,3) Halton jitter patterns,
- *    in UV space.
+ *  - Diagnostic Off and Halton (2,3) jitter in render-space UV coordinates.
+ *    The pattern starts at eight phases and grows with the upscaling ratio.
  *
  * The native projection hook and ReShade callbacks can execute on different
  * threads. Atomic frame/sample mirrors let the hook choose the same sample
@@ -91,6 +91,7 @@ struct FrameState {
   bool reconstruction_scheduled = false;
   bool reconstruction_completed = false;
   bool full_resolution_candidate_seen = false;
+  bool scaled_inputs_valid = false;
 
   // Pipeline markers used to identify which CopyRenderBuffer invocation
   // is the right TAA insertion point. The primary DoF hash can also run on
@@ -146,7 +147,8 @@ inline std::atomic<float> runtime_current_frame_blend = DEFAULT_CURRENT_FRAME_BL
 inline std::atomic<uint64_t> current_frame_token = 0u;
 inline std::atomic<uint32_t> current_sample_index = 0u;
 inline FrameState frame_state = {};
-inline constexpr uint32_t HALTON_SEQUENCE_LENGTH = 8u;
+inline constexpr uint32_t BASE_JITTER_PHASE_COUNT = 8u;
+inline std::atomic<uint32_t> runtime_jitter_phases = BASE_JITTER_PHASE_COUNT;
 
 inline void SetTemporalMode(TemporalMode mode) {
   runtime_temporal_mode.store(mode, std::memory_order_release);
@@ -295,7 +297,7 @@ inline std::array<float, 2> JitterForSample(uint32_t sample_index, uint32_t widt
       };
       // Native-resolution TAA uses ceil(8 * 1^2) = 8 phases. Skip Halton index
       // zero because it is the unit-square origin rather than a distributed tap.
-      const uint32_t halton_index = (sample_index % HALTON_SEQUENCE_LENGTH) + 1u;
+      const uint32_t halton_index = (sample_index % runtime_jitter_phases.load(std::memory_order_acquire)) + 1u;
       std::array<float, 2> result = {
           halton_sample(halton_index, 2u) - 0.5f,
           halton_sample(halton_index, 3u) - 0.5f,
@@ -314,6 +316,7 @@ inline void ResetTemporalState() {
   frame_state.reconstruction_scheduled = false;
   frame_state.reconstruction_completed = false;
   frame_state.full_resolution_candidate_seen = false;
+  frame_state.scaled_inputs_valid = false;
   current_sample_index.store(0u, std::memory_order_release);
 }
 
@@ -321,6 +324,7 @@ inline void BeginFrame() {
   ++frame_state.frame_index;
   frame_state.reconstruction_completed = false;
   frame_state.full_resolution_candidate_seen = false;
+  frame_state.scaled_inputs_valid = false;
   frame_state.dof_fired = false;
   frame_state.mb_tile_prep_fired = false;
   current_frame_token.store(frame_state.frame_index, std::memory_order_release);

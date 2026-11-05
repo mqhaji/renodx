@@ -9,11 +9,16 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstring>
+#include <exception>
 #include <functional>
+#include <limits>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <d3d11_1.h>
@@ -29,6 +34,7 @@
 #include "./fsr3/runtime.hpp"
 #include "./input_capture.hpp"
 #include "./logging.hpp"
+#include "./postprocess/resources.hpp"
 #include "./state.hpp"
 
 namespace mgsv::reconstruction::coordinator {
@@ -47,6 +53,8 @@ struct PendingTemporalDispatch {
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> velocity_srv;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_srv;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> object_velocity_srv;
+  Microsoft::WRL::ComPtr<ID3D11Resource> output_resource;
+  std::shared_ptr<post_process::Output> post_output;
   ValidatedFrameInputs inputs;
   uint64_t temporal_generation = 0u;
   state::TemporalMode mode = state::TemporalMode::OFF;
@@ -136,7 +144,9 @@ struct ExecutionGuard {
 
 inline bool BindRuntimeDevice(reshade::api::device* device) {
   if (device == nullptr) return false;
-  if (runtime_device == nullptr) runtime_device = device;
+  if (runtime_device == nullptr) {
+    runtime_device = device;
+  }
   return runtime_device == device;
 }
 
@@ -165,6 +175,7 @@ inline void Destroy(reshade::api::device* device) {
   analytical::Destroy(device);
   dlss::Destroy(device);
   fsr3::Destroy();
+  post_process::Reset(true);
   submission_failure_pending.store(false, std::memory_order_release);
   runtime_device = nullptr;
   lighting::temporal_inputs::Reset();
@@ -185,42 +196,60 @@ inline void ReleaseInactiveResources(
 }
 
 inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
+  if (inputs.device == nullptr) return false;
+  const auto destination = (inputs.output.resource.handle != 0u ? inputs.device->get_resource_desc(inputs.output.resource) : reshade::api::resource_desc{});
+  if ((state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA && !inputs.HasNativeOutputSize())
+      || inputs.output.width < inputs.render_width || inputs.output.height < inputs.render_height
+      || destination.texture.width != inputs.output.width || destination.texture.height != inputs.output.height
+      || inputs.output.resource.handle == 0u
+      || inputs.output.format != inputs.color_format) {
+    static uint64_t last_output_failure_log = std::numeric_limits<uint64_t>::max();
+    if (logging::ShouldLogFrame(state::CurrentFrameToken(), last_output_failure_log)) {
+      logging::Warn("rejecting incompatible reconstruction output insertion=", inputs.insertion_name,
+                    " render=", inputs.render_width, "x", inputs.render_height,
+                    " output=", inputs.output.width, "x", inputs.output.height);
+    }
+    return false;
+  }
   const auto previous_compute_state = mgsv::rendering::d3d11_compute_state::Capture(inputs.cmd_list);
   inputs.cmd_list->barrier(
       inputs.velocity_resource,
       reshade::api::resource_usage::render_target,
       reshade::api::resource_usage::shader_resource);
 
-  MethodOutput output = {};
+  ColorTarget output = {};
   bool succeeded = false;
   switch (state::GetTemporalMode()) {
     case state::TemporalMode::ANALYTICAL_TAA:
-      succeeded = analytical::Dispatch(inputs, output);
+      succeeded = analytical::Dispatch(inputs, &output);
       break;
     case state::TemporalMode::AMD_FSR3:
-      succeeded = fsr3::Dispatch(inputs, output);
+      succeeded = fsr3::Dispatch(inputs, &output);
       break;
     case state::TemporalMode::NVIDIA_DLSS:
-      succeeded = dlss::Dispatch(inputs, output);
+      succeeded = dlss::Dispatch(inputs, &output);
       break;
     case state::TemporalMode::OFF:
       break;
   }
-  if (succeeded && output.resource.handle != 0u) {
+  if (succeeded && output.resource.handle != 0u
+      && output.resource.handle != inputs.output.resource.handle
+      && output.width == inputs.output.width && output.height == inputs.output.height
+      && output.format == inputs.output.format) {
     inputs.cmd_list->barrier(
         output.resource,
         reshade::api::resource_usage::unordered_access,
         reshade::api::resource_usage::copy_source);
     inputs.cmd_list->barrier(
-        inputs.color_resource,
-        reshade::api::resource_usage::shader_resource,
+        inputs.output.resource,
+        inputs.output.usage,
         reshade::api::resource_usage::copy_dest);
-    inputs.cmd_list->copy_resource(output.resource, inputs.color_resource);
+    inputs.cmd_list->copy_resource(output.resource, inputs.output.resource);
     inputs.cmd_list->barrier(
-        inputs.color_resource,
+        inputs.output.resource,
         reshade::api::resource_usage::copy_dest,
-        reshade::api::resource_usage::shader_resource);
-    inputs.cmd_list->barrier(output.resource, reshade::api::resource_usage::copy_source, output.final_usage);
+        inputs.output.usage);
+    inputs.cmd_list->barrier(output.resource, reshade::api::resource_usage::copy_source, output.usage);
   } else {
     succeeded = false;
   }
@@ -292,7 +321,9 @@ inline void STDMETHODCALLTYPE HookBeginQuery(
   {
     const std::unique_lock lock(submission.mutex);
     const auto found = submission.active_queries.find(context);
-    if (found != submission.active_queries.end()) found->second.insert(asynchronous);
+    if (found != submission.active_queries.end()) {
+      found->second.insert(asynchronous);
+    }
   }
   const auto begin = context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED
                              && deferred_begin_query != nullptr
@@ -509,7 +540,9 @@ inline void OnExecuteSecondaryCommandList(
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   if (context == nullptr) return;
   if (chain.empty()) {
-    if (context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE) lighting::temporal_inputs::Submit(post);
+    if (context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE) {
+      lighting::temporal_inputs::Submit(post);
+    }
     return;
   }
   std::ranges::reverse(chain);
@@ -538,15 +571,26 @@ inline void OnExecuteSecondaryCommandList(
       }
       continue;
     }
+    if (pending.post_output != nullptr) {
+      pending.post_output->PrepareDepth(context, pending.inputs.camera.jitter_uv_x, pending.inputs.camera.jitter_uv_y);
+    }
     // Every native prefix runs even when its added operation was canceled.
     if (pending.temporal_generation != state::frame_state.temporal_generation
-        || state::GetTemporalMode() != pending.mode) continue;
+        || state::GetTemporalMode() != pending.mode) {
+      if (pending.post_output != nullptr) {
+        pending.post_output->CopyNative(context);
+      }
+      continue;
+    }
     if (!state_guard.IsActive() || pending.dispatch_consumed
         || pending.inputs.device != runtime_device
         || pending.inputs.sample_index != state::CurrentSampleIndex()) {
       state::frame_state.reconstruction_scheduled = false;
       logging::Warn("rejected scene reconstruction submission: state, replay, or capture mismatch");
       submission_failure_pending.store(true, std::memory_order_release);
+      if (pending.post_output != nullptr) {
+        pending.post_output->CopyNative(context);
+      }
       continue;
     }
     const uint64_t current_frame = state::CurrentFrameToken();
@@ -557,6 +601,9 @@ inline void OnExecuteSecondaryCommandList(
     pending.inputs.cmd_list = command_list;
     if (!DispatchValidatedLocked(pending.inputs)) {
       state::frame_state.reconstruction_scheduled = false;
+      if (pending.post_output != nullptr) {
+        pending.post_output->CopyNative(context);
+      }
     } else if (pending.inputs.frame_token != current_frame) {
       state::frame_state.reconstruction_completed = false;
     }
@@ -641,6 +688,53 @@ inline void MaybeRunLocked(
       && !dlss::runtime_ready.load(std::memory_order_acquire)) return;
   if (!submission_bridge_installed) return;
 
+  std::shared_ptr<post_process::Output> post_output;
+  std::shared_ptr<post_process::Pipelines> post_pipelines;
+  if (!inputs.HasNativeOutputSize()
+      && inputs.color_format == reshade::api::format::r16g16b16a16_float
+      && (std::strcmp(insertion_name, "BeforeBloom") == 0
+          || std::strcmp(insertion_name, "DOF_ScatterBakeFirst") == 0)) {
+    {
+      const std::shared_lock lock(post_process::state.mutex);
+      post_pipelines = post_process::state.pipelines;
+      const auto& cached = post_process::state.cached;
+      Microsoft::WRL::ComPtr<ID3D11Resource> native_depth;
+      if (const auto depth = post_process::ReadSceneDepth(reinterpret_cast<ID3D11Resource*>(inputs.color_resource.handle)); depth != nullptr) {  // NOLINT(performance-no-int-to-ptr)
+        depth->GetResource(&native_depth);
+      }
+      if (cached != nullptr && cached->device == inputs.device
+          && reinterpret_cast<uint64_t>(cached->source.Get()) == inputs.color_resource.handle
+          && cached->render_width == inputs.render_width && cached->render_height == inputs.render_height
+          && cached->target.width == inputs.output.width && cached->target.height == inputs.output.height
+          && cached->native_depth == native_depth
+          && reinterpret_cast<uint64_t>(cached->geometry_depth.Get()) == inputs.depth_resource.handle) {
+        post_output = cached;
+      }
+    }
+    if (post_output == nullptr) {
+      try {
+        post_output = std::make_shared<post_process::Output>(inputs, std::move(post_pipelines));
+        std::shared_ptr<post_process::Output> retired;
+        {
+          const std::unique_lock lock(post_process::state.mutex);
+          retired = std::exchange(post_process::state.cached, post_output);
+          post_process::state.pipelines = post_output->pipelines;
+        }
+        logging::Info("created separate post-processing output size=", inputs.output.width, "x", inputs.output.height);
+      } catch (const std::exception& error) {
+        logging::Warn(error.what());
+        resolution::Fail("scaled post-processing resources unavailable");
+      }
+    }
+    if (post_output != nullptr) {
+      inputs.output = post_output->target;
+    }
+  }
+  if (!inputs.HasNativeOutputSize() && post_output == nullptr) {
+    resolution::Fail("scaled reconstruction has no compatible output route");
+    return;
+  }
+
   auto* native_context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   if (native_context != nullptr && native_context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED) {
     const auto fail_submission = [] {
@@ -666,10 +760,16 @@ inline void MaybeRunLocked(
         .velocity_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.velocity_srv.handle),                // NOLINT(performance-no-int-to-ptr)
         .depth_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.depth_srv.handle),                      // NOLINT(performance-no-int-to-ptr)
         .object_velocity_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.object_velocity_srv.handle),  // NOLINT(performance-no-int-to-ptr)
+        .post_output = post_output,
         .inputs = inputs,
         .temporal_generation = state::frame_state.temporal_generation,
         .mode = state::GetTemporalMode(),
     };
+    // The source SRV already retains the destination in the usual in-place
+    // Native AA case. A distinct target needs its own lifetime through replay.
+    if (inputs.output.resource.handle != inputs.color_resource.handle) {
+      pending.output_resource = reinterpret_cast<ID3D11Resource*>(inputs.output.resource.handle);  // NOLINT(performance-no-int-to-ptr)
+    }
     ID3D11CommandList* prefix = nullptr;
     const HRESULT finish_result = native_context->FinishCommandList(TRUE, &prefix);
     if (FAILED(finish_result) || prefix == nullptr) {
@@ -680,8 +780,15 @@ inline void MaybeRunLocked(
     }
     pending.prefix.Attach(prefix);
     CompleteRecording(cmd_list, prefix);
-    const std::unique_lock lock(submission.mutex);
-    submission.pending_dispatches.emplace_back(std::move(pending));
+    {
+      const std::unique_lock lock(submission.mutex);
+      submission.pending_dispatches.emplace_back(std::move(pending));
+    }
+    if (post_output != nullptr) {
+      const std::unique_lock lock(post_process::state.mutex);
+      post_process::state.active.swap(post_output);
+      post_process::state.frame = inputs.frame_token;
+    }
     state::frame_state.reconstruction_scheduled = true;
     if (!logged_immediate_dispatch.load(std::memory_order_relaxed)) {
       logging::Info("scheduled temporal dispatch frame=", inputs.frame_token);
@@ -694,7 +801,18 @@ inline void MaybeRunLocked(
     submission_failure_pending.store(true, std::memory_order_release);
     return;
   }
-  DispatchValidatedLocked(inputs);
+  if (post_output != nullptr) {
+    post_output->PrepareDepth(native_context, inputs.camera.jitter_uv_x, inputs.camera.jitter_uv_y);
+  }
+  const bool succeeded = DispatchValidatedLocked(inputs);
+  if (post_output != nullptr) {
+    if (!succeeded) {
+      post_output->CopyNative(native_context);
+    }
+    const std::unique_lock lock(post_process::state.mutex);
+    post_process::state.active.swap(post_output);
+    post_process::state.frame = inputs.frame_token;
+  }
 }
 
 }  // namespace mgsv::reconstruction::coordinator
