@@ -1,3 +1,4 @@
+#include "../bloom/bloom.hlsli"
 #include "./tonemap.hlsli"
 
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:33 2026
@@ -25,64 +26,63 @@ Texture2D<float4> inBloom : register(t7);
 #define cmp -
 
 void main(
-    float2 v0: TEXCOORD0,
-    float4 v1: SV_Position0,
-    out float4 o0: SV_Target0) {
+    float2 v0 : TEXCOORD0,
+    float4 v1 : SV_Position0,
+    out float4 o0 : SV_Target0) {
   float4 r0, r1, r2;
-  uint4 bitmask, uiDest;
-  float4 fDest;
 
   r0.xy = float2(-0.5, -0.5) + v1.xy;
-  r0.xy = r0.xy;
-  r0.xy = r0.xy;
   r0.zw = g_psSystem.m_renderBuffer.zw;
   r1.xy = float2(0.5, 0.5) * r0.zw;
   r0.xy = r0.xy * r0.zw;
   r0.xy = r0.xy + r1.xy;
-  r0.xy = r0.xy;
   r1.xy = v0.xy;
-  r1.xy = r1.xy;
   r1.z = -r1.y;
   r0.zw = float2(0.5, 0.5) * r1.xz;
   r0.zw = float2(0.5, 0.5) + r0.zw;
-  r0.zw = r0.zw;
-  r0.xy = r0.xy;
-  r0.zw = r0.zw;
-  r0.xy = r0.xy;
-  r0.zw = r0.zw;
   r1.xyz = inImage.Sample(g_samplerPoint_Wrap_s, r0.xy).xyz;
+
+  const bool enhanced = CUSTOM_BLOOM_TYPE >= 0.5f;
+  float3 bloom_color = 0.f;
+  [branch]  // Each mode reads only its own bloom representation.
+  if (enhanced) {
+    [branch]  // Zero strength also skips the four reconstruction samples.
+    if (CUSTOM_BLOOM != 0.f) {
+      bloom_color = SampleEnhancedBloom(inBloom, g_samplerLinear_Clamp_s, r0.zw);
+      const float3 scene = renodx::color::srgb::DecodeSafe(r1.rgb);
+      r1.rgb = renodx::color::srgb::EncodeSafe(lerp(scene, bloom_color, CUSTOM_BLOOM * 0.1f));
+    }
+  } else {
+    bloom_color = inBloom.Sample(g_samplerLinear_Clamp_s, r0.zw + 2.f * g_psSystem.m_renderBuffer.zw).rgb;
+  }
 
   // Run bloom through a per-channel SDR proxy so its white blend reconstructs without max-channel amplification.
   float3 perch_scale = 1.f;
   float maxch_scale = 1.f;
-  if (RENODX_TONE_MAP_TYPE != 0.f) {
+  if (RENODX_TONE_MAP_TYPE != 0.f && !enhanced) {
     r1.rgb *= r1.rgb;
 
-    // convert to lms normalized to d65 white
     const float3 perch_tonemapped = ApplyAnchoredCInfinityShoulder(r1.rgb, 1.f, 0.5f, 2.f);
     perch_scale = renodx::math::DivideSafe(perch_tonemapped, r1.rgb, 1.f);
-    // convert back to bt709
     r1.rgb = perch_tonemapped;
   } else {
     r1.xyz = r1.xyz * r1.xyz;
   }
 
-  r1.xyz = r1.xyz;
-  r0.xy = float2(4, 4) * g_psSystem.m_renderBuffer.zw;
-  r0.xy = float2(0.5, 0.5) * r0.xy;
-  r0.xy = r0.xy + r0.zw;
-  r0.xyz = inBloom.Sample(g_samplerLinear_Clamp_s, r0.xy).xyz;
-  r0.xyz = min(float3(0.5, 0.5, 0.5), r0.xyz);
-  r0.rgb = lerp(0, r0.rgb, CUSTOM_BLOOM);
-  r0.xyz = lerp(r1.xyz, 1.f, r0.xyz);
+  if (enhanced) {
+    r0.xyz = r1.xyz;
+  } else {
+    const float3 with_bloom = lerp(r1.xyz, 1.f, min(0.5f, bloom_color));
+    r0.xyz = lerp(r1.xyz, with_bloom, CUSTOM_BLOOM);
+  }
 
   // Reconstruct bloom in HDR, then use a hue-preserving SDR proxy for the LUT.
   if (RENODX_TONE_MAP_TYPE != 0.f) {
-    // convert to lms normalized to d65 white
-    r0.rgb /= perch_scale;
+    if (!enhanced) {
+      r0.rgb /= perch_scale;
+    }
     maxch_scale = ComputeAnchoredCInfinityMaxChannelScale(r0.rgb, 1.f, 0.5f, 2.f);
     r0.rgb *= maxch_scale;
-    // convert to bt709
   }
 
   r0.rgb = Sample2DLUTWithScaling(r0.rgb, inColorLUT, g_samplerLinear_Clamp_s);

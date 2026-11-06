@@ -16,6 +16,7 @@
 | `gtvbgi/` | Shared trace and filters, diffuse application, selective environment correction, and [reference explanation](../gtvbgi/README.md) |
 | `shadows/screen_space_shadows.hpp` | Per-context Bend scratch resources, current-light compute setup, scoped pixel inputs, and game-state restoration |
 | `reconstruction/` | Analytical TAA, FSR3, DLSS, input preparation, submission, and SDK lifecycle |
+| `bloom/` | Bloom controls, native-pass replacements, and the [filter and color contract](../bloom/README.md) |
 | `output/` | Output selection, display state, and final SDR/HDR encoding |
 
 Precision upgrades support the whole mod, including output, reconstruction, shadows, and GT-VBGI. Each feature keeps its own controls and textures. Feature headers are included at file scope and do not rely on hidden variables in the addon entry point.
@@ -45,7 +46,7 @@ Native captures show that later passes also copy the diffuse-light buffer to mea
 ## Input and layout contracts
 
 - Lighting uses the scatter pass's existing 64-byte geometry constants at compute `b0`. Pixel shaders use `b0` for different data.
-- `ShaderInjectData` is 76 floats: 304 CPU bytes and 304 padded GPU bytes at `b13`. One softness value controls all source sizes; map diagnostics share the contact-light selector. Shadow-map sampling counts and search bounds are fixed; Contact Shadow Reach controls the shared Bend sample count. Effect-local copies hold scale, filter steps, history flags, and the current Bend light type. Bend surface thickness and the bilinear threshold are fixed constants. The shared SDK `PrepareConstants` layout remains 96 bytes.
+- `ShaderInjectData` is 77 floats: 308 CPU bytes and 320 padded GPU bytes at `b13`. One softness value controls all source sizes; map diagnostics share the contact-light selector. Shadow-map sampling counts and search bounds are fixed; Contact Shadow Reach controls the shared Bend sample count. Effect-local copies hold scale, filter steps, history flags, and the current Bend light type. Bend surface thickness and the bilinear threshold are fixed constants. The shared SDK `PrepareConstants` layout remains 96 bytes.
 - Temporal `b1/b2` hold current/previous native scene data, not duplicate settings. Copy the actual native constant-buffer allocation and preserve its bound range; the reflected scene structure is 480 bytes. History owns another GPU copy because replaying a producer command list can overwrite its snapshot.
 - AO raw, history, and filter textures use RG16F: R is visibility and G is validity. GI uses RGBA16F with validity in alpha. One shared pair of R32G32_UINT geometry textures stores FP32 linear-depth bits and two packed 16-bit normal coordinates. Shader calculations use FP32; no radiance variance textures are allocated.
 - Lighting has eleven texture-input slots (SRVs) and five writable-output slots (UAVs). Unused outputs use distinct placeholder textures so they cannot conflict with inputs or each other.

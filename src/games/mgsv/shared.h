@@ -99,6 +99,8 @@ struct ShaderInjectData {
 
   // Shared IS-FAST frame phase.
   float shadow_noise_frame;
+
+  float bloom_type;  // 0 = Vanilla, 1 = Enhanced.
 };
 
 #ifndef __cplusplus
@@ -127,6 +129,7 @@ cbuffer RenoDXSettings : register(b13) {
 #define RENODX_COLOR_GRADE_SCALING           shader_injection.scene_grade_scaling
 
 #define CUSTOM_BLOOM          shader_injection.custom_bloom
+#define CUSTOM_BLOOM_TYPE     shader_injection.bloom_type
 #define CUSTOM_BOOST_SUN      shader_injection.custom_boost_sun
 #define CUSTOM_RANDOM         shader_injection.custom_random
 #define CUSTOM_GRAIN_STRENGTH shader_injection.custom_grain_strength

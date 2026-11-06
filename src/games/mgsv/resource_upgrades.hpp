@@ -6,7 +6,10 @@
 #pragma once
 
 #include <d3d11.h>
+#include <wrl/client.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -66,6 +69,22 @@ inline renodx::utils::resource::ResourceUpgradeInfo lut_builder_upgrade_info = {
     },
     .usage_include = reshade::api::resource_usage::render_target,
     .name = "lutbuilder_256x16_bgra8_typeless_hot_swap",
+};
+
+inline renodx::utils::resource::ResourceUpgradeInfo bloom_upgrade_info = {
+    .old_format = reshade::api::format::b8g8r8a8_typeless,
+    .new_format = reshade::api::format::r16g16b16a16_float,
+    .ignore_size = true,
+    .use_resource_view_cloning = true,
+    .use_resource_view_hot_swap = true,
+    .usage_include = reshade::api::resource_usage::render_target,
+    .name = "bloom_rgba16f",
+};
+
+// These references restrict shared shader replacements to the bloom chain.
+// The normal upgrade system owns the images, which remain float for DoF reuse.
+struct __declspec(uuid("13000a80-3153-43c1-bcf1-1a1accb2bd06")) BloomUpgradeScope {
+  std::array<reshade::api::resource, 2> working = {};
 };
 
 inline renodx::utils::resource::ResourceUpgradeInfo scene_tonemap_upgrade_info = {
@@ -438,6 +457,90 @@ inline void RebindRenderTargetClones(
   renodx::mods::swapchain::v2::RewriteRenderTargets(cmd_list, rtvs.size(), rtvs.data(), dsv);
 }
 
+inline void OnInitBloomCommandList(reshade::api::command_list* cmd_list) {
+  if (cmd_list->get_device()->get_api() == reshade::api::device_api::d3d11) {
+    cmd_list->create_private_data<BloomUpgradeScope>();
+  }
+}
+
+inline void OnResetBloomCommandList(reshade::api::command_list* cmd_list) {
+  if (auto* scope = cmd_list->get_private_data<BloomUpgradeScope>(); scope != nullptr) {
+    scope->working = {};
+  }
+}
+
+inline void OnDestroyBloomCommandList(reshade::api::command_list* cmd_list) {
+  if (cmd_list->get_device()->get_api() == reshade::api::device_api::d3d11) {
+    cmd_list->destroy_private_data<BloomUpgradeScope>();
+  }
+}
+
+inline bool IsBloomWorkingInput(const BloomUpgradeScope& scope, reshade::api::resource_view input) {
+  const auto resource = GetOriginalResourceFromView(input);
+  return resource.handle != 0u && std::ranges::find(scope.working, resource) != scope.working.end()
+         && ResourceViewMatchesCloneTarget(input, &bloom_upgrade_info);
+}
+
+inline bool UpgradeBloomTarget(reshade::api::command_list* cmd_list, bool reduction) {
+  auto* scope = cmd_list->get_private_data<BloomUpgradeScope>();
+  if (scope == nullptr) return false;
+  auto* device = cmd_list->get_device();
+  auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> input;
+  Microsoft::WRL::ComPtr<ID3D11Resource> source;
+  context->PSGetShaderResources(0u, 1u, &input);
+  if (input == nullptr) return false;
+  input->GetResource(&source);
+  const bool bloom_input = IsBloomWorkingInput(*scope, {reinterpret_cast<uint64_t>(input.Get())});
+  bool scene_input = false;
+  if (reduction && !bloom_input) {
+    const auto output = mgsv::reconstruction::post_process::GetActive(cmd_list);
+    scene_input = (output != nullptr && (source.Get() == output->color.Get() || output->IsSceneTarget(source.Get())))
+                  || mgsv::reconstruction::post_process::ReadSceneDepth(source.Get()) != nullptr;
+  }
+  if (!bloom_input && !scene_input) return false;
+  const auto& targets = renodx::utils::swapchain::GetRenderTargets(cmd_list);
+  if (targets.empty() || targets[0].handle == 0u) return false;
+  const auto resource = GetOriginalResourceFromView(targets[0]);
+  if (resource.handle == 0u) return false;
+  const auto source_description = device->get_resource_desc({reinterpret_cast<uint64_t>(source.Get())});
+  const auto target_description = device->get_resource_desc(resource);
+  if (source_description.type != reshade::api::resource_type::texture_2d || target_description.type != reshade::api::resource_type::texture_2d) return false;
+  const uint32_t divisor = (scene_input ? 4u : 1u);
+  if (target_description.texture.width != source_description.texture.width / divisor
+      || target_description.texture.height != source_description.texture.height / divisor) return false;
+  if (scene_input) {
+    scope->working = {};
+  }
+  if (!MarkCloneTarget(targets[0], &bloom_upgrade_info, device)
+      && !ResourceViewMatchesCloneTarget(targets[0], &bloom_upgrade_info)) return false;
+  const auto previous = renodx::utils::resource::upgrade::GetResourceClone(resource, {.require_enabled = false, .allow_create = false});
+  ActivateCloneHotSwapIfTracked(device, targets[0]);
+  const auto clone_view = renodx::utils::resource::upgrade::GetResourceViewClone(targets[0]);
+  if (clone_view.handle == 0u) return false;
+  if (previous.handle == 0u) {
+    // Clear new padding before the cropped reduction writes its working region.
+    constexpr std::array<float, 4> black = {};
+    cmd_list->clear_render_target_view(clone_view, black.data(), 0u, nullptr);
+    const auto clone = renodx::utils::resource::upgrade::GetResourceClone(resource, {.allow_create = false});
+    if (clone.handle != 0u) {
+      // Carry an earlier clear into the new clone; later clears update it directly.
+      auto* original = reinterpret_cast<ID3D11Resource*>(resource.handle);  // NOLINT(performance-no-int-to-ptr)
+      mgsv::reconstruction::post_process::ClearColor clear = {};
+      UINT bytes = sizeof(clear);
+      if (SUCCEEDED(original->GetPrivateData(mgsv::reconstruction::post_process::CLEAR_COLOR_GUID, &bytes, &clear)) && bytes == sizeof(clear)) {
+        auto* upgraded = reinterpret_cast<ID3D11Resource*>(clone.handle);  // NOLINT(performance-no-int-to-ptr)
+        upgraded->SetPrivateData(mgsv::reconstruction::post_process::CLEAR_COLOR_GUID, sizeof(clear), &clear);
+      }
+    }
+  }
+  if (reduction) {
+    scope->working[scene_input ? 0u : 1u] = resource;
+  }
+  RebindRenderTargetClones(cmd_list, targets, renodx::utils::swapchain::GetDepthStencil(cmd_list));
+  return true;
+}
+
 inline void UpgradeDeferredSceneColorTarget(reshade::api::command_list* cmd_list) {
   if (cmd_list == nullptr) return;
 
@@ -473,6 +576,17 @@ inline void UpgradeDeferredSceneColorTarget(reshade::api::command_list* cmd_list
 
 inline void UpgradeCopyRenderBufferTarget(reshade::api::command_list* cmd_list) {
   if (cmd_list == nullptr) return;
+  if (auto* scope = cmd_list->get_private_data<BloomUpgradeScope>(); scope != nullptr) {
+    auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> input;
+    context->PSGetShaderResources(0u, 1u, &input);
+    if (IsBloomWorkingInput(*scope, {reinterpret_cast<uint64_t>(input.Get())})) {
+      if (UpgradeBloomTarget(cmd_list, false)) {
+        scope->working = {};
+      }
+      return;
+    }
+  }
   if (!dof_copy_state.upgrade_allowed && !motion_blur_copy_state.upgrade_allowed) return;
 
   const bool is_motion_blur_copy = motion_blur_copy_state.upgrade_allowed;

@@ -45,6 +45,7 @@
 #include "../../utils/shader.hpp"
 #include "../../utils/state.hpp"
 #include "../../utils/swapchain.hpp"
+#include "./bloom/bloom.hpp"
 #include "./gtvbgi/environment_specular.hpp"
 #include "./gtvbgi/lighting.hpp"
 #include "./gtvbgi/temporal_inputs.hpp"
@@ -439,6 +440,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       reshade::register_overlay(nullptr, ADDON_SETTINGS);
 
       mgsv::settings::AppendSettings(&settings, &shader_injection, &output_state);
+      mgsv::bloom::AppendSettings(&settings, &shader_injection);
       mgsv::shadows::AppendSettings(&settings, &shader_injection);
       mgsv::reconstruction::settings::AppendSettings(&settings, &shader_injection, &reconstruction_settings);
       mgsv::lighting::AppendSettings(&settings, &shader_injection);
@@ -526,6 +528,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     reshade::register_event<reshade::addon_event::init_device>(mgsv::lighting::environment_specular::OnInitDevice);
     reshade::register_event<reshade::addon_event::destroy_device>(mgsv::lighting::environment_specular::OnDestroyDevice);
     reshade::register_event<reshade::addon_event::init_command_list>(mgsv::inputs::descriptor_tracker::OnInitCommandList);
+    reshade::register_event<reshade::addon_event::init_command_list>(mgsv::rendering::resource_upgrades::OnInitBloomCommandList);
     reshade::register_event<reshade::addon_event::init_command_list>(mgsv::lighting::environment_specular::OnInitCommandList);
     reshade::register_event<reshade::addon_event::reset_command_list>(mgsv::lighting::environment_specular::OnResetCommandList);
     reshade::register_event<reshade::addon_event::destroy_command_list>(mgsv::lighting::environment_specular::OnDestroyCommandList);
@@ -533,7 +536,9 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     reshade::register_event<reshade::addon_event::clear_render_target_view>(mgsv::shadows::screen_space::OnClearRenderTarget);
     reshade::register_event<reshade::addon_event::destroy_resource>(mgsv::lighting::environment_specular::OnDestroyResource);
     reshade::register_event<reshade::addon_event::destroy_command_list>(mgsv::inputs::descriptor_tracker::OnDestroyCommandList);
+    reshade::register_event<reshade::addon_event::destroy_command_list>(mgsv::rendering::resource_upgrades::OnDestroyBloomCommandList);
     reshade::register_event<reshade::addon_event::reset_command_list>(mgsv::inputs::descriptor_tracker::OnResetCommandList);
+    reshade::register_event<reshade::addon_event::reset_command_list>(mgsv::rendering::resource_upgrades::OnResetBloomCommandList);
     reshade::register_event<reshade::addon_event::push_descriptors>(mgsv::inputs::descriptor_tracker::OnPushDescriptors);
   } else if (fdw_reason == DLL_PROCESS_DETACH) {
     reshade::unregister_event<reshade::addon_event::init_device>(mgsv::shadows::screen_space::OnInitDevice);
@@ -544,6 +549,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     reshade::unregister_event<reshade::addon_event::init_device>(mgsv::lighting::environment_specular::OnInitDevice);
     reshade::unregister_event<reshade::addon_event::destroy_device>(mgsv::lighting::environment_specular::OnDestroyDevice);
     reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::inputs::descriptor_tracker::OnInitCommandList);
+    reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::rendering::resource_upgrades::OnInitBloomCommandList);
     reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::lighting::environment_specular::OnInitCommandList);
     reshade::unregister_event<reshade::addon_event::reset_command_list>(mgsv::lighting::environment_specular::OnResetCommandList);
     reshade::unregister_event<reshade::addon_event::destroy_command_list>(mgsv::lighting::environment_specular::OnDestroyCommandList);
@@ -551,7 +557,9 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     reshade::unregister_event<reshade::addon_event::clear_render_target_view>(mgsv::shadows::screen_space::OnClearRenderTarget);
     reshade::unregister_event<reshade::addon_event::destroy_resource>(mgsv::lighting::environment_specular::OnDestroyResource);
     reshade::unregister_event<reshade::addon_event::destroy_command_list>(mgsv::inputs::descriptor_tracker::OnDestroyCommandList);
+    reshade::unregister_event<reshade::addon_event::destroy_command_list>(mgsv::rendering::resource_upgrades::OnDestroyBloomCommandList);
     reshade::unregister_event<reshade::addon_event::reset_command_list>(mgsv::inputs::descriptor_tracker::OnResetCommandList);
+    reshade::unregister_event<reshade::addon_event::reset_command_list>(mgsv::rendering::resource_upgrades::OnResetBloomCommandList);
     reshade::unregister_event<reshade::addon_event::push_descriptors>(mgsv::inputs::descriptor_tracker::OnPushDescriptors);
   }
   mgsv::reconstruction::Use(fdw_reason, reconstruction_settings);

@@ -63,6 +63,18 @@ namespace mgsv::game {
       },                                                                                   \
   }
 
+#define MGSV_BLOOM_SHADER(value, reduction)                                                     \
+  {                                                                                             \
+      (value),                                                                                  \
+      {                                                                                         \
+          .crc32 = (value),                                                                     \
+          .code = __##value,                                                                    \
+          .on_replace = [](auto* cmd_list) {                                                    \
+            return mgsv::rendering::resource_upgrades::UpgradeBloomTarget(cmd_list, reduction); \
+          },                                                                                    \
+      },                                                                                        \
+  }
+
 // The supplied shader data must outlive this registry and its draw callbacks.
 inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shader_injection) {
   const auto begin_shadows = [shader_injection](reshade::api::command_list* cmd_list, uint32_t light_type,
@@ -116,6 +128,11 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
     mgsv::shadows::screen_space::End(cmd_list);
   };
   return {
+      MGSV_BLOOM_SHADER(0x72C1D157, true),
+      MGSV_BLOOM_SHADER(0x463195C2, false),
+      MGSV_BLOOM_SHADER(0x1AC1A5EF, false),
+      MGSV_BLOOM_SHADER(0x265053A6, false),
+      MGSV_BLOOM_SHADER(0x9BE51873, false),
       // DOF_ScatterCompositeNear
       MGSV_UPGRADE_RTV_REPLACE_SHADER_CALLBACK(
           0xE2D609B1, mgsv::rendering::resource_upgrades::ArmDofFinalCopyRenderBufferWindow),
@@ -299,5 +316,6 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
 #undef MGSV_UPGRADE_RTV_REPLACE_SHADER_CALLBACK
 #undef MGSV_UPGRADE_RTV_SHADER
 #undef MGSV_UPGRADE_DEFERRED_TONEMAP_OUTPUT_RTV
+#undef MGSV_BLOOM_SHADER
 
 }  // namespace mgsv::game
