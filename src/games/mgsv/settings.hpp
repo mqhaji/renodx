@@ -226,15 +226,6 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .parse = [](float value) { return value * 0.01f; },
           },
           new renodx::utils::settings::Setting{
-              .key = "FxBloomStrength",
-              .binding = &shader_injection->custom_bloom,
-              .default_value = 100.f,
-              .label = "Bloom",
-              .section = "Effects",
-              .max = 100.f,
-              .parse = [](float value) { return value * 0.01f; },
-          },
-          new renodx::utils::settings::Setting{
               .key = "FxSunBrightnessBoostEnabled",
               .binding = &shader_injection->custom_boost_sun,
               .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
@@ -370,6 +361,7 @@ inline void ApplyPresetOff(renodx::utils::settings::Settings* registry, ShaderIn
       {"ColorGradeScene", 100.f},
       {"ColorGradeSceneScaling", 0.f},
       {"FxBloomStrength", 100.f},
+      {"FxBloomType", 0.f},
       {"FxSunBrightnessBoostEnabled", 0.f},
       {"FxFilmGrainStrength", 0.f},
       {"FxMotionBlurStrength", 100.f},

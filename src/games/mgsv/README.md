@@ -8,6 +8,10 @@ RenoDX for Metal Gear Solid V: The Phantom Pain adds HDR output and color gradin
 
 Reconstruction settings stay independent of RenoDX presets. DLSS requires a compatible `nvngx_dlss.dll` beside the game executable; its default model is F when the DLL supports it. Character wobble and some special-view flicker remain unresolved. See the [reconstruction guide](reconstruction/README.md) for controls, startup and shutdown behavior, and testing.
 
+## Bloom
+
+**Bloom Type** selects Vanilla or Enhanced (the default). Enhanced blends the scene with filtered linear light. Bloom strength controls either type. See the [bloom guide](bloom/README.md) for details.
+
 ## Indirect Lighting
 
 **Screen-Space Lighting** selects Off or GT-VBGI. One search through scene depth supplies AO contact shading, GI light bouncing from visible surfaces, and specular visibility for environment reflections. AO, GI, and Specular Occlusion have separate strengths; resolution and sampling controls are shared.
