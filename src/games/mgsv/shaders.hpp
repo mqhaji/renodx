@@ -13,6 +13,7 @@
 
 #include "../../mods/shader.hpp"
 #include "../../utils/mutex.hpp"
+#include "gtvbgi/ambient_diffuse.hpp"
 #include "gtvbgi/lighting.hpp"
 #include "inputs.hpp"
 #include "reconstruction/postprocess/resources.hpp"
@@ -128,6 +129,41 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
     mgsv::shadows::screen_space::End(cmd_list);
   };
   return {
+      {
+          0x4FBDBB39,
+          {.crc32 = 0x4FBDBB39,
+           .on_inject = [](auto*) { return false; },
+           .on_drawn = &mgsv::lighting::ambient_diffuse::OnSkyDrawn},
+      },
+      {
+          0x844CE327,
+          {.crc32 = 0x844CE327,
+           .on_inject = [](auto*) { return false; },
+           .on_draw = [shader_injection](auto* cmd_list) {
+             bool enabled;
+             {
+               const std::shared_lock lock(renodx::utils::mutex::global_mutex);
+               enabled = shader_injection->gt_enabled >= 0.5f;
+             }
+             if (enabled) {
+               mgsv::lighting::ambient_diffuse::Capture(cmd_list);
+             }
+             return true; }},
+      },
+      {
+          0xD71E843E,
+          {.crc32 = 0xD71E843E,
+           .on_inject = [](auto*) { return false; },
+           .on_drawn = [shader_injection](auto* cmd_list) {
+             bool enabled;
+             {
+               const std::shared_lock lock(renodx::utils::mutex::global_mutex);
+               enabled = shader_injection->gt_enabled >= 0.5f;
+             }
+             if (enabled) {
+               mgsv::lighting::ambient_diffuse::OnDiffuseCopied(cmd_list);
+             } }},
+      },
       MGSV_BLOOM_SHADER(0x72C1D157, true),
       MGSV_BLOOM_SHADER(0x463195C2, false),
       MGSV_BLOOM_SHADER(0x1AC1A5EF, false),
@@ -298,14 +334,25 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
           },
       },
 
-      // Keep the second scatter dispatch; record added lighting after it.
+      // Correct ambient lighting and add GI before either scatter consumes it.
+      {
+          0x6DAF0C4A,
+          {
+              .crc32 = 0x6DAF0C4A,
+              .code = __0x6DAF0C4A,
+              .on_inject = [](auto*) { return false; },
+              .on_draw = [shader_injection](auto* cmd_list) {
+                mgsv::lighting::ApplyLightPasses(cmd_list, *shader_injection);
+                return true; },
+          },
+      },
+      // The original second scatter still runs, without another lighting chain.
       {
           0xB2601810,
           {
               .crc32 = 0xB2601810,
               // Do not inject constants into the game's shader. Each added pass binds its own.
               .on_inject = [](reshade::api::command_list*) { return false; },
-              .on_drawn = [shader_injection](reshade::api::command_list* cmd_list) { mgsv::lighting::ApplyLightPasses(cmd_list, *shader_injection); },
           },
       },
 

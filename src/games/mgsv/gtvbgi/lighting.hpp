@@ -32,6 +32,7 @@
 #include "../reconstruction/coordinator.hpp"
 #include "../reconstruction/resolution.hpp"
 #include "../shared.h"
+#include "ambient_diffuse.hpp"
 #include "environment_specular.hpp"
 #include "temporal_inputs.hpp"
 
@@ -62,6 +63,7 @@ struct LightFrame {
   reshade::api::resource_view light_source = {0};
   reshade::api::resource_view albedo = {0};
   reshade::api::resource_view specular = {0};
+  reshade::api::resource_view scattering_copy = {0};
   uint32_t width = 0;
   uint32_t height = 0;
 };
@@ -195,7 +197,7 @@ inline bool EnsureLightPassLayout(reshade::api::device* device) {
 
   std::array<reshade::api::pipeline_layout_param, 3> params = {};
   params[0].type = reshade::api::pipeline_layout_param_type::push_descriptors;
-  params[0].push_descriptors.count = 11u;  // t0-t10; input roles vary by pass
+  params[0].push_descriptors.count = 12u;  // t0-t11; input roles vary by pass
   params[0].push_descriptors.type = reshade::api::descriptor_type::texture_shader_resource_view;
   params[0].push_descriptors.dx_register_index = 0u;
   params[0].push_descriptors.dx_register_space = 0u;
@@ -279,8 +281,10 @@ inline reshade::api::resource fallback_srv_resource = {0};
 inline reshade::api::resource_view fallback_srv = {0};
 inline std::array<reshade::api::resource, 4> fallback_uav_resources = {};
 inline std::array<reshade::api::resource_view, 4> fallback_uavs = {};
+inline Microsoft::WRL::ComPtr<ID3D11SamplerState> fallback_point_wrap;
 
 inline void DestroyFallbackViews(reshade::api::device* device) {
+  fallback_point_wrap.Reset();
   for (auto& view : fallback_uavs) {
     if (view.handle != 0) {
       device->destroy_resource_view(view);
@@ -304,11 +308,22 @@ inline void DestroyFallbackViews(reshade::api::device* device) {
 }
 
 inline bool EnsureFallbackViews(reshade::api::device* device) {
-  if (fallback_srv.handle != 0
+  if (fallback_srv.handle != 0 && fallback_point_wrap != nullptr
       && std::ranges::all_of(fallback_uavs, [](const auto& view) { return view.handle != 0; })) {
     return true;
   }
   DestroyFallbackViews(device);
+
+  const D3D11_SAMPLER_DESC sampler = {
+      .Filter = D3D11_FILTER_MIN_MAG_MIP_POINT,
+      .AddressU = D3D11_TEXTURE_ADDRESS_WRAP,
+      .AddressV = D3D11_TEXTURE_ADDRESS_WRAP,
+      .AddressW = D3D11_TEXTURE_ADDRESS_WRAP,
+      .MaxAnisotropy = 1u,
+      .ComparisonFunc = D3D11_COMPARISON_ALWAYS,
+      .MaxLOD = D3D11_FLOAT32_MAX,
+  };
+  if (FAILED(reinterpret_cast<ID3D11Device*>(device->get_native())->CreateSamplerState(&sampler, &fallback_point_wrap))) return false;  // NOLINT(performance-no-int-to-ptr)
 
   const reshade::api::resource_desc srv_desc(
       1u, 1u, 1u, 1u,
@@ -351,22 +366,11 @@ inline bool EnsureFallbackViews(reshade::api::device* device) {
   return true;
 }
 
-inline reshade::api::resource_view GetFallbackView(reshade::api::command_list* cmd_list) {
-  if (!EnsureFallbackViews(cmd_list->get_device())) return {0};
-  return fallback_srv;
-}
-
-inline reshade::api::resource_view GetFallbackUav(reshade::api::command_list* cmd_list,
-                                                  std::size_t index) {
-  if (!EnsureFallbackViews(cmd_list->get_device())) return {0};
-  return fallback_uavs[index % fallback_uavs.size()];
-}
-
 // Bind every input and output for this pass. ApplyLightPasses restores game state
 // after the complete lighting chain, not between individual dispatches.
 inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* pass,
                               const ShaderInjectData& constants,
-                              const std::array<reshade::api::resource_view, 11>& sources,
+                              const std::array<reshade::api::resource_view, 12>& sources,
                               reshade::api::resource_view target,
                               reshade::api::resource_view second_target,
                               reshade::api::resource_view third_target,
@@ -374,7 +378,7 @@ inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* p
                               reshade::api::resource_view fifth_target,
                               uint32_t width, uint32_t height) {
   cmd_list->bind_pipeline(reshade::api::pipeline_stage::all_compute, pass->pipeline);
-  const auto bind_sources = [cmd_list](const std::array<reshade::api::resource_view, 11>& inputs) {
+  const auto bind_sources = [cmd_list](const std::array<reshade::api::resource_view, 12>& inputs) {
     cmd_list->push_descriptors(
         reshade::api::shader_stage::all_compute, light_pass_layout, 0u,
         {
@@ -424,8 +428,6 @@ using lighting::DispatchLightPass;
 using lighting::EnsureFallbackViews;
 using lighting::EnsureLightPass;
 using lighting::EnsureLightTarget;
-using lighting::GetFallbackUav;
-using lighting::GetFallbackView;
 using lighting::LightPass;
 using lighting::LightTarget;
 using lighting::LogLight;
@@ -671,8 +673,6 @@ using lighting::DispatchLightPass;
 using lighting::EnsureFallbackViews;
 using lighting::EnsureLightPass;
 using lighting::EnsureLightTarget;
-using lighting::GetFallbackUav;
-using lighting::GetFallbackView;
 using lighting::LightPass;
 using lighting::LightTarget;
 using lighting::LogLight;
@@ -762,32 +762,32 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
       new renodx::utils::settings::Setting{
           .key = "FxIndirectLightingAOStrength",
           .binding = &shader_injection->ao_strength,
-          .default_value = 75.f,
+          .default_value = 100.f,
           .label = "Ambient Occlusion Strength",
           .section = "Indirect Lighting",
-          .tooltip = "Controls how strongly the added shading darkens the scene. Values above 100 increase the darkening.",
-          .max = 200.f,
+          .tooltip = "Controls how strongly nearby geometry blocks ambient diffuse light. Direct light keeps its own shadows, and added GI is not darkened again.",
+          .max = 100.f,
           .parse = [](float value) { return value * 0.01f; },
           .is_visible = [shader_injection] { return shader_injection->gt_enabled >= 0.5f; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxIndirectLightingGIStrength",
           .binding = &shader_injection->gi_strength,
-          .default_value = 75.f,
+          .default_value = 100.f,
           .label = "Global Illumination Strength",
           .section = "Indirect Lighting",
           .tooltip = "Controls how much bounced light is added to the scene.",
-          .max = 200.f,
+          .max = 100.f,
           .parse = [](float value) { return value * 0.01f; },
           .is_visible = [shader_injection] { return shader_injection->gt_enabled >= 0.5f; },
       },
       new renodx::utils::settings::Setting{
           .key = "FxIndirectLightingSpecularOcclusionStrength",
           .binding = &shader_injection->specular_occlusion_strength,
-          .default_value = 75.f,
+          .default_value = 100.f,
           .label = "Specular Occlusion Strength",
           .section = "Indirect Lighting",
-          .tooltip = "Controls occlusion of environment reflections. 0% keeps native occlusion; 100% uses visibility-bitmask occlusion where supported. Direct highlights and separate rain reflections keep their existing shading.",
+          .tooltip = "Controls occlusion of environment reflections. 0% keeps native environment occlusion; 100% uses visibility-bitmask occlusion where supported. Qualified direct highlights use their own shadows. Separate rain reflections retain native occlusion.",
           .max = 100.f,
           .parse = [](float value) { return value * 0.01f; },
           .is_visible = [shader_injection] { return shader_injection->gt_enabled >= 0.5f; },
@@ -1048,7 +1048,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .label = "Lighting Debug View",
           .section = "Indirect Lighting (Advanced)",
           .tooltip = "Replaces diffuse lighting for inspection; surface color, specular, fog, and later processing still apply. In the specular visibility views, cyan means no sampled slice crossed the reflection cone; magenta means missing inputs.",
-          .labels = {"Off", "GI Lighting", "Geometry Coverage", "Accepted Source Coverage", "Valid / Invalid Results", "Source Lighting", "Temporal GI", "Accepted GI History", "Raw AO", "Temporal AO", "Filtered AO", "Accepted AO History", "Native Roughness", "Environment Specular", "Raw Specular Visibility", "Temporal Specular Visibility", "Filtered Specular Visibility", "Accepted Specular History", "Specular Confidence"},
+          .labels = {"Off", "GI Lighting", "Geometry Coverage", "Accepted Source Coverage", "Valid / Invalid Results", "Source Lighting", "Temporal GI", "Accepted GI History", "Raw AO", "Temporal AO", "Filtered AO", "Accepted AO History", "Native Roughness", "Environment Specular", "Raw Specular Visibility", "Temporal Specular Visibility", "Filtered Specular Visibility", "Accepted Specular History", "Specular Confidence", "Ambient Diffuse", "Direct Diffuse", "Corrected Diffuse", "Ambient Input Validity"},
           .is_visible = [shader_injection] {
             return shader_injection->gt_enabled >= 0.5f;
           },
@@ -1092,8 +1092,8 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   }
   constants.gt_resolution_divisor = static_cast<float>(scale);
 
-  constants.gt_noise_frame = static_cast<float>(lighting::noise_frame.load(std::memory_order_relaxed) & 31u);
   const uint32_t present = lighting::noise_frame.load(std::memory_order_relaxed);
+  constants.gt_noise_frame = static_cast<float>(present & 31u);
   const bool new_submission = history_allowed && temporal.valid
                               && (temporal.submission != il::history.submission
                                   || temporal.generation != il::history.generation);
@@ -1181,10 +1181,9 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   const bool depth_mips_requested = constants.gt_depth_mips_enabled != 0.f;
   const bool depth_mips_ready = BuildDepthMips(cmd_list, frame.depth, depth_mips_requested);
   constants.gt_depth_mips_enabled = (depth_mips_ready ? 1.f : 0.f);
-  const auto scratch0 = GetFallbackUav(cmd_list, 0);
-  const auto scratch1 = GetFallbackUav(cmd_list, 1);
-  const auto scratch2 = GetFallbackUav(cmd_list, 2);
-  const auto scratch3 = GetFallbackUav(cmd_list, 3);
+  // Setup above qualifies these handles once for the complete chain.
+  const auto fallback_input = lighting::fallback_srv;
+  const auto fallback_outputs = lighting::fallback_uavs;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   const bool immediate = context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE;
   const std::array<float, 11> parameters = {
@@ -1360,24 +1359,24 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
     static std::atomic_flag failed = {};
     LogLightOnce(&failed, reshade::log::level::warning, "Lighting spatial setup failed; using unfiltered AO and GI");
   }
-  const std::array<reshade::api::resource_view, 11> sources = {
+  const std::array<reshade::api::resource_view, 12> sources = {
       frame.depth,
       frame.normal,
-      (depth_mip_chain.ready ? depth_mip_chain.view : GetFallbackView(cmd_list)),
+      (depth_mip_chain.ready ? depth_mip_chain.view : fallback_input),
       frame.light_source,
       frame.albedo,
-      GetFallbackView(cmd_list),
+      fallback_input,
       reshade::api::resource_view{reinterpret_cast<uintptr_t>(noise.Get())},
-      constants.gt_specular_active >= 0.5f ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->material.Get())} : GetFallbackView(cmd_list),
-      constants.gt_specular_active >= 0.5f ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->srv.Get())} : GetFallbackView(cmd_list),
-      GetFallbackView(cmd_list),
-      GetFallbackView(cmd_list),
+      constants.gt_specular_active >= 0.5f ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->material.Get())} : fallback_input,
+      constants.gt_specular_active >= 0.5f ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->srv.Get())} : fallback_input,
+      fallback_input,
+      fallback_input,
   };
   DispatchLightPass(cmd_list, &il::gather_pass, constants, sources,
                     visibility_target.uav, il::bounce_target.uav,
-                    diagnostic_ready ? il::diagnostic_target.uav : scratch1,
-                    constants.gt_specular_active >= 0.5f ? specular_visibility_target.uav : scratch2,
-                    scratch3, width, height);
+                    diagnostic_ready ? il::diagnostic_target.uav : fallback_outputs[1],
+                    constants.gt_specular_active >= 0.5f ? specular_visibility_target.uav : fallback_outputs[2],
+                    fallback_outputs[3], width, height);
   if (constants.gt_specular_active >= 0.5f) {
     static std::atomic_flag recorded = {};
     LogLightOnce(&recorded, reshade::log::level::info, "Bitmask specular commands recorded; effect=", width, "x", height,
@@ -1386,7 +1385,7 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
 
   auto ao_source = visibility_target.view;
   auto gi_source = il::bounce_target.view;
-  auto specular_source = (constants.gt_specular_active >= 0.5f ? specular_visibility_target.view : GetFallbackView(cmd_list));
+  auto specular_source = (constants.gt_specular_active >= 0.5f ? specular_visibility_target.view : fallback_input);
   auto specular_temporal_source = specular_source;
   if (temporal_ready) {
     const std::array<ID3D11Buffer*, 2> scenes = {
@@ -1407,22 +1406,22 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
     } else {
       context->CSSetConstantBuffers(1u, 2u, scenes.data());
     }
-    const std::array<reshade::api::resource_view, 11> temporal_sources = {
+    const std::array<reshade::api::resource_view, 12> temporal_sources = {
         gi_source,
         frame.depth,
         frame.normal,
         temporal.motion.velocity != nullptr
             ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(temporal.motion.velocity.Get())}
-            : GetFallbackView(cmd_list),
+            : fallback_input,
         temporal.motion.object_velocity != nullptr
             ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(temporal.motion.object_velocity.Get())}
-            : GetFallbackView(cmd_list),
+            : fallback_input,
         il::temporal_targets[il::history.slot].view,
         il::geometry_targets[il::history.slot].view,
         ao_source,
         ao::temporal_targets[il::history.slot].view,
         specular_source,
-        specular_temporal_ready ? specular_temporal_targets[il::history.slot].view : GetFallbackView(cmd_list),
+        specular_temporal_ready ? specular_temporal_targets[il::history.slot].view : fallback_input,
     };
     auto temporal_constants = constants;
     if (!specular_temporal_ready) {
@@ -1430,9 +1429,9 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
     }
     DispatchLightPass(cmd_list, &il::temporal_pass, temporal_constants, temporal_sources,
                       il::temporal_targets[write_slot].uav, il::geometry_targets[write_slot].uav,
-                      diagnostic_ready ? il::diagnostic_target.uav : scratch1,
+                      diagnostic_ready ? il::diagnostic_target.uav : fallback_outputs[1],
                       ao::temporal_targets[write_slot].uav,
-                      specular_temporal_ready ? specular_temporal_targets[write_slot].uav : scratch3,
+                      specular_temporal_ready ? specular_temporal_targets[write_slot].uav : fallback_outputs[3],
                       width, height);
     gi_source = il::temporal_targets[write_slot].view;
     ao_source = ao::temporal_targets[write_slot].view;
@@ -1476,18 +1475,18 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
                                  : 2u);
     for (uint32_t index = 0u; index < iterations; ++index) {
       constants.gt_filter_step = static_cast<float>(std::min(1u << index, std::max(1u, radius / 2u)));
-      const std::array<reshade::api::resource_view, 11> filter_sources = {
+      const std::array<reshade::api::resource_view, 12> filter_sources = {
           gi_source,
           frame.depth,
           frame.normal,
           ao_source,
           specular_source,
           reshade::api::resource_view{reinterpret_cast<uintptr_t>(noise.Get())},
-          GetFallbackView(cmd_list),
-          GetFallbackView(cmd_list),
-          GetFallbackView(cmd_list),
-          GetFallbackView(cmd_list),
-          GetFallbackView(cmd_list),
+          fallback_input,
+          fallback_input,
+          fallback_input,
+          fallback_input,
+          fallback_input,
       };
       auto filter_constants = constants;
       if (!specular_filter_ready) {
@@ -1495,9 +1494,9 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
       }
       DispatchLightPass(cmd_list, &il::filter_pass, filter_constants, filter_sources,
                         il::filter_targets[index & 1u].uav, ao::filter_targets[index & 1u].uav,
-                        constants.gt_debug_view == 10.f ? il::diagnostic_target.uav : scratch1,
-                        specular_filter_ready ? specular_filter_targets[index & 1u].uav : scratch2,
-                        scratch3, width, height);
+                        constants.gt_debug_view == 10.f ? il::diagnostic_target.uav : fallback_outputs[1],
+                        specular_filter_ready ? specular_filter_targets[index & 1u].uav : fallback_outputs[2],
+                        fallback_outputs[3], width, height);
       gi_source = il::filter_targets[index & 1u].view;
       ao_source = ao::filter_targets[index & 1u].view;
       if (specular_filter_ready) {
@@ -1505,24 +1504,44 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
       }
     }
   }
-  const std::array<reshade::api::resource_view, 11> apply_sources = {
+  Microsoft::WRL::ComPtr<ID3D11Resource> diffuse_resource;
+  reinterpret_cast<ID3D11UnorderedAccessView*>(frame.light.handle)->GetResource(&diffuse_resource);  // NOLINT(performance-no-int-to-ptr)
+  auto ambient = lighting::ambient_diffuse::Read(device, diffuse_resource.Get());
+  if (ambient != nullptr && (ambient->depth.Get() != depth_resource.Get() || ambient->width != frame.width || ambient->height != frame.height)) {
+    ambient.reset();
+  }
+  if (ambient == nullptr) {
+    static std::atomic_flag reported = {};
+    LogLightOnce(&reported, reshade::log::level::warning, "ambient diffuse unavailable; diffuse AO is skipped while GI and specular visibility continue");
+  }
+  auto* const ambient_constants = (ambient != nullptr ? ambient->constants.Get() : nullptr);
+  auto* const ambient_sampler = (ambient != nullptr ? ambient->sampler.Get() : lighting::fallback_point_wrap.Get());
+  Microsoft::WRL::ComPtr<ID3D11DeviceContext1> ambient_context;
+  if (ambient != nullptr && SUCCEEDED(context->QueryInterface(IID_PPV_ARGS(&ambient_context)))) {
+    ambient_context->CSSetConstantBuffers1(3u, 1u, &ambient_constants, &ambient->first_constant, &ambient->constant_count);
+  } else {
+    context->CSSetConstantBuffers(3u, 1u, &ambient_constants);
+  }
+  context->CSSetSamplers(0u, 1u, &ambient_sampler);
+  const std::array<reshade::api::resource_view, 12> apply_sources = {
       gi_source,
       frame.depth,
-      diagnostic_ready ? il::diagnostic_target.view : GetFallbackView(cmd_list),
+      diagnostic_ready ? il::diagnostic_target.view : fallback_input,
       ao_source,
       frame.normal,
-      environment != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->srv.Get())} : GetFallbackView(cmd_list),
-      environment != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->material.Get())} : GetFallbackView(cmd_list),
-      constants.gt_specular_active >= 0.5f ? specular_visibility_target.view : GetFallbackView(cmd_list),
+      environment != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->srv.Get())} : fallback_input,
+      environment != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->material.Get())} : fallback_input,
+      constants.gt_specular_active >= 0.5f ? specular_visibility_target.view : fallback_input,
       specular_temporal_source,
       specular_source,
-      GetFallbackView(cmd_list),
+      ambient != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(ambient->view.Get())} : fallback_input,
+      ambient != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(ambient->weight_view.Get())} : fallback_input,
   };
-  // Resolve both signals together: AO attenuates only existing diffuse, and
-  // the visibility-integrated bounce is added afterward in the same store.
+  // Correct ambient diffuse and add the bounce before skin scattering.
   DispatchLightPass(cmd_list, &il::add_pass, constants, apply_sources, frame.light,
-                    environment != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->visibility_uav.Get())} : scratch0,
-                    scratch1, scratch2, scratch3, frame.width, frame.height);
+                    environment != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->visibility_uav.Get())} : fallback_outputs[0],
+                    frame.scattering_copy.handle != 0u ? frame.scattering_copy : fallback_outputs[1],
+                    fallback_outputs[2], fallback_outputs[3], frame.width, frame.height);
   static std::atomic_flag recorded = {};
   LogLightOnce(&recorded, reshade::log::level::info,
                "GT-VBGI commands recorded; effect=", width, "x", height,
@@ -1553,11 +1572,10 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
 
 }  // namespace mgsv::ao
 
-// Native composite inputs and post-scatter lighting orchestration.
+// Native composite inputs and pre-scatter lighting orchestration.
 namespace mgsv::lighting {
 
-// Called immediately after the game's scatter dispatch is recorded, not after GPU completion.
-// Dispatch leaves its bindings unchanged, so read them here before recording our own passes.
+// Called before the first scatter; its inputs and native geometry are bound.
 inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderInjectData& shader_injection) {
   if (cmd_list == nullptr || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return;
 
@@ -1565,7 +1583,7 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
   {
     const std::shared_lock lock(renodx::utils::mutex::global_mutex);
     constants = shader_injection;
-    constants.gt_debug_view = std::clamp(constants.gt_debug_view, 0.f, 18.f);
+    constants.gt_debug_view = std::clamp(constants.gt_debug_view, 0.f, 22.f);
   }
   if (constants.gt_enabled < 0.5f) {
     static std::atomic_flag reported = {};
@@ -1584,19 +1602,26 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> normal;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> light_source;
-  Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> light;
+  Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> scattering_copy;
+  Microsoft::WRL::ComPtr<ID3D11Resource> copied_resource;
   context->CSGetShaderResources(1u, 1u, depth.GetAddressOf());
   context->CSGetShaderResources(2u, 1u, normal.GetAddressOf());
-  context->CSGetUnorderedAccessViews(0u, 1u, light.GetAddressOf());
-  if (depth == nullptr || normal == nullptr || light == nullptr) {
+  context->CSGetShaderResources(0u, 1u, light_source.GetAddressOf());
+  if (light_source != nullptr) {
+    light_source->GetResource(&copied_resource);
+    auto* native_device = reinterpret_cast<ID3D11Device*>(cmd_list->get_device()->get_native());  // NOLINT(performance-no-int-to-ptr)
+    const D3D11_UNORDERED_ACCESS_VIEW_DESC view = {.Format = DXGI_FORMAT_R16G16B16A16_FLOAT, .ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D};
+    native_device->CreateUnorderedAccessView(copied_resource.Get(), &view, &scattering_copy);
+  }
+  if (depth == nullptr || normal == nullptr || scattering_copy == nullptr) {
     static std::atomic_flag reported = {};
     mgsv::lighting::LogLightOnce(&reported, reshade::log::level::warning, "skipping lighting: missing scatter bindings depth=",
-                                 depth != nullptr, " normal=", normal != nullptr, " light=", light != nullptr);
+                                 depth != nullptr, " normal=", normal != nullptr, " copied_light=", scattering_copy != nullptr);
     return;
   }
 
   D3D11_UNORDERED_ACCESS_VIEW_DESC light_view_desc = {};
-  light->GetDesc(&light_view_desc);
+  scattering_copy->GetDesc(&light_view_desc);
   if (light_view_desc.ViewDimension != D3D11_UAV_DIMENSION_TEXTURE2D
       || light_view_desc.Texture2D.MipSlice != 0u) {
     static std::atomic_flag reported = {};
@@ -1608,7 +1633,7 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
 
   Microsoft::WRL::ComPtr<ID3D11Resource> light_resource;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> light_texture;
-  light->GetResource(light_resource.GetAddressOf());
+  scattering_copy->GetResource(light_resource.GetAddressOf());
   if (FAILED(light_resource.As(&light_texture))) {
     static std::atomic_flag reported = {};
     mgsv::lighting::LogLightOnce(&reported, reshade::log::level::warning,
@@ -1640,7 +1665,9 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
     view->GetResource(resource.GetAddressOf());
     if (FAILED(resource.As(&texture))) return "resource type";
     if (expected_format != DXGI_FORMAT_UNKNOWN) {
-      if (resource.Get() == light_resource.Get()) return "output alias";
+      // The native copy is read by the trace, then written by application.
+      // Materials must remain separate from that writable image.
+      if (resource.Get() == light_resource.Get() && view != light_source.Get()) return "output alias";
       if (view_desc.Texture2D.MipLevels != 1u) return "mip count";
       Microsoft::WRL::ComPtr<ID3D11Device> input_device;
       // ReShade redirects texture GetDevice to its proxy. Views retain the
@@ -1664,8 +1691,7 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
     return;
   }
 
-  // t4 is the native copied pre-SSS diffuse, distinct from the output UAV.
-  context->CSGetShaderResources(4u, 1u, light_source.GetAddressOf());
+  // The first scatter reads the copied, unmodified diffuse at t0.
   const bool generation_matches = shared_inputs.materials.generation == shared_inputs.generation;
   const char* source_error = input_error(light_source.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
   const char* specular_error = input_error(shared_inputs.materials.specular.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
@@ -1727,14 +1753,48 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
   // Every deferred reference outlives its recorded work. The native geometry
   // constants are copied on the GPU at this insertion, not read back by the CPU.
   const auto apply = [width = light_desc.Width, height = light_desc.Height, constants, geometry, geometry_first, geometry_count,
-                      depth, normal, light, light_source,
+                      depth, normal, light_source, scattering_copy,
                       albedo = shared_inputs.materials.albedo,
                       specular = shared_inputs.materials.specular,
-                      generation = shared_inputs.generation](reshade::api::command_list* submitted, bool history_allowed) {
+                      generation = shared_inputs.generation](reshade::api::command_list* submitted, bool first_submission) {
+    if (!first_submission) {
+      Microsoft::WRL::ComPtr<ID3D11Resource> copied;
+      light_source->GetResource(&copied);
+      copied->SetPrivateDataInterface(ambient_diffuse::DIFFUSE_SOURCE_GUID, nullptr);
+      return;
+    }
     const auto selected = inputs::Read(submitted->get_device());
     if (selected.device == nullptr || selected.generation != generation) return;
     auto* submitted_context = reinterpret_cast<ID3D11DeviceContext*>(submitted->get_native());  // NOLINT(performance-no-int-to-ptr)
+    Microsoft::WRL::ComPtr<ID3D11Resource> copied;
+    Microsoft::WRL::ComPtr<ID3D11Resource> diffuse;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> diffuse_texture;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> light;
+    light_source->GetResource(&copied);
+    UINT bytes = sizeof(ID3D11Resource*);
+    if (FAILED(copied->GetPrivateData(ambient_diffuse::DIFFUSE_SOURCE_GUID, &bytes, diffuse.GetAddressOf())) || diffuse == nullptr
+        || FAILED(diffuse.As(&diffuse_texture))) {
+      static std::atomic_flag reported = {};
+      LogLightOnce(&reported, reshade::log::level::warning, "skipping lighting: diffuse copy has no qualified submitted source");
+      return;
+    }
+    // A submitted native copy admits one lighting application, not one per
+    // Present or every repeated interception of the same scattering input.
+    copied->SetPrivateDataInterface(ambient_diffuse::DIFFUSE_SOURCE_GUID, nullptr);
+    D3D11_TEXTURE2D_DESC description = {};
+    diffuse_texture->GetDesc(&description);
+    const D3D11_UNORDERED_ACCESS_VIEW_DESC view = {.Format = DXGI_FORMAT_R16G16B16A16_FLOAT, .ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D};
+    if (diffuse == copied || description.Width != width || description.Height != height
+        || description.ArraySize != 1u || description.MipLevels != 1u || description.SampleDesc.Count != 1u
+        || FAILED(reinterpret_cast<ID3D11Device*>(submitted->get_device()->get_native())->CreateUnorderedAccessView(diffuse.Get(), &view, &light))) return;  // NOLINT(performance-no-int-to-ptr)
     const auto previous_state = mgsv::rendering::d3d11_compute_state::Capture(submitted);
+    // The native copy can leave these lighting images bound in graphics slots.
+    const std::array<ID3D11ShaderResourceView*, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT> empty = {};
+    submitted_context->VSSetShaderResources(0u, static_cast<UINT>(empty.size()), empty.data());
+    submitted_context->HSSetShaderResources(0u, static_cast<UINT>(empty.size()), empty.data());
+    submitted_context->DSSetShaderResources(0u, static_cast<UINT>(empty.size()), empty.data());
+    submitted_context->GSSetShaderResources(0u, static_cast<UINT>(empty.size()), empty.data());
+    submitted_context->PSSetShaderResources(0u, static_cast<UINT>(empty.size()), empty.data());
     if (geometry != nullptr) {
       Microsoft::WRL::ComPtr<ID3D11DeviceContext1> submitted_context1;
       auto* buffer = geometry.Get();
@@ -1751,11 +1811,13 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
         .light_source = {reinterpret_cast<uintptr_t>(light_source.Get())},
         .albedo = {reinterpret_cast<uintptr_t>(albedo.Get())},
         .specular = {reinterpret_cast<uintptr_t>(specular.Get())},
+        .scattering_copy = {reinterpret_cast<uintptr_t>(scattering_copy.Get())},
         .width = width,
         .height = height,
     };
     mgsv::ao::Apply(submitted_frame, submitted, constants,
-                    temporal_inputs::Read(submitted->get_device(), submitted_frame.depth), history_allowed);
+                    temporal_inputs::Read(submitted->get_device(), submitted_frame.depth),
+                    submitted_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE);
     mgsv::rendering::d3d11_compute_state::Restore(submitted, previous_state);
   };
   if (geometry != nullptr && mgsv::reconstruction::coordinator::ScheduleLighting(cmd_list, apply)) return;
@@ -1763,7 +1825,7 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
   // Missing safe submission support keeps the existing same-context chain.
   // It may spatially filter current GI, but cannot advance temporal history.
   const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
-  apply(cmd_list, false);
+  apply(cmd_list, true);
 }
 
 }  // namespace mgsv::lighting

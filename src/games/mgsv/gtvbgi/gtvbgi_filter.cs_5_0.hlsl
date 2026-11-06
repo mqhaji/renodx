@@ -30,10 +30,11 @@ static const float4 BINOMIAL_WEIGHTS[5] = {
 };
 
 [numthreads(8, 8, 1)]
-void main(uint3 tid : SV_DispatchThreadID) {
+
+void main(uint3 thread_id : SV_DispatchThreadID) {
   uint width, height;
   gi_input.GetDimensions(width, height);
-  const int2 pixel = int2(tid.xy);
+  const int2 pixel = int2(thread_id.xy);
   if (any(pixel >= int2(width, height))) return;
 
   const float4 gi_center = gi_input.Load(int3(pixel, 0));
@@ -48,13 +49,14 @@ void main(uint3 tid : SV_DispatchThreadID) {
   if (specular_active) {
     specular_center = specular_input.Load(int3(pixel, 0));
   }
-  const bool specular_valid = specular_active && ValidSpecularMasses(specular_center);
+  const bool specular_valid = specular_active && IsSpecularSampleValid(specular_center);
   float4 specular_result = specular_valid ? specular_center : float4(0.0, 0.0, 0.0, -1.0);
 
   [branch]
+
   if (CUSTOM_MGSV_GT_SPATIAL_ENABLED >= 0.5 && (gi_valid || ao_valid || specular_valid)) {
     const float scale = max(CUSTOM_MGSV_GT_RESOLUTION_DIVISOR, 1.0);
-    const int2 full_size = int2(cBufferWidth, cBufferHeight);
+    const int2 full_size = int2(buffer_width, buffer_height);
     const int2 center_pixel = min(int2(floor((float2(pixel) + 0.5) * scale)), full_size - 1);
     const float center_depth = depth_buffer.Load(int3(center_pixel, 0)).x;
     const float center_z = LinearZ(center_depth);
@@ -63,9 +65,12 @@ void main(uint3 tid : SV_DispatchThreadID) {
       const float3 center_position = ViewPos(float2(center_pixel), center_z);
       float3 center_reflection = 0.0;
       float3 center_lobe = 0.0;
+      float center_side = 1.0;
       if (specular_valid) {
-        center_reflection = reflect(normalize(ViewPos(float2(center_pixel) + 0.5, center_z)), center_normal);
-        center_lobe = SpecularLobeParameters(specular_center.z);
+        const float3 view = normalize(-ViewPos(float2(center_pixel) + 0.5, center_z));
+        center_reflection = reflect(-view, center_normal);
+        center_lobe = GetSpecularLobeParameters(specular_center.z);
+        center_side = GetSpecularSurfaceSide(center_normal, view);
       }
       const float plane_scale = max(0.02 * length(center_position), 1.0e-6);
       const uint taps = (uint)clamp(CUSTOM_MGSV_GT_FILTER_TAPS, 3.0, 9.0) | 1u;
@@ -105,7 +110,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
           if (specular_valid) {
             specular_sample = specular_input.Load(int3(q, 0));
           }
-          const bool specular_sample_valid = specular_valid && ValidSpecularMasses(specular_sample);
+          const bool specular_sample_valid = specular_valid && IsSpecularSampleValid(specular_sample);
           if (!gi_sample_valid && !ao_sample_valid && !specular_sample_valid) continue;
 
           const float kernel_weight = BINOMIAL_WEIGHTS[abs(x)][half_width - 1] * BINOMIAL_WEIGHTS[abs(y)][half_width - 1];
@@ -124,8 +129,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
           normal_weight *= normal_weight;
           const float edge_weight = exp(-0.5 * plane * plane) * normal_weight;
           if (specular_sample_valid) {
-            const float3 reflection = reflect(normalize(ViewPos(float2(sample_pixel) + 0.5, sample_z)), sample_normal);
-            lobe_weight = SpecularLobeWeight(center_reflection, center_lobe, reflection, specular_sample.z);
+            const float3 view = normalize(-ViewPos(float2(sample_pixel) + 0.5, sample_z));
+            const float3 reflection = reflect(-view, sample_normal);
+            lobe_weight = (GetSpecularSurfaceSide(sample_normal, view) == center_side
+                               ? GetSpecularLobeWeight(center_reflection, center_lobe, reflection, specular_sample.z)
+                               : 0.0);
           }
           const float weight = kernel_weight * edge_weight * 4.0;
           if (gi_sample_valid) {

@@ -4,9 +4,9 @@
 // transposed relative to stage 1: groups on the row axis, threads on columns, so
 // this shader's vThreadID.y is the column and vThreadID.x is the row.
 //
-// The addon keeps the original second scatter through an explicit callback-only
-// registration. This compiled port is available for comparisons; exact parity
-// with retail has not been established. See ssss.hlsli for its implementation.
+// The addon keeps the original second scatter. Custom lighting runs before
+// stage 1; this compiled stage-2 port is not active. Exact parity with retail
+// has not been established. See ssss.hlsli for its implementation.
 //
 // The tail is the retail translucency term:
 //
