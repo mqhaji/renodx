@@ -46,6 +46,7 @@
 #include "../../utils/state.hpp"
 #include "../../utils/swapchain.hpp"
 #include "./bloom/bloom.hpp"
+#include "./gtvbgi/ambient_diffuse.hpp"
 #include "./gtvbgi/environment_specular.hpp"
 #include "./gtvbgi/lighting.hpp"
 #include "./gtvbgi/temporal_inputs.hpp"
@@ -330,6 +331,7 @@ void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool resize) {
   if (!mgsv::inputs::IsSelectedSwapchain(swapchain)) return;
   mgsv::inputs::OnDestroySwapchain(swapchain, resize);
   mgsv::lighting::environment_specular::Reset();
+  mgsv::lighting::ambient_diffuse::Reset();
   mgsv::reconstruction::coordinator::ResetTemporalState("input swapchain retired");
   mgsv::reconstruction::post_process::Reset();
   // Cancel reconstruction but retain every original game prefix/post list for its existing replay path.
@@ -383,6 +385,7 @@ void OnPresent(
     if (mgsv::inputs::IsSelectedSwapchain(swapchain)) {
       if (!lighting_enabled) {
         mgsv::lighting::environment_specular::Reset();
+        mgsv::lighting::ambient_diffuse::Reset();
       }
       mgsv::lighting::temporal_inputs::enabled.store(temporal_lighting_enabled, std::memory_order_release);
       mgsv::lighting::temporal_inputs::BeginFrame(queue->get_device());
@@ -416,6 +419,7 @@ void OnDestroyDevice(reshade::api::device* device) {
   if (!mgsv::inputs::IsSelectedDevice(device)) return;
   mgsv::inputs::OnDestroyDevice(device);
   mgsv::lighting::environment_specular::Reset();
+  mgsv::lighting::ambient_diffuse::Reset();
   mgsv::reconstruction::input_capture::InvalidateCapturedFrame();
   mgsv::ao::Destroy(device);
   mgsv::il::Destroy(device);
@@ -535,6 +539,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     reshade::register_event<reshade::addon_event::clear_render_target_view>(mgsv::lighting::environment_specular::OnClearRenderTarget);
     reshade::register_event<reshade::addon_event::clear_render_target_view>(mgsv::shadows::screen_space::OnClearRenderTarget);
     reshade::register_event<reshade::addon_event::destroy_resource>(mgsv::lighting::environment_specular::OnDestroyResource);
+    reshade::register_event<reshade::addon_event::destroy_resource>(mgsv::lighting::ambient_diffuse::OnDestroyResource);
+    reshade::register_event<reshade::addon_event::clear_render_target_view>(mgsv::lighting::ambient_diffuse::OnClearRenderTarget);
     reshade::register_event<reshade::addon_event::destroy_command_list>(mgsv::inputs::descriptor_tracker::OnDestroyCommandList);
     reshade::register_event<reshade::addon_event::destroy_command_list>(mgsv::rendering::resource_upgrades::OnDestroyBloomCommandList);
     reshade::register_event<reshade::addon_event::reset_command_list>(mgsv::inputs::descriptor_tracker::OnResetCommandList);
@@ -556,6 +562,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     reshade::unregister_event<reshade::addon_event::clear_render_target_view>(mgsv::lighting::environment_specular::OnClearRenderTarget);
     reshade::unregister_event<reshade::addon_event::clear_render_target_view>(mgsv::shadows::screen_space::OnClearRenderTarget);
     reshade::unregister_event<reshade::addon_event::destroy_resource>(mgsv::lighting::environment_specular::OnDestroyResource);
+    reshade::unregister_event<reshade::addon_event::destroy_resource>(mgsv::lighting::ambient_diffuse::OnDestroyResource);
+    reshade::unregister_event<reshade::addon_event::clear_render_target_view>(mgsv::lighting::ambient_diffuse::OnClearRenderTarget);
     reshade::unregister_event<reshade::addon_event::destroy_command_list>(mgsv::inputs::descriptor_tracker::OnDestroyCommandList);
     reshade::unregister_event<reshade::addon_event::destroy_command_list>(mgsv::rendering::resource_upgrades::OnDestroyBloomCommandList);
     reshade::unregister_event<reshade::addon_event::reset_command_list>(mgsv::inputs::descriptor_tracker::OnResetCommandList);

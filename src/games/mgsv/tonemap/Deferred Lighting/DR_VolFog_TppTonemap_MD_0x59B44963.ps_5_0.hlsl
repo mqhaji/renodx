@@ -105,17 +105,17 @@ void main(
   r3.xyz = r3.xyz;
   const float2 specular_uv = r0.zw;
   r0.z = inOcclusion.Sample(g_samplerLinear_Wrap_s, r0.zw).x;
-  const float3 specular_correction = EnvironmentSpecularCorrection(specular_uv, r0.z);
+  const float3 specular_correction = GetEnvironmentSpecularCorrection(specular_uv, r0.z, r1.yzw);
   r4.xyz = r0.zzz;
   r2.xyz = r3.xyz * r2.xyz;
-  // Custom AO already attenuates diffuse upstream; keep native AO on specular only.
+  // Diffuse already has ambient-only AO; the correction separates specular below.
   if (CUSTOM_MGSV_LIGHTING_ENABLED != 0.f) {
     r1.yzw = r2.xyz + r1.yzw * r4.xyz;
   } else {
     r1.yzw = r2.xyz + r1.yzw;
     r1.yzw = r1.yzw * r4.xyz;
   }
-  if (CUSTOM_MGSV_LIGHTING_ENABLED != 0.0 && CUSTOM_MGSV_SPECULAR_OCCLUSION_STRENGTH > 0.0) {
+  if (CUSTOM_MGSV_LIGHTING_ENABLED != 0.0) {
     r1.yzw += specular_correction;
   }
   r1.yzw = r1.yzw;
