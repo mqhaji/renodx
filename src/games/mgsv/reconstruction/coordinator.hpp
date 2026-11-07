@@ -9,6 +9,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <exception>
 #include <functional>
@@ -39,6 +41,8 @@
 
 namespace mgsv::reconstruction::coordinator {
 
+// Bound retained split recordings if the game delays or abandons submission.
+inline constexpr size_t MAX_PENDING_DISPATCHES = 64u;
 inline auto& execution_lock = state::execution_lock;
 inline reshade::api::device* runtime_device = nullptr;
 
@@ -453,6 +457,9 @@ inline void OnInitCommandList(reshade::api::command_list* command_list) {
 }
 
 inline void CompleteRecording(reshade::api::command_list* recording, ID3D11CommandList* finished) {
+  if (auto* route = recording->get_private_data<post_process::Recording>(); route != nullptr) {
+    *route = {};
+  }
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(recording->get_native());  // NOLINT(performance-no-int-to-ptr)
   lighting::temporal_inputs::Finish(context, finished);
   const std::unique_lock lock(submission.mutex);
@@ -484,7 +491,7 @@ inline bool ScheduleLighting(
     const std::unique_lock lock(submission.mutex);
     const auto queries = submission.active_queries.find(context);
     if (queries == submission.active_queries.end() || !queries->second.empty()
-        || submission.pending_dispatches.size() >= 64u) return false;
+        || submission.pending_dispatches.size() >= MAX_PENDING_DISPATCHES) return false;
   }
   Microsoft::WRL::ComPtr<ID3D11CommandList> prefix;
   if (FAILED(context->FinishCommandList(TRUE, &prefix)) || prefix == nullptr) return false;
@@ -736,6 +743,22 @@ inline void MaybeRunLocked(
   }
 
   auto* native_context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
+  std::shared_ptr<post_process::OutputProducer> output_producer;
+  if (post_output != nullptr) {
+    output_producer = std::make_shared<post_process::OutputProducer>();
+  }
+  const auto publish_output = [&] {
+    if (post_output == nullptr) return;
+    const std::unique_lock lock(post_process::state.mutex);
+    post_process::state.active.swap(post_output);
+    post_process::state.producer = output_producer;
+    post_process::state.frame = inputs.frame_token;
+    if (native_context != nullptr && native_context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED) {
+      if (auto* recording = cmd_list->get_private_data<post_process::Recording>(); recording != nullptr) {
+        *recording = {.output = post_process::state.active, .producer = output_producer, .frame = inputs.frame_token, .generation = post_process::state.generation};
+      }
+    }
+  };
   if (native_context != nullptr && native_context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED) {
     const auto fail_submission = [] {
       logging::Warn("failed to schedule temporal dispatch");
@@ -748,7 +771,7 @@ inline void MaybeRunLocked(
     }
     {
       const std::unique_lock lock(submission.mutex);
-      if (submission.pending_dispatches.size() >= 64u) return;
+      if (submission.pending_dispatches.size() >= MAX_PENDING_DISPATCHES) return;
       const auto queries = submission.active_queries.find(native_context);
       // Existing recordings may contain an unseen Begin. Wait for a natural
       // successful FinishCommandList or a fresh context before splitting them.
@@ -784,11 +807,7 @@ inline void MaybeRunLocked(
       const std::unique_lock lock(submission.mutex);
       submission.pending_dispatches.emplace_back(std::move(pending));
     }
-    if (post_output != nullptr) {
-      const std::unique_lock lock(post_process::state.mutex);
-      post_process::state.active.swap(post_output);
-      post_process::state.frame = inputs.frame_token;
-    }
+    publish_output();
     state::frame_state.reconstruction_scheduled = true;
     if (!logged_immediate_dispatch.load(std::memory_order_relaxed)) {
       logging::Info("scheduled temporal dispatch frame=", inputs.frame_token);
@@ -809,9 +828,7 @@ inline void MaybeRunLocked(
     if (!succeeded) {
       post_output->CopyNative(native_context);
     }
-    const std::unique_lock lock(post_process::state.mutex);
-    post_process::state.active.swap(post_output);
-    post_process::state.frame = inputs.frame_token;
+    publish_output();
   }
 }
 

@@ -43,9 +43,41 @@
 
 namespace mgsv::reconstruction::post_process {
 
+// Reconstruction can produce a larger scene than the game rendered. Later
+// effects and UI need matching destinations, while earlier passes must keep
+// their smaller native textures. This file owns those larger textures and the
+// views used to read or write them; runtime.hpp chooses which draws use them.
+
+// Native bloom processes this fixed rectangle inside a reduced-size texture.
+// These are the working area's dimensions, not the texture's full dimensions.
 inline constexpr uint32_t BLOOM_GRID_WIDTH = 246u;
 inline constexpr uint32_t BLOOM_GRID_HEIGHT = 138u;
+// Recognize native intermediates from full size down to 1/16 of each axis.
+inline constexpr uint32_t MAX_SURFACE_REDUCTION = 4u;
+// Preserve the game's cutoff for small depth-of-field blur spots:
+// min(maximum, output_width * reference_cutoff / reference_width).
+// The reference width comes from the game; it is not the player's resolution.
+inline constexpr float DOF_REFERENCE_WIDTH = 1920.f;
+inline constexpr float DOF_REFERENCE_CUTOFF = 0.85f;
+inline constexpr float DOF_MAXIMUM_CUTOFF = 2.f;
 
+// Values shared by the small size-adjustment shaders and native-buffer copies.
+// Each row is four floats (16 bytes), matching one shader constant. Native
+// buffers receive only the fields they use; unrelated values stay unchanged.
+// UV coordinates run from 0 to 1 across a texture; a reciprocal is 1/value.
+struct SizePatch {
+  std::array<float, 4> buffer_size;   // This texture's width, height, and their reciprocals.
+  std::array<float, 4> output_size;   // Full output width/height in XY; ZW unused.
+  std::array<float, 4> dof_cutoff;    // Small-blur cutoff in X; other components unused.
+  std::array<float, 4> sample_step;   // One texture pixel in UV units in XY; ZW remain 1.
+  std::array<float, 4> flare_center;  // Fixed bloom center in UV units; Z is 1/length(center).
+  std::array<float, 4> flare_edge;    // Reciprocal center coordinates for the flare's edge fade.
+  std::array<float, 4> bloom_crop;    // UV offset and scale for copying the fixed bloom region.
+};
+static_assert(sizeof(SizePatch) == 112u);
+
+// Private-data keys label D3D objects. Their numeric values are unique names,
+// not rendering parameters. The scene key retains its native depth/stencil view.
 inline constexpr GUID SCENE_DEPTH_GUID = {
     .Data1 = 0x240B06A8u,
     .Data2 = 0xD21Fu,
@@ -53,6 +85,8 @@ inline constexpr GUID SCENE_DEPTH_GUID = {
     .Data4 = {0x9Eu, 0x64u, 0xF2u, 0x25u, 0xC6u, 0xE1u, 0x99u, 0x43u},
 };
 
+// Stores the most recent full clear, so an alias created later starts with
+// the same color and alpha as the native target.
 inline constexpr GUID CLEAR_COLOR_GUID = {
     .Data1 = 0x79C18D48u,
     .Data2 = 0x3F10u,
@@ -61,10 +95,11 @@ inline constexpr GUID CLEAR_COLOR_GUID = {
 };
 
 struct ClearColor {
-  uint64_t frame;
+  uint64_t frame;  // CPU recording interval; does not establish GPU completion.
   std::array<float, 4> color;
 };
 
+// Retrieve the exact depth/stencil view observed alongside this scene target.
 inline Microsoft::WRL::ComPtr<ID3D11DepthStencilView> ReadSceneDepth(ID3D11Resource* scene) {
   Microsoft::WRL::ComPtr<IUnknown> object;
   Microsoft::WRL::ComPtr<ID3D11DepthStencilView> depth;
@@ -75,6 +110,8 @@ inline Microsoft::WRL::ComPtr<ID3D11DepthStencilView> ReadSceneDepth(ID3D11Resou
   return depth;
 }
 
+// Give the copy helpers a clean set of D3D bindings, then restore the caller's
+// state on every exit. This changes bindings, not the contents of textures.
 struct ContextScope {
   Microsoft::WRL::ComPtr<ID3D11DeviceContext1> context;
   Microsoft::WRL::ComPtr<ID3DDeviceContextState> saved;
@@ -95,15 +132,22 @@ struct ContextScope {
   }
 };
 
+// One native intermediate and its matching output-sized texture. A texture
+// stores pixels; a view specifies how a shader reads or writes that storage.
 struct Surface {
-  enum class Role : uint8_t { DATA,
-                              SCENE_COLOR,
-                              BLOOM,
-                              BLOOM_FIXED_GRID,
-                              FLARE_LAYER };
+  // Role describes the use established by a qualified draw or copy. Native
+  // texture pooling can reuse the same object for a different purpose later.
+  enum class Role : uint8_t {
+    DATA,              // Effect data, such as a DoF mask; not a generic scene-color input.
+    SCENE_COLOR,       // Scene image or a color layer that can feed scene composition.
+    BLOOM,             // Bloom or flare color using the texture's regular sampling region.
+    BLOOM_FIXED_GRID,  // Bloom or flare color confined to the fixed working rectangle.
+    FLARE_LAYER        // Separate depth-tested flare sprites blended into scene color later.
+  };
   Microsoft::WRL::ComPtr<ID3D11Resource> original;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
   Microsoft::WRL::ComPtr<ID3D11Buffer> size_patch;
+  // Allocation alone does not make this texture a valid current input.
   uint64_t routed_frame = std::numeric_limits<uint64_t>::max();
   Role role = Role::DATA;
   struct TargetView {
@@ -114,6 +158,8 @@ struct Surface {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> original;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> replacement;
   };
+  // Reuse equivalent read/write views instead of recreating them each draw.
+  // Retaining the native views also prevents their identities from being reused.
   std::vector<TargetView> targets;
   std::vector<SampleView> samples;
 };
@@ -121,14 +167,18 @@ struct Surface {
 // These objects depend on the device, not on the current render/output size.
 struct Pipelines {
   reshade::api::device* device;
+  // Fallback resizing, native constant adjustment, and sampled-depth alignment.
   Microsoft::WRL::ComPtr<ID3D11ComputeShader> fallback_shader;
   Microsoft::WRL::ComPtr<ID3D11ComputeShader> system_shader;
   Microsoft::WRL::ComPtr<ID3D11ComputeShader> bloom_shader;
   Microsoft::WRL::ComPtr<ID3D11ComputeShader> align_depth_shader;
+  // A fullscreen triangle writes enlarged UI depth and stencil without color.
   Microsoft::WRL::ComPtr<ID3D11VertexShader> copy_vertex;
   Microsoft::WRL::ComPtr<ID3D11PixelShader> copy_depth_pixel;
   Microsoft::WRL::ComPtr<ID3D11PixelShader> copy_stencil_pixel;
   Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depth_write;
+  // Each masked draw restores one stencil bit. Reuse these eight write masks
+  // and bit selectors across frames and size changes.
   std::array<Microsoft::WRL::ComPtr<ID3D11DepthStencilState>, 8> stencil_write;
   std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>, 8> stencil_bits;
 
@@ -176,30 +226,66 @@ struct Pipelines {
   }
 };
 
+// Each reconstruction insertion keeps its own intermediate roles. Access to
+// these bindings is protected by the owning Output's surface_mutex. This is
+// ownership and routing information, not a saved copy of the texture's pixels.
+struct OutputProducer {
+  struct SurfaceBinding {
+    ID3D11Resource* resource;  // Borrowed identity; Output retains the texture.
+    Surface::Role role;
+  };
+  // The output owns the textures. Each producer records their roles separately:
+  // the next scene can reuse a texture while this scene is still being recorded.
+  std::vector<SurfaceBinding> surfaces;
+
+  void SetSurfaceRole(ID3D11Resource* resource, Surface::Role role) {
+    const auto binding = std::ranges::find(surfaces, resource, &SurfaceBinding::resource);
+    if (binding == surfaces.end()) {
+      surfaces.push_back({.resource = resource, .role = role});
+    } else {
+      binding->role = role;
+    }
+  }
+};
+
 // Keep each output and its post-processing aliases alive through submission.
 // Native resources remain available to earlier, render-sized producers.
 struct Output {
+  // Protects the intermediate/view caches, their roles, and producer bindings.
+  // Cache hits can share this lock; new views and role changes need exclusive access.
   std::shared_mutex surface_mutex;
   std::vector<std::shared_ptr<Surface>> surfaces;
   std::shared_ptr<Pipelines> pipelines;
   reshade::api::device* device = nullptr;
   uint32_t render_width = 0u;
   uint32_t render_height = 0u;
+  // Both native scene identities can appear in later bindings: the upgraded
+  // float texture and the game's original texture that it replaces.
   Microsoft::WRL::ComPtr<ID3D11Resource> source;
   Microsoft::WRL::ComPtr<ID3D11Resource> original_source;
+  // Reconstruction writes here. Subsequent native effects and UI can read or
+  // update it through the sample view (srv) and render-target view (rtv).
+  // Float storage does not change MGSV's expected scene-color encoding.
   Microsoft::WRL::ComPtr<ID3D11Texture2D> color;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
   Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
+  // Immutable size-dependent values and the original scene's fallback input.
   Microsoft::WRL::ComPtr<ID3D11Buffer> size_patch;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> source_view;
   Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> fallback_uav;
+  // Saved-state support and dimensions/jitter shared by the copy shaders.
   Microsoft::WRL::ComPtr<ID3DDeviceContextState> empty_state;
   Microsoft::WRL::ComPtr<ID3D11Buffer> copy_constants;
+  // Geometry depth is sampled by scene effects. Align it to the reconstructed
+  // image's pixel grid, including the current camera jitter.
   Microsoft::WRL::ComPtr<ID3D11Resource> geometry_depth;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> geometry_depth_view;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> aligned_depth;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> aligned_depth_view;
   Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> aligned_depth_uav;
+  // UI depth/stencil can be a different native resource. Stencil is the
+  // per-pixel mask used for UI clipping. Copy to readable storage first,
+  // then restore the values into an output-sized depth/stencil target.
   Microsoft::WRL::ComPtr<ID3D11Resource> native_depth;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_copy;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_view;
@@ -207,8 +293,11 @@ struct Output {
   Microsoft::WRL::ComPtr<ID3D11Texture2D> output_depth;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> output_depth_sample;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> output_stencil_sample;
+  // Indexed by D3D11's read-only depth/stencil flag bits: neither, depth,
+  // stencil, or both. Views are created only when that flag combination is used.
   std::array<Microsoft::WRL::ComPtr<ID3D11DepthStencilView>, 4> output_depth_views;
   ColorTarget target;
+  // One bit per diagnostic message group, to avoid repeating success logs.
   std::atomic<uint32_t> observed_passes = 0u;
 
   explicit Output(const ValidatedFrameInputs& inputs, std::shared_ptr<Pipelines> shared_pipelines = nullptr)
@@ -223,6 +312,8 @@ struct Output {
         }
       });
     }
+    // Color needs read, render-target, and compute-write access. Depth resources
+    // below reuse the dimensions but choose their own formats and access flags.
     const D3D11_TEXTURE2D_DESC description = {
         .Width = inputs.output.width,
         .Height = inputs.output.height,
@@ -274,6 +365,7 @@ struct Output {
         || FAILED(native_device->CreateUnorderedAccessView(aligned_depth.Get(), nullptr, &aligned_depth_uav))) {
       throw std::runtime_error("MGSV output geometry depth allocation failed");
     }
+    // Depth association comes from an actual target binding, not a size guess.
     const auto scene_depth = ReadSceneDepth(source.Get());
     if (scene_depth == nullptr) return;
     scene_depth->GetResource(&native_depth);
@@ -290,6 +382,8 @@ struct Output {
     depth_target.Flags = 0u;
     DXGI_FORMAT sampled_depth = DXGI_FORMAT_UNKNOWN;
     DXGI_FORMAT sampled_stencil = DXGI_FORMAT_UNKNOWN;
+    // Typeless storage permits separate typed views of depth and stencil.
+    // Preserve the native depth representation rather than converting formats.
     switch (depth_target.Format) {
       case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
         depth_description.Format = DXGI_FORMAT_R32G8X24_TYPELESS;
@@ -368,6 +462,8 @@ struct Output {
       resolution::Fail("cannot preserve the output depth copy state");
       return;
     }
+    // The first row stores integer input/output dimensions. The second stores
+    // a reserved mode, two float jitter values as raw bits, and padding.
     const std::array<uint32_t, 8> values = {render_width, render_height, target.width, target.height,
                                             0u, std::bit_cast<uint32_t>(jitter_x), std::bit_cast<uint32_t>(jitter_y), 0u};
     context->UpdateSubresource(copy_constants.Get(), 0u, nullptr, values.data(), 0u, 0u);
@@ -378,6 +474,7 @@ struct Output {
       context->CSSetConstantBuffers(0u, 1u, copy_constants.GetAddressOf());
       context->Dispatch((target.width + 7u) / 8u, (target.height + 7u) / 8u, 1u);
     }
+    // Keep sampled geometry separate from the UI's depth and stencil tests.
     if (native_depth == nullptr) return;
     context->CopyResource(depth_copy.Get(), native_depth.Get());
     if (stencil_view != nullptr) {
@@ -413,6 +510,8 @@ struct Output {
     return render_width != 0u && render_height != 0u && (render_width != target.width || render_height != target.height);
   }
 
+  // Build once for each texture extent. Buffer dimensions can be reduced while
+  // output_size still describes the full reconstructed scene.
   Microsoft::WRL::ComPtr<ID3D11Buffer> CreateSizePatch(uint32_t width, uint32_t height) const {
     const float inverse_width = 1.f / static_cast<float>(width);
     const float inverse_height = 1.f / static_cast<float>(height);
@@ -421,42 +520,24 @@ struct Output {
         inverse_width * (static_cast<float>(BLOOM_GRID_WIDTH) * 0.5f),
         inverse_height * (static_cast<float>(BLOOM_GRID_HEIGHT) * 0.5f),
     };
-    const std::array<float, 28> values = {
-        static_cast<float>(width),
-        static_cast<float>(height),
-        inverse_width,
-        inverse_height,
-        static_cast<float>(target.width),
-        static_cast<float>(target.height),
-        0.f,
-        0.f,
-        std::min(2.f, static_cast<float>(target.width) * 0.85f * (1.f / 1920.f)),
-        0.f,
-        0.f,
-        0.f,
-        inverse_width,
-        inverse_height,
-        1.f,
-        1.f,
-        bloom_center[0],
-        bloom_center[1],
-        1.f / std::sqrt((bloom_center[0] * bloom_center[0]) + (bloom_center[1] * bloom_center[1])),
-        0.f,
-        1.f / bloom_center[0],
-        1.f / bloom_center[1],
-        0.f,
-        0.f,
-        -0.5f * inverse_width,
-        -0.5f * inverse_height,
-        static_cast<float>(BLOOM_GRID_WIDTH) / (static_cast<float>(target.width) * 0.25f),
-        static_cast<float>(BLOOM_GRID_HEIGHT) / (static_cast<float>(target.height) * 0.25f),
+    const SizePatch values = {
+        .buffer_size = {static_cast<float>(width), static_cast<float>(height), inverse_width, inverse_height},
+        .output_size = {static_cast<float>(target.width), static_cast<float>(target.height), 0.f, 0.f},
+        .dof_cutoff = {std::min(DOF_MAXIMUM_CUTOFF, static_cast<float>(target.width) * DOF_REFERENCE_CUTOFF * (1.f / DOF_REFERENCE_WIDTH)), 0.f, 0.f, 0.f},
+        .sample_step = {inverse_width, inverse_height, 1.f, 1.f},
+        .flare_center = {bloom_center[0], bloom_center[1],
+                         1.f / std::sqrt((bloom_center[0] * bloom_center[0]) + (bloom_center[1] * bloom_center[1])), 0.f},
+        .flare_edge = {1.f / bloom_center[0], 1.f / bloom_center[1], 0.f, 0.f},
+        .bloom_crop = {-0.5f * inverse_width, -0.5f * inverse_height,
+                       static_cast<float>(BLOOM_GRID_WIDTH) / (static_cast<float>(target.width) * 0.25f),
+                       static_cast<float>(BLOOM_GRID_HEIGHT) / (static_cast<float>(target.height) * 0.25f)},
     };
     const D3D11_BUFFER_DESC description = {
         .ByteWidth = sizeof(values),
         .Usage = D3D11_USAGE_IMMUTABLE,
         .BindFlags = D3D11_BIND_CONSTANT_BUFFER,
     };
-    const D3D11_SUBRESOURCE_DATA initial = {.pSysMem = values.data()};
+    const D3D11_SUBRESOURCE_DATA initial = {.pSysMem = &values};
     Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;
     auto* native_device = reinterpret_cast<ID3D11Device*>(device->get_native());  // NOLINT(performance-no-int-to-ptr)
     if (FAILED(native_device->CreateBuffer(&description, &initial, &buffer))) {
@@ -465,38 +546,57 @@ struct Output {
     return buffer;
   }
 
-  std::shared_ptr<Surface> GetSurface(ID3D11Resource* original, bool create) {
+  // Lookup can require a producer from this recording, not just cached storage.
+  // create permits allocation lookup without claiming that pixels were written;
+  // MapTarget or CopySurface records that producer separately.
+  std::shared_ptr<Surface> GetSurface(ID3D11Resource* original, bool create,
+                                      uint64_t recording_frame = reconstruction::state::CurrentFrameToken(),
+                                      const OutputProducer* producer = nullptr, Surface::Role* role = nullptr) {
     if (original == nullptr || render_width == 0u || render_height == 0u) return nullptr;
-    {
-      const std::shared_lock lock(surface_mutex);
+    // Called with either lock held, including the recheck after a cache miss.
+    const auto find_surface = [&]() -> std::shared_ptr<Surface> {
       for (const auto& surface : surfaces) {
         if (surface->original.Get() == original) {
+          const OutputProducer::SurfaceBinding* binding = nullptr;
+          if (producer != nullptr) {
+            const auto found = std::ranges::find(producer->surfaces, original, &OutputProducer::SurfaceBinding::resource);
+            if (found != producer->surfaces.end()) {
+              binding = &*found;
+            }
+          }
           // General intermediates can change purpose each frame. The dedicated
           // flare layer keeps its producer/consumer link: another thread can
           // record the scene copy before recording the current flare draws.
-          if (!create && surface->routed_frame != reconstruction::state::CurrentFrameToken()
+          if (!create && (producer != nullptr ? binding == nullptr : surface->routed_frame != recording_frame)
               && surface->role != Surface::Role::FLARE_LAYER) return nullptr;
+          if (role != nullptr) {
+            *role = (binding != nullptr ? binding->role : surface->role);
+          }
           return surface;
         }
       }
+      return nullptr;
+    };
+    {
+      const std::shared_lock lock(surface_mutex);
+      if (const auto surface = find_surface(); surface != nullptr) return surface;
     }
     if (!create) return nullptr;
     const std::unique_lock lock(surface_mutex);
-    for (const auto& surface : surfaces) {
-      if (surface->original.Get() == original) return surface;
-    }
+    // Another recording worker may have filled the cache while we changed locks.
+    if (const auto surface = find_surface(); surface != nullptr) return surface;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
     if (FAILED(original->QueryInterface(IID_PPV_ARGS(&texture)))) return nullptr;
     D3D11_TEXTURE2D_DESC description;
     texture->GetDesc(&description);
     if (description.ArraySize != 1u || description.MipLevels != 1u || description.SampleDesc.Count != 1u) return nullptr;
     uint32_t level = 0u;
-    for (; level <= 4u; ++level) {
+    for (; level <= MAX_SURFACE_REDUCTION; ++level) {
       if (description.Width == (render_width >> level) && description.Height == (render_height >> level)) break;
     }
     // Fixed-size UI and utility targets share these draw paths. Their size
     // alone does not make them part of the output-resolution scene chain.
-    if (level > 4u) return nullptr;
+    if (level > MAX_SURFACE_REDUCTION) return nullptr;
     description.Width = std::max(1u, target.width >> level);
     description.Height = std::max(1u, target.height >> level);
     description.Usage = D3D11_USAGE_DEFAULT;
@@ -521,23 +621,39 @@ struct Output {
     return surface;
   }
 
+  // Redirect a native write. create marks a qualified producer; a lookup alone
+  // must use an already eligible target. scene_only excludes effect-data targets.
   Microsoft::WRL::ComPtr<ID3D11RenderTargetView> MapTarget(ID3D11RenderTargetView* view, bool create, bool scene_only = false,
-                                                           Surface::Role role = Surface::Role::DATA) {
+                                                           Surface::Role role = Surface::Role::DATA,
+                                                           uint64_t recording_frame = reconstruction::state::CurrentFrameToken(),
+                                                           OutputProducer* producer = nullptr) {
     if (view == nullptr) return nullptr;
     Microsoft::WRL::ComPtr<ID3D11Resource> original;
     view->GetResource(&original);
     if (IsSceneTarget(original.Get())) return rtv;
-    const auto surface = GetSurface(original.Get(), create);
+    auto previous_role = Surface::Role::DATA;
+    const auto surface = GetSurface(original.Get(), create, recording_frame, producer, &previous_role);
     if (surface == nullptr) return nullptr;
+    if (scene_only && previous_role == Surface::Role::DATA && !create) return nullptr;
+    const auto find_view = [&]() -> ID3D11RenderTargetView* {
+      for (const auto& target_view : surface->targets) {
+        if (target_view.original.Get() == view) return target_view.replacement.Get();
+      }
+      return nullptr;
+    };
+    if (!create) {
+      const std::shared_lock lock(surface_mutex);
+      if (auto* cached = find_view(); cached != nullptr) return cached;
+    }
     const std::unique_lock lock(surface_mutex);
-    if (scene_only && surface->role == Surface::Role::DATA && !create) return nullptr;
     if (create) {
-      surface->routed_frame = reconstruction::state::CurrentFrameToken();
+      surface->routed_frame = recording_frame;
       surface->role = (scene_only ? Surface::Role::SCENE_COLOR : role);
+      if (producer != nullptr) {
+        producer->SetSurfaceRole(original.Get(), surface->role);
+      }
     }
-    for (const auto& target_view : surface->targets) {
-      if (target_view.original.Get() == view) return target_view.replacement;
-    }
+    if (auto* cached = find_view(); cached != nullptr) return cached;
     D3D11_RENDER_TARGET_VIEW_DESC description;
     view->GetDesc(&description);
     Surface::TargetView target_view = {.original = view};
@@ -546,17 +662,34 @@ struct Output {
       resolution::Fail("post-processing target view allocation failed");
       return nullptr;
     }
-    surface->targets.push_back(target_view);
-    return target_view.replacement;
+    surface->targets.push_back(std::move(target_view));
+    return surface->targets.back().replacement;
   }
 
-  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> MapInput(ID3D11ShaderResourceView* view, bool scene_only = false) {
+  // Redirect reads only when this recording has a matching scene, depth, or
+  // intermediate. A missing match leaves the caller's native binding unchanged.
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> MapInput(ID3D11ShaderResourceView* view, bool scene_only = false,
+                                                            uint64_t recording_frame = reconstruction::state::CurrentFrameToken(),
+                                                            const OutputProducer* producer = nullptr) {
     if (view == nullptr) return nullptr;
     Microsoft::WRL::ComPtr<ID3D11Resource> original;
     view->GetResource(&original);
     // The float scene uses explicit encoding. Leave unrelated native sRGB
     // views to the existing clone path rather than changing their transfer.
     if (original == source) return srv;
+    if (original == original_source) {
+      D3D11_SHADER_RESOURCE_VIEW_DESC description;
+      view->GetDesc(&description);
+      // Native UNORM and float scene views both carry encoded color. A draw
+      // using the native alias still needs this frame's reconstructed image.
+      // An sRGB view would decode on read, so it cannot use the same float SRV.
+      if (description.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D && description.Texture2D.MostDetailedMip == 0u
+          && (description.Format == DXGI_FORMAT_B8G8R8A8_UNORM || description.Format == DXGI_FORMAT_R8G8B8A8_UNORM)) {
+        return srv;
+      }
+    }
+    // Stencil is integer mask data, not sampled geometry. Keep its view separate
+    // even when the game's geometry and UI share one depth/stencil texture.
     if (IsScaled() && original == native_depth) {
       D3D11_SHADER_RESOURCE_VIEW_DESC description;
       view->GetDesc(&description);
@@ -564,13 +697,23 @@ struct Output {
       if (original != geometry_depth) return output_depth_sample;
     }
     if (IsScaled() && original == geometry_depth) return aligned_depth_view;
-    const auto surface = GetSurface(original.Get(), false);
+    auto role = Surface::Role::DATA;
+    const auto surface = GetSurface(original.Get(), false, recording_frame, producer, &role);
     if (surface == nullptr) return nullptr;
-    const std::unique_lock lock(surface_mutex);
-    if (scene_only && surface->role == Surface::Role::DATA) return nullptr;
-    for (const auto& sample : surface->samples) {
-      if (sample.original.Get() == view) return sample.replacement;
+    if (scene_only && role == Surface::Role::DATA) return nullptr;
+    const auto find_view = [&]() -> ID3D11ShaderResourceView* {
+      for (const auto& sample : surface->samples) {
+        if (sample.original.Get() == view) return sample.replacement.Get();
+      }
+      return nullptr;
+    };
+    {
+      const std::shared_lock lock(surface_mutex);
+      if (auto* cached = find_view(); cached != nullptr) return cached;
     }
+    const std::unique_lock lock(surface_mutex);
+    // Recheck after changing locks so concurrent misses share one cached view.
+    if (auto* cached = find_view(); cached != nullptr) return cached;
     D3D11_SHADER_RESOURCE_VIEW_DESC description;
     view->GetDesc(&description);
     Surface::SampleView sample = {.original = view};
@@ -579,20 +722,21 @@ struct Output {
       resolution::Fail("post-processing sample view allocation failed");
       return nullptr;
     }
-    surface->samples.push_back(sample);
-    return sample.replacement;
+    surface->samples.push_back(std::move(sample));
+    return surface->samples.back().replacement;
   }
 
-  bool CopySurface(ID3D11DeviceContext* context, ID3D11Resource* from, ID3D11Resource* to) {
+  // Mirror a qualified full-resource copy using matching output-sized storage.
+  // An intermediate destination inherits the source's role after size/format checks.
+  bool CopySurface(ID3D11DeviceContext* context, ID3D11Resource* from, ID3D11Resource* to,
+                   uint64_t recording_frame = reconstruction::state::CurrentFrameToken(), OutputProducer* producer = nullptr) {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> copied;
     auto role = Surface::Role::DATA;
     if (IsSceneTarget(from)) {
       copied = color;
       role = Surface::Role::SCENE_COLOR;
-    } else if (const auto surface = GetSurface(from, false); surface != nullptr) {
+    } else if (const auto surface = GetSurface(from, false, recording_frame, producer, &role); surface != nullptr) {
       copied = surface->texture;
-      const std::shared_lock lock(surface_mutex);
-      role = surface->role;
     }
     if (copied == nullptr) return false;
     if (IsSceneTarget(to)) {
@@ -608,45 +752,105 @@ struct Output {
     copied->GetDesc(&source_description);
     native_destination->GetDesc(&destination_description);
     if (source_description.Format != destination_description.Format) return false;
-    const auto destination = GetSurface(to, true);
+    const auto destination = GetSurface(to, true, recording_frame);
     if (destination == nullptr) return false;
     destination->texture->GetDesc(&destination_description);
     if (source_description.Width != destination_description.Width || source_description.Height != destination_description.Height
         || source_description.Format != destination_description.Format) return false;
     {
       const std::unique_lock lock(surface_mutex);
-      destination->routed_frame = reconstruction::state::CurrentFrameToken();
+      destination->routed_frame = recording_frame;
       destination->role = role;
+      if (producer != nullptr) {
+        producer->SetSurfaceRole(to, role);
+      }
     }
     context->CopyResource(destination->texture.Get(), copied.Get());
     return true;
   }
 };
 
+// Keep one destination and producer for an unfinished deferred recording.
+// Successful FinishCommandList releases this reference; the wider sequence
+// below can retain the same route until display conversion. Reset retires both.
+struct __declspec(uuid("71618f64-fc26-4a78-91de-6e20f879a85a")) Recording {
+  std::shared_ptr<Output> output;
+  std::shared_ptr<OutputProducer> producer;
+  uint64_t frame = 0u;       // Recording interval used to qualify intermediate writes.
+  uint64_t generation = 0u;  // Reset counter used to reject retired output resources.
+};
+
+// Native post-processing can finish one list and continue on another while
+// another worker publishes the next scene. Keep ownership until display output
+// closes this recording sequence, rather than borrowing the latest publication.
+struct Sequence {
+  uint64_t id;
+  Recording recording;
+};
+
 struct State {
   std::shared_mutex mutex;
+  // Shader/state objects can be reused at any size. Cached textures match one
+  // render/output size pair; outstanding recordings can retain older textures.
   std::shared_ptr<Pipelines> pipelines;
+  // cached can serve independently recorded UI even without a new scene.
+  // active is the most recently published scene, qualified by frame below.
   std::shared_ptr<Output> cached;
   std::shared_ptr<Output> active;
+  std::shared_ptr<OutputProducer> producer;
+  std::vector<Sequence> sequences;
+  uint64_t next_sequence_id = 0u;
   uint64_t frame = 0u;
+  // Invalidates old Recording values without relying on CPU/GPU timing.
+  uint64_t generation = 0u;
 };
 inline State state;
+// Only the identity is thread-local. Device state owns and retires GPU objects.
+inline thread_local uint64_t post_sequence_id = 0u;
 
-inline std::shared_ptr<Output> GetActive(reshade::api::command_list* command_list) {
+// Prefer ownership tied to the unfinished command list, then its wider
+// post-processing sequence. Only then may a new recording use the latest scene.
+inline std::shared_ptr<Output> GetActive(reshade::api::command_list* command_list, Recording* selected = nullptr) {
   const std::shared_lock lock(state.mutex);
+  const auto* recording = command_list->get_private_data<Recording>();
+  if (recording != nullptr && recording->output != nullptr && recording->generation == state.generation
+      && recording->output->device == command_list->get_device()) {
+    if (selected != nullptr) {
+      *selected = *recording;
+    }
+    return recording->output;
+  }
+  const auto sequence = std::ranges::find(state.sequences, post_sequence_id, &Sequence::id);
+  if (sequence != state.sequences.end() && sequence->recording.generation == state.generation
+      && sequence->recording.output != nullptr && sequence->recording.output->device == command_list->get_device()) {
+    if (selected != nullptr) {
+      *selected = sequence->recording;
+    }
+    return sequence->recording.output;
+  }
   if (state.frame != reconstruction::state::CurrentFrameToken()
       || state.active == nullptr || state.active->device != command_list->get_device()) return nullptr;
+  if (selected != nullptr) {
+    *selected = {.output = state.active, .producer = state.producer, .frame = state.frame, .generation = state.generation};
+  }
   return state.active;
 }
 
+// Retire routing immediately, but release retained D3D objects after unlocking:
+// their destruction callbacks can enter the addon again. Device teardown also
+// retires pipelines; a size/mode reset normally keeps those reusable objects.
 inline void Reset(bool release_pipelines = false) {
   std::shared_ptr<Pipelines> pipelines;
   std::shared_ptr<Output> cached;
   std::shared_ptr<Output> active;
+  std::vector<Sequence> sequences;
   {
     const std::unique_lock lock(state.mutex);
     cached.swap(state.cached);
     active.swap(state.active);
+    sequences.swap(state.sequences);
+    state.producer.reset();
+    ++state.generation;
     if (release_pipelines) {
       pipelines.swap(state.pipelines);
     }
