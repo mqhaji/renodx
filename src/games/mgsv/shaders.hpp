@@ -5,7 +5,9 @@
 
 #pragma once
 
+#include <cstdint>
 #include <shared_mutex>
+#include <span>
 
 #include <embed/shaders.h>
 
@@ -78,6 +80,8 @@ namespace mgsv::game {
 
 // The supplied shader data must outlive this registry and its draw callbacks.
 inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shader_injection) {
+  // Take one settings snapshot for the added work. Bind the shared PCSS noise
+  // only for lights with a native map; End restores every displaced pixel input.
   const auto begin_shadows = [shader_injection](reshade::api::command_list* cmd_list, uint32_t light_type,
                                                 bool has_shadow_map = true) {
     ShaderInjectData constants = {};
@@ -112,6 +116,12 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
     const auto* saved = cmd_list->get_private_data<mgsv::lighting::environment_specular::DrawState>();
     return saved != nullptr && saved->active;
   };
+  const auto shadow_active = [](reshade::api::command_list* cmd_list) {
+    const auto* saved = cmd_list->get_private_data<mgsv::shadows::screen_space::DrawState>();
+    return saved != nullptr && saved->active && saved->replacement_safe;
+  };
+  // Directional draws also supply the existing environment-specular capture.
+  // Keep that attachment around the same native draw as the new shadow mask.
   const auto begin_directional = [shader_injection, begin_shadows](reshade::api::command_list* cmd_list,
                                                                    bool has_shadow_map = true) {
     begin_shadows(cmd_list, 0u, has_shadow_map);
@@ -128,18 +138,39 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
     mgsv::lighting::environment_specular::EndCapture(cmd_list);
     mgsv::shadows::screen_space::End(cmd_list);
   };
+  const auto local_shadow_shader = [begin_shadows, shadow_active](uint32_t hash, std::span<const uint8_t> code,
+                                                                  uint32_t light_type, bool has_shadow_map) {
+    return renodx::mods::shader::CustomShader{
+        .crc32 = hash,
+        .code = code,
+        .on_replace = shadow_active,
+        .on_draw = [begin_shadows, light_type, has_shadow_map](auto* cmd_list) {
+          begin_shadows(cmd_list, light_type, has_shadow_map);
+          return true;
+        },
+        .on_drawn = &mgsv::shadows::screen_space::End,
+    };
+  };
+  // A replacement can write the optional capture output only after its native
+  // bindings were qualified. Otherwise the original light shader stays active.
+  const auto directional_shadow_shader = [begin_directional, end_directional, capture_active, shadow_active](
+                                             uint32_t hash, std::span<const uint8_t> code, bool has_shadow_map) {
+    return renodx::mods::shader::CustomShader{
+        .crc32 = hash,
+        .code = code,
+        .on_replace = [capture_active, shadow_active](auto* cmd_list) { return capture_active(cmd_list) || shadow_active(cmd_list); },
+        .on_draw = [begin_directional, has_shadow_map](auto* cmd_list) { return begin_directional(cmd_list, has_shadow_map); },
+        .on_drawn = end_directional,
+    };
+  };
   return {
       {
           0x4FBDBB39,
-          {.crc32 = 0x4FBDBB39,
-           .on_inject = [](auto*) { return false; },
-           .on_drawn = &mgsv::lighting::ambient_diffuse::OnSkyDrawn},
+          {.crc32 = 0x4FBDBB39, .on_inject = [](auto*) { return false; }, .on_drawn = &mgsv::lighting::ambient_diffuse::OnSkyDrawn},
       },
       {
           0x844CE327,
-          {.crc32 = 0x844CE327,
-           .on_inject = [](auto*) { return false; },
-           .on_draw = [shader_injection](auto* cmd_list) {
+          {.crc32 = 0x844CE327, .on_inject = [](auto*) { return false; }, .on_draw = [shader_injection](auto* cmd_list) {
              bool enabled;
              {
                const std::shared_lock lock(renodx::utils::mutex::global_mutex);
@@ -152,9 +183,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
       },
       {
           0xD71E843E,
-          {.crc32 = 0xD71E843E,
-           .on_inject = [](auto*) { return false; },
-           .on_drawn = [shader_injection](auto* cmd_list) {
+          {.crc32 = 0xD71E843E, .on_inject = [](auto*) { return false; }, .on_drawn = [shader_injection](auto* cmd_list) {
              bool enabled;
              {
                const std::shared_lock lock(renodx::utils::mutex::global_mutex);
@@ -170,14 +199,11 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
       MGSV_BLOOM_SHADER(0x265053A6, false),
       MGSV_BLOOM_SHADER(0x9BE51873, false),
       // DOF_ScatterCompositeNear
-      MGSV_UPGRADE_RTV_REPLACE_SHADER_CALLBACK(
-          0xE2D609B1, mgsv::rendering::resource_upgrades::ArmDofFinalCopyRenderBufferWindow),
+      MGSV_UPGRADE_RTV_REPLACE_SHADER_CALLBACK(0xE2D609B1, mgsv::rendering::resource_upgrades::ArmDofFinalCopyRenderBufferWindow),
       // DOF_ScatterCompositeFar
-      MGSV_UPGRADE_RTV_REPLACE_SHADER_CALLBACK(
-          0x7C017264, mgsv::rendering::resource_upgrades::ArmDofFinalCopyRenderBufferWindow),
+      MGSV_UPGRADE_RTV_REPLACE_SHADER_CALLBACK(0x7C017264, mgsv::rendering::resource_upgrades::ArmDofFinalCopyRenderBufferWindow),
       // DOF_ScatterCompositeFinal
-      MGSV_UPGRADE_RTV_REPLACE_SHADER_CALLBACK(
-          0xFC5542BB, mgsv::rendering::resource_upgrades::DisarmDofFinalCopyRenderBufferAfterDofFinal),
+      MGSV_UPGRADE_RTV_REPLACE_SHADER_CALLBACK(0xFC5542BB, mgsv::rendering::resource_upgrades::DisarmDofFinalCopyRenderBufferAfterDofFinal),
 
       {
           0xF05DCBFD,
@@ -274,54 +300,10 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
               .get_replacement_pipeline = [](reshade::api::command_list* cmd_list) { return mgsv::lighting::environment_specular::GetShadowedCapturePipeline(cmd_list, __sun_environment_capture); },
           },
       },
-      {
-          0x712F7222,
-          {
-              .crc32 = 0x712F7222,
-              .code = __0x712F7222,
-              .on_replace = [capture_active](reshade::api::command_list* cmd_list) {
-                const auto* state = cmd_list->get_private_data<mgsv::shadows::screen_space::DrawState>();
-                return capture_active(cmd_list) || (state != nullptr && state->active && state->replacement_safe); },
-              .on_draw = [begin_directional](reshade::api::command_list* cmd_list) { return begin_directional(cmd_list, false); },
-              .on_drawn = end_directional,
-          },
-      },
-      {
-          0x08292A5E,
-          {
-              .crc32 = 0x08292A5E,
-              .code = __0x08292A5E,
-              .on_draw = [begin_shadows](reshade::api::command_list* cmd_list) {
-                begin_shadows(cmd_list, 1u);
-                return true;
-              },
-              .on_drawn = &mgsv::shadows::screen_space::End,
-          },
-      },
-      {
-          0x1D4DB9C5,
-          {
-              .crc32 = 0x1D4DB9C5,
-              .code = __0x1D4DB9C5,
-              .on_draw = [begin_shadows](reshade::api::command_list* cmd_list) {
-                begin_shadows(cmd_list, 3u);
-                return true;
-              },
-              .on_drawn = &mgsv::shadows::screen_space::End,
-          },
-      },
-      {
-          0x80F0A0BC,
-          {
-              .crc32 = 0x80F0A0BC,
-              .code = __0x80F0A0BC,
-              .on_draw = [begin_shadows](reshade::api::command_list* cmd_list) {
-                begin_shadows(cmd_list, 2u);
-                return true;
-              },
-              .on_drawn = &mgsv::shadows::screen_space::End,
-          },
-      },
+      {0x712F7222, directional_shadow_shader(0x712F7222, __0x712F7222, false)},
+      {0x08292A5E, local_shadow_shader(0x08292A5E, __0x08292A5E, 1u, true)},
+      {0x1D4DB9C5, local_shadow_shader(0x1D4DB9C5, __0x1D4DB9C5, 3u, true)},
+      {0x80F0A0BC, local_shadow_shader(0x80F0A0BC, __0x80F0A0BC, 2u, true)},
       {
           0x34B04FB1,
           {
@@ -333,6 +315,33 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
               .on_drawn = &mgsv::lighting::environment_specular::EndCapture,
           },
       },
+
+      // Preserve each native variant's masks and material response. Lights
+      // without shadow maps use contact shadows and the same spotlight budget.
+      {0x0636037A, local_shadow_shader(0x0636037A, __0x0636037A, 2u, true)},
+      {0x0C708B4B, directional_shadow_shader(0x0C708B4B, __0x0C708B4B, true)},
+      {0x1B5FA666, local_shadow_shader(0x1B5FA666, __0x1B5FA666, 1u, true)},
+      {0x22A2A1C6, local_shadow_shader(0x22A2A1C6, __0x22A2A1C6, 1u, true)},
+      {0x246ED82C, local_shadow_shader(0x246ED82C, __0x246ED82C, 4u, true)},
+      {0x3AA3593B, local_shadow_shader(0x3AA3593B, __0x3AA3593B, 2u, false)},
+      {0x3AF9D807, local_shadow_shader(0x3AF9D807, __0x3AF9D807, 3u, true)},
+      {0x4671E064, local_shadow_shader(0x4671E064, __0x4671E064, 1u, false)},
+      {0x541068FC, local_shadow_shader(0x541068FC, __0x541068FC, 2u, false)},
+      {0x699E8CD0, local_shadow_shader(0x699E8CD0, __0x699E8CD0, 4u, true)},
+      {0x6C006674, local_shadow_shader(0x6C006674, __0x6C006674, 3u, true)},
+      {0x73783915, local_shadow_shader(0x73783915, __0x73783915, 1u, false)},
+      {0x77FA7216, local_shadow_shader(0x77FA7216, __0x77FA7216, 3u, false)},
+      {0x81D871E3, local_shadow_shader(0x81D871E3, __0x81D871E3, 1u, false)},
+      {0x8E139033, local_shadow_shader(0x8E139033, __0x8E139033, 3u, false)},
+      {0xA54AA716, local_shadow_shader(0xA54AA716, __0xA54AA716, 4u, false)},
+      {0xB067B01D, directional_shadow_shader(0xB067B01D, __0xB067B01D, false)},
+      {0xB08273FD, local_shadow_shader(0xB08273FD, __0xB08273FD, 1u, false)},
+      {0xCF3011AA, local_shadow_shader(0xCF3011AA, __0xCF3011AA, 4u, false)},
+      {0xD3CF7256, local_shadow_shader(0xD3CF7256, __0xD3CF7256, 1u, true)},
+      {0xD7F4F7B2, local_shadow_shader(0xD7F4F7B2, __0xD7F4F7B2, 3u, false)},
+      {0xDB15C6F6, local_shadow_shader(0xDB15C6F6, __0xDB15C6F6, 3u, true)},
+      {0xE82F8D58, local_shadow_shader(0xE82F8D58, __0xE82F8D58, 3u, false)},
+      {0xFB8F891F, directional_shadow_shader(0xFB8F891F, __0xFB8F891F, true)},
 
       // Correct ambient lighting and add GI before either scatter consumes it.
       {

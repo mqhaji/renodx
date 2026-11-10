@@ -47,7 +47,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .default_value = 100.f,
               .label = "Shadow Softness",
               .section = "Shadows",
-              .tooltip = "Scales shadow-map softness for all lights. 100% keeps the tuned source sizes. 0% uses native map filtering. Contact detail stays active.",
+              .tooltip = "Scales the light size for shadow-map and contact-edge filtering. 100% keeps the tuned source sizes. 0% uses native map filtering and sharp contact detail. Contact rays keep the native light position.",
               .max = 100.f,
               .format = "%.0f%%",
               .parse = [](float value) { return value * 0.01f; },
@@ -60,7 +60,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .default_value = 60.f,
               .label = "Contact Shadow Reach",
               .section = "Shadows (Advanced)",
-              .tooltip = "Search length in output pixels along the ray's main screen axis, shared by all lights. Converted to the current render size when upscaling. Higher values catch farther visible casters and increase cost. This changes reach, not sample density.",
+              .tooltip = "Search length in output pixels along the ray's main screen axis, shared by all lights. Converted to render pixels when upscaling, with a minimum of 16 render pixels. Higher values find farther visible casters and increase cost. This changes reach, not sample density.",
               .min = 16.f,
               .max = 256.f,
               .format = "%d px",
@@ -76,16 +76,6 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .tooltip = "Limits added spotlight contact-shadow work. Lower values reduce cost; 0 is unlimited. Lights beyond the budget retain shadow-map shadows.",
               .max = 64.f,
               .format = "%d",
-              .is_visible = is_shadow_visible,
-          },
-          new renodx::utils::settings::Setting{
-              .key = "FxLocalScreenSpaceShadowCulling",
-              .binding = &shader_injection->ss_local_culling,
-              .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
-              .default_value = 1.f,
-              .label = "Skip Unlit Areas",
-              .section = "Shadows (Advanced)",
-              .tooltip = "Skips contact-shadow calculations in areas the light cannot reach, based on its cone and range.",
               .is_visible = is_shadow_visible,
           },
           new renodx::utils::settings::Setting{
@@ -106,8 +96,8 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .default_value = 0.f,
               .label = "Contact Shadow Debug View",
               .section = "Shadows (Advanced)",
-              .tooltip = "Shows contact-shadow information for the selected light type. Other lighting remains visible. Without Contact Shadows hides their effect while keeping the calculations running. Shadow Detail shows full detail in white and skipped detail in black. Magenta marks missing inputs.",
-              .labels = {"Off", "Visibility", "Depth Edges", "Ray Layout", "Without Contact Shadows", "Shadow Detail"},
+              .tooltip = "Shows contact-shadow information for the selected light type. Other lighting remains visible. Without Contact Shadows hides their effect while keeping the calculations running. Shadow Detail shows evaluated areas. Toward Light draws arrows pointing toward the light; cast shadows extend away from it. Magenta marks missing inputs.",
+              .labels = {"Off", "Visibility", "Depth Edges", "Ray Layout", "Without Contact Shadows", "Shadow Detail", "Toward Light"},
               .is_visible = is_shadow_visible,
           },
           new renodx::utils::settings::Setting{
@@ -118,7 +108,13 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .label = "Debug Light",
               .section = "Shadows (Advanced)",
               .labels = {"Sun / Moon", "Spot", "Point"},
-              .is_visible = [shader_injection] { return shader_injection->enhanced_shadows_enabled >= 0.5f && (shader_injection->shadow_map_debug_view >= 1.f || (shader_injection->ss_shadow_debug_view >= 1.f && shader_injection->ss_shadow_debug_view <= 3.f) || shader_injection->ss_shadow_debug_view == 5.f); },
+              .is_visible = [shader_injection] {
+                return shader_injection->enhanced_shadows_enabled >= 0.5f
+                       && (shader_injection->shadow_map_debug_view >= 1.f
+                           || (shader_injection->ss_shadow_debug_view >= 1.f && shader_injection->ss_shadow_debug_view <= 3.f)
+                           || shader_injection->ss_shadow_debug_view == 5.f
+                           || shader_injection->ss_shadow_debug_view == 6.f);
+              },
           },
       });
 }

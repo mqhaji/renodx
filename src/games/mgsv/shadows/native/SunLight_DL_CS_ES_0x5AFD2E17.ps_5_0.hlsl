@@ -1,9 +1,9 @@
 // Directional lighting, ported from native shader 0x5AFD2E17 with 3Dmigoto.
 // PCSS replaces only shadow-map filtering. Native lighting, cloud shadows,
 // distance fades, and output packing retain their original calculations.
-#include "../shared.h"
-#include "pcss.hlsli"
-#include "screen_space_shadows.hlsli"
+#include "../../shared.h"
+#include "../pcss.hlsli"
+#include "../screen_space_shadows.hlsli"
 
 cbuffer cPSScene : register(b2) {
   struct
@@ -247,7 +247,7 @@ void main(
   r9.y = 0.5 * r2.w;
   r8.zw = r9.xy + r8.zw;
   r4.yz = r8.zw + r8.xy;
-  const BendShadow contact_shadow = ReadBendShadow(v0.xy, 0u);
+  const BendShadow contact_shadow = ReadBendShadow(v0.xy, 0u, g_DepthTexture);
   const bool map_debug = CUSTOM_ENHANCED_SHADOWS_ENABLED && CUSTOM_SHADOW_MAP_DEBUG_VIEW >= 0.5
                          && uint(CUSTOM_SS_DEBUG_LIGHT) == 0u;
   const bool shadow_required = contact_shadow.visibility > 0.0 || contact_shadow.diagnostic

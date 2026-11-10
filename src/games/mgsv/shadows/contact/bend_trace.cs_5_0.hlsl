@@ -1,8 +1,9 @@
 // Copyright 2023 Sony Interactive Entertainment.
 // SPDX-License-Identifier: Apache-2.0
-// Adapted from Bend's shared-depth screen-space shadows. See BEND_LICENSE.md.
+// Adapted from Bend's shared-depth screen-space shadows. See ../BEND_LICENSE.md.
 
 #include "bend_common.hlsli"
+#include "../pcss.hlsli"
 
 Texture2D<float4> bend_depth : register(t0);
 SamplerState bend_border : register(s0);
@@ -14,17 +15,17 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
   const uint4 metadata = bend_dispatch.Load4(32);
   if (metadata.z != 1) return;
   const bool directional = CUSTOM_SS_LIGHT_TYPE < 0.5;
-  const bool spot = CUSTOM_SS_LIGHT_TYPE != 2.0;
-  const bool receiver_culling = !directional && CUSTOM_SS_LOCAL_CULLING >= 0.5
+  const bool spot = !BEND_POINT_LIGHT;
+  const bool receiver_culling = !directional
                                 && all(isfinite(bend_projection_param)) && bend_projection_param.z > 0.0
                                 && all(isfinite(bend_camera_center.xy));
   float local_range = -1.0;
   if (receiver_culling) {
-    const bool distance_spot = CUSTOM_SS_LIGHT_TYPE == 3.0;
-    const float attenuation = distance_spot ? bend_light_params[6].z : bend_light_params[6].w;
+    const bool distance_light = BEND_DISTANCE_LIGHT;
+    const float attenuation = distance_light ? bend_light_params[6].z : bend_light_params[6].w;
     if (isfinite(attenuation) && attenuation > 0.0
-        && (!distance_spot || attenuation >= 1.17549435e-38)) {
-      local_range = (distance_spot ? rsqrt(sqrt(sqrt(sqrt(attenuation)))) : rsqrt(sqrt(attenuation)))
+        && (!distance_light || attenuation >= 1.17549435e-38)) {
+      local_range = (distance_light ? rsqrt(sqrt(sqrt(sqrt(attenuation)))) : rsqrt(sqrt(attenuation)))
                     + (spot ? 0.0 : abs(bend_light_params[6].x));
       if (!isfinite(local_range)) {
         local_range = -1.0;
@@ -33,6 +34,8 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
   }
   const int4 bounds = asint(bend_dispatch.Load4(16));
   const float4 light = asfloat(bend_dispatch.Load4(0));
+  // Recover the original sweep from the cumulative tile counts written by
+  // setup. All sweeps share one indirect call, including very large viewports.
   uint tile = group.y + (group.z << BEND_TILE_ROW_BITS);
   uint first_tile = 0;
   uint sector = 0;
@@ -48,6 +51,8 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
   const uint columns = bend_dispatch.Load(address + 4);
   group.yz = uint2(tile % columns, tile / columns);
   const int2 wave_offset = asint(bend_dispatch.Load2(address + 12));
+  // Construct a shared ray through this square ring around the light. Neighbor
+  // lanes advance one major-axis pixel; reversing lanes handles camera-side sign.
   int2 relative = int2(group.yz) * BEND_GROUP_SIZE + wave_offset;
   const int2 signs = sign(relative);
   const bool horizontal = abs(relative.x + signs.y) < abs(relative.y - signs.x);
@@ -139,6 +144,8 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
   }
 
   if (receiver_culling) {
+    // After supplying casting depth, reject receivers outside the native light.
+    // Earlier per-lane exits would remove depths needed by other lit receivers.
     const float denominator = receiver_depth - bend_projection_param.w;
     const float view_depth = bend_projection_param.z / denominator;
     if (denominator > 0.0 && isfinite(view_depth)) {
@@ -171,12 +178,22 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
   const uint first_sample = lane + 1;
   const uint hard_samples = 4u;
   const uint fade_samples = 8u;
+  const float contrast = 4.0;
+  const float solid_threshold = 1.0 - rcp(contrast);
   float hard = 1.0;
+  uint blocker_sample = 0u;
+  // Keep the nearest four contacts sharp. Farther samples use four interleaved
+  // visibility minima, followed by the reference method's eight-sample end fade.
   [unroll(4)]
   for (uint hard_index = 0; hard_index < hard_samples; ++hard_index) {
-    hard = min(hard, abs(reference - shared_depth[first_sample + hard_index] * depth_scale));
+    const float separation = abs(reference - shared_depth[first_sample + hard_index] * depth_scale);
+    if (separation < hard) {
+      hard = separation;
+    }
+    if (blocker_sample == 0u && separation <= solid_threshold) {
+      blocker_sample = hard_index + 1u;
+    }
   }
-  const float contrast = 4.0;
   const float hard_visibility = saturate(hard * contrast + 1.0 - contrast);
   float soft_visibility = 1.0;
   // Shared depth reads are complete. Fully blocked contacts need no farther reduction.
@@ -193,11 +210,20 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
                                    shared_depth[address + 2u], shared_depth[address + 3u]);
       float4 separation = abs(reference - depths * depth_scale);
       soft = min(soft, separation);
+      // The first solid caster controls contact hardening. Once found, there
+      // is no need to track four changing winner indices through the sweep.
+      if (blocker_sample == 0u && any(separation <= solid_threshold)) {
+        const uint component = separation.x <= solid_threshold ? 0u : (separation.y <= solid_threshold ? 1u : (separation.z <= solid_threshold ? 2u : 3u));
+        blocker_sample = soft_index + component + 1u;
+      }
     }
     // Typed reach values need not end on a four-sample boundary.
     [loop]
     for (; soft_index < samples - fade_samples; ++soft_index) {
       const float separation = abs(reference - shared_depth[first_sample + soft_index] * depth_scale);
+      if (blocker_sample == 0u && separation <= solid_threshold) {
+        blocker_sample = soft_index + 1u;
+      }
       switch (soft_index & 3u) {
         case 0u: soft.x = min(soft.x, separation); break;
         case 1u: soft.y = min(soft.y, separation); break;
@@ -226,15 +252,43 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
     soft_visibility = dot(saturate(soft * contrast + 1.0 - contrast), 0.25);
   }
   float visibility = min(hard_visibility, soft_visibility);
-  float diagnostic = edge ? 1.0 : 0.0;
-  if (CUSTOM_SS_DEBUG_VIEW == 3.0) {
+  float radius = 0.0;
+  if (visibility < 1.0 && blocker_sample > 0u && CUSTOM_SHADOW_SOFTNESS > 0.0) {
+    // Size the soft edge from the first caster and the same light size as PCSS.
+    // Receiver depth cancels from the pixel radius in screen coordinates;
+    // only the world-space cap needs inverse depth.
+    // This avoids two position reconstructions, a light-vector normalization,
+    // and keeping the sweep's coordinates alive through the reduction loop.
+    const float2 viewport = bend_viewport.xy;
+    const float2 receiver_ray = ((float2(output_pixel) + 0.5) / viewport * float2(2.0, -2.0)
+                                 + float2(-1.0, 1.0) - bend_camera_center.xy)
+                                * bend_projection_param.xy;
+    const float3 source = directional ? bend_light_params[0].xyz : bend_light_params[3].xyz;
+    const float2 projected_span = (source.xy - receiver_ray * source.z) * (0.5 * viewport / bend_projection_param.xy);
+    const float remaining_span = max(abs(projected_span.x), abs(projected_span.y)) - float(blocker_sample) * source.z;
+    const float pixel_scale = 0.5 * max(viewport.x / abs(bend_projection_param.x), viewport.y / abs(bend_projection_param.y));
+    const float inverse_depth = (receiver_depth - bend_projection_param.w) / bend_projection_param.z;
+    const float source_radius = directional ? tan(CUSTOM_SHADOW_SOFTNESS * SHADOW_DIRECTIONAL_ANGULAR_RADIUS) * length(source)
+                                            : CUSTOM_SHADOW_SOFTNESS * SHADOW_LOCAL_SOURCE_RADIUS;
+    if (remaining_span > 1e-6 && inverse_depth > 0.0 && all(isfinite(float3(remaining_span, inverse_depth, pixel_scale)))) {
+      const float cone_radius = source_radius * float(blocker_sample) * pixel_scale / remaining_span;
+      radius = min(SHADOW_CONTACT_FILTER_RADIUS, min(cone_radius, PCSS_MAX_RADIUS * pixel_scale * inverse_depth));
+    }
+  }
+  // r/(1+r) keeps a useful fraction of a pixel in RG8. G still marks support.
+  float diagnostic = radius / (1.0 + radius);
+  const bool debug_selected = uint(CUSTOM_SS_DEBUG_LIGHT) == (directional ? 0u : (BEND_POINT_LIGHT ? 2u : 1u));
+  if (debug_selected && CUSTOM_SS_DEBUG_VIEW == 2.0) {
+    diagnostic = edge ? 1.0 : 0.0;
+  }
+  if (debug_selected && CUSTOM_SS_DEBUG_VIEW == 3.0) {
     diagnostic = frac(float(group.x) / BEND_GROUP_SIZE);
   }
-  if (CUSTOM_SS_DEBUG_VIEW == 5.0) {
+  if (debug_selected && CUSTOM_SS_DEBUG_VIEW == 5.0) {
     diagnostic = 1.0;
   }
-  // G below 0.25 means the clear ran but no sweep wrote this pixel. Keep native
-  // lighting there. The remaining G range carries the selected debug signal.
+  // G below 0.25 means the clear ran but no sweep wrote this pixel. The reader
+  // keeps native lighting there; supported pixels carry radius or debug data.
   bend_output[output_pixel] = float4(isfinite(visibility) ? visibility : 1.0, 0.25 + 0.75 * diagnostic,
                                      0.0, 0.0);
 }

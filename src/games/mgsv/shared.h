@@ -91,11 +91,10 @@ struct ShaderInjectData {
   // Bend contact-shadow controls and values copied for this light draw.
   float ss_shadow_debug_view;
   float ss_shadow_debug_light;
-  float ss_shadow_light_type;  // 0 = directional, 1 = spot, 2 = point, 3 = distance spot.
+  float ss_shadow_light_type;  // 0 = directional, 1/2 = spot/point, 3/4 = distance spot/point.
 
   // Local-light contact work limits.
   float ss_spot_budget;  // Maximum spotlight evaluations per lighting-buffer fill; 0 = unlimited.
-  float ss_local_culling;
 
   // Shared IS-FAST frame phase.
   float shadow_noise_frame;
@@ -149,8 +148,7 @@ cbuffer RenoDXSettings : register(b13) {
 #define CUSTOM_SS_DEBUG_LIGHT shader_injection.ss_shadow_debug_light
 #define CUSTOM_SS_LIGHT_TYPE  shader_injection.ss_shadow_light_type
 
-#define CUSTOM_SS_SPOT_BUDGET   shader_injection.ss_spot_budget
-#define CUSTOM_SS_LOCAL_CULLING shader_injection.ss_local_culling
+#define CUSTOM_SS_SPOT_BUDGET shader_injection.ss_spot_budget
 
 #define CUSTOM_MGSV_LIGHTING_ENABLED            (shader_injection.gt_enabled >= 0.5)
 #define CUSTOM_MGSV_AO_STRENGTH                 shader_injection.ao_strength

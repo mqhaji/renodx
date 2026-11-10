@@ -1,12 +1,19 @@
 // Copyright 2023 Sony Interactive Entertainment.
 // SPDX-License-Identifier: Apache-2.0
-// Adapted for MGSV and D3D11. See BEND_LICENSE.md for the full license.
+// Adapted for MGSV and D3D11. See ../BEND_LICENSE.md for the full license.
 
 #ifndef MGSV_BEND_COMMON_HLSLI_
 #define MGSV_BEND_COMMON_HLSLI_
 
-#include "../shared.h"
+#include "../../shared.h"
 
+// Both native local-light families use the same geometry. Their attenuation
+// differs: the distance variants use a sixteenth-power cutoff.
+#define BEND_POINT_LIGHT    (CUSTOM_SS_LIGHT_TYPE == 2.0 || CUSTOM_SS_LIGHT_TYPE == 4.0)
+#define BEND_DISTANCE_LIGHT (CUSTOM_SS_LIGHT_TYPE == 3.0 || CUSTOM_SS_LIGHT_TYPE == 4.0)
+
+// The reference sweep and its integer tile arithmetic use 64-thread groups.
+// Header/record sizes are bytes and match the host's indirect argument buffer.
 #define BEND_GROUP_SIZE      64
 #define BEND_MAX_SAMPLES     256
 #define BEND_DISPATCH_HEADER 48

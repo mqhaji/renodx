@@ -32,8 +32,8 @@ struct __declspec(uuid("857D66A1-1F7E-4C6F-BDE8-A21BC0135537")) DeviceState {
   Microsoft::WRL::ComPtr<ID3D11SamplerState> border;
 };
 
-// A view's resource description never changes. Store POD metadata on the view
-// itself so caching neither pins retired game textures nor needs a global map.
+// A view's resource description never changes. Cache it on the view itself to
+// avoid keeping retired textures alive or maintaining a separate global map.
 struct __declspec(uuid("A079A897-0A5A-4823-BBC7-080019D8A9B8")) ViewDescription {
   D3D11_TEXTURE2D_DESC texture = {};
   bool compatible = false;
@@ -106,6 +106,8 @@ inline void End(reshade::api::command_list* cmd_list) {
   auto* state = cmd_list->get_private_data<DrawState>();
   if (state == nullptr) return;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
+  // Restore the native draw's displaced inputs, including intentional null
+  // bindings. The retained views keep objects alive, not their old contents.
   if (state->pcss_noise_active) {
     context->PSSetShaderResources(20u, 1u, state->displaced_pcss_noise.GetAddressOf());
     state->displaced_pcss_noise.Reset();
@@ -139,13 +141,15 @@ inline bool OnClearRenderTarget(reshade::api::command_list* cmd_list, reshade::a
 }
 
 inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& settings, uint32_t light_type) {
-  if (cmd_list == nullptr || light_type >= 4u || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return;
-  const uint32_t light_group = (light_type == 3u ? 1u : light_type);
+  if (cmd_list == nullptr || light_type >= 5u || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return;
+  const uint32_t light_group = (light_type >= 3u ? light_type - 2u : light_type);
   if (settings.enhanced_shadows_enabled < 0.5f) return;
   auto* state = cmd_list->get_private_data<DrawState>();
   auto* device_state = cmd_list->get_device()->get_private_data<DeviceState>();
   if (state == nullptr || state->active) return;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
+  // Reserve the two contact inputs before qualification. Every early return
+  // then leaves a neutral native fallback for this draw; End restores them.
   std::array<ID3D11ShaderResourceView*, 2> previous = {};
   context->PSGetShaderResources(18u, static_cast<UINT>(previous.size()), previous.data());
   for (size_t index = 0u; index < previous.size(); ++index) {
@@ -159,11 +163,13 @@ inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& 
     }
   };
   constexpr std::array<ID3D11ShaderResourceView*, 2> empty = {};
-  // Null inputs are deliberate native fallbacks if any qualification or setup fails.
+  // Null inputs leave native shadow-map lighting available if a check or setup fails.
   context->PSSetShaderResources(18u, static_cast<UINT>(empty.size()), empty.data());
   const auto selected = inputs::ReadSelection(cmd_list->get_device());
   if (device_state == nullptr || selected.device == nullptr) return;
 
+  // Read the depth and outputs from this draw, rather than choosing textures
+  // by size or by the order in which worker threads recorded their commands.
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
   std::array<Microsoft::WRL::ComPtr<ID3D11RenderTargetView>, 3> targets;
   std::array<ID3D11RenderTargetView*, 3> native_targets = {};
@@ -233,6 +239,8 @@ inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& 
     return;
   }
 
+  // Forward the actual native buffer ranges. A 64 KiB allocation can contain
+  // many draws' constants, so binding the whole allocation would read wrong data.
   std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>, 2> native_constants;
   std::array<ID3D11Buffer*, 2> buffers = {};
   std::array<UINT, 2> first = {};
@@ -267,6 +275,8 @@ inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& 
   }
 
   auto* device = reinterpret_cast<ID3D11Device*>(cmd_list->get_device()->get_native());  // NOLINT(performance-no-int-to-ptr)
+  // Share immutable shaders and the border sampler across contexts. Resizing
+  // the depth image replaces only scratch textures, not these programs.
   if (state->shaders[0] == nullptr) {
     const std::shared_lock lock(device_state->mutex);
     state->shaders = device_state->shaders;
@@ -305,6 +315,8 @@ inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& 
   }
   const uint32_t mask_width = depth_description.Width;
   const uint32_t mask_height = depth_description.Height;
+  // Each context records writes into its own mask. Compact RG8 stores enough
+  // precision for visibility and the bounded radius; unsupported devices use RG16F.
   if (state->mask == nullptr || state->width != mask_width || state->height != mask_height
       || state->generation != selected.generation) {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> mask;
@@ -337,6 +349,8 @@ inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& 
     state->generation = selected.generation;
   }
   if (state->dispatch == nullptr) {
+    // The header describes the light; eight sweep records precede the clear
+    // and trace arguments. Setup writes all values consumed by this invocation.
     constexpr UINT dispatch_bytes = 48u + 10u * 32u;
     const D3D11_BUFFER_DESC description = {
         .ByteWidth = dispatch_bytes,
@@ -396,6 +410,8 @@ inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& 
   }
   auto* budget = state->fallback_budget.Get();
   if (light_group == 1u && settings.ss_spot_budget >= 1.f) {
+    // Contexts writing the same native lighting allocation share its counter.
+    // Resetting it beside the native clear makes replay follow GPU order.
     if (state->budget_target.Get() != targets[0].Get()) {
       Microsoft::WRL::ComPtr<ID3D11Resource> resource;
       targets[0]->GetResource(&resource);
@@ -434,6 +450,8 @@ inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& 
     }
   }
 
+  // Scale a private settings copy. Other effects and UI callbacks must never
+  // observe the render-size conversion or this draw's selected light type.
   auto constants = settings;
   const auto plan = reconstruction::resolution::Read();
   if (plan.IsScaled() && plan.render == reconstruction::resolution::Size{.width = mask_width, .height = mask_height}) {
@@ -444,9 +462,9 @@ inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& 
   std::memcpy(bytes.data(), &constants, sizeof(constants));
   context->UpdateSubresource(state->constants.Get(), 0u, nullptr, bytes.data(), 0u, 0u);
 
-  // All writable resources are private to this context. The only graphics
-  // inputs exposing them, PS t18/t19, were unbound above. No native graphics
-  // resource can alias these outputs, so graphics state stays bound throughout.
+  // Mask and dispatch storage belong to this context; the spotlight counter
+  // can be shared. Native graphics never binds their UAVs, and PS t18/t19 were
+  // unbound above, so recording these writes can leave graphics state intact.
   Microsoft::WRL::ComPtr<ID3D11ComputeShader> saved_shader;
   Microsoft::WRL::ComPtr<ID3D11SamplerState> saved_sampler;
   std::array<ID3D11ClassInstance*, 256> instances = {};
@@ -479,6 +497,8 @@ inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& 
   for (size_t index = 0u; index < saved_buffers.size(); ++index) {
     saved_buffer_refs[index].Attach(saved_buffers[index]);
   }
+  // Setup publishes bounds and indirect arguments on the GPU. Clear and trace
+  // consume them in order, without a CPU readback or per-sector dispatch loop.
   if (ranged) {
     context1->CSSetConstantBuffers1(2u, static_cast<UINT>(buffers.size()), buffers.data(), first.data(), counts.data());
   } else {
@@ -501,6 +521,8 @@ inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& 
   context->CSSetShader(state->shaders[2].Get(), nullptr, 0u);
   context->DispatchIndirect(state->dispatch.Get(), 48u + 9u * 32u);
 
+  // Unbind private writable views before restoring compute state and exposing
+  // their read-only views to the native light shader. The draw runs afterward.
   constexpr std::array<ID3D11UnorderedAccessView*, 3> no_outputs = {};
   context->CSSetUnorderedAccessViews(0u, static_cast<UINT>(no_outputs.size()), no_outputs.data(), nullptr);
   context->CSSetShaderResources(0u, 1u, saved_inputs[0].GetAddressOf());

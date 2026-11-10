@@ -18,6 +18,12 @@ static const uint PCSS_LOCAL_BLOCKER_SAMPLES = 4u;
 static const uint PCSS_FILTER_SAMPLES = 4u;
 static const float PCSS_MAX_RADIUS = 0.25;
 static const uint PCSS_PROJECTION_OFFSET = 348u;
+// Both shadow maps and screen-space rays represent these same source sizes.
+static const float SHADOW_DIRECTIONAL_ANGULAR_RADIUS = 0.27 * 0.01745329252;
+static const float SHADOW_LOCAL_SOURCE_RADIUS = 0.05;
+// Contact shadows supply fine detail; bound their small spatial filter in
+// render pixels rather than widening a sparsely sampled kernel indefinitely.
+static const float SHADOW_CONTACT_FILTER_RADIUS = 2.0;
 
 struct PcssProjection {
   float2 uv_scale;
@@ -184,6 +190,8 @@ PcssResult FilterSunShadow(Texture2D<float4> shadow_map, SamplerComparisonState 
   float closest_blocker_gap = 1.0;
   uint blockers = 0u;
   result.valid = true;
+  // Reverse depth grows toward the light. Only samples closer than the biased
+  // receiver count as blockers; measure their gap from the actual receiver.
   [loop]
   for (uint sample_index = 0u; sample_index < blocker_samples; ++sample_index) {
     float2 offset = PcssDisk(sample_index, blocker_samples, rotation, radial_jitter) * max_radius * uv_scale;
@@ -204,7 +212,7 @@ PcssResult FilterSunShadow(Texture2D<float4> shadow_map, SamplerComparisonState 
   // Sparse searches can miss thin casters. Keep the native filter on a miss.
   if (blockers == 0u) return result;
   result.blocker_gap = gap_sum / (float(blockers) * depth_per_unit);
-  result.radius = min(max_radius, result.blocker_gap * tan(max(CUSTOM_SHADOW_SOFTNESS, 0.0) * (0.27 * 0.01745329252)));
+  result.radius = min(max_radius, result.blocker_gap * tan(max(CUSTOM_SHADOW_SOFTNESS, 0.0) * SHADOW_DIRECTIONAL_ANGULAR_RADIUS));
   float2 uv_radius = result.radius * uv_scale;
   if (max(uv_radius.x / texel.x, uv_radius.y / texel.y) <= 0.5) return result;
   // A local plane is unreliable if extending it across the filter reaches a
@@ -212,6 +220,8 @@ PcssResult FilterSunShadow(Texture2D<float4> shadow_map, SamplerComparisonState 
   if (dot(abs(depth_gradient), uv_radius) + bias >= closest_blocker_gap) return result;
 
   float occlusion = 0.0;
+  // Sample the estimated source footprint with hardware depth comparisons.
+  // Convert native occlusion to visibility; the caller keeps native masks/fades.
   [loop]
   for (uint filter_index = 0u; filter_index < filter_samples; ++filter_index) {
     float2 offset = PcssDisk(filter_index, filter_samples, rotation, radial_jitter) * uv_radius;
@@ -247,14 +257,16 @@ PcssResult FilterSpotShadow(Texture2D<float4> shadow_map, SamplerComparisonState
   sincos(noise.x * 6.28318530718, rotation.y, rotation.x);
   float radial_jitter = clamp(noise.y, 0.001, 0.999);
   const float max_radius = PCSS_MAX_RADIUS;
-  float light_radius = 0.05 * max(CUSTOM_SHADOW_SOFTNESS, 0.0);
+  float light_radius = SHADOW_LOCAL_SOURCE_RADIUS * max(CUSTOM_SHADOW_SOFTNESS, 0.0);
   const uint blocker_samples = PCSS_LOCAL_BLOCKER_SAMPLES;
   const uint filter_samples = PCSS_FILTER_SAMPLES;
   float2 uv_per_unit = focal / receiver_distance;
   float blocker_sum = 0.0;
   uint blockers = 0u;
   result.valid = true;
-  if (light_radius == 0.0 || max_radius == 0.0) return result;
+  if (light_radius == 0.0) return result;
+  // Convert each blocking depth through z = a + b/w before averaging distance.
+  // Averaging nonlinear depth first would produce a different penumbra size.
   [loop]
   for (uint blocker_index = 0u; blocker_index < blocker_samples; ++blocker_index) {
     float2 offset = PcssDisk(blocker_index, blocker_samples, rotation, radial_jitter) * max_radius * uv_per_unit;
@@ -271,6 +283,8 @@ PcssResult FilterSpotShadow(Texture2D<float4> shadow_map, SamplerComparisonState
   if (blockers == 0u) return result;
   float blocker_distance = blocker_sum / float(blockers);
   result.blocker_gap = max(receiver_distance - blocker_distance, 0.0);
+  // A finite source projects a wider edge as the receiver moves away from its
+  // blocker. Keep the search bound separate from the calculated filter radius.
   result.radius = min(max_radius, light_radius * result.blocker_gap / max(blocker_distance, 1e-6));
   float2 uv_radius = result.radius * uv_per_unit;
   if (max(uv_radius.x / texel.x, uv_radius.y / texel.y) <= 0.5) return result;
@@ -321,6 +335,8 @@ PcssResult FilterPointShadow(Texture2D<float4> shadow_map, SamplerComparisonStat
   float3 tangent = normalize(abs(direction.z) < 0.99 ? cross(direction, float3(0.0, 0.0, 1.0))
                                                      : cross(direction, float3(0.0, 1.0, 0.0)));
   float3 bitangent = cross(direction, tangent);
+  // The receiver's local plane supplies the expected radial distance along
+  // each sampled direction, including directions crossing the hemisphere seam.
   float3 plane_normal = cross(position_dx, position_dy);
   float plane_distance = dot(plane_normal, position);
   if (abs(plane_distance) <= 1e-20) return result;
@@ -338,13 +354,13 @@ PcssResult FilterPointShadow(Texture2D<float4> shadow_map, SamplerComparisonStat
   sincos(noise.x * 6.28318530718, rotation.y, rotation.x);
   float radial_jitter = clamp(noise.y, 0.001, 0.999);
   const float max_radius = PCSS_MAX_RADIUS;
-  float light_radius = 0.05 * max(CUSTOM_SHADOW_SOFTNESS, 0.0);
+  float light_radius = SHADOW_LOCAL_SOURCE_RADIUS * max(CUSTOM_SHADOW_SOFTNESS, 0.0);
   const uint blocker_samples = PCSS_LOCAL_BLOCKER_SAMPLES;
   const uint filter_samples = PCSS_FILTER_SAMPLES;
   float blocker_sum = 0.0;
   uint blockers = 0u;
   result.valid = true;
-  if (light_radius == 0.0 || max_radius == 0.0) return result;
+  if (light_radius == 0.0) return result;
   // Rotate the tangent frame once rather than each disk point in both loops.
   float3 rotated_tangent = tangent * rotation.x + bitangent * rotation.y;
   bitangent = bitangent * rotation.x - tangent * rotation.y;
@@ -378,6 +394,8 @@ PcssResult FilterPointShadow(Texture2D<float4> shadow_map, SamplerComparisonStat
   if (filter_spread * min(float(width) * 0.25, float(height) * 0.5) <= 0.5) return result;
   float occlusion = 0.0;
   uint samples = 0u;
+  // Ignore rays that cannot intersect the receiver plane. Average only valid
+  // comparisons; if none remain, the caller retains native filtering.
   [loop]
   for (uint filter_index = 0u; filter_index < filter_samples; ++filter_index) {
     float2 offset = PcssDisk(filter_index, filter_samples, float2(1.0, 0.0), radial_jitter) * filter_spread;

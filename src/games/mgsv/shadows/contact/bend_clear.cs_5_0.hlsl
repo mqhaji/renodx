@@ -1,6 +1,6 @@
 // Copyright 2023 Sony Interactive Entertainment.
 // SPDX-License-Identifier: Apache-2.0
-// MGSV dispatch preparation for Bend shadows. See BEND_LICENSE.md.
+// MGSV dispatch preparation for Bend shadows. See ../BEND_LICENSE.md.
 
 #include "bend_common.hlsli"
 

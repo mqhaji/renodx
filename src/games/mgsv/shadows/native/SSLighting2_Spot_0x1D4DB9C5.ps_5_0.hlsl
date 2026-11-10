@@ -1,7 +1,7 @@
 // Native spot lighting with PCSS shadow-map filtering and Bend contact shadows.
-#include "../shared.h"
-#include "pcss.hlsli"
-#include "screen_space_shadows.hlsli"
+#include "../../shared.h"
+#include "../pcss.hlsli"
+#include "../screen_space_shadows.hlsli"
 
 cbuffer cPSScene : register(b2) {
   struct
@@ -107,10 +107,17 @@ void main(
   r1.w = max(r6.w, r1.w);
   r6.xyz = r6.xyz * r4.www;
   r6.w = g_psMaterial.m_materials[7].w;
+  // This variant uses 1 - m_lightParams[6].z * distance^16 before inverse-square
+  // falloff. Bend's bounds must use this cutoff rather than the other spot's.
+  r2.w = r2.w * r2.w;
+  r2.w = r2.w * r2.w;
+  r2.w = r2.w * r2.w;
+  r2.w = min(3.40282347e+038, r2.w);
   r4.w = r4.w * r4.w;
-  r2.w = g_psLight.m_lightParams[6].w * r2.w;
+  r2.w = g_psLight.m_lightParams[6].z * r2.w;
   r2.w = -r2.w;
-  r2.w = r4.w + r2.w;
+  r2.w = 1 + r2.w;
+  r2.w = r4.w * r2.w;
   r2.w = min(r6.w, r2.w);
   r2.w = max(0, r2.w);
   r7.xyz = g_psLight.m_lightParams[7].xyz;
@@ -156,7 +163,7 @@ void main(
   r2.w = max(0, r2.w);
   r2.w = min(1, r2.w);
   r2.w = r2.w * r2.w;
-  const BendShadow contact_shadow = ReadBendShadow(v0.xy, 1u);
+  const BendShadow contact_shadow = ReadBendShadow(v0.xy, 1u, g_DepthTexture);
   const bool map_debug = CUSTOM_ENHANCED_SHADOWS_ENABLED && CUSTOM_SHADOW_MAP_DEBUG_VIEW >= 0.5
                          && uint(CUSTOM_SS_DEBUG_LIGHT) == 1u;
   const bool shadow_required = contact_shadow.visibility > 0.0 || contact_shadow.diagnostic
