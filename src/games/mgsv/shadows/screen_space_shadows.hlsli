@@ -33,6 +33,17 @@ struct BendShadow {
   bool diagnostic;
 };
 
+float2 ReadBendMask(int2 pixel, uint4 bounds, uint3 storage) {
+  if (storage.z == 1u) {
+    // Each light owns one packed rectangle. Keep screen bounds for geometry and
+    // filter rejection, then map accepted texels into the shared RG8 atlas.
+    const uint2 local = uint2(pixel - int2(bounds.xy));
+    const uint texel_index = storage.x + local.y * (bounds.z - bounds.x) + local.x;
+    pixel = int2(texel_index % storage.y, texel_index / storage.y);
+  }
+  return bend_shadow_mask.Load(int3(pixel, 0)).xy;
+}
+
 // Resolve once before shadow-map filtering. A fully blocked direct light can
 // skip PCSS, while missing contact-shadow data keeps the map filter available.
 BendShadow ReadBendShadow(float2 pixel, uint light_type, Texture2D<float4> depth) {
@@ -57,10 +68,11 @@ BendShadow ReadBendShadow(float2 pixel, uint light_type, Texture2D<float4> depth
   // Bounds belong to this GPU invocation. Equal image dimensions or a retained
   // texture view alone would not prove that these pixels belong to this light.
   const uint4 bounds = bend_shadow_data.Load4(16);
+  const uint3 storage = bend_shadow_data.Load3(368u);
   const uint2 position = uint2(pixel);
   const bool inside_bounds = all(position >= bounds.xy) && all(position < bounds.zw);
   bool supported = inside_bounds;
-  float2 sample = supported ? bend_shadow_mask.Load(int3(position, 0)).xy : float2(1.0, 0.0);
+  float2 sample = supported ? ReadBendMask(int2(position), bounds, storage) : float2(1.0, 0.0);
   // Whole unlit regions can retain their neutral clear value without a trace.
   if (!directional && (!supported || sample.y < 0.24)) {
     supported = true;
@@ -80,7 +92,7 @@ BendShadow ReadBendShadow(float2 pixel, uint light_type, Texture2D<float4> depth
       const int2 offset = int2(index % 3 - 1, index / 3 - 1);
       const int2 neighbor = int2(position) + offset;
       const bool inside = all(neighbor >= int2(bounds.xy)) && all(neighbor < int2(bounds.zw));
-      const float2 value = index == 4 ? sample : (inside ? bend_shadow_mask.Load(int3(neighbor, 0)).xy : 0.0);
+      const float2 value = index == 4 ? sample : (inside ? ReadBendMask(neighbor, bounds, storage) : 0.0);
       const bool valid = value.y >= 0.24 && all(isfinite(value));
       neighborhood[index] = valid ? value : 0.0;
       if (valid) {

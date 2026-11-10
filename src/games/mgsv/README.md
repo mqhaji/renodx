@@ -42,7 +42,7 @@ Contact-hardening filters soften the native sun, spot, and point shadow maps. Be
 
 Sampling is fixed at 12 sun/moon blocker samples, 4 local blocker samples, 4 map-filter samples, and contact contrast 4. Contact Shadow Reach in Advanced defaults to 60 output pixels for all lights and is converted to render pixels when upscaling; larger values search farther and increase cost. Contact shadows run at full rendering resolution with all sample groups. Surface thickness is fixed at 0.5% and the bilinear depth threshold at 2%. Contact-shadow work outside a light's cone or range is always skipped.
 
-Spot Contact Shadow Budget defaults to 13 and admits the first eligible spotlight evaluations between native lighting-buffer clears. Zero is unlimited. Lights beyond the budget retain shadow-map filtering. The budget limits GPU work while CPU submission still runs.
+Spot Contact Shadow Budget defaults to 13 and selects the first eligible spotlight evaluations between native lighting-buffer clears. Zero is unlimited. Lights beyond the budget retain shadow-map filtering. Compatible point and spot lights without shadow maps share one setup, clear, and trace chain per batch. Each light still supplies its own constants and reads its own mask; other lights keep the per-light path.
 
 See the [shadow guide](shadows/README.md) for controls, debug views, and testing.
 

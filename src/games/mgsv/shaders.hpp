@@ -92,9 +92,9 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
     }
     mgsv::shadows::screen_space::Begin(cmd_list, constants, light_type);
     if (has_shadow_map) {
-      const auto noise = mgsv::lighting::GetNoiseView(cmd_list->get_device());
       auto* state = cmd_list->get_private_data<mgsv::shadows::screen_space::DrawState>();
-      if (state != nullptr) {
+      if (state != nullptr && state->replacement_safe) {
+        const auto noise = mgsv::lighting::GetNoiseView(cmd_list->get_device());
         auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
         context->PSGetShaderResources(20u, 1u, state->displaced_pcss_noise.ReleaseAndGetAddressOf());
         context->PSSetShaderResources(20u, 1u, noise.GetAddressOf());

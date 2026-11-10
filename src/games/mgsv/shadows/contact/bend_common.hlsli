@@ -7,19 +7,29 @@
 
 #include "../../shared.h"
 
-// Both native local-light families use the same geometry. Their attenuation
-// differs: the distance variants use a sixteenth-power cutoff.
-#define BEND_POINT_LIGHT    (CUSTOM_SS_LIGHT_TYPE == 2.0 || CUSTOM_SS_LIGHT_TYPE == 4.0)
-#define BEND_DISTANCE_LIGHT (CUSTOM_SS_LIGHT_TYPE == 3.0 || CUSTOM_SS_LIGHT_TYPE == 4.0)
+// Native distance variants share the same light geometry but use a different
+// attenuation curve. Keep this classification common to setup and tracing.
+bool IsBendPointLight(float light_type) {
+  return light_type == 2.0 || light_type == 4.0;
+}
+
+bool IsBendDistanceLight(float light_type) {
+  return light_type == 3.0 || light_type == 4.0;
+}
 
 // The reference sweep and its integer tile arithmetic use 64-thread groups.
 // Header/record sizes are bytes and match the host's indirect argument buffer.
-#define BEND_GROUP_SIZE      64
-#define BEND_MAX_SAMPLES     256
-#define BEND_DISPATCH_HEADER 48
-#define BEND_DISPATCH_STRIDE 32
-#define BEND_TILE_ROW_BITS   15
-#define BEND_TILE_ROWS       (1 << BEND_TILE_ROW_BITS)
+#define BEND_GROUP_SIZE          64
+#define BEND_MAX_SAMPLES         256
+#define BEND_DISPATCH_HEADER     48
+#define BEND_DISPATCH_STRIDE     32
+#define BEND_TILE_ROW_BITS       15
+#define BEND_TILE_ROWS           (1 << BEND_TILE_ROW_BITS)
+#define BEND_BATCH_RECORD_STRIDE 400
+#define BEND_BATCH_LIGHT_VECTORS 12
+#define BEND_ATLAS_OFFSET        368
+#define BEND_TRACE_END_OFFSET    380
+#define BEND_CLEAR_END_OFFSET    384
 
 // These are the light draw's native buffers, with their original offsets.
 // They are bound with the same D3D11 constant-buffer ranges as the pixel shader.
@@ -33,8 +43,22 @@ cbuffer BendScene : register(b2) {
   float4 bend_viewport : packoffset(c22);
   float4 bend_camera_center : packoffset(c28);
 }
+#ifdef MGSV_BEND_BATCH
+// Header: integer light count and atlas dimensions, stored as raw float bits.
+// Each light then has eleven native float4 values and one integer-kind vector.
+Buffer<float4> bend_lights : register(t4);
+#else
 cbuffer BendLight : register(b3) {
   float4 bend_light_params[11] : packoffset(c0);
+}
+#endif
+
+float4 ReadBendLightParam(uint light_index, uint parameter) {
+#ifdef MGSV_BEND_BATCH
+  return bend_lights.Load(1u + light_index * BEND_BATCH_LIGHT_VECTORS + parameter);
+#else
+  return bend_light_params[parameter];
+#endif
 }
 
 // Test a conservative light sphere against a bundle of camera rays. Used for
@@ -64,5 +88,37 @@ RWByteAddressBuffer bend_spot_budget : register(u2);
 ByteAddressBuffer bend_dispatch : register(t3);
 #endif
 RWTexture2D<float4> bend_output : register(u1);
+
+#if defined(MGSV_BEND_BATCH) && !defined(MGSV_BEND_SETUP)
+// Each light stores its cumulative work count. Skipped lights repeat the
+// preceding count, so binary search jumps over them and finds the owning light.
+uint FindBendBatchLight(uint work_index, uint light_count, uint prefix_offset) {
+  uint lower = 0u;
+  uint upper = light_count;
+  [loop]
+  while (lower < upper) {
+    const uint middle = lower + ((upper - lower) >> 1u);
+    if (bend_dispatch.Load(middle * BEND_BATCH_RECORD_STRIDE + prefix_offset) <= work_index) {
+      lower = middle + 1u;
+    } else {
+      upper = middle;
+    }
+  }
+  return lower;
+}
+#endif
+
+#ifndef MGSV_BEND_SETUP
+int2 BendMaskPixel(int2 pixel, int4 bounds, uint record) {
+#ifdef MGSV_BEND_BATCH
+  const uint2 storage = bend_dispatch.Load2(record + BEND_ATLAS_OFFSET);
+  const uint2 local = uint2(pixel - bounds.xy);
+  const uint texel_index = storage.x + local.y * uint(bounds.z - bounds.x) + local.x;
+  return int2(texel_index % storage.y, texel_index / storage.y);
+#else
+  return pixel;
+#endif
+}
+#endif
 
 #endif

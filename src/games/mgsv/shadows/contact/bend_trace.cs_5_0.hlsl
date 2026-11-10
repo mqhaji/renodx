@@ -3,6 +3,7 @@
 // Adapted from Bend's shared-depth screen-space shadows. See ../BEND_LICENSE.md.
 
 #include "bend_common.hlsli"
+
 #include "../pcss.hlsli"
 
 Texture2D<float4> bend_depth : register(t0);
@@ -11,43 +12,56 @@ SamplerState bend_border : register(s0);
 groupshared float shared_depth[((BEND_MAX_SAMPLES + BEND_GROUP_SIZE - 1) / BEND_GROUP_SIZE + 1) * BEND_GROUP_SIZE];
 
 [numthreads(BEND_GROUP_SIZE, 1, 1)]
-void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
-  const uint4 metadata = bend_dispatch.Load4(32);
+void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
+  uint light_index = 0u;
+  uint record = 0u;
+  uint tile = group.y + (group.z << BEND_TILE_ROW_BITS);
+#ifdef MGSV_BEND_BATCH
+  const uint light_count = asuint(bend_lights.Load(0u).x);
+  light_index = FindBendBatchLight(tile, light_count, BEND_TRACE_END_OFFSET);
+  if (light_index == light_count) return;
+  record = light_index * BEND_BATCH_RECORD_STRIDE;
+  const uint first_light_tile = light_index == 0u ? 0u : bend_dispatch.Load(record - BEND_BATCH_RECORD_STRIDE + BEND_TRACE_END_OFFSET);
+  tile -= first_light_tile;
+  const float light_type = float(asuint(bend_lights.Load(BEND_BATCH_LIGHT_VECTORS + light_index * BEND_BATCH_LIGHT_VECTORS).x));
+#else
+  const float light_type = CUSTOM_SS_LIGHT_TYPE;
+#endif
+  const uint4 metadata = bend_dispatch.Load4(record + 32u);
   if (metadata.z != 1) return;
-  const bool directional = CUSTOM_SS_LIGHT_TYPE < 0.5;
-  const bool spot = !BEND_POINT_LIGHT;
+  const bool directional = light_type < 0.5;
+  const bool spot = !IsBendPointLight(light_type);
   const bool receiver_culling = !directional
                                 && all(isfinite(bend_projection_param)) && bend_projection_param.z > 0.0
                                 && all(isfinite(bend_camera_center.xy));
   float local_range = -1.0;
   if (receiver_culling) {
-    const bool distance_light = BEND_DISTANCE_LIGHT;
-    const float attenuation = distance_light ? bend_light_params[6].z : bend_light_params[6].w;
+    const bool distance_light = IsBendDistanceLight(light_type);
+    const float attenuation = distance_light ? ReadBendLightParam(light_index, 6u).z : ReadBendLightParam(light_index, 6u).w;
     if (isfinite(attenuation) && attenuation > 0.0
         && (!distance_light || attenuation >= 1.17549435e-38)) {
       local_range = (distance_light ? rsqrt(sqrt(sqrt(sqrt(attenuation)))) : rsqrt(sqrt(attenuation)))
-                    + (spot ? 0.0 : abs(bend_light_params[6].x));
+                    + (spot ? 0.0 : abs(ReadBendLightParam(light_index, 6u).x));
       if (!isfinite(local_range)) {
         local_range = -1.0;
       }
     }
   }
-  const int4 bounds = asint(bend_dispatch.Load4(16));
-  const float4 light = asfloat(bend_dispatch.Load4(0));
+  const int4 bounds = asint(bend_dispatch.Load4(record + 16u));
+  const float4 light = asfloat(bend_dispatch.Load4(record));
   // Recover the original sweep from the cumulative tile counts written by
   // setup. All sweeps share one indirect call, including very large viewports.
-  uint tile = group.y + (group.z << BEND_TILE_ROW_BITS);
   uint first_tile = 0;
   uint sector = 0;
   [loop]
   for (; sector < metadata.w; ++sector) {
-    const uint last_tile = bend_dispatch.Load(BEND_DISPATCH_HEADER + sector * BEND_DISPATCH_STRIDE + 20);
+    const uint last_tile = bend_dispatch.Load(record + BEND_DISPATCH_HEADER + sector * BEND_DISPATCH_STRIDE + 20);
     if (tile < last_tile) break;
     first_tile = last_tile;
   }
   if (sector == metadata.w) return;
   tile -= first_tile;
-  const uint address = BEND_DISPATCH_HEADER + sector * BEND_DISPATCH_STRIDE;
+  const uint address = record + BEND_DISPATCH_HEADER + sector * BEND_DISPATCH_STRIDE;
   const uint columns = bend_dispatch.Load(address + 4);
   group.yz = uint2(tile % columns, tile / columns);
   const int2 wave_offset = asint(bend_dispatch.Load2(address + 12));
@@ -75,7 +89,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
     // light sphere is outside any side, this group cannot illuminate a pixel.
     // The decision is uniform and precedes all shared-memory/depth work.
     const float2 last = start - pixel_step * float(BEND_GROUP_SIZE - 1);
-    if (BendSphereOutsideRays(bend_light_params[3].xyz, local_range,
+    if (BendSphereOutsideRays(ReadBendLightParam(light_index, 3u).xyz, local_range,
                               (min(start, last) - 2.0),
                               (max(start, last) + 2.0), float2(metadata.xy))) return;
   }
@@ -139,7 +153,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
                                         + center_direction * min(extension.x, extension.y);
   if (any(floor(endpoint_delta + 0.5) != 0.0)) return;
   if (!(receiver_depth > 0.0) || abs(pixel_distance) < 1e-7) {
-    bend_output[output_pixel] = float4(1.0, 0.25, receiver_depth, 0.0);
+    bend_output[BendMaskPixel(output_pixel, bounds, record)] = float4(1.0, 0.25, receiver_depth, 0.0);
     return;
   }
 
@@ -154,20 +168,20 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
                           - bend_camera_center.xy)
                          * bend_projection_param.xy;
       const float3 position = float3(ray * view_depth, view_depth);
-      const float3 delta = position - bend_light_params[3].xyz;
+      const float3 delta = position - ReadBendLightParam(light_index, 3u).xyz;
       const float distance = length(delta);
       // Keep uncertain pixels near the light boundary.
       const float margin = length(2.0 * bend_projection_param.xy * view_depth * inverse_size)
                            + view_depth * 0.00001 + distance * 0.00002;
       bool lit = local_range <= 0.0 || distance <= local_range + margin;
-      const float3 axis = bend_light_params[5].xyz;
-      const float3 cone = bend_light_params[7].xyz;
+      const float3 axis = ReadBendLightParam(light_index, 5u).xyz;
+      const float3 cone = ReadBendLightParam(light_index, 7u).xyz;
       if (spot && all(isfinite(axis)) && all(isfinite(cone))
           && cone.x > 0.0 && cone.y > 0.0 && cone.z > 0.0) {
         lit = lit && dot(axis, delta) + length(axis) * margin >= cone.x * max(0.0, distance - margin);
       }
       if (!lit) {
-        bend_output[output_pixel] = float4(1.0, 0.25, 0.0, 0.0);
+        bend_output[BendMaskPixel(output_pixel, bounds, record)] = float4(1.0, 0.25, 0.0, 0.0);
         return;
       }
     }
@@ -263,7 +277,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
     const float2 receiver_ray = ((float2(output_pixel) + 0.5) / viewport * float2(2.0, -2.0)
                                  + float2(-1.0, 1.0) - bend_camera_center.xy)
                                 * bend_projection_param.xy;
-    const float3 source = directional ? bend_light_params[0].xyz : bend_light_params[3].xyz;
+    const float3 source = directional ? ReadBendLightParam(light_index, 0u).xyz : ReadBendLightParam(light_index, 3u).xyz;
     const float2 projected_span = (source.xy - receiver_ray * source.z) * (0.5 * viewport / bend_projection_param.xy);
     const float remaining_span = max(abs(projected_span.x), abs(projected_span.y)) - float(blocker_sample) * source.z;
     const float pixel_scale = 0.5 * max(viewport.x / abs(bend_projection_param.x), viewport.y / abs(bend_projection_param.y));
@@ -277,7 +291,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
   }
   // r/(1+r) keeps a useful fraction of a pixel in RG8. G still marks support.
   float diagnostic = radius / (1.0 + radius);
-  const bool debug_selected = uint(CUSTOM_SS_DEBUG_LIGHT) == (directional ? 0u : (BEND_POINT_LIGHT ? 2u : 1u));
+  const bool debug_selected = uint(CUSTOM_SS_DEBUG_LIGHT) == (directional ? 0u : (IsBendPointLight(light_type) ? 2u : 1u));
   if (debug_selected && CUSTOM_SS_DEBUG_VIEW == 2.0) {
     diagnostic = edge ? 1.0 : 0.0;
   }
@@ -289,6 +303,6 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
   }
   // G below 0.25 means the clear ran but no sweep wrote this pixel. The reader
   // keeps native lighting there; supported pixels carry radius or debug data.
-  bend_output[output_pixel] = float4(isfinite(visibility) ? visibility : 1.0, 0.25 + 0.75 * diagnostic,
-                                     0.0, 0.0);
+  bend_output[BendMaskPixel(output_pixel, bounds, record)] = float4(isfinite(visibility) ? visibility : 1.0, 0.25 + 0.75 * diagnostic,
+                                                                    0.0, 0.0);
 }

@@ -43,11 +43,18 @@ namespace mgsv::reconstruction::coordinator {
 
 // Bound retained split recordings if the game delays or abandons submission.
 inline constexpr size_t MAX_PENDING_DISPATCHES = 64u;
+// Shadow batches must leave room for GI and the later scene reconstruction.
+inline constexpr size_t RESERVED_LIGHTING_DISPATCHES = 8u;
 inline auto& execution_lock = state::execution_lock;
 inline reshade::api::device* runtime_device = nullptr;
 
 using BeginQuery = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Asynchronous*);
 using EndQuery = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Asynchronous*);
+
+enum class LightingPolicy : uint8_t {
+  INDIRECT,
+  SHADOW_BATCH,
+};
 
 struct PendingTemporalDispatch {
   reshade::api::command_list* deferred_context = nullptr;
@@ -65,6 +72,8 @@ struct PendingTemporalDispatch {
   std::function<void(reshade::api::command_list*, bool)> lighting_callback;
   bool is_lighting = false;
   bool dispatch_consumed = false;
+  LightingPolicy lighting_policy = LightingPolicy::INDIRECT;
+  std::function<void()> on_recording_complete;
 };
 
 // The lock owns query/list transactions; hook pointers use lifecycle serialization instead.
@@ -462,27 +471,41 @@ inline void CompleteRecording(reshade::api::command_list* recording, ID3D11Comma
   }
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(recording->get_native());  // NOLINT(performance-no-int-to-ptr)
   lighting::temporal_inputs::Finish(context, finished);
-  const std::unique_lock lock(submission.mutex);
-  submission.active_queries[context].clear();
-  const auto pending = std::ranges::find_if(
-      submission.pending_dispatches,
-      [recording](const PendingTemporalDispatch& candidate) {
-        return candidate.deferred_context == recording && candidate.post == nullptr;
-      });
-  if (pending != submission.pending_dispatches.end()) {
-    pending->deferred_context = nullptr;
-    pending->post = finished;
+  std::function<void()> on_recording_complete;
+  {
+    const std::unique_lock lock(submission.mutex);
+    submission.active_queries[context].clear();
+    const auto pending = std::ranges::find_if(
+        submission.pending_dispatches,
+        [recording](const PendingTemporalDispatch& candidate) {
+          return candidate.deferred_context == recording && candidate.post == nullptr;
+        });
+    if (pending != submission.pending_dispatches.end()) {
+      pending->deferred_context = nullptr;
+      pending->post = finished;
+      on_recording_complete = std::move(pending->on_recording_complete);
+    }
+  }
+  // A successful FinishCommandList stops input collection for this insertion.
+  // Run completion outside our lock because feature callbacks can take theirs.
+  if (on_recording_complete) {
+    on_recording_complete();
   }
 }
 
 inline bool ScheduleLighting(
     reshade::api::command_list* cmd_list,
-    std::function<void(reshade::api::command_list*, bool)> callback) {
+    std::function<void(reshade::api::command_list*, bool)> callback,
+    LightingPolicy policy = LightingPolicy::INDIRECT,
+    std::function<void()> on_recording_complete = {}) {
   if (cmd_list == nullptr || !callback) return false;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   if (context == nullptr) return false;
   const ExecutionGuard execution_guard;
   if (context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE) {
+    if (on_recording_complete) {
+      on_recording_complete();
+    }
     callback(cmd_list, true);
     return true;
   }
@@ -490,8 +513,11 @@ inline bool ScheduleLighting(
   {
     const std::unique_lock lock(submission.mutex);
     const auto queries = submission.active_queries.find(context);
+    const size_t pending_limit = (policy == LightingPolicy::SHADOW_BATCH
+                                      ? MAX_PENDING_DISPATCHES - RESERVED_LIGHTING_DISPATCHES
+                                      : MAX_PENDING_DISPATCHES);
     if (queries == submission.active_queries.end() || !queries->second.empty()
-        || submission.pending_dispatches.size() >= MAX_PENDING_DISPATCHES) return false;
+        || submission.pending_dispatches.size() >= pending_limit) return false;
   }
   Microsoft::WRL::ComPtr<ID3D11CommandList> prefix;
   if (FAILED(context->FinishCommandList(TRUE, &prefix)) || prefix == nullptr) return false;
@@ -504,6 +530,8 @@ inline bool ScheduleLighting(
       .prefix = std::move(prefix),
       .lighting_callback = std::move(callback),
       .is_lighting = true,
+      .lighting_policy = policy,
+      .on_recording_complete = std::move(on_recording_complete),
   });
   return true;
 }
@@ -556,6 +584,14 @@ inline void OnExecuteSecondaryCommandList(
   if (context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) {
     for (const auto& pending : chain) {
       context->ExecuteCommandList(pending.prefix.Get(), TRUE);
+      if (pending.is_lighting && pending.lighting_policy == LightingPolicy::SHADOW_BATCH
+          && pending.lighting_callback) {
+        const ExecutionGuard execution_guard;
+        // Record the batch between its native prefix and remainder. The outer
+        // list must recompute visibility on every replay from its current depth.
+        // The callback preserves all compute and graphics state it changes.
+        pending.lighting_callback(command_list, false);
+      }
       if (!pending.is_lighting && !pending.dispatch_consumed && state::GetTemporalMode() == pending.mode) {
         const ExecutionGuard execution_guard;
         if (pending.temporal_generation != state::frame_state.temporal_generation) continue;
@@ -574,6 +610,8 @@ inline void OnExecuteSecondaryCommandList(
     lighting::temporal_inputs::Submit(pending.prefix.Get());
     if (pending.is_lighting) {
       if (pending.lighting_callback) {
+        // Shadows also run after the first submission; unlike temporal history,
+        // their visibility belongs to this execution of the native light draws.
         pending.lighting_callback(command_list, !pending.dispatch_consumed);
       }
       continue;

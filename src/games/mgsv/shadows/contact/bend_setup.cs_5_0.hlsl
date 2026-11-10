@@ -4,6 +4,7 @@
 
 #define MGSV_BEND_SETUP
 #include "bend_common.hlsli"
+
 #include "../pcss.hlsli"
 
 struct BendDispatch {
@@ -11,45 +12,47 @@ struct BendDispatch {
   int2 offset;
 };
 
-[numthreads(1, 1, 1)]
-void main() {
-  uint width, height;
-  bend_output.GetDimensions(width, height);
+void SetupBendLight(uint light_index, uint record, float light_type, uint2 output_size) {
+  const uint width = output_size.x;
+  const uint height = output_size.y;
   // Start with no supported contact output. Every failed qualification leaves
   // neutral metadata, while PCSS can still use the cached native projection.
-  bend_dispatch.Store4(0, 0u);
-  bend_dispatch.Store4(16, 0u);
-  bend_dispatch.Store4(32, uint4(width, height, 0, 0));
+  bend_dispatch.Store4(record, 0u);
+  bend_dispatch.Store4(record + 16u, 0u);
+  bend_dispatch.Store4(record + 32u, uint4(width, height, 0, 0));
+  // A reused legacy allocation must never be mistaken for packed atlas data.
+  bend_dispatch.Store4(record + BEND_ATLAS_OFFSET, 0u);
+  bend_dispatch.Store4(record + BEND_CLEAR_END_OFFSET, 0u);
   // Only the two actual indirect calls need empty arguments on early returns.
   // Active sweeps are overwritten below; the published count limits reads.
-  bend_dispatch.Store3(BEND_DISPATCH_HEADER + 8 * BEND_DISPATCH_STRIDE, 0u);
-  bend_dispatch.Store3(BEND_DISPATCH_HEADER + 9 * BEND_DISPATCH_STRIDE, 0u);
-  const bool directional = CUSTOM_SS_LIGHT_TYPE < 0.5;
+  bend_dispatch.Store3(record + BEND_DISPATCH_HEADER + 8 * BEND_DISPATCH_STRIDE, 0u);
+  bend_dispatch.Store3(record + BEND_DISPATCH_HEADER + 9 * BEND_DISPATCH_STRIDE, 0u);
+  const bool directional = light_type < 0.5;
   // Keep PCSS available even when this light skips contact tracing. Point
   // shadows use their native radial projection and need no cached matrix data.
   PcssProjection shadow_projection = (PcssProjection)0;
-  if (!BEND_POINT_LIGHT && CUSTOM_SHADOW_SOFTNESS > 0.0) {
+  if (!IsBendPointLight(light_type) && CUSTOM_SHADOW_SOFTNESS > 0.0) {
     shadow_projection = CalculatePcssProjection(bend_shadow_projection, bend_shadow_cascades, directional);
   }
-  bend_dispatch.Store4(PCSS_PROJECTION_OFFSET, asuint(float4(shadow_projection.uv_scale, shadow_projection.depth_scale, shadow_projection.depth_a)));
-  bend_dispatch.Store(PCSS_PROJECTION_OFFSET + 16u, asuint(shadow_projection.depth_b));
+  bend_dispatch.Store4(record + PCSS_PROJECTION_OFFSET, asuint(float4(shadow_projection.uv_scale, shadow_projection.depth_scale, shadow_projection.depth_a)));
+  bend_dispatch.Store(record + PCSS_PROJECTION_OFFSET + 16u, asuint(shadow_projection.depth_b));
   const uint2 source_size = uint2(bend_viewport.xy + 0.5);
   if (width == 0 || height == 0 || any(source_size == 0)
       || any(source_size != uint2(width, height))) return;
-  const uint spot_budget = !directional && !BEND_POINT_LIGHT
+  const uint spot_budget = !directional && !IsBendPointLight(light_type)
                                    && isfinite(CUSTOM_SS_SPOT_BUDGET) && CUSTOM_SS_SPOT_BUDGET >= 1.0
                                ? uint(min(CUSTOM_SS_SPOT_BUDGET, 2147483520.0))
                                : 0u;
   // Once the budget is full, later lights need no projection or sweep setup.
   // Empty indirect arguments and state 2 keep their original game shadows.
   if (spot_budget != 0u && bend_spot_budget.Load(0) >= spot_budget) {
-    bend_dispatch.Store(40, 2u);
+    bend_dispatch.Store(record + 40u, 2u);
     return;
   }
   // Native directional shading uses N dot L, so this points toward the source.
   // Local positions are already in view space. Keep the native center for bounds.
-  const float4 position = directional ? float4(bend_light_params[0].xyz, 0.0)
-                                      : float4(bend_light_params[3].xyz, 1.0);
+  const float4 position = directional ? float4(ReadBendLightParam(light_index, 0u).xyz, 0.0)
+                                      : float4(ReadBendLightParam(light_index, 3u).xyz, 1.0);
   if (!all(isfinite(position)) || dot(position.xyz, position.xyz) < 1e-12) return;
   // A common source offset moves whole shadow edges together. Keep the sweep
   // centered and resolve its finite-source footprint in the light shader.
@@ -71,8 +74,8 @@ void main() {
   int2 maximum = int2(width, height);
   // Native attenuation gives a finite sphere. For spotlights, keep only the
   // part inside the native light cone before projecting the receiver bounds.
-  const bool distance_light = BEND_DISTANCE_LIGHT;
-  const float attenuation = distance_light ? bend_light_params[6].z : bend_light_params[6].w;
+  const bool distance_light = IsBendDistanceLight(light_type);
+  const float attenuation = distance_light ? ReadBendLightParam(light_index, 6u).z : ReadBendLightParam(light_index, 6u).w;
   // The distance variant caps d^16 at FLT_MAX. Tiny/subnormal coefficients
   // need not reach zero after that cap, so do not infer a finite range there.
   const bool finite_cutoff = attenuation > 0.0 && (!distance_light || attenuation >= 1.17549435e-38);
@@ -80,17 +83,17 @@ void main() {
     // Distance lights cut off at 1-k*d^16 = 0. Other local lights use
     // 1/d^2-k*d^2 = 0. Both point variants can offset that distance.
     const float radius = (distance_light ? rsqrt(sqrt(sqrt(sqrt(attenuation)))) : rsqrt(sqrt(attenuation)))
-                         + (BEND_POINT_LIGHT ? abs(bend_light_params[6].x) : 0.0);
+                         + (IsBendPointLight(light_type) ? abs(ReadBendLightParam(light_index, 6u).x) : 0.0);
     if (BendSphereOutsideRays(position.xyz, radius, 0.0, float2(source_size), float2(source_size))) {
-      bend_dispatch.Store(40, 2u);
+      bend_dispatch.Store(record + 40u, 2u);
       return;
     }
     float3 lower_corner = position.xyz - radius;
     float3 upper_corner = position.xyz + radius;
-    const float3 cone = bend_light_params[7].xyz;
-    const float3 axis = bend_light_params[5].xyz;
+    const float3 cone = ReadBendLightParam(light_index, 7u).xyz;
+    const float3 axis = ReadBendLightParam(light_index, 5u).xyz;
     const float axis_length = length(axis);
-    if (!BEND_POINT_LIGHT && isfinite(radius) && all(isfinite(cone))
+    if (!IsBendPointLight(light_type) && isfinite(radius) && all(isfinite(cone))
         && cone.y > 0.0 && cone.z > 0.0 && isfinite(axis_length) && axis_length > 1e-6) {
       float cosine = cone.x / axis_length;
       if (cosine > 0.0 && cosine < 1.0) {
@@ -210,17 +213,17 @@ void main() {
     uint index;
     bend_spot_budget.InterlockedAdd(0, 1u, index);
     if (index >= spot_budget) {
-      bend_dispatch.Store(40, 2u);
+      bend_dispatch.Store(record + 40u, 2u);
       return;
     }
   }
-  bend_dispatch.Store4(0, asuint(light));
-  bend_dispatch.Store4(16, uint4(minimum, maximum));
-  bend_dispatch.Store4(32, uint4(width, height, 1, count));
+  bend_dispatch.Store4(record, asuint(light));
+  bend_dispatch.Store4(record + 16u, uint4(minimum, maximum));
+  bend_dispatch.Store4(record + 32u, uint4(width, height, 1, count));
   uint tiles = 0;
   [loop]
   for (uint index = 0; index < count; ++index) {
-    const uint address = BEND_DISPATCH_HEADER + index * BEND_DISPATCH_STRIDE;
+    const uint address = record + BEND_DISPATCH_HEADER + index * BEND_DISPATCH_STRIDE;
     bend_dispatch.Store3(address, uint3(dispatches[index].groups));
     bend_dispatch.Store2(address + 12, asuint(dispatches[index].offset * BEND_GROUP_SIZE));
     tiles += dispatches[index].groups.y * dispatches[index].groups.z;
@@ -228,10 +231,57 @@ void main() {
   }
   // Clear only this light's footprint. The pixel shader rejects pixels outside
   // these bounds, so no old result can be consumed from another light.
-  bend_dispatch.Store3(BEND_DISPATCH_HEADER + 8 * BEND_DISPATCH_STRIDE,
+  bend_dispatch.Store3(record + BEND_DISPATCH_HEADER + 8 * BEND_DISPATCH_STRIDE,
                        uint3((maximum.x - minimum.x + BEND_GROUP_SIZE - 1) >> 6, maximum.y - minimum.y, 1));
   // Flatten all sweep tiles into one indirect call. The shader recovers each
   // original quadrant from the small prefix list above, without CPU readback.
-  bend_dispatch.Store3(BEND_DISPATCH_HEADER + 9 * BEND_DISPATCH_STRIDE,
+  bend_dispatch.Store3(record + BEND_DISPATCH_HEADER + 9 * BEND_DISPATCH_STRIDE,
                        uint3(BEND_GROUP_SIZE, min(tiles, BEND_TILE_ROWS), (tiles + BEND_TILE_ROWS - 1) >> BEND_TILE_ROW_BITS));
+}
+
+[numthreads(1, 1, 1)]
+void main() {
+#ifdef MGSV_BEND_BATCH
+  const uint4 batch = asuint(bend_lights.Load(0u));
+  const uint footer = batch.x * BEND_BATCH_RECORD_STRIDE;
+  bend_dispatch.Store3(footer, 0u);
+  bend_dispatch.Store3(footer + 16u, 0u);
+  uint atlas_end = 0u;
+  uint trace_tiles = 0u;
+  uint clear_pixels = 0u;
+  [loop]
+  for (uint light_index = 0u; light_index < batch.x; ++light_index) {
+    const uint record = light_index * BEND_BATCH_RECORD_STRIDE;
+    // One thread admits lights in native order and carries the same GPU budget
+    // as the per-light path. Replayed command lists recompute their own work.
+    SetupBendLight(light_index, record, float(asuint(bend_lights.Load(BEND_BATCH_LIGHT_VECTORS + light_index * BEND_BATCH_LIGHT_VECTORS).x)),
+                   uint2(bend_viewport.xy + 0.5));
+    const uint4 metadata = bend_dispatch.Load4(record + 32u);
+    uint area = 0u;
+    if (metadata.z == 1u) {
+      const uint4 bounds = bend_dispatch.Load4(record + 16u);
+      area = (bounds.z - bounds.x) * (bounds.w - bounds.y);
+      const uint last_sweep = record + BEND_DISPATCH_HEADER + (metadata.w - 1u) * BEND_DISPATCH_STRIDE;
+      trace_tiles += bend_dispatch.Load(last_sweep + 20u);
+      clear_pixels += area;
+    }
+    // The host guarantees enough atlas texels for every admitted rectangle.
+    // Native coordinates stay unchanged; only mask storage is packed.
+    bend_dispatch.Store4(record + BEND_ATLAS_OFFSET, uint4(atlas_end, batch.y, 1u, trace_tiles));
+    bend_dispatch.Store(record + BEND_CLEAR_END_OFFSET, clear_pixels);
+    atlas_end += area;
+  }
+  if (clear_pixels > 0u) {
+    const uint groups = (clear_pixels + BEND_GROUP_SIZE - 1u) >> 6u;
+    bend_dispatch.Store3(footer, uint3(min(groups, BEND_TILE_ROWS), (groups + BEND_TILE_ROWS - 1u) >> BEND_TILE_ROW_BITS, 1u));
+  }
+  if (trace_tiles > 0u) {
+    bend_dispatch.Store3(footer + 16u, uint3(BEND_GROUP_SIZE, min(trace_tiles, BEND_TILE_ROWS),
+                                             (trace_tiles + BEND_TILE_ROWS - 1u) >> BEND_TILE_ROW_BITS));
+  }
+#else
+  uint width, height;
+  bend_output.GetDimensions(width, height);
+  SetupBendLight(0u, 0u, CUSTOM_SS_LIGHT_TYPE, uint2(width, height));
+#endif
 }
