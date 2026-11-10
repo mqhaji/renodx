@@ -70,7 +70,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .key = "FxSpotScreenSpaceShadowBudget",
               .binding = &shader_injection->ss_spot_budget,
               .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-              .default_value = 32.f,
+              .default_value = 34.f,
               .label = "Spot Contact Shadow Budget",
               .section = "Shadows (Advanced)",
               .tooltip = "Limits added spotlight contact-shadow work. Lower values reduce cost; 0 is unlimited. Lights beyond the budget retain shadow-map shadows.",

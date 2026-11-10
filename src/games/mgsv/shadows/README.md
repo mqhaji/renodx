@@ -63,7 +63,7 @@ Fixed trace settings are contrast 4, 0.5% relative nonlinear-depth thickness, a 
 | Enhanced Shadows | On | Enables shadow-map filtering and contact shadows together |
 | Shadow Softness | 100% | Scales the shared source sizes; 0% keeps native map filtering and sharp contact detail |
 | Contact Shadow Reach | 60 px | Shared search length, from 16 to 256 output pixels, converted to render pixels with a minimum of 16 render pixels |
-| Spot Contact Shadow Budget | 13 | Limits spotlight contact evaluations between lighting-buffer clears; 0 is unlimited |
+| Spot Contact Shadow Budget | 34 | Limits spotlight contact evaluations between lighting-buffer clears; 0 is unlimited |
 
 Reach, budget, and diagnostics are in Shadows (Advanced), collapsed by default. At DLSS Performance, the minimum trace length corresponds to about 32 output pixels. Reach changes search distance, not softness. Skipped spotlight contacts retain shadow-map filtering. Preset Off disables Enhanced Shadows; Reset All restores defaults.
 
