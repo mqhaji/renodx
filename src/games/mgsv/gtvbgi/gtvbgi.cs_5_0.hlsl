@@ -3,15 +3,19 @@
 
 // Search visible geometry in both directions along each slice. The same depth
 // samples supply AO, diffuse bounce, and specular visibility before skin scattering.
-// Keep the outputs separate: application darkens only native ambient with AO,
-// adds the bounce, and resolves specular visibility for deferred composition.
+// AO and GI share storage, but keep independent validity and application rules.
+// Application darkens only native ambient, adds GI, and resolves specular
+// visibility for deferred composition. See indirect_diffuse.hlsli for packing.
 
 #include "../gbuffer.hlsli"
 #include "../shared.h"
+#include "indirect_diffuse.hlsli"
 #include "specular_occlusion.hlsli"
 
-#define AO_PI               3.14159265358979323846
-#define AO_SECTORS          32u
+#define AO_PI 3.14159265358979323846
+// Each bit owns an equal share of the slice's weighted angular measure.
+#define AO_SECTORS 32u
+// Optional reductions cover 2, 4, 8, and 16 render pixels along each axis.
 #define AO_DEPTH_MIP_LEVELS 4
 
 Texture2D<float4> depth_buffer : register(t0);
@@ -20,11 +24,10 @@ Texture2D<float4> depth_mips : register(t2);
 Texture2DArray<float2> fast_noise : register(t6);
 Texture2D<float4> native_material : register(t7);
 Texture2D<float4> environment_specular : register(t8);
-RWTexture2D<float2> ao_output : register(u0);
 
 Texture2D<float4> source_diffuse : register(t3);
 Texture2D<float4> source_albedo : register(t4);
-RWTexture2D<float4> gi_output : register(u1);
+RWTexture2D<float4> lighting_output : register(u1);
 RWTexture2D<float4> diagnostic_output : register(u2);
 // RG stores visible/open angular areas relative to the whole reflection cone.
 // B is native roughness; A is sampling confidence, with -1 for missing data.
@@ -86,8 +89,9 @@ uint GetSectorMask(uint first, uint end) {
   return high & ~((1u << first) - 1u);
 }
 
-// Reference mode 3, using its HQ angular mapping. The asin form is equivalent
-// to (1 - acos(x * sin(stretch)) * 2 / PI) / s without cancellation near s=0.
+// Importance-sample slice directions toward the projected surface normal, as
+// in reference mode 3. This spends more samples where diffuse light matters.
+// The asin form avoids cancellation in the reference's small-stretch formula.
 float2 SampleCosineSliceDirection(float2 normal_xy, float phase) {
   const float angle = phase * AO_PI;
   float2 direction = float2(cos(angle), sin(angle));
@@ -134,6 +138,9 @@ float LoadTraceDepth(int2 sample_pixel, int mip_level) {
 uint2 GetCoverageMasks(float2 sample_position, float sample_depth, float thickness,
                        float3 position, float3 view_direction, float side, float normal_angle, float cos_n,
                        float sector_offset, float4 specular_interval, bool2 unfinished) {
+  // Treat each depth sample as a finite slab, not an infinitely thick wall.
+  // Project its front/back into two separate angular intervals: one weighted
+  // for diffuse, the other restricted to the receiver's reflection cone.
   const float sample_z = LinearZ(sample_depth);
   // Native reverse-Z zero is background, not a finite surface slab.
   if (!(sample_depth > 0.0 && sample_z > 0.0) || sample_z > 1.0e6) return 0u;
@@ -168,17 +175,14 @@ uint2 GetCoverageMasks(float2 sample_position, float sample_depth, float thickne
 }
 
 [numthreads(8, 8, 1)]
-
 void main(uint3 thread_id : SV_DispatchThreadID) {
+  // 1. Select a representative full-resolution receiver for this lighting
+  // pixel. Round the allocation up, but clamp its last sample to the scene edge.
   const uint2 ao_pixel = thread_id.xy;
   uint ao_width, ao_height;
-  ao_output.GetDimensions(ao_width, ao_height);
+  lighting_output.GetDimensions(ao_width, ao_height);
   if (ao_pixel.x >= ao_width || ao_pixel.y >= ao_height) return;
-  gi_output[ao_pixel] = 0.0;
   const bool specular_active = CUSTOM_MGSV_SPECULAR_ACTIVE >= 0.5;
-  if (specular_active) {
-    specular_output[ao_pixel] = float4(0.0, 0.0, 0.0, -1.0);
-  }
   const int diagnostic = (int)CUSTOM_MGSV_GT_DEBUG_VIEW;
   if (diagnostic >= 2 && diagnostic <= 11) {
     diagnostic_output[ao_pixel] = diagnostic == 4 ? float4(1.0, 0.0, 0.0, 1.0) : float4(0.0, 0.0, 0.0, 1.0);
@@ -191,10 +195,16 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
   const float depth = depth_buffer.Load(int3(receiver_pixel, 0)).x;
   const float z = LinearZ(depth);
   if (!(depth > 0.0 && z > 0.0) || z > 1.0e6) {
-    ao_output[ao_pixel] = float2(1.0, 1.0);
+    if (specular_active) {
+      specular_output[ao_pixel] = float4(0.0, 0.0, 0.0, -1.0);
+    }
+    lighting_output[ao_pixel] = PackIndirectDiffuse(0.0, false, 1.0, true);
     return;
   }
 
+  // 2. Reconstruct the receiver in camera space. Thin foliage may have shading
+  // normals facing away from the camera; fold only their view component for
+  // the diffuse integral. Native normals remain available for specular/source use.
   const float2 pixel = float2(receiver_pixel);
   float3 normal = DecodeNormal(normal_buffer.Load(int3(receiver_pixel, 0)).xyz);
   const float3 native_normal = normal;
@@ -212,6 +222,9 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
   // The reference CDF assumes a view-facing receiver. Do not extrapolate its
   // measure to backfacing shading normals; use neutral visibility instead.
   if (any(!isfinite(normal)) || !(position.z > 0.0) || dot(normal, view_direction) < 0.0) {
+    if (specular_active) {
+      specular_output[ao_pixel] = float4(0.0, 0.0, 0.0, -1.0);
+    }
     // Distinguish receiver rejection reasons in the geometry diagnostic.
     if (diagnostic == 4) {
       float3 reason = float3(0.0, 0.0, 1.0);
@@ -221,7 +234,7 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
         reason = float3(0.0, 1.0, 1.0);
       diagnostic_output[ao_pixel] = float4(reason, 1.0);
     }
-    ao_output[ao_pixel] = float2(1.0, 1.0);
+    lighting_output[ao_pixel] = PackIndirectDiffuse(0.0, false, 1.0, true);
     return;
   }
 
@@ -242,6 +255,9 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
   const float3 axis_y = float3(-view_direction.x * view_direction.y * basis_scale, 1.0 - view_direction.y * view_direction.y * basis_scale, view_direction.y);
   const float2 normal_xy = float2(dot(normal, axis_x), dot(normal, axis_y));
 
+  // 3. Prepare a roughness-dependent reflection cone. Its mask uses the same
+  // geometry search, but a different angular measure from diffuse. Unsupported
+  // capture or cone coverage will retain native specular AO during composition.
   bool specular_valid = false;
   float roughness = 0.0;
   float3 specular_normal = native_normal;
@@ -286,8 +302,9 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
                                : 0u;
   const uint2 noise_pixel = ao_pixel & 127u;
 
+  // 4. Rotate each slice using IS-FAST noise on the lighting grid. Each slice
+  // searches both screen directions with exponentially increasing distances.
   [loop]
-
   for (int slice = 0; slice < slices; ++slice) {
     // Use the stored uniform channels directly.
     // A separated R2 offset supplies the third variate, following EA's guidance.
@@ -319,6 +336,8 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
     const float normal_angle = normal_sign * acos(cos_n);
     const float sector_offset = phases.z / float(AO_SECTORS);
     const float radial_phase = phases.y;
+    // A set bit means a nearer sampled surface already owns this angular band.
+    // Share one mask across both search sides so GI cannot count it twice.
     uint occupied = 0u;
     uint specular_occupied = 0u;
     float4 specular_interval = 0.0;
@@ -335,7 +354,6 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
     }
 
     [loop]
-
     for (int side = 0; side < 2 && (occupied != 0xFFFFFFFFu || (specular_interval.w > 0.0 && specular_occupied != 0xFFFFFFFFu)); ++side) {
       const float side_sign = side == 0 ? -1.0 : 1.0;
       const float2 ray_direction = screen_direction * side_sign;
@@ -361,6 +379,8 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
                                                 bool2(occupied != 0xFFFFFFFFu, specular_occupied != 0xFFFFFFFFu));
         const uint covered = coverage.x;
         specular_occupied |= coverage.y;
+        // 5. Gather radiance only for newly covered diffuse sectors. A coarse
+        // depth has no color of its own, so descend to its full-size owner first.
         uint fresh = covered & ~occupied;
         if (fresh != 0u) {
           int2 owner;
@@ -423,15 +443,21 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
     }
   }
 
+  // 6. Average the slices. Uncovered diffuse sectors remain ambient visibility;
+  // covered sectors contribute source radiance once. Store specular visible/open
+  // areas separately so later filtering can divide only after combining samples.
   const float occlusion = saturate(1.0 - visibility / float(slices));
+  float4 specular_sample = float4(0.0, 0.0, 0.0, -1.0);
   if (specular_valid) {
     const float2 masses = specular_mass * (inverse_open_area / float(slices));
     if (all(isfinite(masses)) && all(masses >= 0.0) && all(masses <= 65504.0)) {
-      specular_output[ao_pixel] = float4(min(masses.x, masses.y), masses.y, roughness, specular_support);
+      specular_sample = float4(min(masses.x, masses.y), masses.y, roughness, specular_support);
     }
   }
+  if (specular_active) {
+    specular_output[ao_pixel] = specular_sample;
+  }
   const float applied = saturate(occlusion * CUSTOM_MGSV_AO_STRENGTH);
-  ao_output[ao_pixel] = float2(1.0 - applied, 1.0);
   if (diagnostic >= 8 && diagnostic <= 10) {
     diagnostic_output[ao_pixel] = float4((1.0 - applied).xxx, 1.0);
   }
@@ -439,7 +465,7 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
   // is separate from AO visibility. Bound only to the RGBA16F storage range.
   const float3 bounce = indirect / float(slices);
   gi_valid = gi_valid && all(isfinite(bounce));
-  gi_output[ao_pixel] = gi_valid ? float4(clamp(bounce, 0.0, 65504.0), 1.0) : 0.0;
+  lighting_output[ao_pixel] = PackIndirectDiffuse(clamp(bounce, 0.0, 65504.0), gi_valid, 1.0 - applied, true);
   if (diagnostic >= 2 && diagnostic <= 5) {
     float3 value = occlusion.xxx;
     if (diagnostic == 3) value = (accepted_coverage / float(slices)).xxx;

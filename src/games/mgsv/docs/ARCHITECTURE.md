@@ -11,10 +11,10 @@
 | `inputs.hpp` | Selected device/swapchain, resize/reset versions, and native material/motion references |
 | `resource_upgrades.hpp` | Shared precision upgrades, clone activation, and scoped copies |
 | `gtvbgi/lighting.hpp` | Combined lighting textures, controls, input checks, GPU commands, and game-state restoration |
-| `gtvbgi/temporal_inputs.hpp` | Native camera/exposure copies and motion records tied to submitted producer commands |
+| `gtvbgi/temporal_inputs.hpp` | Native camera/exposure copies, motion, and diffuse-copy records tied to submitted producer commands |
 | `gtvbgi/environment_specular.hpp` | Per-device capture state, environment/visibility texture pairs, and scoped native/deferred bindings |
-| `gtvbgi/ambient_diffuse.hpp` | Qualified half-resolution ambient snapshots, native sampling constants, and the submitted diffuse-copy source |
-| `gtvbgi/` | Shared trace and filters, diffuse application, selective environment correction, and [reference explanation](../gtvbgi/README.md) |
+| `gtvbgi/ambient_diffuse.hpp` | Qualified half-resolution ambient snapshots, native sampling constants, and native diffuse-copy observation |
+| `gtvbgi/` | Shared trace and filters, diffuse application, selective environment correction, and [implementation guide](../gtvbgi/README.md) |
 | `shadows/screen_space_shadows.hpp` | Light-draw checks, spotlight budgets, per-light fallback, scoped inputs, and state restoration |
 | `shadows/batch.hpp` | Shared mask atlas, copied light inputs, and batch submission before native consumers |
 | `shadows/native_groups.hpp` | Verified native point/spot group hooks and CPU constant copies |
@@ -30,11 +30,11 @@ Precision upgrades support the whole mod, including output, reconstruction, shad
 
 The native ambient upsampler (`0x844CE327`) copies its qualified half-resolution input, 4x4 phase weights, and mutable sampling constants into owned GPU snapshots. The preceding sky-light producer (`0x4FBDBB39`) identifies the input family. Native diffuse clears invalidate the snapshot's alpha in GPU order. No full-resolution ambient image is allocated.
 
-After direct lighting, CopyBuffer (`0xD71E843E`) copies diffuse and creates the skin-material mask. Its callback associates this copy with its actual source in submission order. Before the first skin-scattering pass (`0x6DAF0C4A`), these added lighting passes run:
+After direct lighting, CopyBuffer (`0xD71E843E`) copies diffuse and creates the skin-material mask. The existing camera/motion submission tracking also publishes this copy's source, without a separate command-list split. Copy records do not advance temporal history. Before the first skin-scattering pass (`0x6DAF0C4A`), these added lighting passes run:
 
 1. Check the game's depth, normals, diffuse source/destination, and saved material references.
 2. If enabled, build four smaller depth levels that keep the nearest surface in each region.
-3. Search geometry once, writing AO visibility, GI light/validity, and bitmask specular visibility.
+3. Search geometry once, writing GI RGB and AO visibility into one RGBA16F image, plus bitmask specular visibility. Negative R marks missing GI; negative alpha marks missing AO. The signals keep separate validity without reducing their precision.
 4. Accumulate the three signals against their separate histories in one temporal dispatch. Keep these results as next-frame histories.
 5. Spatially filter all three signals together in each filter dispatch.
 6. Reconstruct native ambient using the game's point-wrap, phase, and depth-weight convention. Separate direct diffuse as `total - ambient`, then write `direct + ambient * AO + GI` to native diffuse and the copied skin-scattering input, preserving their separate alpha meanings. Resolve specular visibility/confidence in the same dispatch.
@@ -55,11 +55,11 @@ Native captures show that later passes also copy the diffuse-light buffer to mea
 - Lighting uses the scatter pass's existing 64-byte geometry constants at compute `b0`. Pixel shaders use `b0` for different data.
 - `ShaderInjectData` is 76 floats: 304 CPU bytes and 304 GPU bytes at `b13`. One softness value controls all source sizes; map diagnostics share the contact-light selector. Shadow-map sampling counts and search bounds are fixed; Contact Shadow Reach controls the shared Bend sample count. Effect-local copies hold scale, filter steps, history flags, and the current Bend light type. Bend surface thickness and the bilinear threshold are fixed constants. The shared SDK `PrepareConstants` layout remains 96 bytes.
 - Temporal `b1/b2` hold current/previous native scene data, not duplicate settings. Copy the actual native constant-buffer allocation and preserve its bound range; the reflected scene structure is 480 bytes. History owns another GPU copy because replaying a producer command list can overwrite its snapshot.
-- AO raw, history, and filter textures use RG16F: R is visibility and G is validity. GI uses RGBA16F with validity in alpha. One shared pair of R32G32_UINT geometry textures stores FP32 linear-depth bits and two packed 16-bit normal coordinates. Shader calculations use FP32; no radiance variance textures are allocated.
+- AO and GI share their raw, history, and filter images. RGB stores GI and alpha stores ambient visibility in RGBA16F. Negative R marks missing GI; negative alpha marks missing AO. Valid values keep their full FP16 precision. One shared pair of R32G32_UINT geometry textures stores FP32 linear-depth bits and two packed 16-bit normal coordinates. Shader calculations use FP32; no radiance variance textures are allocated.
 - Lighting has twelve texture-input slots (SRVs) and five writable-output slots (UAVs). Application reads ambient/phase weights at t10/t11 and native object sampling constants at b3, preserving their bound range. Its extra u2 writes the existing scattering copy; it allocates no new full-resolution output. Unused outputs use distinct placeholder textures so they cannot conflict with inputs or each other.
 - Specular visibility uses five RGBA16F textures: raw, two temporal, and two spatial results. RG stores normalized visible/open angular areas, B receiver roughness, and A current sampling support. Alpha -1 marks missing data; zero support and zero/zero areas remain valid. History checks the previous reflection direction and roughness, then clamps the visibility ratio. Spatial filtering preserves the center's roughness and support. Visibility is not exposure-scaled. Missing specular inputs retain native occlusion without suppressing AO/GI; missing filter inputs use the last valid stage.
 - Normals use the game's packing in camera coordinates. Position reconstruction keeps signed projection scales, including negative X, and the game's camera-offset convention. Matching jitter under live rendering still needs verification.
-- The albedo sRGB view decodes base color. Native diffuse/specular lighting is linear and already scaled by exposure. Copied diffuse alpha identifies skin-scattering materials, not every shaded pixel. GI alpha identifies valid results and remains separate from AO visibility.
+- The albedo sRGB view decodes base color. Native diffuse/specular lighting is linear and already scaled by exposure. Copied native diffuse alpha identifies skin-scattering materials, not every shaded pixel. Custom diffuse images use RGB for GI and alpha for AO visibility; their negative missing-data markers remain independent.
 - The first accepted Present selects one device/swapchain. Resize and destruction invalidate old resource versions. Resizing textures does not rebuild unchanged shader pipelines.
 - Holding COM texture references keeps objects alive while the game can still overwrite their pixels. Matching sizes or context/Present identifiers alone cannot prove matching scene content, fresh writes, or execution order.
 

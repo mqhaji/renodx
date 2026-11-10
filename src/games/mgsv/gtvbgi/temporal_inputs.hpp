@@ -7,8 +7,10 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <span>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -23,6 +25,10 @@
 
 namespace mgsv::lighting::temporal_inputs {
 
+inline constexpr GUID DIFFUSE_SOURCE_GUID = {.Data1 = 0xa1465c19, .Data2 = 0x1276, .Data3 = 0x4697, .Data4 = {0x8a, 0xd0, 0x9c, 0x21, 0x35, 0xf7, 0xd8, 0x43}};
+
+// Own the native scene-buffer copy and its original D3D11.1 binding range.
+// Camera identity and jitter describe the producer, not the thread reading it.
 struct Scene {
   Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;
   Microsoft::WRL::ComPtr<ID3D11Resource> depth;
@@ -38,6 +44,8 @@ struct Scene {
   bool jitter_valid = false;
 };
 
+// One submitted camera/motion pair. Read() qualifies their depth, generation,
+// and camera sample against the scatter before history may use these pixels.
 struct Snapshot {
   inputs::Motion motion;
   Scene scene;
@@ -53,6 +61,12 @@ struct Snapshot {
   bool valid = false;
 };
 
+enum class ProducerKind : uint8_t {
+  SCENE,
+  MOTION,
+  DIFFUSE_COPY,
+};
+
 struct Producer {
   reshade::api::device* device = nullptr;
   uint64_t generation = 0u;
@@ -64,13 +78,17 @@ struct Producer {
   uint64_t camera_generation = 0u;
   uint32_t camera_sample = 0u;
   bool jitter_valid = false;
-  bool is_motion = false;
+  ProducerKind kind = ProducerKind::SCENE;
+  Microsoft::WRL::ComPtr<ID3D11Resource> copy_source;
+  Microsoft::WRL::ComPtr<ID3D11Resource> copy_destination;
 };
 
 struct State {
   std::shared_mutex mutex;
+  // Vectors preserve producer order within a context/list. Finished vectors are
+  // immutable and shared so publication can outlive removal of their map entry.
   std::unordered_map<ID3D11DeviceContext*, std::vector<Producer>> recordings;
-  std::unordered_map<ID3D11CommandList*, std::vector<Producer>> lists;
+  std::unordered_map<ID3D11CommandList*, std::shared_ptr<const std::vector<Producer>>> lists;
   Snapshot submitted;
   reshade::api::device* device = nullptr;
   uint64_t next_submission = 0u;
@@ -79,36 +97,62 @@ struct State {
 inline State state;
 inline std::atomic<bool> enabled = true;
 
+// Copy edges qualify one lighting application. They do not advance the camera
+// or motion submission number used to decide whether history can advance.
+inline void Publish(std::span<const Producer> producers) {
+  {
+    const std::unique_lock lock(state.mutex);
+    // Publish the camera and motion from one list as a coherent snapshot.
+    // Readers must not observe a partially updated producer sequence.
+    for (const auto& producer : producers) {
+      if (producer.kind == ProducerKind::DIFFUSE_COPY) continue;
+      if (state.device != producer.device || state.submitted.generation != producer.generation) {
+        state.submitted = {};
+        state.device = producer.device;
+        state.submitted.generation = producer.generation;
+      }
+      if (producer.kind == ProducerKind::MOTION) {
+        state.submitted.motion = producer.motion;
+        state.submitted.motion_jitter_uv = producer.motion_jitter_uv;
+        state.submitted.velocity_projection_jitter_scale = producer.velocity_projection_jitter_scale;
+        state.submitted.camera_publication = producer.camera_publication;
+        state.submitted.camera_generation = producer.camera_generation;
+        state.submitted.camera_sample = producer.camera_sample;
+        state.submitted.jitter_valid = producer.jitter_valid;
+      } else {
+        state.submitted.scene = producer.scene;
+      }
+      state.submitted.submission = ++state.next_submission;
+    }
+  }
+  // Copy metadata is consumed after this prefix. Publish its final associations
+  // in recorded order, outside the lock: replacing an interface can release
+  // a native resource and reenter destruction callbacks.
+  for (const auto& producer : producers) {
+    if (producer.kind != ProducerKind::DIFFUSE_COPY) continue;
+    const auto selected = inputs::ReadSelection(producer.device);
+    if (selected.device != nullptr && selected.generation == producer.generation) {
+      producer.copy_destination->SetPrivateDataInterface(DIFFUSE_SOURCE_GUID, producer.copy_source.Get());
+    }
+  }
+}
+
 // Only known native producers enter this ledger. Recorded observations become
 // eligible after their containing command list reaches immediate submission.
 inline void Record(reshade::api::command_list* cmd_list, Producer producer) {
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   if (context == nullptr) return;
-  const std::unique_lock lock(state.mutex);
   if (context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED) {
+    const std::unique_lock lock(state.mutex);
     state.recordings[context].push_back(std::move(producer));
-    return;
-  }
-  if (state.device != producer.device || state.submitted.generation != producer.generation) {
-    state.submitted = {};
-    state.device = producer.device;
-    state.submitted.generation = producer.generation;
-  }
-  if (producer.is_motion) {
-    state.submitted.motion = std::move(producer.motion);
-    state.submitted.motion_jitter_uv = producer.motion_jitter_uv;
-    state.submitted.velocity_projection_jitter_scale = producer.velocity_projection_jitter_scale;
-    state.submitted.camera_publication = producer.camera_publication;
-    state.submitted.camera_generation = producer.camera_generation;
-    state.submitted.camera_sample = producer.camera_sample;
-    state.submitted.jitter_valid = producer.jitter_valid;
   } else {
-    state.submitted.scene = std::move(producer.scene);
+    Publish({&producer, 1u});
   }
-  state.submitted.submission = ++state.next_submission;
 }
 
 inline void CaptureScene(reshade::api::command_list* cmd_list) {
+  // Capture the supported native scene producer's b2 and t2 together. Keeping
+  // the buffer object alive would not protect its contents from later writes.
   if (cmd_list == nullptr || !enabled.load(std::memory_order_acquire)) return;
   const auto selected = inputs::ReadSelection(cmd_list->get_device());
   if (selected.device == nullptr) return;
@@ -165,40 +209,31 @@ inline void CaptureScene(reshade::api::command_list* cmd_list) {
                    });
 }
 
+// Finishing a recording is not submission. Keep the ordered records attached
+// to that native list until Submit publishes them or destruction retires them.
 inline void Finish(ID3D11DeviceContext* context, ID3D11CommandList* list) {
   const std::unique_lock lock(state.mutex);
   if (const auto recording = state.recordings.find(context); recording != state.recordings.end()) {
-    state.lists[list] = std::move(recording->second);
+    state.lists[list] = std::make_shared<const std::vector<Producer>>(std::move(recording->second));
     state.recordings.erase(recording);
   }
 }
 
 inline void Submit(ID3D11CommandList* list) {
-  const std::unique_lock lock(state.mutex);
-  const auto recorded = state.lists.find(list);
-  if (recorded == state.lists.end()) return;
-  for (const auto& producer : recorded->second) {
-    if (state.device != producer.device || state.submitted.generation != producer.generation) {
-      state.submitted = {};
-      state.device = producer.device;
-      state.submitted.generation = producer.generation;
-    }
-    if (producer.is_motion) {
-      state.submitted.motion = producer.motion;
-      state.submitted.motion_jitter_uv = producer.motion_jitter_uv;
-      state.submitted.velocity_projection_jitter_scale = producer.velocity_projection_jitter_scale;
-      state.submitted.camera_publication = producer.camera_publication;
-      state.submitted.camera_generation = producer.camera_generation;
-      state.submitted.camera_sample = producer.camera_sample;
-      state.submitted.jitter_valid = producer.jitter_valid;
-    } else {
-      state.submitted.scene = producer.scene;
-    }
-    state.submitted.submission = ++state.next_submission;
+  std::shared_ptr<const std::vector<Producer>> producers;
+  {
+    const std::shared_lock lock(state.mutex);
+    const auto recorded = state.lists.find(list);
+    if (recorded == state.lists.end()) return;
+    producers = recorded->second;
   }
+  // Retain immutable records across publication and native destruction callbacks.
+  Publish(*producers);
 }
 
 inline Snapshot Read(reshade::api::device* device, reshade::api::resource_view scatter_depth) {
+  // Scene and motion must name the same depth allocation and jitter sample.
+  // A recent Present or two matching dimensions cannot establish that pairing.
   const auto selected = inputs::ReadSelection(device);
   if (selected.device == nullptr || scatter_depth.handle == 0u) return {};
   auto* depth_view = reinterpret_cast<ID3D11ShaderResourceView*>(scatter_depth.handle);  // NOLINT(performance-no-int-to-ptr)

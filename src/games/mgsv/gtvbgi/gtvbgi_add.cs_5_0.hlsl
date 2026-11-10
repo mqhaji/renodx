@@ -9,12 +9,12 @@
 
 #include "../gbuffer.hlsli"
 #include "../shared.h"
+#include "indirect_diffuse.hlsli"
 #include "specular_occlusion.hlsli"
 
-Texture2D<float4> gi_buffer : register(t0);
+Texture2D<float4> lighting_buffer : register(t0);
 Texture2D<float4> depth_buffer : register(t1);
 Texture2D<float4> diagnostic_buffer : register(t2);
-Texture2D<float2> ao_buffer : register(t3);
 Texture2D<float4> normal_buffer : register(t4);
 Texture2D<float4> environment_specular : register(t5);
 Texture2D<float4> native_material : register(t6);
@@ -33,8 +33,10 @@ RWTexture2D<float2> specular_output : register(u1);
 RWTexture2D<float4> scattering_copy : register(u2);
 
 [numthreads(8, 8, 1)]
-
 void main(uint3 thread_id : SV_DispatchThreadID) {
+  // 1. Reconstruct full-resolution lighting from four low-resolution taps.
+  // Depth weights prevent foreground bounce from spreading into the background;
+  // specular additionally checks normal, roughness, reflected direction, and side.
   const uint2 pixel = thread_id.xy;
   if (pixel.x >= buffer_width || pixel.y >= buffer_height) return;
 
@@ -52,7 +54,7 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
   const bool gi_receiver_valid = depth > 0.0 && z < 1.0e6;
   const float inv_z = 1.0 / z;
   uint gi_width, gi_height;
-  gi_buffer.GetDimensions(gi_width, gi_height);
+  lighting_buffer.GetDimensions(gi_width, gi_height);
 
   float3 radiance = 0.0;
   float weight_sum = 0.0;
@@ -100,15 +102,14 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
       const float depth_match = qz > 0.0 ? 1.0 / (1.0 + 32.0 * abs(qz - z) * inv_z) : 1.0;
 
       const float weight = bilinear * depth_match;
-      const float ao = ao_buffer.Load(int3(q, 0)).r;
-      visibility += (isfinite(ao) ? saturate(ao) : 1.0) * weight;
+      const float4 tap = lighting_buffer.Load(int3(q, 0));
+      visibility += (HasAmbientVisibility(tap) ? saturate(tap.a) : 1.0) * weight;
       visibility_weight += weight;
       // Preserve the AO resolve's neutral background taps. GI has stricter
       // geometry validity and must keep a separate normalization sum.
       if (!gi_receiver_valid || !(qdepth > 0.0 && qz > 0.0 && qz < 1.0e6)) continue;
       // Valid black remains in the weight sum; missing/invalid results do not.
-      const float4 tap = gi_buffer.Load(int3(q, 0));
-      if (tap.a > 0.5 && all(isfinite(tap.rgb))) {
+      if (HasDiffuseGI(tap)) {
         radiance += tap.rgb * weight;
         weight_sum += weight;
       }
@@ -145,6 +146,9 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
     }
   }
 
+  // 2. Recover only the native ambient contribution. Our lighting upsample above
+  // cannot stand in for the game's own phase/depth-weighted ambient upsample:
+  // subtracting a different result would incorrectly change direct light.
   const float3 bounce = radiance / max(weight_sum, 1.0e-4) * CUSTOM_MGSV_GI_STRENGTH;
   const float4 center_light = light_output.Load(pixel);
   const float ao = visibility_weight > 1.0e-4 ? visibility / visibility_weight : 1.0;
@@ -186,6 +190,9 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
                     && all(abs(size - full_size) < 0.5);
     ambient = ambient_valid ? min(ambient, max(center_light.rgb, 0.0)) : 0.0;
   }
+  // 3. AO attenuates ambient alone. GI already integrates sampled visibility,
+  // so multiplying it by AO again would double-count the same obstruction.
+  // Receiving albedo is applied once later by native deferred composition.
   const float3 direct = center_light.rgb - ambient;
   const float3 shaded_diffuse = direct + ambient * saturate(ao);
   if (!gi_receiver_valid) {
@@ -200,6 +207,9 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
   float3 output = (diagnostic == 1) ? bounce : shaded_diffuse + bounce;
   if (diagnostic >= 2 && diagnostic <= 11) output = diagnostic_sum / max(diagnostic_weight, 1.0e-4);
   if (diagnostic == 6) output *= CUSTOM_MGSV_GI_STRENGTH;
+  // 4. Divide filtered specular areas into visibility, then estimate confidence.
+  // A small or poorly sampled cone retains native AO through zero confidence.
+  // This produces a factor for deferred composition, not reflected color.
   float2 specular = 0.0;
   if (diagnostic >= 14 && diagnostic <= 18) output = float3(1.0, 0.0, 1.0);
   if (specular_receiver && specular_weight_sum > 1e-4) {
@@ -229,6 +239,8 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
   if (diagnostic == 20) output = ambient_valid ? direct : float3(1.0, 0.0, 1.0);
   if (diagnostic == 21) output = shaded_diffuse + bounce;
   if (diagnostic == 22) output = ambient_valid ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 1.0);
+  // 5. Update both diffuse consumers before skin scattering. The copy's alpha
+  // selects scattering materials; it is not a general lighting-validity flag.
   // Preserve finite values in the native RGBA16F destination at high strengths.
   light_output[pixel] = float4(min(output, 65504.0), center_light.a);
   uint copy_width, copy_height;

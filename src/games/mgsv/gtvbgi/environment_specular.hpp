@@ -25,6 +25,9 @@
 
 namespace mgsv::lighting::environment_specular {
 
+// Keep captured environment color and resolved visibility paired with one
+// native specular target. Deferred composition must use that pair, rather than
+// whichever camera or filter output was most recently observed on the CPU.
 struct Target {
   uint64_t generation = 0u;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
@@ -106,6 +109,8 @@ inline void OnResetCommandList(reshade::api::command_list* cmd_list) {
 }
 
 inline void BeginCapture(reshade::api::command_list* cmd_list, bool lighting_enabled) {
+  // 1. Qualify the existing light draw before adding an attachment. Native
+  // diffuse/specular outputs and their additive blend must remain unchanged.
   if (!lighting_enabled) return;
   const auto selected = inputs::Read(cmd_list->get_device());
   if (selected.device == nullptr) return;
@@ -178,6 +183,9 @@ inline void BeginCapture(reshade::api::command_list* cmd_list, bool lighting_ena
   if (material == nullptr || depth == nullptr) return;
   Microsoft::WRL::ComPtr<ID3D11Resource> depth_resource;
   depth->GetResource(&depth_resource);
+  // 2. Reuse a full-size capture tied to this native specular allocation.
+  // Capture RGB is linear pre-exposed environment light; alpha marks validity.
+  // The paired RG16F image will hold resolved visibility and confidence.
   auto target = Read(selected.device, specular.Get());
   if (target == nullptr) {
     auto created = std::make_shared<Target>();
@@ -233,6 +241,9 @@ inline void BeginCapture(reshade::api::command_list* cmd_list, bool lighting_ena
   if (target->generation != selected.generation || target->depth.Get() != depth_resource.Get()
       || target->material.Get() != material.Get()) return;
 
+  // 3. Add environment RGB at target 2 while replacing its validity alpha.
+  // Targets 0/1 retain their native blend. EndCapture restores every displaced
+  // render target, depth view, blend state, and pixel shader after this draw.
   if (capture_blend == nullptr) {
     if (blend_description.IndependentBlendEnable == FALSE) {
       for (auto& blend : blend_description.RenderTarget) {
@@ -327,6 +338,8 @@ inline reshade::api::pipeline GetShadowedCapturePipeline(reshade::api::command_l
 }
 
 inline void BeginComposite(reshade::api::command_list* cmd_list) {
+  // 4. Match deferred composition's native specular/depth inputs, then bind
+  // only their capture and visibility pair. EndComposite restores t16/t17.
   auto* saved = cmd_list->get_private_data<DrawState>();
   if (saved == nullptr || saved->composite_active) return;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
@@ -384,6 +397,8 @@ inline bool OnClearRenderTarget(reshade::api::command_list* cmd_list, reshade::a
   view->GetResource(&resource);
   const auto target = Read(cmd_list->get_device(), resource.Get());
   if (target != nullptr) {
+    // Invalidate color and visibility beside the native clear in GPU order.
+    // An old capture must not survive a new lighting accumulation or replay.
     const std::array<float, 4> empty = {};
     auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
     context->ClearRenderTargetView(target->rtv.Get(), empty.data());

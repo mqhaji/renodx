@@ -332,6 +332,7 @@ void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool resize) {
   mgsv::inputs::OnDestroySwapchain(swapchain, resize);
   mgsv::lighting::environment_specular::Reset();
   mgsv::lighting::ambient_diffuse::Reset();
+  mgsv::lighting::ResetNativeLightViews(swapchain->get_device());
   mgsv::reconstruction::coordinator::ResetTemporalState("input swapchain retired");
   mgsv::reconstruction::post_process::Reset();
   // Cancel reconstruction but retain every original game prefix/post list for its existing replay path.
@@ -386,6 +387,7 @@ void OnPresent(
       if (!lighting_enabled) {
         mgsv::lighting::environment_specular::Reset();
         mgsv::lighting::ambient_diffuse::Reset();
+        mgsv::lighting::ResetNativeLightViews(queue->get_device());
       }
       mgsv::lighting::temporal_inputs::enabled.store(temporal_lighting_enabled, std::memory_order_release);
       mgsv::lighting::temporal_inputs::BeginFrame(queue->get_device());

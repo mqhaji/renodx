@@ -18,13 +18,14 @@
 
 #include "../../../utils/data.hpp"
 #include "../inputs.hpp"
-#include "../reconstruction/coordinator.hpp"
+#include "temporal_inputs.hpp"
 
 namespace mgsv::lighting::ambient_diffuse {
 
 inline constexpr GUID SKY_SOURCE_GUID = {.Data1 = 0xa1465c18, .Data2 = 0x1276, .Data3 = 0x4697, .Data4 = {0x8a, 0xd0, 0x9c, 0x21, 0x35, 0xf7, 0xd8, 0x43}};
-inline constexpr GUID DIFFUSE_SOURCE_GUID = {.Data1 = 0xa1465c19, .Data2 = 0x1276, .Data3 = 0x4697, .Data4 = {0x8a, 0xd0, 0x9c, 0x21, 0x35, 0xf7, 0xd8, 0x43}};
 
+// Snapshot the small inputs to native ambient upsampling, not a new full-size
+// ambient image. The application shader reproduces that upsampling later.
 struct Target {
   uint64_t generation = 0u;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> image;
@@ -78,6 +79,8 @@ inline void OnSkyDrawn(reshade::api::command_list* cmd_list) {
 }
 
 inline void Capture(reshade::api::command_list* cmd_list) {
+  // 1. Recognize the native ambient producer from its tagged half-size input.
+  // t0 is ambient, t2 is full-size depth, and t3 is the 4x4 phase-weight table.
   const auto selected = inputs::ReadSelection(cmd_list->get_device());
   if (selected.device == nullptr) return;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
@@ -116,6 +119,9 @@ inline void Capture(reshade::api::command_list* cmd_list) {
   output_texture->GetDesc(&output_desc);
   depth_texture->GetDesc(&depth_desc);
   weight_texture->GetDesc(&weight_desc);
+  // 2. Qualify the exact reconstruction convention: texture layouts, full-size
+  // viewport, point-wrap sampler s8, and matching vertex/pixel b5 ranges. A
+  // different upsampler must not be mistaken for the ambient contribution.
   D3D11_SHADER_RESOURCE_VIEW_DESC source_view = {};
   D3D11_SHADER_RESOURCE_VIEW_DESC weight_view = {};
   inputs[0]->GetDesc(&source_view);
@@ -168,6 +174,8 @@ inline void Capture(reshade::api::command_list* cmd_list) {
     count = constant_desc.ByteWidth / 16u;
   }
   if (count < 13u || (static_cast<uint64_t>(first) * 16u) + 208u > constant_desc.ByteWidth) return;
+  // 3. Reuse snapshots while their allocation properties and binding ranges
+  // agree. The native diffuse destination identifies which scene owns them.
   auto target = Read(cmd_list->get_device(), destination.Get());
   // Allocation properties are immutable; cache them instead of querying our
   // own snapshot resources on every native ambient draw.
@@ -216,7 +224,8 @@ inline void Capture(reshade::api::command_list* cmd_list) {
     target = std::move(created);
     targets.insert_or_assign(destination.Get(), target);
   }
-  // Copy pixels and mutable constants in the native producer's GPU stream.
+  // 4. Record copies beside the producer. These commands preserve pixels and
+  // mutable constants in GPU order, including when the native list is replayed.
   context->CopyResource(target->image.Get(), source.Get());
   context->CopyResource(target->weights.Get(), weights.Get());
   context->CopyResource(target->constants.Get(), pixel_constants.Get());
@@ -227,7 +236,8 @@ inline void Capture(reshade::api::command_list* cmd_list) {
 }
 
 inline void OnDiffuseCopied(reshade::api::command_list* cmd_list) {
-  if (inputs::ReadSelection(cmd_list->get_device()).device == nullptr) return;
+  const auto selected = inputs::ReadSelection(cmd_list->get_device());
+  if (selected.device == nullptr) return;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> input;
   Microsoft::WRL::ComPtr<ID3D11RenderTargetView> output;
@@ -238,17 +248,21 @@ inline void OnDiffuseCopied(reshade::api::command_list* cmd_list) {
   if (input == nullptr || output == nullptr) return;
   input->GetResource(&source);
   output->GetResource(&destination);
-  // Publish the actual copy edge in submission order. Different recording
-  // contexts can otherwise overwrite this association ahead of its consumer.
-  if (!reconstruction::coordinator::ScheduleLighting(cmd_list, [source, destination](auto*, bool) {
-        destination->SetPrivateDataInterface(DIFFUSE_SOURCE_GUID, source.Get());
-      })) {
-    destination->SetPrivateDataInterface(DIFFUSE_SOURCE_GUID, nullptr);
-  }
+  // The existing submission ledger publishes this edge after its native copy
+  // and before the scatter insertion. Metadata needs no command-list split.
+  temporal_inputs::Record(cmd_list, {
+                                        .device = selected.device,
+                                        .generation = selected.generation,
+                                        .kind = temporal_inputs::ProducerKind::DIFFUSE_COPY,
+                                        .copy_source = std::move(source),
+                                        .copy_destination = std::move(destination),
+                                    });
 }
 
 inline bool OnClearRenderTarget(reshade::api::command_list* cmd_list, reshade::api::resource_view view,
                                 const float* /*color*/, uint32_t /*count*/, const reshade::api::rect* /*rects*/) {
+  // Clear validity beside the native diffuse clear. Until the ambient producer
+  // overwrites this snapshot, application must leave direct lighting untouched.
   if (view.handle == 0u || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return false;
   Microsoft::WRL::ComPtr<ID3D11Resource> resource;
   reinterpret_cast<ID3D11RenderTargetView*>(view.handle)->GetResource(&resource);  // NOLINT(performance-no-int-to-ptr)

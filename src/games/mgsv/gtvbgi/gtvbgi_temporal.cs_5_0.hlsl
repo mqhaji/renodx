@@ -3,27 +3,25 @@
 
 #include "../gbuffer.hlsli"
 #include "../shared.h"
+#include "indirect_diffuse.hlsli"
 #include "specular_occlusion.hlsli"
 
 // Reuse matching pixels from the previous frame before spatial filtering.
 // AO, GI, and specular visibility share motion and geometry checks, but each
 // keeps its own history, accepted weight, and missing-data rules.
 
-Texture2D<float4> raw_gi : register(t0);
+Texture2D<float4> raw_lighting : register(t0);
 Texture2D<float4> depth_buffer : register(t1);
 Texture2D<float4> normal_buffer : register(t2);
 Texture2D<float4> velocity_buffer : register(t3);
 Texture2D<float4> object_velocity_buffer : register(t4);
-Texture2D<float4> previous_gi : register(t5);
+Texture2D<float4> previous_lighting : register(t5);
 Texture2D<uint2> previous_geometry : register(t6);
-Texture2D<float2> raw_ao : register(t7);
-Texture2D<float2> previous_ao : register(t8);
 Texture2D<float4> raw_specular : register(t9);
 Texture2D<float4> previous_specular : register(t10);
-RWTexture2D<float4> gi_output : register(u0);
+RWTexture2D<float4> lighting_output : register(u0);
 RWTexture2D<uint2> geometry_output : register(u1);
 RWTexture2D<float4> diagnostic_output : register(u2);
-RWTexture2D<float2> ao_output : register(u3);
 RWTexture2D<float4> specular_output : register(u4);
 
 // GPU copies of the native 480-byte scene block. These are scene data, not
@@ -53,45 +51,102 @@ cbuffer PreviousSceneConstants : register(b2) {
   NativeScene previous_scene : packoffset(c0);
 }
 
-[numthreads(8, 8, 1)]
+static const uint GROUP_WIDTH = 8u;
+// One extra pixel on each side supplies every lane's 3x3 clamp neighborhood.
+static const uint TILE_WIDTH = GROUP_WIDTH + 2u;
+static const uint TILE_PIXELS = TILE_WIDTH * TILE_WIDTH;
 
-void main(uint3 thread_id : SV_DispatchThreadID) {
+// The clamp reads a 3x3 neighborhood. Share the 10x10 footprint of each 8x8
+// output group instead of loading and decoding it again for every receiver.
+// Keep FP32 values here so the cache adds no intermediate quantization.
+groupshared float4 lighting_tile[TILE_PIXELS];
+groupshared float4 specular_tile[TILE_PIXELS];
+groupshared float4 geometry_tile[TILE_PIXELS];
+
+[numthreads(GROUP_WIDTH, GROUP_WIDTH, 1)]
+void main(uint3 thread_id : SV_DispatchThreadID, uint3 group_id : SV_GroupID, uint lane : SV_GroupIndex) {
+  // 1. Cooperatively load the current neighborhoods only for active clamps.
+  // RGB and alpha share one fetch; specular also needs native geometry to keep
+  // different reflection directions and opposite surface sides out of its clamp.
   uint width, height;
-  raw_gi.GetDimensions(width, height);
+  raw_lighting.GetDimensions(width, height);
   const int2 pixel = int2(thread_id.xy);
-  if (any(pixel >= int2(width, height))) return;
-
   const float scale = max(CUSTOM_MGSV_GT_RESOLUTION_DIVISOR, 1.0);
   const float2 full_size = float2(buffer_width, buffer_height);
-  const int2 full_pixel = min(int2(floor((float2(pixel) + 0.5) * scale)), int2(full_size) - 1);
-  const float4 current_gi = raw_gi.Load(int3(pixel, 0));
-  const float2 current_ao = raw_ao.Load(int3(pixel, 0));
-  const float depth = depth_buffer.Load(int3(full_pixel, 0)).x;
-  const float z = LinearZ(depth);
-  const float3 normal = DecodeNormal(normal_buffer.Load(int3(full_pixel, 0)).xyz);
-  const bool geometry_valid = depth > 0.0 && z > 0.0 && z < 1.0e6 && all(isfinite(normal));
-  const bool gi_valid = geometry_valid && current_gi.a > 0.5 && all(isfinite(current_gi.rgb));
-  const bool ao_valid = geometry_valid && current_ao.g > 0.5 && isfinite(current_ao.r);
   const bool specular_active = CUSTOM_MGSV_SPECULAR_ACTIVE >= 0.5;
+  const bool cache_gi = CUSTOM_MGSV_GT_TEMPORAL_ENABLED >= 0.5
+                        && CUSTOM_MGSV_GI_TEMPORAL_ACTIVE >= 0.5 && CUSTOM_MGSV_GI_HISTORY_VALID >= 0.5
+                        && CUSTOM_MGSV_GI_HISTORY_WEIGHT > 0.0 && CUSTOM_MGSV_GI_HISTORY_CLAMP > 0.0;
+  const bool cache_ao = CUSTOM_MGSV_GT_TEMPORAL_ENABLED >= 0.5
+                        && CUSTOM_MGSV_AO_TEMPORAL_ACTIVE >= 0.5 && CUSTOM_MGSV_AO_HISTORY_VALID >= 0.5
+                        && CUSTOM_MGSV_OCCLUSION_HISTORY_WEIGHT > 0.0 && CUSTOM_MGSV_AO_HISTORY_CLAMP > 0.0;
+  const bool cache_specular = specular_active && CUSTOM_MGSV_GT_TEMPORAL_ENABLED >= 0.5
+                              && CUSTOM_MGSV_AO_TEMPORAL_ACTIVE >= 0.5 && CUSTOM_MGSV_SPECULAR_HISTORY_VALID >= 0.5
+                              && CUSTOM_MGSV_OCCLUSION_HISTORY_WEIGHT > 0.0 && CUSTOM_MGSV_SPECULAR_HISTORY_CLAMP > 0.0;
+  const int2 tile_origin = int2(group_id.xy * GROUP_WIDTH) - 1;
+  const uint center = (thread_id.y % GROUP_WIDTH + 1u) * TILE_WIDTH + thread_id.x % GROUP_WIDTH + 1u;
+  // These switches depend only on frame constants. Partial groups and invalid
+  // receivers still help load the tile and reach the barrier before returning.
+  if (cache_gi || cache_ao || cache_specular) {
+    for (uint index = lane; index < TILE_PIXELS; index += GROUP_WIDTH * GROUP_WIDTH) {
+      const int2 q = tile_origin + int2(index % TILE_WIDTH, index / TILE_WIDTH);
+      if (any(q < 0) || any(q >= int2(width, height))) continue;
+      if (cache_gi || cache_ao) lighting_tile[index] = raw_lighting.Load(int3(q, 0));
+      if (cache_specular) {
+        specular_tile[index] = raw_specular.Load(int3(q, 0));
+        const int2 sample_pixel = min(int2(floor((float2(q) + 0.5) * scale)), int2(full_size) - 1);
+        const float sample_depth = depth_buffer.Load(int3(sample_pixel, 0)).x;
+        const float sample_z = LinearZ(sample_depth);
+        const float3 sample_normal = DecodeNormal(normal_buffer.Load(int3(sample_pixel, 0)).xyz);
+        const bool valid = sample_depth > 0.0 && sample_z > 0.0 && sample_z < 1.0e6 && all(isfinite(sample_normal));
+        geometry_tile[index] = float4(sample_normal, valid ? sample_z : 0.0);
+      }
+    }
+    GroupMemoryBarrierWithGroupSync();
+  }
+  if (any(pixel >= int2(width, height))) return;
+
+  // 2. Establish current values before any history rejection. Early returns
+  // must still write valid current lighting, specular, and geometry outputs;
+  // they must never expose an old pixel from a reused ping-pong allocation.
+  const int2 full_pixel = min(int2(floor((float2(pixel) + 0.5) * scale)), int2(full_size) - 1);
+  const float4 current_lighting = (cache_gi || cache_ao) ? lighting_tile[center] : raw_lighting.Load(int3(pixel, 0));
+  float z;
+  float3 normal;
+  bool geometry_valid;
+  if (cache_specular) {
+    const float4 geometry = geometry_tile[center];
+    z = geometry.w;
+    normal = geometry.xyz;
+    geometry_valid = z > 0.0;
+  } else {
+    const float depth = depth_buffer.Load(int3(full_pixel, 0)).x;
+    z = LinearZ(depth);
+    normal = DecodeNormal(normal_buffer.Load(int3(full_pixel, 0)).xyz);
+    geometry_valid = depth > 0.0 && z > 0.0 && z < 1.0e6 && all(isfinite(normal));
+  }
+  const bool gi_valid = geometry_valid && HasDiffuseGI(current_lighting);
+  const bool ao_valid = geometry_valid && HasAmbientVisibility(current_lighting);
   float4 current_specular = float4(0.0, 0.0, 0.0, -1.0);
   if (specular_active) {
-    current_specular = raw_specular.Load(int3(pixel, 0));
+    current_specular = cache_specular ? specular_tile[center] : raw_specular.Load(int3(pixel, 0));
   }
   const bool specular_valid = specular_active && geometry_valid && IsSpecularSampleValid(current_specular);
   if (specular_active) {
     specular_output[pixel] = specular_valid ? current_specular : float4(0.0, 0.0, 0.0, -1.0);
   }
-  const float3 current_radiance = gi_valid ? min(current_gi.rgb, 65504.0) : 0.0;
-  const float current_visibility = ao_valid ? saturate(current_ao.r) : 1.0;
+  const float3 current_radiance = gi_valid ? min(current_lighting.rgb, 65504.0) : 0.0;
+  const float current_visibility = ao_valid ? saturate(current_lighting.a) : 1.0;
   const int diagnostic = (int)CUSTOM_MGSV_GT_DEBUG_VIEW;
-  gi_output[pixel] = float4(current_radiance, gi_valid ? 1.0 : 0.0);
-  ao_output[pixel] = float2(current_visibility, ao_valid ? 1.0 : 0.0);
-  geometry_output[pixel] = uint2(0u, 0u);
+  lighting_output[pixel] = PackIndirectDiffuse(current_radiance, gi_valid, current_visibility, ao_valid);
   if (diagnostic == 6) diagnostic_output[pixel] = float4(current_radiance, 1.0);
   if (diagnostic == 8 || diagnostic == 9) diagnostic_output[pixel] = float4(current_visibility.xxx, 1.0);
   if (diagnostic == 7 || diagnostic == 11) diagnostic_output[pixel] = float4(0.0, 0.0, 0.0, 1.0);
   if (diagnostic == 17) diagnostic_output[pixel] = float4(0.0, 0.0, 0.0, 1.0);
-  if (!geometry_valid) return;
+  if (!geometry_valid) {
+    geometry_output[pixel] = uint2(0u, 0u);
+    return;
+  }
 
   // Store this surface even when one lighting result is missing. Each signal
   // carries its own validity, so missing GI cannot invalidate AO or specular.
@@ -102,6 +157,9 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
   const uint2 packed_normal = uint2(round(saturate(oct.xy * 0.5 + 0.5) * 65535.0));
   geometry_output[pixel] = uint2(asuint(z), packed_normal.x | (packed_normal.y << 16u));
 
+  // 3. Use the host's submitted-history decision, then validate exposure and
+  // projection locally. Exposure converts GI RGB into current units; AO and
+  // specular visibility are dimensionless and receive no exposure conversion.
   bool accumulate_gi = gi_valid && CUSTOM_MGSV_GT_TEMPORAL_ENABLED >= 0.5
                        && CUSTOM_MGSV_GI_TEMPORAL_ACTIVE >= 0.5 && CUSTOM_MGSV_GI_HISTORY_VALID >= 0.5
                        && CUSTOM_MGSV_GI_HISTORY_WEIGHT > 0.0;
@@ -178,6 +236,9 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
   if (any(abs(current_lengths - 1.0) > 1.0e-3) || any(abs(previous_lengths - 1.0) > 1.0e-3)
       || any(abs(current_angles) > 1.0e-3) || any(abs(previous_angles) > 1.0e-3)) return;
 
+  // 4. Move the receiver through world space into the previous camera. Jitter
+  // is stored in normalized screen units and converted to render pixels here.
+  // Native object velocity overrides only the projected screen displacement.
   const float2 current_jitter = float2(CUSTOM_MGSV_GT_CURRENT_JITTER_X, CUSTOM_MGSV_GT_CURRENT_JITTER_Y);
   const float2 previous_jitter = float2(CUSTOM_MGSV_GT_PREVIOUS_JITTER_X, CUSTOM_MGSV_GT_PREVIOUS_JITTER_Y);
   const float3 view_position = ViewPos(float2(full_pixel) - current_jitter * full_size, z);
@@ -243,6 +304,9 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
     current_lobe = GetSpecularLobeParameters(current_specular.z);
     current_side = GetSpecularSurfaceSide(normal, view);
   }
+  // 5. Validate four bilinear history taps individually before interpolation.
+  // Shared depth/normal reads feed separate GI, AO, and specular acceptance;
+  // a rejected or missing signal cannot enter another signal's weight sum.
   [unroll]
   for (int i = 0; i < 4; ++i) {
     const int2 offset = int2(i & 1, i >> 1);
@@ -268,11 +332,17 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
                                            / 0.4);
     const float depth_difference = abs(history_z - previous_position.z);
     const float reference_depth = max(previous_position.z, 1.0e-4);
-    if (accumulate_gi && normal_weights.x > 0.0
-        && depth_difference <= CUSTOM_MGSV_GI_DEPTH_REJECTION * reference_depth) {
-      const float4 history = previous_gi.Load(int3(q, 0));
-      if (history.a > 0.5 && all(isfinite(history.rgb))) {
-        const float3 exposed_history = history.rgb * exposure_ratio;
+    const bool gi_geometry_matches = accumulate_gi && normal_weights.x > 0.0
+                                     && depth_difference <= CUSTOM_MGSV_GI_DEPTH_REJECTION * reference_depth;
+    const bool ao_geometry_matches = accumulate_ao && normal_weights.y > 0.0
+                                     && depth_difference <= CUSTOM_MGSV_OCCLUSION_DEPTH_REJECTION * reference_depth;
+    float4 history_lighting = float4(-1.0, 0.0, 0.0, -1.0);
+    if (gi_geometry_matches || ao_geometry_matches) {
+      history_lighting = previous_lighting.Load(int3(q, 0));
+    }
+    if (gi_geometry_matches) {
+      if (HasDiffuseGI(history_lighting)) {
+        const float3 exposed_history = history_lighting.rgb * exposure_ratio;
         if (all(isfinite(exposed_history))) {
           const float weight = bilinear * normal_weights.x;
           gi_history_sum += exposed_history * weight;
@@ -280,12 +350,10 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
         }
       }
     }
-    if (accumulate_ao && normal_weights.y > 0.0
-        && depth_difference <= CUSTOM_MGSV_OCCLUSION_DEPTH_REJECTION * reference_depth) {
-      const float2 history = previous_ao.Load(int3(q, 0));
-      if (history.g > 0.5 && isfinite(history.r)) {
+    if (ao_geometry_matches) {
+      if (HasAmbientVisibility(history_lighting)) {
         const float weight = bilinear * normal_weights.y;
-        ao_history_sum += history.r * weight;
+        ao_history_sum += history_lighting.a * weight;
         ao_accepted_weight += weight;
       }
     }
@@ -329,6 +397,9 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
     specular_history = specular_history_sum / specular_accepted_weight;
   }
 
+  // 6. Limit accepted history to the current 3x3 neighborhood's statistics.
+  // This reduces stale brightness and visibility after lighting changes.
+  // Welford's mean/variance updates avoid subtracting large HDR squares.
   const bool clamp_gi = gi_history_valid && CUSTOM_MGSV_GI_HISTORY_CLAMP > 0.0;
   const bool clamp_ao = ao_history_valid && CUSTOM_MGSV_AO_HISTORY_CLAMP > 0.0;
   const bool clamp_specular = specular_history_valid && CUSTOM_MGSV_SPECULAR_HISTORY_CLAMP > 0.0;
@@ -350,11 +421,12 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
       for (int x = -1; x <= 1; ++x) {
         const int2 q = pixel + int2(x, y);
         if (any(q < 0) || any(q > last)) continue;
+        const uint sample_index = uint(int(center) + y * int(TILE_WIDTH) + x);
         // Welford updates keep FP32 HDR statistics stable. Validity and
         // sample counts remain separate; invalid GI cannot poison AO.
         if (clamp_gi) {
-          const float4 sample_value = raw_gi.Load(int3(q, 0));
-          if (sample_value.a > 0.5 && all(isfinite(sample_value.rgb))) {
+          const float4 sample_value = lighting_tile[sample_index];
+          if (HasDiffuseGI(sample_value)) {
             gi_count += 1.0;
             const float3 difference = sample_value.rgb - gi_mean;
             gi_mean += difference / gi_count;
@@ -362,22 +434,22 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
           }
         }
         if (clamp_ao) {
-          const float2 sample_value = raw_ao.Load(int3(q, 0));
-          if (sample_value.g > 0.5 && isfinite(sample_value.r)) {
+          const float4 sample_value = lighting_tile[sample_index];
+          if (HasAmbientVisibility(sample_value)) {
             ao_count += 1.0;
-            const float difference = sample_value.r - ao_mean;
+            const float difference = sample_value.a - ao_mean;
             ao_mean += difference / ao_count;
-            ao_squared_difference += difference * (sample_value.r - ao_mean);
+            ao_squared_difference += difference * (sample_value.a - ao_mean);
           }
         }
         if (clamp_specular) {
-          const float4 sample_value = raw_specular.Load(int3(q, 0));
+          const float4 sample_value = specular_tile[sample_index];
           if (IsSpecularSampleValid(sample_value) && sample_value.y > 1e-7) {
             const int2 sample_pixel = min(int2(floor((float2(q) + 0.5) * scale)), int2(full_size) - 1);
-            const float sample_depth = depth_buffer.Load(int3(sample_pixel, 0)).x;
-            const float sample_z = LinearZ(sample_depth);
-            const float3 sample_normal = DecodeNormal(normal_buffer.Load(int3(sample_pixel, 0)).xyz);
-            if (sample_depth > 0.0 && sample_z > 0.0 && sample_z < 1e6 && all(isfinite(sample_normal))) {
+            const float4 geometry = geometry_tile[sample_index];
+            const float sample_z = geometry.w;
+            const float3 sample_normal = geometry.xyz;
+            if (sample_z > 0.0) {
               const float3 sample_position = ViewPos(float2(sample_pixel), sample_z);
               const float plane = dot(normal, sample_position - receiver_position) / specular_plane_scale;
               const float3 view = normalize(-ViewPos(float2(sample_pixel) + 0.5, sample_z));
@@ -427,11 +499,15 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
     }
   }
 
+  // 7. Blend with the user weight multiplied by actual accepted coverage.
+  // Keep current validity, roughness, and support. The host saves these outputs
+  // as history before any spatial pass, so blur does not accumulate over time.
+  float4 lighting_result = PackIndirectDiffuse(current_radiance, gi_valid, current_visibility, ao_valid);
   if (gi_history_valid) {
     const float blend = saturate(CUSTOM_MGSV_GI_HISTORY_WEIGHT) * saturate(gi_accepted_weight);
     const float3 result = lerp(current_radiance, gi_history, blend);
     if (all(isfinite(result))) {
-      gi_output[pixel] = float4(min(result, 65504.0), 1.0);
+      lighting_result.rgb = min(result, 65504.0);
       if (diagnostic == 6) diagnostic_output[pixel] = float4(result, 1.0);
       if (diagnostic == 7) diagnostic_output[pixel] = float4(saturate(gi_accepted_weight).xxx, 1.0);
     }
@@ -440,10 +516,13 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
     const float blend = saturate(CUSTOM_MGSV_OCCLUSION_HISTORY_WEIGHT) * saturate(ao_accepted_weight);
     const float result = saturate(lerp(current_visibility, ao_history, blend));
     if (isfinite(result)) {
-      ao_output[pixel] = float2(result, 1.0);
+      lighting_result.a = result;
       if (diagnostic == 9) diagnostic_output[pixel] = float4(result.xxx, 1.0);
       if (diagnostic == 11) diagnostic_output[pixel] = float4(saturate(ao_accepted_weight).xxx, 1.0);
     }
+  }
+  if (gi_history_valid || ao_history_valid) {
+    lighting_output[pixel] = lighting_result;
   }
   if (specular_history_valid) {
     const float blend = saturate(CUSTOM_MGSV_OCCLUSION_HISTORY_WEIGHT) * saturate(specular_accepted_weight);

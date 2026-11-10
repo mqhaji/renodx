@@ -36,7 +36,9 @@
 #include "environment_specular.hpp"
 #include "temporal_inputs.hpp"
 
-// Shared lighting resources and dispatch support.
+// The scatter hook at the end of this file validates native inputs and schedules
+// one submitted lighting chain. ao::Apply records its trace, temporal, spatial,
+// and application stages. The shared types here own the resources they reuse.
 namespace mgsv::lighting {
 
 template <typename... Args>
@@ -88,6 +90,40 @@ inline std::atomic<uint32_t> noise_frame = 0u;
 inline bool noise_creation_failed = false;
 inline std::shared_mutex noise_mutex;
 inline reshade::api::device* noise_device = nullptr;
+
+inline constexpr size_t NATIVE_LIGHT_VIEW_CACHE_SIZE = 4u;
+
+struct NativeLightView {
+  // Identity only; the UAV below owns a reference to this texture.
+  ID3D11Resource* resource = nullptr;
+  Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> view;
+};
+
+// Two native images are used per invocation. A small bounded cache also covers
+// alternating scene targets without retaining every texture seen by the addon.
+struct NativeLightViews {
+  std::shared_mutex mutex;
+  std::array<NativeLightView, NATIVE_LIGHT_VIEW_CACHE_SIZE> entries;
+  reshade::api::device* device = nullptr;
+  uint64_t generation = 0u;
+  size_t next_entry = 0u;
+};
+
+inline NativeLightViews native_light_views;
+
+inline void ResetNativeLightViews(reshade::api::device* device) {
+  std::array<NativeLightView, NATIVE_LIGHT_VIEW_CACHE_SIZE> retired;
+  {
+    const std::unique_lock lock(native_light_views.mutex);
+    if (native_light_views.device != device) return;
+    retired.swap(native_light_views.entries);
+    native_light_views.device = nullptr;
+    native_light_views.generation = 0u;
+    native_light_views.next_entry = 0u;
+  }
+  // A view retains its native texture. Release outside the lock so resource
+  // destruction callbacks cannot reenter a locked cache.
+}
 
 // Soft shadows and GT-VBGI share the same immutable texture and frame phase.
 // Return an owned view so device retirement cannot invalidate a borrowed handle.
@@ -255,6 +291,7 @@ inline void DestroyLightPass(reshade::api::device* device, LightPass* pass) {
 }
 
 inline void DestroyLightPassLayout(reshade::api::device* device) {
+  ResetNativeLightViews(device);
   const std::unique_lock lock(noise_mutex);
   if (noise_device != nullptr && noise_device != device) return;
   noise_device = nullptr;
@@ -419,7 +456,8 @@ inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* p
 
 }  // namespace mgsv::lighting
 
-// Ambient occlusion resources, passes, and settings.
+// Optional shared depth reductions and the specular visibility targets.
+// AO itself travels in the alpha channel of il's diffuse-lighting targets.
 namespace mgsv::ao {
 
 using lighting::DestroyLightPass;
@@ -433,18 +471,15 @@ using lighting::LightTarget;
 using lighting::LogLight;
 using lighting::LogLightOnce;
 
-inline LightTarget visibility_target;
 inline LightTarget specular_visibility_target;
 inline std::array<LightTarget, 2> specular_temporal_targets;
 inline std::array<LightTarget, 2> specular_filter_targets;
-inline std::array<LightTarget, 2> temporal_targets;
-inline std::array<LightTarget, 2> filter_targets;
 inline uint32_t temporal_status = UINT32_MAX;
 inline uint32_t temporal_status_reports = 0u;
 
-// The AO march's depth mip chain. Every level holds the nearest of the four texels
-// below it, so a distant step can fetch one texel that covers the footprint its
-// spacing would otherwise skip over.
+// Reverse-Z reductions keep the nearest depth in each footprint. Distant trace
+// steps can then detect thin geometry between their samples. Odd edge pixels
+// join the last footprint; the trace finds its full-resolution color owner.
 constexpr uint32_t DEPTH_MIP_LEVELS = 4;
 
 struct DepthMipChain {
@@ -461,7 +496,7 @@ struct DepthMipChain {
 
 inline DepthMipChain depth_mip_chain;
 
-inline void DestroyDepthMipChain(reshade::api::device* device) {
+inline void DestroyDepthMipTargets(reshade::api::device* device) {
   depth_mip_chain.ready = false;
   for (auto& view : depth_mip_chain.level_views) {
     if (view.handle != 0) {
@@ -483,14 +518,6 @@ inline void DestroyDepthMipChain(reshade::api::device* device) {
     device->destroy_resource(depth_mip_chain.resource);
     depth_mip_chain.resource = {0};
   }
-  if (depth_mip_chain.pipeline.handle != 0) {
-    device->destroy_pipeline(depth_mip_chain.pipeline);
-    depth_mip_chain.pipeline = {0};
-  }
-  if (depth_mip_chain.layout.handle != 0) {
-    device->destroy_pipeline_layout(depth_mip_chain.layout);
-    depth_mip_chain.layout = {0};
-  }
   depth_mip_chain.width = 0;
   depth_mip_chain.height = 0;
 }
@@ -501,7 +528,9 @@ inline bool EnsureDepthMipChain(reshade::api::device* device, uint32_t width, ui
       && depth_mip_chain.height == height) {
     return true;
   }
-  DestroyDepthMipChain(device);
+  // Texture dimensions do not affect the shader or layout. Keep both alive
+  // across scene resizes and rebuild only the images and views here.
+  DestroyDepthMipTargets(device);
 
   const reshade::api::resource_desc desc(
       std::max(width / 2u, 1u), std::max(height / 2u, 1u), 1u, DEPTH_MIP_LEVELS,
@@ -560,8 +589,7 @@ inline bool EnsureDepthMipChain(reshade::api::device* device, uint32_t width, ui
   params[1].push_descriptors.type = reshade::api::descriptor_type::unordered_access_view;
   params[1].push_descriptors.dx_register_index = 0u;
   params[1].push_descriptors.dx_register_space = 0u;
-  if (!device->create_pipeline_layout(
-          static_cast<uint32_t>(params.size()), params.data(), &depth_mip_chain.layout)) {
+  if (depth_mip_chain.layout.handle == 0 && !device->create_pipeline_layout(static_cast<uint32_t>(params.size()), params.data(), &depth_mip_chain.layout)) {
     static std::atomic_flag reported = {};
     LogLightOnce(&reported, reshade::log::level::error, "AO depth mip pipeline layout creation failed");
     return false;
@@ -576,7 +604,7 @@ inline bool EnsureDepthMipChain(reshade::api::device* device, uint32_t width, ui
       .count = 1,
       .data = &shader_description,
   };
-  if (!device->create_pipeline(depth_mip_chain.layout, 1, &subobject, &depth_mip_chain.pipeline)) {
+  if (depth_mip_chain.pipeline.handle == 0 && !device->create_pipeline(depth_mip_chain.layout, 1, &subobject, &depth_mip_chain.pipeline)) {
     static std::atomic_flag reported = {};
     LogLightOnce(&reported, reshade::log::level::error, "AO depth mip pipeline creation failed");
     return false;
@@ -608,6 +636,8 @@ inline bool BuildDepthMips(reshade::api::command_list* cmd_list, reshade::api::r
   if (!EnsureDepthMipChain(device, width, height)) return false;
 
   cmd_list->bind_pipeline(reshade::api::pipeline_stage::all_compute, depth_mip_chain.pipeline);
+  // Each level reads only the preceding level. Bind the new output first to
+  // release the previous UAV before exposing that same mip as an input.
   for (uint32_t level = 0; level < DEPTH_MIP_LEVELS; ++level) {
     const reshade::api::resource_view source =
         level == 0 ? depth_view : depth_mip_chain.level_source_views[level - 1];
@@ -644,19 +674,20 @@ inline bool BuildDepthMips(reshade::api::command_list* cmd_list, reshade::api::r
 }
 
 inline void Destroy(reshade::api::device* device) {
-  DestroyDepthMipChain(device);
-  DestroyLightTarget(device, &visibility_target);
+  DestroyDepthMipTargets(device);
+  if (depth_mip_chain.pipeline.handle != 0) {
+    device->destroy_pipeline(depth_mip_chain.pipeline);
+    depth_mip_chain.pipeline = {0};
+  }
+  if (depth_mip_chain.layout.handle != 0) {
+    device->destroy_pipeline_layout(depth_mip_chain.layout);
+    depth_mip_chain.layout = {0};
+  }
   DestroyLightTarget(device, &specular_visibility_target);
   for (auto& target : specular_temporal_targets) {
     DestroyLightTarget(device, &target);
   }
   for (auto& target : specular_filter_targets) {
-    DestroyLightTarget(device, &target);
-  }
-  for (auto& target : temporal_targets) {
-    DestroyLightTarget(device, &target);
-  }
-  for (auto& target : filter_targets) {
     DestroyLightTarget(device, &target);
   }
   temporal_status = UINT32_MAX;
@@ -683,14 +714,17 @@ inline LightPass add_pass;
 inline LightPass temporal_pass;
 inline LightPass filter_pass;
 
-inline LightTarget bounce_target;
+// RGB is diffuse GI; alpha is ambient visibility. Each keeps its own validity.
+inline LightTarget indirect_diffuse_target;
 inline LightTarget diagnostic_target;
 inline std::array<LightTarget, 2> temporal_targets;
 inline std::array<LightTarget, 2> geometry_targets;
 inline std::array<LightTarget, 2> filter_targets;
 inline std::array<lighting::temporal_inputs::Scene, 2> history_scenes;
 
-// Updated only by the serialized immediate submission callback.
+// Updated only by the serialized immediate submission callback. These signatures
+// invalidate each signal independently when its trace settings change. The slot
+// identifies temporal output before spatial blur, never a filtered image.
 struct History {
   std::array<float, 11> parameters = {};
   std::array<float, 11> ao_parameters = {};
@@ -716,7 +750,7 @@ inline void Destroy(reshade::api::device* device) {
   DestroyLightPass(device, &add_pass);
   DestroyLightPass(device, &temporal_pass);
   DestroyLightPass(device, &filter_pass);
-  DestroyLightTarget(device, &bounce_target);
+  DestroyLightTarget(device, &indirect_diffuse_target);
   DestroyLightTarget(device, &diagnostic_target);
   for (auto& target : temporal_targets) {
     DestroyLightTarget(device, &target);
@@ -1077,6 +1111,9 @@ namespace mgsv::ao {
 inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list* cmd_list,
                   ShaderInjectData constants, const lighting::temporal_inputs::Snapshot& temporal,
                   bool history_allowed) {
+  // 1. Translate UI units to this scene. Search radius is in output pixels;
+  // trace/filter dimensions divide each render axis and round up at odd sizes.
+  // All overrides stay in this invocation's settings copy.
   auto* device = cmd_list->get_device();
   const auto plan = reconstruction::resolution::Read();
   if (plan.IsScaled() && plan.render == reconstruction::resolution::Size{.width = frame.width, .height = frame.height}) {
@@ -1116,10 +1153,9 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   if (noise == nullptr) return;
   const uint32_t width = (frame.width + scale - 1u) / scale;
   const uint32_t height = (frame.height + scale - 1u) / scale;
-  const bool size_changed = visibility_target.width != width || visibility_target.height != height;
+  const bool size_changed = il::indirect_diffuse_target.width != width || il::indirect_diffuse_target.height != height;
 
-  if (!EnsureLightTarget(device, &visibility_target, width, height, reshade::api::format::r16g16_float)
-      || !EnsureLightTarget(device, &il::bounce_target, width, height)
+  if (!EnsureLightTarget(device, &il::indirect_diffuse_target, width, height)
       || !EnsureLightPass(device, &il::gather_pass, "mgsv: GT-VBGI trace created", __gtvbgi)
       || !EnsureLightPass(device, &il::add_pass, "mgsv: GT-VBGI application created", __gtvbgi_add)
       || !EnsureFallbackViews(device)) {
@@ -1145,6 +1181,9 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
                  "Lighting debug texture unavailable; normal lighting remains enabled");
   }
 
+  // 2. Match the environment capture to this specular/depth pair. Its material
+  // input supplies roughness. Missing specular data disables only that signal;
+  // the diffuse trace can still run with the already qualified native inputs.
   Microsoft::WRL::ComPtr<ID3D11Resource> specular_resource;
   Microsoft::WRL::ComPtr<ID3D11Resource> depth_resource;
   reinterpret_cast<ID3D11ShaderResourceView*>(frame.specular.handle)->GetResource(&specular_resource);  // NOLINT(performance-no-int-to-ptr)
@@ -1186,6 +1225,10 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   const auto fallback_outputs = lighting::fallback_uavs;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   const bool immediate = context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE;
+  // 3. Qualify history before reading it. A matching size alone is insufficient:
+  // require the same camera, viewport, depth allocation, and device generation.
+  // AO strength belongs in its signature because the trace applies it; GI and
+  // specular strengths are applied later and do not change their stored samples.
   const std::array<float, 11> parameters = {
       constants.gt_search_radius_pixels,
       constants.gt_surface_thickness,
@@ -1239,12 +1282,13 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   if (immediate && (geometry_changed || il::history.specular_parameters != specular_parameters || constants.gt_specular_active < 0.5f)) {
     il::history.specular_valid = false;
   }
+  // Alternate two history slots so no dispatch reads its own output. Camera
+  // copies follow those slots and preserve the native constant-buffer range.
   const uint32_t write_slot = 1u - il::history.slot;
   // An unsplit deferred fallback must never write submitted history textures.
   bool temporal_ready = immediate && EnsureLightPass(device, &il::temporal_pass, "mgsv: combined AO/GI temporal pass created", __gtvbgi_temporal);
   for (uint32_t index = 0u; index < 2u && temporal_ready; ++index) {
     temporal_ready = EnsureLightTarget(device, &il::temporal_targets[index], width, height)
-                     && EnsureLightTarget(device, &ao::temporal_targets[index], width, height, reshade::api::format::r16g16_float)
                      && EnsureLightTarget(device, &il::geometry_targets[index], width, height,
                                           reshade::api::format::r32g32_uint);
   }
@@ -1288,6 +1332,8 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
                  "Lighting temporal unavailable; immediate=", immediate,
                  " ready=", temporal_ready, "; using current samples");
   }
+  // Present supplies only the phase-gap check. A new qualified producer
+  // submission is also required, so repeated hooks cannot advance history.
   constants.gi_history_valid = (constants.gi_temporal_active >= 0.5f && il::history.valid
                                         && present - il::history.frame == 1u
                                         && il::history_scenes[il::history.slot].buffer != nullptr
@@ -1344,8 +1390,7 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   }
   bool filter_ready = EnsureLightPass(device, &il::filter_pass, "mgsv: combined AO/GI spatial filter created", __gtvbgi_filter);
   for (uint32_t index = 0u; index < 2u && filter_ready; ++index) {
-    filter_ready = EnsureLightTarget(device, &il::filter_targets[index], width, height)
-                   && EnsureLightTarget(device, &ao::filter_targets[index], width, height, reshade::api::format::r16g16_float);
+    filter_ready = EnsureLightTarget(device, &il::filter_targets[index], width, height);
   }
   bool specular_filter_ready = filter_ready && constants.gt_specular_active >= 0.5f;
   for (uint32_t index = 0u; index < 2u && specular_filter_ready; ++index) {
@@ -1359,6 +1404,9 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
     static std::atomic_flag failed = {};
     LogLightOnce(&failed, reshade::log::level::warning, "Lighting spatial setup failed; using unfiltered AO and GI");
   }
+  // 4. Trace geometry once for AO, GI, and specular visibility. Diffuse RGB and
+  // AO alpha share u1. Unused slots keep distinct placeholders in the common
+  // layout; they must never alias the real inputs or writable destinations.
   const std::array<reshade::api::resource_view, 12> sources = {
       frame.depth,
       frame.normal,
@@ -1373,7 +1421,7 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
       fallback_input,
   };
   DispatchLightPass(cmd_list, &il::gather_pass, constants, sources,
-                    visibility_target.uav, il::bounce_target.uav,
+                    fallback_outputs[0], il::indirect_diffuse_target.uav,
                     diagnostic_ready ? il::diagnostic_target.uav : fallback_outputs[1],
                     constants.gt_specular_active >= 0.5f ? specular_visibility_target.uav : fallback_outputs[2],
                     fallback_outputs[3], width, height);
@@ -1383,10 +1431,12 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
                  "; shared temporal and spatial passes, native fallback; inspect Accepted Specular History for per-pixel acceptance");
   }
 
-  auto ao_source = visibility_target.view;
-  auto gi_source = il::bounce_target.view;
+  auto lighting_source = il::indirect_diffuse_target.view;
   auto specular_source = (constants.gt_specular_active >= 0.5f ? specular_visibility_target.view : fallback_input);
   auto specular_temporal_source = specular_source;
+  // 5. Accumulate all signals in one dispatch. The shader copies current values
+  // when history is cold or disabled. Save this result before spatial filtering
+  // so blur cannot grow by feeding the filtered image back every frame.
   if (temporal_ready) {
     const std::array<ID3D11Buffer*, 2> scenes = {
         temporal.scene.buffer.Get(),
@@ -1407,7 +1457,7 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
       context->CSSetConstantBuffers(1u, 2u, scenes.data());
     }
     const std::array<reshade::api::resource_view, 12> temporal_sources = {
-        gi_source,
+        lighting_source,
         frame.depth,
         frame.normal,
         temporal.motion.velocity != nullptr
@@ -1418,8 +1468,8 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
             : fallback_input,
         il::temporal_targets[il::history.slot].view,
         il::geometry_targets[il::history.slot].view,
-        ao_source,
-        ao::temporal_targets[il::history.slot].view,
+        fallback_input,
+        fallback_input,
         specular_source,
         specular_temporal_ready ? specular_temporal_targets[il::history.slot].view : fallback_input,
     };
@@ -1430,11 +1480,10 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
     DispatchLightPass(cmd_list, &il::temporal_pass, temporal_constants, temporal_sources,
                       il::temporal_targets[write_slot].uav, il::geometry_targets[write_slot].uav,
                       diagnostic_ready ? il::diagnostic_target.uav : fallback_outputs[1],
-                      ao::temporal_targets[write_slot].uav,
+                      fallback_outputs[2],
                       specular_temporal_ready ? specular_temporal_targets[write_slot].uav : fallback_outputs[3],
                       width, height);
-    gi_source = il::temporal_targets[write_slot].view;
-    ao_source = ao::temporal_targets[write_slot].view;
+    lighting_source = il::temporal_targets[write_slot].view;
     if (specular_temporal_ready) {
       specular_source = specular_temporal_targets[write_slot].view;
       specular_temporal_source = specular_source;
@@ -1466,6 +1515,9 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
       };
     }
   }
+  // 6. Ping-pong shared spatial outputs. Spacing grows 1, 2, 4, ... lighting
+  // pixels up to the radius limit. Off follows the same path with shader copies;
+  // allocation failure leaves the most recent available result as the source.
   if (filter_ready) {
     const uint32_t iterations = (std::isfinite(constants.gt_filter_passes)
                                      ? static_cast<uint32_t>(std::clamp(constants.gt_filter_passes, 1.f, 4.f))
@@ -1476,10 +1528,10 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
     for (uint32_t index = 0u; index < iterations; ++index) {
       constants.gt_filter_step = static_cast<float>(std::min(1u << index, std::max(1u, radius / 2u)));
       const std::array<reshade::api::resource_view, 12> filter_sources = {
-          gi_source,
+          lighting_source,
           frame.depth,
           frame.normal,
-          ao_source,
+          fallback_input,
           specular_source,
           reshade::api::resource_view{reinterpret_cast<uintptr_t>(noise.Get())},
           fallback_input,
@@ -1493,17 +1545,19 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
         filter_constants.gt_specular_active = 0.f;
       }
       DispatchLightPass(cmd_list, &il::filter_pass, filter_constants, filter_sources,
-                        il::filter_targets[index & 1u].uav, ao::filter_targets[index & 1u].uav,
+                        il::filter_targets[index & 1u].uav, fallback_outputs[0],
                         constants.gt_debug_view == 10.f ? il::diagnostic_target.uav : fallback_outputs[1],
                         specular_filter_ready ? specular_filter_targets[index & 1u].uav : fallback_outputs[2],
                         fallback_outputs[3], width, height);
-      gi_source = il::filter_targets[index & 1u].view;
-      ao_source = ao::filter_targets[index & 1u].view;
+      lighting_source = il::filter_targets[index & 1u].view;
       if (specular_filter_ready) {
         specular_source = specular_filter_targets[index & 1u].view;
       }
     }
   }
+  // 7. Reconstruct the captured native ambient separately from our lighting.
+  // Its exact sampler, phase weights, and b5 range are needed to subtract only
+  // ambient from total diffuse. Missing capture skips diffuse AO, not GI.
   Microsoft::WRL::ComPtr<ID3D11Resource> diffuse_resource;
   reinterpret_cast<ID3D11UnorderedAccessView*>(frame.light.handle)->GetResource(&diffuse_resource);  // NOLINT(performance-no-int-to-ptr)
   auto ambient = lighting::ambient_diffuse::Read(device, diffuse_resource.Get());
@@ -1524,10 +1578,10 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   }
   context->CSSetSamplers(0u, 1u, &ambient_sampler);
   const std::array<reshade::api::resource_view, 12> apply_sources = {
-      gi_source,
+      lighting_source,
       frame.depth,
       diagnostic_ready ? il::diagnostic_target.view : fallback_input,
-      ao_source,
+      fallback_input,
       frame.normal,
       environment != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->srv.Get())} : fallback_input,
       environment != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->material.Get())} : fallback_input,
@@ -1537,7 +1591,9 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
       ambient != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(ambient->view.Get())} : fallback_input,
       ambient != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(ambient->weight_view.Get())} : fallback_input,
   };
-  // Correct ambient diffuse and add the bounce before skin scattering.
+  // Full-resolution application writes native diffuse and eligible skin-copy
+  // RGB, preserving each alpha. It also resolves specular visibility/confidence
+  // for deferred composition; it does not darken total specular here.
   DispatchLightPass(cmd_list, &il::add_pass, constants, apply_sources, frame.light,
                     environment != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->visibility_uav.Get())} : fallback_outputs[0],
                     frame.scattering_copy.handle != 0u ? frame.scattering_copy : fallback_outputs[1],
@@ -1575,7 +1631,9 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
 // Native composite inputs and pre-scatter lighting orchestration.
 namespace mgsv::lighting {
 
-// Called before the first scatter; its inputs and native geometry are bound.
+// Called before the first scatter, with its native inputs still bound. Recording
+// collects owned references and GPU constant copies. The scheduled callback runs
+// after the native prefix is submitted and before either skin scatter consumes it.
 inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderInjectData& shader_injection) {
   if (cmd_list == nullptr || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return;
 
@@ -1598,7 +1656,50 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   if (context == nullptr) return;
 
-  // Keep these views alive until this callback returns, even if later bindings replace them.
+  // Reuse UAVs for the two native destinations instead of creating them at each
+  // hook. Four entries cover alternating pairs; round-robin eviction is bounded
+  // and cheaper to maintain than an unbounded map of rarely reused textures.
+  const auto get_light_view = [](reshade::api::device* device, uint64_t generation, ID3D11Resource* resource) {
+    {
+      const std::shared_lock lock(native_light_views.mutex);
+      if (native_light_views.device == device && native_light_views.generation == generation) {
+        for (const auto& entry : native_light_views.entries) {
+          if (entry.resource == resource && entry.view != nullptr) return entry.view;
+        }
+      }
+    }
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> created;
+    const D3D11_UNORDERED_ACCESS_VIEW_DESC description = {
+        .Format = DXGI_FORMAT_R16G16B16A16_FLOAT,
+        .ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D,
+    };
+    if (FAILED(reinterpret_cast<ID3D11Device*>(device->get_native())->CreateUnorderedAccessView(resource, &description, &created))) return created;  // NOLINT(performance-no-int-to-ptr)
+
+    // Evicted views and their textures may trigger destruction callbacks. Move
+    // them out of the cache so their final Release happens after unlocking.
+    std::array<NativeLightView, NATIVE_LIGHT_VIEW_CACHE_SIZE> retired;
+    NativeLightView evicted;
+    {
+      const std::unique_lock lock(native_light_views.mutex);
+      if (native_light_views.device != device || native_light_views.generation != generation) {
+        retired.swap(native_light_views.entries);
+        native_light_views.device = device;
+        native_light_views.generation = generation;
+        native_light_views.next_entry = 0u;
+      }
+      for (const auto& entry : native_light_views.entries) {
+        if (entry.resource == resource && entry.view != nullptr) return entry.view;
+      }
+      const size_t index = native_light_views.next_entry;
+      std::swap(evicted, native_light_views.entries[index]);
+      native_light_views.entries[index] = {.resource = resource, .view = created};
+      native_light_views.next_entry = (index + 1u) % native_light_views.entries.size();
+    }
+    return created;
+  };
+
+  // 1. Retain this scatter's inputs, rather than selecting a global latest frame.
+  // The submitted callback captures these references if recording is deferred.
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> normal;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> light_source;
@@ -1609,9 +1710,7 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
   context->CSGetShaderResources(0u, 1u, light_source.GetAddressOf());
   if (light_source != nullptr) {
     light_source->GetResource(&copied_resource);
-    auto* native_device = reinterpret_cast<ID3D11Device*>(cmd_list->get_device()->get_native());  // NOLINT(performance-no-int-to-ptr)
-    const D3D11_UNORDERED_ACCESS_VIEW_DESC view = {.Format = DXGI_FORMAT_R16G16B16A16_FLOAT, .ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D};
-    native_device->CreateUnorderedAccessView(copied_resource.Get(), &view, &scattering_copy);
+    scattering_copy = get_light_view(cmd_list->get_device(), shared_inputs.generation, copied_resource.Get());
   }
   if (depth == nullptr || normal == nullptr || scattering_copy == nullptr) {
     static std::atomic_flag reported = {};
@@ -1652,6 +1751,8 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
     return;
   }
 
+  // 2. Reject incompatible size, device, encoding, or read/write aliases before
+  // touching native lighting. A float format by itself does not prove linear RGB.
   const auto input_error = [&](ID3D11ShaderResourceView* view, DXGI_FORMAT expected_format = DXGI_FORMAT_UNKNOWN) -> const char* {
     if (view == nullptr) return "missing view";
     D3D11_SHADER_RESOURCE_VIEW_DESC view_desc = {};
@@ -1723,6 +1824,8 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
         "; skipping custom lighting");
     return;
   }
+  // 3. Snapshot the scatter's projection constants in GPU order. Retaining the
+  // native buffer alone is insufficient: another recorded draw can overwrite it.
   // These checks qualify layouts and ownership, not fresh pixels or GPU order.
   Microsoft::WRL::ComPtr<ID3D11Buffer> native_geometry;
   Microsoft::WRL::ComPtr<ID3D11Buffer> geometry;
@@ -1750,17 +1853,21 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
       }
     }
   }
+  // 4. Resolve the original diffuse destination only after the copy's prefix is
+  // submitted. Its association is consumed once, preventing repeated application.
   // Every deferred reference outlives its recorded work. The native geometry
   // constants are copied on the GPU at this insertion, not read back by the CPU.
   const auto apply = [width = light_desc.Width, height = light_desc.Height, constants, geometry, geometry_first, geometry_count,
                       depth, normal, light_source, scattering_copy,
                       albedo = shared_inputs.materials.albedo,
                       specular = shared_inputs.materials.specular,
-                      generation = shared_inputs.generation](reshade::api::command_list* submitted, bool first_submission) {
+                      generation = shared_inputs.generation, get_light_view](reshade::api::command_list* submitted, bool first_submission) {
     if (!first_submission) {
+      // Cached native work may replay, but custom AO/GI must not compound on a
+      // lighting image that was already corrected by this recorded insertion.
       Microsoft::WRL::ComPtr<ID3D11Resource> copied;
       light_source->GetResource(&copied);
-      copied->SetPrivateDataInterface(ambient_diffuse::DIFFUSE_SOURCE_GUID, nullptr);
+      copied->SetPrivateDataInterface(temporal_inputs::DIFFUSE_SOURCE_GUID, nullptr);
       return;
     }
     const auto selected = inputs::Read(submitted->get_device());
@@ -1772,7 +1879,7 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> light;
     light_source->GetResource(&copied);
     UINT bytes = sizeof(ID3D11Resource*);
-    if (FAILED(copied->GetPrivateData(ambient_diffuse::DIFFUSE_SOURCE_GUID, &bytes, diffuse.GetAddressOf())) || diffuse == nullptr
+    if (FAILED(copied->GetPrivateData(temporal_inputs::DIFFUSE_SOURCE_GUID, &bytes, diffuse.GetAddressOf())) || diffuse == nullptr
         || FAILED(diffuse.As(&diffuse_texture))) {
       static std::atomic_flag reported = {};
       LogLightOnce(&reported, reshade::log::level::warning, "skipping lighting: diffuse copy has no qualified submitted source");
@@ -1780,13 +1887,15 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
     }
     // A submitted native copy admits one lighting application, not one per
     // Present or every repeated interception of the same scattering input.
-    copied->SetPrivateDataInterface(ambient_diffuse::DIFFUSE_SOURCE_GUID, nullptr);
+    copied->SetPrivateDataInterface(temporal_inputs::DIFFUSE_SOURCE_GUID, nullptr);
     D3D11_TEXTURE2D_DESC description = {};
     diffuse_texture->GetDesc(&description);
-    const D3D11_UNORDERED_ACCESS_VIEW_DESC view = {.Format = DXGI_FORMAT_R16G16B16A16_FLOAT, .ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D};
     if (diffuse == copied || description.Width != width || description.Height != height
-        || description.ArraySize != 1u || description.MipLevels != 1u || description.SampleDesc.Count != 1u
-        || FAILED(reinterpret_cast<ID3D11Device*>(submitted->get_device()->get_native())->CreateUnorderedAccessView(diffuse.Get(), &view, &light))) return;  // NOLINT(performance-no-int-to-ptr)
+        || description.ArraySize != 1u || description.MipLevels != 1u || description.SampleDesc.Count != 1u) return;
+    light = get_light_view(submitted->get_device(), generation, diffuse.Get());
+    if (light == nullptr) return;
+    // 5. Preserve state once around the complete chain. Clear displaced graphics
+    // reads as well as compute inputs before making the native images writable.
     const auto previous_state = mgsv::rendering::d3d11_compute_state::Capture(submitted);
     // The native copy can leave these lighting images bound in graphics slots.
     const std::array<ID3D11ShaderResourceView*, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT> empty = {};

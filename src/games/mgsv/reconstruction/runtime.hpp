@@ -158,7 +158,7 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list, const ShaderInjectD
                                                     .camera_generation = (reconstruction_enabled ? camera.reset_generation : 0u),
                                                     .camera_sample = (reconstruction_enabled ? camera.sample_index : 0u),
                                                     .jitter_valid = !reconstruction_enabled || (camera.valid && camera.camera_matrix_valid),
-                                                    .is_motion = true,
+                                                    .kind = lighting::temporal_inputs::ProducerKind::MOTION,
                                                 });
   };
   if (lighting_motion_needed && !runtime::state::IsEnabled()) {
