@@ -15,6 +15,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -24,8 +25,26 @@
 #include "../gbuffer/material_inputs.hpp"
 #include "../inputs.hpp"
 #include "specular_result.hpp"
+#include "temporal_inputs.hpp"
 
 namespace mgsv::lighting::environment_specular {
+
+struct MaterialTableCopy {
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
+  D3D11_TEXTURE2D_DESC description = {};
+  D3D11_SHADER_RESOURCE_VIEW_DESC view_description = {};
+};
+
+// Cache descriptions on the native view that owns this borrowed resource.
+// Descriptions cannot change; mutable pixels still need an ordered snapshot.
+struct __declspec(uuid("F0CF4550-49D1-447D-BC41-51D410CCF54E")) MaterialTableLayout {
+  uint64_t generation = 0u;
+  ID3D11Resource* resource = nullptr;
+  D3D11_TEXTURE2D_DESC description = {};
+  D3D11_SHADER_RESOURCE_VIEW_DESC view_description = {};
+  bool qualified = false;
+};
 
 // Keep captured environment color and resolved visibility paired with one
 // native specular target. Deferred composition must use that pair, rather than
@@ -43,11 +62,9 @@ struct Target {
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> normal;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_view;
   Microsoft::WRL::ComPtr<ID3D11Resource> depth;
-  // These are pixel snapshots, taken beside the light that uses the tables.
-  // Holding a native SRV alone would keep the object alive, not its contents.
-  std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>, 2> material_tables;
-  std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 2> material_table_views;
-  bool material_tables_valid = false;
+  // Mutable tables need pixel snapshots. Immutable tables are retained directly
+  // in the producer record, so they never allocate or update these copies.
+  std::array<MaterialTableCopy, 2> material_table_copies;
 };
 
 // The key is the native specular accumulation allocation, not a frame or context
@@ -68,6 +85,8 @@ struct __declspec(uuid("E86B6354-AF43-4D25-9CDE-C72A331B8D91")) DrawState {
   bool composite_output_active = false;
   bool composite_replacement_safe = false;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> composite_readiness_input;
+  uint64_t capture_generation = 0u;
+  temporal_inputs::MaterialTableBindings material_tables;
 };
 
 struct CaptureBlend {
@@ -95,7 +114,7 @@ inline void OnDestroyDevice(reshade::api::device* device) {
 }
 
 inline std::shared_ptr<Target> Read(reshade::api::device* device, ID3D11Resource* specular) {
-  const auto selected = inputs::Read(device);
+  const auto selected = inputs::ReadSelection(device);
   if (selected.device == nullptr || specular == nullptr) return {};
   std::shared_ptr<Target> result;
   targets.if_contains(specular, [&](const auto& entry) {
@@ -126,13 +145,14 @@ inline void BeginCapture(reshade::api::command_list* cmd_list, bool lighting_ena
   // 1. Qualify the existing light draw before adding an attachment. Native
   // diffuse/specular outputs and their additive blend must remain unchanged.
   if (!lighting_enabled) return;
-  const auto selected = inputs::Read(cmd_list->get_device());
+  const auto selected = inputs::ReadSelection(cmd_list->get_device());
   if (selected.device == nullptr) return;
   auto* device_state = selected.device->get_private_data<DeviceState>();
   if (device_state == nullptr) return;
   auto* saved = cmd_list->get_private_data<DrawState>();
   if (saved == nullptr || saved->active) return;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
+  auto* device = reinterpret_cast<ID3D11Device*>(selected.device->get_native());   // NOLINT(performance-no-int-to-ptr)
   std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> render_targets = {};
   DrawState state;
   UINT class_instance_count = 0u;
@@ -215,8 +235,6 @@ inline void BeginCapture(reshade::api::command_list* cmd_list, bool lighting_ena
     description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     description.CPUAccessFlags = 0u;
     description.MiscFlags = 0u;
-    Microsoft::WRL::ComPtr<ID3D11Device> device;
-    context->GetDevice(&device);
     if (FAILED(device->CreateTexture2D(&description, nullptr, &created->texture))
         || FAILED(device->CreateRenderTargetView(created->texture.Get(), nullptr, &created->rtv))
         || FAILED(device->CreateShaderResourceView(created->texture.Get(), nullptr, &created->srv))) {
@@ -259,60 +277,100 @@ inline void BeginCapture(reshade::api::command_list* cmd_list, bool lighting_ena
   if (target->generation != selected.generation || target->depth.Get() != depth_resource.Get()
       || target->material.Get() != material.Get()) return;
 
-  {
-    // Both normal composition and stage views need these material tables.
-    const std::unique_lock lock(target->material_mutex);
-    target->material_tables_valid = false;
-    Microsoft::WRL::ComPtr<ID3D11Device> device;
-    context->GetDevice(&device);
-    // All supported environment producers bind the Fresnel lookup at t9 and
-    // the two-row material palette at t10. Copy in this command stream before
-    // the native draw; later compute work uses this same target's snapshots.
-    const auto copy_table = [&](uint32_t slot, uint32_t index) {
-      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> source_view;
-      context->PSGetShaderResources(slot, 1u, &source_view);
-      if (source_view == nullptr) return false;
-      Microsoft::WRL::ComPtr<ID3D11Resource> source;
+  // The native producers bind Fresnel at t9 and the palette at t10. Cache
+  // immutable view descriptors; mutable contents still need ordered copies.
+  state.capture_generation = selected.generation;
+  state.material_tables.specular = std::move(specular);
+  std::array<ID3D11ShaderResourceView*, 2> bound_tables = {};
+  context->PSGetShaderResources(9u, static_cast<UINT>(bound_tables.size()), bound_tables.data());
+  std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 2> table_sources;
+  // The shared trace uses palette first, then Fresnel: reverse the native slots.
+  table_sources[0].Attach(bound_tables[1]);
+  table_sources[1].Attach(bound_tables[0]);
+  std::array<bool, 2> immutable_tables = {};
+  const auto capture_table = [&](size_t index) {
+    auto* source = table_sources[index].Get();
+    if (source == nullptr) return false;
+    MaterialTableLayout layout;
+    auto bytes = static_cast<UINT>(sizeof(layout));
+    if (FAILED(source->GetPrivateData(__uuidof(MaterialTableLayout), &bytes, &layout))
+        || bytes != sizeof(layout) || layout.generation != selected.generation) {
+      layout = {.generation = selected.generation};
+      Microsoft::WRL::ComPtr<ID3D11Resource> resource;
       Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
-      source_view->GetResource(&source);
-      if (FAILED(source.As(&texture))) return false;
-      D3D11_TEXTURE2D_DESC desc = {};
-      D3D11_SHADER_RESOURCE_VIEW_DESC view_desc = {};
-      texture->GetDesc(&desc);
-      source_view->GetDesc(&view_desc);
-      if (desc.ArraySize != 1u || desc.SampleDesc.Count != 1u
-          || view_desc.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D
-          || view_desc.Texture2D.MostDetailedMip != 0u
-          || (index == 0u && (desc.Width != 256u || desc.Height != 2u))
-          || (index == 1u && (desc.Width < 2u || desc.Height < 2u))) return false;
-      D3D11_TEXTURE2D_DESC previous = {};
-      D3D11_SHADER_RESOURCE_VIEW_DESC previous_view = {};
-      if (target->material_tables[index] != nullptr) {
-        target->material_tables[index]->GetDesc(&previous);
-        target->material_table_views[index]->GetDesc(&previous_view);
+      source->GetResource(&resource);
+      if (SUCCEEDED(resource.As(&texture))) {
+        layout.resource = resource.Get();
+        texture->GetDesc(&layout.description);
+        source->GetDesc(&layout.view_description);
+        layout.qualified = layout.description.ArraySize == 1u && layout.description.SampleDesc.Count == 1u
+                           && layout.view_description.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D
+                           && layout.view_description.Texture2D.MostDetailedMip == 0u;
       }
-      if (previous.Width != desc.Width || previous.Height != desc.Height
-          || previous.MipLevels != desc.MipLevels || previous.Format != desc.Format || previous_view.Format != view_desc.Format) {
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        desc.CPUAccessFlags = 0u;
-        desc.MiscFlags = 0u;
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> copy;
-        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
-        if (FAILED(device->CreateTexture2D(&desc, nullptr, &copy))
-            || FAILED(device->CreateShaderResourceView(copy.Get(), &view_desc, &view))) return false;
-        target->material_tables[index] = std::move(copy);
-        target->material_table_views[index] = std::move(view);
-      }
-      context->CopyResource(target->material_tables[index].Get(), source.Get());
+      source->SetPrivateData(__uuidof(MaterialTableLayout), sizeof(layout), &layout);
+    }
+    const auto& description = layout.description;
+    const auto& view_description = layout.view_description;
+    if (!layout.qualified || (index == 0u && (description.Width != 256u || description.Height != 2u))
+        || (index == 1u && (description.Width < 2u || description.Height < 2u))) return false;
+    immutable_tables[index] = description.Usage == D3D11_USAGE_IMMUTABLE;
+    if (immutable_tables[index]) {
+      state.material_tables.views[index] = std::move(table_sources[index]);
       return true;
+    }
+
+    MaterialTableCopy copy;
+    {
+      const std::shared_lock lock(target->material_mutex);
+      copy = target->material_table_copies[index];
+    }
+    const auto compatible = [&](const MaterialTableCopy& candidate) {
+      return candidate.texture != nullptr && candidate.texture.Get() != layout.resource
+             && candidate.description.Width == description.Width && candidate.description.Height == description.Height
+             && candidate.description.MipLevels == description.MipLevels && candidate.description.Format == description.Format
+             && candidate.view_description.Format == view_description.Format
+             && candidate.view_description.Texture2D.MipLevels == view_description.Texture2D.MipLevels;
     };
-    target->material_tables_valid = copy_table(10u, 0u) && copy_table(9u, 1u);
-    if (!target->material_tables_valid) {
-      static std::atomic_flag reported = {};
-      if (!reported.test_and_set(std::memory_order_relaxed)) {
-        reshade::log::message(reshade::log::level::warning, "MgsvLighting: specular GI material tables unavailable; keeping current lighting");
+    if (!compatible(copy)) {
+      MaterialTableCopy created = {.description = description, .view_description = view_description};
+      created.description.Usage = D3D11_USAGE_DEFAULT;
+      created.description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+      created.description.CPUAccessFlags = 0u;
+      created.description.MiscFlags = 0u;
+      if (FAILED(device->CreateTexture2D(&created.description, nullptr, &created.texture))
+          || FAILED(device->CreateShaderResourceView(created.texture.Get(), &created.view_description, &created.view))) return false;
+      MaterialTableCopy retired;
+      MaterialTableCopy reused;
+      {
+        const std::unique_lock lock(target->material_mutex);
+        if (compatible(target->material_table_copies[index])) {
+          reused = target->material_table_copies[index];
+        } else {
+          retired = std::exchange(target->material_table_copies[index], created);
+          reused = std::move(created);
+        }
       }
+      copy = std::move(reused);
+    }
+    // Keep the copy in every recording so replay restores this producer's
+    // pixels too. A previous CPU observation cannot establish those contents.
+    context->CopyResource(copy.texture.Get(), layout.resource);
+    state.material_tables.views[index] = std::move(copy.view);
+    return true;
+  };
+  if (!capture_table(0u) || !capture_table(1u)) {
+    state.material_tables.views = {};
+    static std::atomic_flag reported = {};
+    if (!reported.test_and_set(std::memory_order_relaxed)) {
+      reshade::log::message(reshade::log::level::warning, "MgsvLighting: specular GI material tables unavailable; keeping current lighting");
+    }
+  } else {
+    static std::atomic_flag reported = {};
+    if (!reported.test_and_set(std::memory_order_relaxed)) {
+      const std::string message = std::string("MgsvLighting: material lookup inputs: palette=")
+                                  + (immutable_tables[0] ? "immutable" : "snapshot")
+                                  + " Fresnel=" + (immutable_tables[1] ? "immutable" : "snapshot");
+      reshade::log::message(reshade::log::level::info, message.c_str());
     }
   }
 
@@ -339,8 +397,6 @@ inline void BeginCapture(reshade::api::command_list* cmd_list, bool lighting_ena
     for (size_t index = 3u; index < 5u; ++index) {
       blend_description.RenderTarget[index] = {.BlendEnable = FALSE, .SrcBlend = D3D11_BLEND_ONE, .DestBlend = D3D11_BLEND_ZERO, .BlendOp = D3D11_BLEND_OP_ADD, .SrcBlendAlpha = D3D11_BLEND_ONE, .DestBlendAlpha = D3D11_BLEND_ZERO, .BlendOpAlpha = D3D11_BLEND_OP_ADD, .RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL};
     }
-    Microsoft::WRL::ComPtr<ID3D11Device> device;
-    context->GetDevice(&device);
     if (FAILED(device->CreateBlendState(&blend_description, &capture_blend))) return;
     Microsoft::WRL::ComPtr<ID3D11BlendState> existing;
     {
@@ -389,6 +445,15 @@ inline void EndCapture(reshade::api::command_list* cmd_list) {
   context->OMSetBlendState(saved->blend.Get(), saved->blend_factor.data(), saved->sample_mask);
   // The next draw can reject capture without rebinding its native pixel shader.
   context->PSSetShader(saved->original_shader.Get(), nullptr, 0u);
+  if (saved->material_tables.specular != nullptr) {
+    // Keep this draw's table selection with its submitted native commands.
+    temporal_inputs::Record(cmd_list, {
+                                          .device = cmd_list->get_device(),
+                                          .generation = saved->capture_generation,
+                                          .kind = temporal_inputs::ProducerKind::MATERIAL_TABLES,
+                                          .material_tables = std::move(saved->material_tables),
+                                      });
+  }
   *saved = {};
 }
 
@@ -397,6 +462,7 @@ inline reshade::api::pipeline GetShadowedCapturePipeline(reshade::api::command_l
   if (saved == nullptr || !saved->active) return {0u};
   auto* device_state = cmd_list->get_device()->get_private_data<DeviceState>();
   if (device_state == nullptr) {
+    saved->material_tables.specular.Reset();
     EndCapture(cmd_list);
     return {0u};
   }
@@ -408,6 +474,7 @@ inline reshade::api::pipeline GetShadowedCapturePipeline(reshade::api::command_l
     auto* device = reinterpret_cast<ID3D11Device*>(cmd_list->get_device()->get_native());  // NOLINT(performance-no-int-to-ptr)
     Microsoft::WRL::ComPtr<ID3D11PixelShader> created;
     if (FAILED(device->CreatePixelShader(bytecode.data(), bytecode.size(), nullptr, &created))) {
+      saved->material_tables.specular.Reset();
       EndCapture(cmd_list);
       return {0u};
     }

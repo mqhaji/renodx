@@ -11,7 +11,7 @@
 | `inputs.hpp` | Selected device/swapchain, resize/reset versions, and native material/motion references |
 | `resource_upgrades.hpp` | Shared precision upgrades, clone activation, and scoped copies |
 | `gtvbgi/lighting.hpp` | Combined lighting textures, controls, input checks, GPU commands, and game-state restoration |
-| `gtvbgi/temporal_inputs.hpp` | Native camera/exposure copies, motion, and diffuse-copy records tied to submitted producer commands |
+| `gtvbgi/temporal_inputs.hpp` | Native camera/exposure copies, motion, diffuse-copy associations, and material-table bindings tied to submitted producer commands |
 | `gtvbgi/environment_specular.hpp` | Environment captures, resolved specular visibility, material tables, and scoped native/deferred bindings |
 | `gtvbgi/specular_result.hpp` | Resolved reflected light, remaining environment response, and separate readiness/composition masks |
 | `gtvbgi/source_preparation.hpp` | Shared source radiance written beside the native diffuse copy |
@@ -49,6 +49,8 @@ Missing trace inputs skip custom lighting while preserving the original game pas
 The game's diffuse-AO bypass still follows the Screen-Space Lighting setting rather than dispatch success. Missing or inconsistent ambient input skips custom diffuse AO while GI continues. Qualified ambient uses AO once; direct diffuse and added GI do not receive that multiplier. The native ambient-volume mask is preserved. Direct specular avoids native AO where environment separation is qualified. Unsupported specular pixels and rain's separate reflections retain native occlusion. Bitmask visibility changes only environment reflections, with confidence blending toward native environment AO.
 
 Environment RGB comes from supported sun/environment producers, including the startup menu's environment-only shader. Native material shaders also capture linear color without the baked cube contribution, with native albedo/normal/material guides and exact depth. The shared trace combines broad bitmask transport with a focused GGX ray for narrow lobes, then filters a complementary screen/environment pair. Deferred composition removes overlapping native contributions before fog and records actual use in an R8 mask. Regular native SSR keeps tracing; accepting the GT-VBGI estimate does not prove native reflection detail is redundant. Both regular SSR and the sortie menu's planar floor trace supply hits to the shared compositor. Their original blend retains the complementary weight on current scene color, so GT-VBGI and native reflections are not both added at full strength. The mask preserves composed GT-VBGI color where no native hit contributes. All attachments are keyed by qualified native allocations and reset alongside their GPU writers, not selected by CPU recording order. The integrated native environment remains an explicit Blinn-Phong fallback; see the [lighting guide](../gtvbgi/README.md#specular-transport) for the GGX conversion and its limits.
+
+Material palette and Fresnel tables reuse native immutable SRVs; mutable tables use ordered GPU snapshots. Cached view descriptions avoid repeated layout checks. The existing producer ledger selects the pair in submission order without another split or history advance. Missing or stale bindings retain current lighting.
 
 Native captures show that later passes also copy the diffuse-light buffer to measure brightness. Applying AO/GI only during final lighting composition would leave that brightness measurement reading different data unless it is updated too.
 

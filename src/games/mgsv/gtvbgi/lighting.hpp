@@ -1306,10 +1306,15 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   };
   if (immediate && constants.gt_specular_active >= 0.5f
       && clean_material != nullptr && transport_result != nullptr) {
-    {
-      const std::shared_lock lock(environment->material_mutex);
-      if (environment->material_tables_valid) {
-        material_tables = environment->material_table_views;
+    // The submitted environment producer selects tables on the specular
+    // allocation. Material guides alone do not identify that producer.
+    uint64_t table_generation = 0u;
+    UINT bytes = sizeof(table_generation);
+    if (SUCCEEDED(specular_resource->GetPrivateData(lighting::temporal_inputs::MATERIAL_TABLE_GENERATION_GUID, &bytes, &table_generation))
+        && bytes == sizeof(table_generation) && table_generation == environment->generation) {
+      for (size_t index = 0u; index < material_tables.size(); ++index) {
+        bytes = sizeof(ID3D11ShaderResourceView*);
+        specular_resource->GetPrivateData(lighting::temporal_inputs::MATERIAL_TABLE_GUIDS[index], &bytes, material_tables[index].GetAddressOf());
       }
     }
     if (material_tables[0] != nullptr && material_tables[1] != nullptr
@@ -1926,9 +1931,11 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> light_source;
   Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> scattering_copy;
   Microsoft::WRL::ComPtr<ID3D11Resource> copied_resource;
-  context->CSGetShaderResources(1u, 1u, depth.GetAddressOf());
-  context->CSGetShaderResources(2u, 1u, normal.GetAddressOf());
-  context->CSGetShaderResources(0u, 1u, light_source.GetAddressOf());
+  std::array<ID3D11ShaderResourceView*, 3> native_inputs = {};
+  context->CSGetShaderResources(0u, static_cast<UINT>(native_inputs.size()), native_inputs.data());
+  light_source.Attach(native_inputs[0]);
+  depth.Attach(native_inputs[1]);
+  normal.Attach(native_inputs[2]);
   if (light_source != nullptr) {
     light_source->GetResource(&copied_resource);
     scattering_copy = get_light_view(cmd_list->get_device(), shared_inputs.generation, copied_resource.Get());
@@ -2093,7 +2100,7 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
       copied->SetPrivateDataInterface(temporal_inputs::DIFFUSE_SOURCE_GUID, nullptr);
       return;
     }
-    const auto selected = inputs::Read(submitted->get_device());
+    const auto selected = inputs::ReadSelection(submitted->get_device());
     if (selected.device == nullptr || selected.generation != generation) return;
     auto* submitted_context = reinterpret_cast<ID3D11DeviceContext*>(submitted->get_native());  // NOLINT(performance-no-int-to-ptr)
     Microsoft::WRL::ComPtr<ID3D11Resource> copied;

@@ -28,6 +28,12 @@ namespace mgsv::lighting::temporal_inputs {
 inline constexpr GUID DIFFUSE_SOURCE_GUID = {.Data1 = 0xa1465c19, .Data2 = 0x1276, .Data3 = 0x4697, .Data4 = {0x8a, 0xd0, 0x9c, 0x21, 0x35, 0xf7, 0xd8, 0x43}};
 inline constexpr GUID PREPARED_SOURCE_GUID = {.Data1 = 0xe7302e42, .Data2 = 0x2f76, .Data3 = 0x40fb, .Data4 = {0x91, 0x25, 0xeb, 0x27, 0x50, 0x2c, 0x45, 0x66}};
 
+inline constexpr auto MATERIAL_TABLE_GUIDS = std::to_array<GUID>({
+    {.Data1 = 0x5ab2941c, .Data2 = 0x55db, .Data3 = 0x4712, .Data4 = {0x83, 0xf4, 0x2c, 0xa8, 0xe1, 0x29, 0xe8, 0xe5}},
+    {.Data1 = 0x639ae694, .Data2 = 0x4c42, .Data3 = 0x49bf, .Data4 = {0xa3, 0x0c, 0x51, 0x8d, 0x7c, 0xb1, 0x90, 0x21}},
+});
+inline constexpr GUID MATERIAL_TABLE_GENERATION_GUID = {.Data1 = 0x9ee98019, .Data2 = 0x58a5, .Data3 = 0x46c6, .Data4 = {0x91, 0x3a, 0xa2, 0x71, 0x18, 0xb5, 0x09, 0xe4}};
+
 // Own the native scene-buffer copy and its original D3D11.1 binding range.
 // Camera identity and jitter describe the producer, not the thread reading it.
 struct Scene {
@@ -66,6 +72,13 @@ enum class ProducerKind : uint8_t {
   SCENE,
   MOTION,
   DIFFUSE_COPY,
+  MATERIAL_TABLES,
+};
+
+struct MaterialTableBindings {
+  Microsoft::WRL::ComPtr<ID3D11Resource> specular;
+  // Palette and Fresnel, respectively. Mutable inputs use ordered snapshots.
+  std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 2> views;
 };
 
 struct Producer {
@@ -83,6 +96,7 @@ struct Producer {
   Microsoft::WRL::ComPtr<ID3D11Resource> copy_source;
   Microsoft::WRL::ComPtr<ID3D11Resource> copy_destination;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> prepared_source;
+  MaterialTableBindings material_tables;
 };
 
 struct State {
@@ -99,15 +113,15 @@ struct State {
 inline State state;
 inline std::atomic<bool> enabled = true;
 
-// Copy edges qualify one lighting application. They do not advance the camera
-// or motion submission number used to decide whether history can advance.
+// Copy and material bindings qualify lighting inputs. They do not advance the
+// camera/motion submission number used to decide whether history can advance.
 inline void Publish(std::span<const Producer> producers) {
   {
     const std::unique_lock lock(state.mutex);
     // Publish the camera and motion from one list as a coherent snapshot.
     // Readers must not observe a partially updated producer sequence.
     for (const auto& producer : producers) {
-      if (producer.kind == ProducerKind::DIFFUSE_COPY) continue;
+      if (producer.kind != ProducerKind::SCENE && producer.kind != ProducerKind::MOTION) continue;
       if (state.device != producer.device || state.submitted.generation != producer.generation) {
         state.submitted = {};
         state.device = producer.device;
@@ -127,17 +141,33 @@ inline void Publish(std::span<const Producer> producers) {
       state.submitted.submission = ++state.next_submission;
     }
   }
-  // Copy metadata is consumed after this prefix. Publish its final associations
+  // Input metadata is consumed after this prefix. Publish its final associations
   // in recorded order, outside the lock: replacing an interface can release
   // a native resource and reenter destruction callbacks.
   for (const auto& producer : producers) {
-    if (producer.kind != ProducerKind::DIFFUSE_COPY) continue;
+    if (producer.kind != ProducerKind::DIFFUSE_COPY && producer.kind != ProducerKind::MATERIAL_TABLES) continue;
     const auto selected = inputs::ReadSelection(producer.device);
-    if (selected.device != nullptr && selected.generation == producer.generation) {
+    if (selected.device == nullptr || selected.generation != producer.generation) continue;
+    if (producer.kind == ProducerKind::DIFFUSE_COPY) {
       producer.copy_destination->SetPrivateDataInterface(DIFFUSE_SOURCE_GUID, producer.copy_source.Get());
       // Publish preparation beside this exact copy, including null on fallback.
       // A cached target or recent Present cannot prove that its draw executed.
       producer.copy_destination->SetPrivateDataInterface(PREPARED_SOURCE_GUID, producer.prepared_source.Get());
+    } else if (producer.material_tables.specular != nullptr) {
+      // The serialized submission path publishes the pair together. A worker
+      // recording another light cannot select its tables for this invocation.
+      const uint64_t invalid_generation = 0u;
+      auto* destination = producer.material_tables.specular.Get();
+      destination->SetPrivateData(MATERIAL_TABLE_GENERATION_GUID, sizeof(invalid_generation), &invalid_generation);
+      bool published = true;
+      for (size_t index = 0u; index < MATERIAL_TABLE_GUIDS.size(); ++index) {
+        if (FAILED(destination->SetPrivateDataInterface(MATERIAL_TABLE_GUIDS[index], producer.material_tables.views[index].Get()))) {
+          published = false;
+        }
+      }
+      if (published) {
+        destination->SetPrivateData(MATERIAL_TABLE_GENERATION_GUID, sizeof(producer.generation), &producer.generation);
+      }
     }
   }
 }
