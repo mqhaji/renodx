@@ -235,7 +235,8 @@ inline void Capture(reshade::api::command_list* cmd_list) {
   }
 }
 
-inline void OnDiffuseCopied(reshade::api::command_list* cmd_list) {
+inline void OnDiffuseCopied(reshade::api::command_list* cmd_list,
+                            Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> prepared_source = {}) {
   const auto selected = inputs::ReadSelection(cmd_list->get_device());
   if (selected.device == nullptr) return;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
@@ -256,6 +257,7 @@ inline void OnDiffuseCopied(reshade::api::command_list* cmd_list) {
                                         .kind = temporal_inputs::ProducerKind::DIFFUSE_COPY,
                                         .copy_source = std::move(source),
                                         .copy_destination = std::move(destination),
+                                        .prepared_source = std::move(prepared_source),
                                     });
 }
 

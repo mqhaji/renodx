@@ -21,7 +21,9 @@
 #include <include/reshade.hpp>
 
 #include "../../../utils/data.hpp"
+#include "../gbuffer/material_inputs.hpp"
 #include "../inputs.hpp"
+#include "specular_result.hpp"
 
 namespace mgsv::lighting::environment_specular {
 
@@ -29,6 +31,7 @@ namespace mgsv::lighting::environment_specular {
 // native specular target. Deferred composition must use that pair, rather than
 // whichever camera or filter output was most recently observed on the CPU.
 struct Target {
+  std::shared_mutex material_mutex;
   uint64_t generation = 0u;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
   Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
@@ -37,7 +40,14 @@ struct Target {
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> visibility_srv;
   Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> visibility_uav;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> material;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> normal;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_view;
   Microsoft::WRL::ComPtr<ID3D11Resource> depth;
+  // These are pixel snapshots, taken beside the light that uses the tables.
+  // Holding a native SRV alone would keep the object alive, not its contents.
+  std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>, 2> material_tables;
+  std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 2> material_table_views;
+  bool material_tables_valid = false;
 };
 
 // The key is the native specular accumulation allocation, not a frame or context
@@ -53,8 +63,10 @@ struct __declspec(uuid("E86B6354-AF43-4D25-9CDE-C72A331B8D91")) DrawState {
   std::array<float, 4> blend_factor = {};
   UINT sample_mask = UINT32_MAX;
   bool active = false;
-  std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 2> composite_inputs;
+  std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 5> composite_inputs;
   bool composite_active = false;
+  bool composite_output_active = false;
+  bool composite_replacement_safe = false;
 };
 
 struct CaptureBlend {
@@ -65,6 +77,7 @@ struct CaptureBlend {
 struct __declspec(uuid("A71B9530-42A6-4E39-8635-19ECA852BD70")) DeviceState {
   std::shared_mutex mutex;
   std::vector<CaptureBlend> blends;
+  std::vector<CaptureBlend> composition_blends;
   Microsoft::WRL::ComPtr<ID3D11PixelShader> capture_shader;
 };
 
@@ -176,10 +189,12 @@ inline void BeginCapture(reshade::api::command_list* cmd_list, bool lighting_ena
       || specular_view.ViewDimension != D3D11_RTV_DIMENSION_TEXTURE2D || specular_view.Texture2D.MipSlice != 0u
       || description.ArraySize != 1u
       || description.MipLevels != 1u || description.SampleDesc.Count != 1u) return;
-  std::array<ID3D11ShaderResourceView*, 2> native_inputs = {};
-  context->PSGetShaderResources(1u, static_cast<UINT>(native_inputs.size()), native_inputs.data());
-  material.Attach(native_inputs[0]);
-  depth.Attach(native_inputs[1]);
+  std::array<ID3D11ShaderResourceView*, 3> native_inputs = {};
+  context->PSGetShaderResources(0u, static_cast<UINT>(native_inputs.size()), native_inputs.data());
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> normal;
+  normal.Attach(native_inputs[0]);
+  material.Attach(native_inputs[1]);
+  depth.Attach(native_inputs[2]);
   if (material == nullptr || depth == nullptr) return;
   Microsoft::WRL::ComPtr<ID3D11Resource> depth_resource;
   depth->GetResource(&depth_resource);
@@ -191,6 +206,8 @@ inline void BeginCapture(reshade::api::command_list* cmd_list, bool lighting_ena
     auto created = std::make_shared<Target>();
     created->generation = selected.generation;
     created->material = material;
+    created->normal = normal;
+    created->depth_view = depth;
     created->depth = depth_resource;
     description.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     description.Usage = D3D11_USAGE_DEFAULT;
@@ -241,6 +258,63 @@ inline void BeginCapture(reshade::api::command_list* cmd_list, bool lighting_ena
   if (target->generation != selected.generation || target->depth.Get() != depth_resource.Get()
       || target->material.Get() != material.Get()) return;
 
+  {
+    // Both normal composition and stage views need these material tables.
+    const std::unique_lock lock(target->material_mutex);
+    target->material_tables_valid = false;
+    Microsoft::WRL::ComPtr<ID3D11Device> device;
+    context->GetDevice(&device);
+    // All supported environment producers bind the Fresnel lookup at t9 and
+    // the two-row material palette at t10. Copy in this command stream before
+    // the native draw; later compute work uses this same target's snapshots.
+    const auto copy_table = [&](uint32_t slot, uint32_t index) {
+      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> source_view;
+      context->PSGetShaderResources(slot, 1u, &source_view);
+      if (source_view == nullptr) return false;
+      Microsoft::WRL::ComPtr<ID3D11Resource> source;
+      Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+      source_view->GetResource(&source);
+      if (FAILED(source.As(&texture))) return false;
+      D3D11_TEXTURE2D_DESC desc = {};
+      D3D11_SHADER_RESOURCE_VIEW_DESC view_desc = {};
+      texture->GetDesc(&desc);
+      source_view->GetDesc(&view_desc);
+      if (desc.ArraySize != 1u || desc.SampleDesc.Count != 1u
+          || view_desc.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D
+          || view_desc.Texture2D.MostDetailedMip != 0u
+          || (index == 0u && (desc.Width != 256u || desc.Height != 2u))
+          || (index == 1u && (desc.Width < 2u || desc.Height < 2u))) return false;
+      D3D11_TEXTURE2D_DESC previous = {};
+      D3D11_SHADER_RESOURCE_VIEW_DESC previous_view = {};
+      if (target->material_tables[index] != nullptr) {
+        target->material_tables[index]->GetDesc(&previous);
+        target->material_table_views[index]->GetDesc(&previous_view);
+      }
+      if (previous.Width != desc.Width || previous.Height != desc.Height
+          || previous.MipLevels != desc.MipLevels || previous.Format != desc.Format || previous_view.Format != view_desc.Format) {
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        desc.CPUAccessFlags = 0u;
+        desc.MiscFlags = 0u;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> copy;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
+        if (FAILED(device->CreateTexture2D(&desc, nullptr, &copy))
+            || FAILED(device->CreateShaderResourceView(copy.Get(), &view_desc, &view))) return false;
+        target->material_tables[index] = std::move(copy);
+        target->material_table_views[index] = std::move(view);
+      }
+      context->CopyResource(target->material_tables[index].Get(), source.Get());
+      return true;
+    };
+    target->material_tables_valid = copy_table(10u, 0u) && copy_table(9u, 1u);
+    if (!target->material_tables_valid) {
+      static std::atomic_flag reported = {};
+      if (!reported.test_and_set(std::memory_order_relaxed)) {
+        reshade::log::message(reshade::log::level::warning, "MgsvLighting: specular GI material tables unavailable; keeping current lighting");
+      }
+    }
+  }
+
   // 3. Add environment RGB at target 2 while replacing its validity alpha.
   // Targets 0/1 retain their native blend. EndCapture restores every displaced
   // render target, depth view, blend state, and pixel shader after this draw.
@@ -261,6 +335,9 @@ inline void BeginCapture(reshade::api::command_list* cmd_list, bool lighting_ena
         .BlendOpAlpha = D3D11_BLEND_OP_ADD,
         .RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL,
     };
+    for (size_t index = 3u; index < 5u; ++index) {
+      blend_description.RenderTarget[index] = {.BlendEnable = FALSE, .SrcBlend = D3D11_BLEND_ONE, .DestBlend = D3D11_BLEND_ZERO, .BlendOp = D3D11_BLEND_OP_ADD, .SrcBlendAlpha = D3D11_BLEND_ONE, .DestBlendAlpha = D3D11_BLEND_ZERO, .BlendOpAlpha = D3D11_BLEND_OP_ADD, .RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL};
+    }
     Microsoft::WRL::ComPtr<ID3D11Device> device;
     context->GetDevice(&device);
     if (FAILED(device->CreateBlendState(&blend_description, &capture_blend))) return;
@@ -282,9 +359,16 @@ inline void BeginCapture(reshade::api::command_list* cmd_list, bool lighting_ena
     }
   }
   render_targets[2] = target->rtv.Get();
+  Microsoft::WRL::ComPtr<ID3D11Resource> material_resource;
+  material->GetResource(&material_resource);
+  const auto result = specular_result::Read(selected.device, material_resource.Get());
+  if (result != nullptr) {
+    render_targets[3] = result->images[0].rtv.Get();
+    render_targets[4] = result->composed.rtv.Get();
+  }
   state.active = true;
   *saved = std::move(state);
-  context->OMSetRenderTargets(3u, render_targets.data(), saved->depth.Get());
+  context->OMSetRenderTargets(5u, render_targets.data(), saved->depth.Get());
   context->OMSetBlendState(capture_blend.Get(), saved->blend_factor.data(), saved->sample_mask);
   static std::atomic_flag reported = {};
   if (!reported.test_and_set(std::memory_order_relaxed)) {
@@ -339,11 +423,30 @@ inline reshade::api::pipeline GetShadowedCapturePipeline(reshade::api::command_l
 
 inline void BeginComposite(reshade::api::command_list* cmd_list) {
   // 4. Match deferred composition's native specular/depth inputs, then bind
-  // only their capture and visibility pair. EndComposite restores t16/t17.
+  // only their capture and visibility pair. EndComposite restores t16..t20 and the temporary mask output.
   auto* saved = cmd_list->get_private_data<DrawState>();
   if (saved == nullptr || saved->composite_active) return;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
-  std::array<ID3D11ShaderResourceView*, 2> previous = {};
+  // The replacement declares target 1 for its actual-use mask. Never let that
+  // output overwrite a native auxiliary target or conflict with pixel UAVs.
+  std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> render_targets = {};
+  context->OMGetRenderTargets(static_cast<UINT>(render_targets.size()), render_targets.data(), &saved->depth);
+  for (size_t index = 0u; index < render_targets.size(); ++index) {
+    saved->render_targets[index].Attach(render_targets[index]);
+  }
+  UINT class_count = 0u;
+  context->PSGetShader(&saved->original_shader, nullptr, &class_count);
+  saved->composite_replacement_safe = render_targets[1] == nullptr
+                                      && saved->original_shader != nullptr && class_count == 0u;
+  std::array<ID3D11UnorderedAccessView*, D3D11_PS_CS_UAV_REGISTER_COUNT> uavs = {};
+  context->OMGetRenderTargetsAndUnorderedAccessViews(0u, nullptr, nullptr, 0u, static_cast<UINT>(uavs.size()), uavs.data());
+  for (auto* view : uavs) {
+    if (view != nullptr) {
+      saved->composite_replacement_safe = false;
+      view->Release();
+    }
+  }
+  std::array<ID3D11ShaderResourceView*, 5> previous = {};
   context->PSGetShaderResources(16u, static_cast<UINT>(previous.size()), previous.data());
   for (uint32_t index = 0u; index < previous.size(); ++index) {
     saved->composite_inputs[index].Attach(previous[index]);
@@ -363,9 +466,83 @@ inline void BeginComposite(reshade::api::command_list* cmd_list) {
     depth->GetResource(&depth_resource);
   }
   const auto target = Read(cmd_list->get_device(), specular_resource.Get());
-  std::array<ID3D11ShaderResourceView*, 2> inputs = {};
+  std::array<ID3D11ShaderResourceView*, 5> inputs = {};
   if (target != nullptr && target->depth.Get() == depth_resource.Get()) {
-    inputs = {target->srv.Get(), target->visibility_srv.Get()};
+    inputs[0] = target->srv.Get();
+    inputs[1] = target->visibility_srv.Get();
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> albedo;
+    Microsoft::WRL::ComPtr<ID3D11Resource> albedo_resource;
+    Microsoft::WRL::ComPtr<ID3D11Resource> material_resource;
+    context->PSGetShaderResources(8u, 1u, &albedo);
+    if (albedo != nullptr) {
+      albedo->GetResource(&albedo_resource);
+    }
+    if (target->material != nullptr) {
+      target->material->GetResource(&material_resource);
+    }
+    const auto material = material_inputs::Read(cmd_list->get_device(), albedo_resource.Get());
+    const auto result = specular_result::Read(cmd_list->get_device(), material_resource.Get());
+    auto* device_state = cmd_list->get_device()->get_private_data<DeviceState>();
+    if (material != nullptr && result != nullptr && device_state != nullptr) {
+      // The same deferred pixel that replaces indirect specular publishes its
+      // mask. A prepared result alone cannot disable native SSR: composition
+      // might fail qualification or use a different scene target.
+      bool compatible = saved->composite_replacement_safe && render_targets[0] != nullptr
+                        && std::ranges::all_of(render_targets.begin() + 1, render_targets.end(), [](const auto* view) { return view == nullptr; });
+      if (compatible) {
+        Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        render_targets[0]->GetResource(&resource);
+        compatible = SUCCEEDED(resource.As(&texture));
+        if (compatible) {
+          D3D11_TEXTURE2D_DESC description = {};
+          texture->GetDesc(&description);
+          compatible = description.Width == result->width && description.Height == result->height
+                       && description.SampleDesc.Count == 1u;
+        }
+      }
+      Microsoft::WRL::ComPtr<ID3D11BlendState> composite_blend;
+      if (compatible) {
+        context->OMGetBlendState(&saved->blend, saved->blend_factor.data(), &saved->sample_mask);
+        {
+          const std::shared_lock lock(device_state->mutex);
+          for (const auto& blend : device_state->composition_blends) {
+            if (blend.original == saved->blend) {
+              composite_blend = blend.capture;
+              break;
+            }
+          }
+        }
+        if (composite_blend == nullptr) {
+          D3D11_BLEND_DESC description = {};
+          if (saved->blend != nullptr) {
+            saved->blend->GetDesc(&description);
+          } else {
+            description.RenderTarget[0] = {.BlendEnable = FALSE, .SrcBlend = D3D11_BLEND_ONE, .DestBlend = D3D11_BLEND_ZERO, .BlendOp = D3D11_BLEND_OP_ADD, .SrcBlendAlpha = D3D11_BLEND_ONE, .DestBlendAlpha = D3D11_BLEND_ZERO, .BlendOpAlpha = D3D11_BLEND_OP_ADD, .RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL};
+          }
+          if (description.IndependentBlendEnable == FALSE) {
+            std::fill(description.RenderTarget + 1, description.RenderTarget + D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,
+                      description.RenderTarget[0]);
+          }
+          description.IndependentBlendEnable = TRUE;
+          description.RenderTarget[1] = {.BlendEnable = FALSE, .SrcBlend = D3D11_BLEND_ONE, .DestBlend = D3D11_BLEND_ZERO, .BlendOp = D3D11_BLEND_OP_ADD, .SrcBlendAlpha = D3D11_BLEND_ONE, .DestBlendAlpha = D3D11_BLEND_ZERO, .BlendOpAlpha = D3D11_BLEND_OP_ADD, .RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL};
+          auto* device = reinterpret_cast<ID3D11Device*>(cmd_list->get_device()->get_native());  // NOLINT(performance-no-int-to-ptr)
+          if (SUCCEEDED(device->CreateBlendState(&description, &composite_blend))) {
+            const std::unique_lock lock(device_state->mutex);
+            device_state->composition_blends.push_back({.original = saved->blend, .capture = composite_blend});
+          }
+        }
+      }
+      if (compatible && composite_blend != nullptr) {
+        render_targets[1] = result->composed.rtv.Get();
+        context->OMSetRenderTargets(2u, render_targets.data(), saved->depth.Get());
+        context->OMSetBlendState(composite_blend.Get(), saved->blend_factor.data(), saved->sample_mask);
+        saved->composite_output_active = true;
+        inputs[2] = result->images[0].srv.Get();
+        inputs[3] = result->images[1].srv.Get();
+        inputs[4] = material->color_srv.Get();
+      }
+    }
     static std::atomic_flag reported = {};
     if (!reported.test_and_set(std::memory_order_relaxed)) {
       reshade::log::message(reshade::log::level::info, "MgsvLighting: environment specular composition inputs recorded; zero confidence retains native occlusion");
@@ -380,10 +557,24 @@ inline void EndComposite(reshade::api::command_list* cmd_list) {
   auto* saved = cmd_list->get_private_data<DrawState>();
   if (saved == nullptr || !saved->composite_active) return;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
-  const std::array<ID3D11ShaderResourceView*, 2> previous = {saved->composite_inputs[0].Get(), saved->composite_inputs[1].Get()};
+  std::array<ID3D11ShaderResourceView*, 5> previous = {};
+  for (size_t index = 0u; index < previous.size(); ++index) {
+    previous[index] = saved->composite_inputs[index].Get();
+  }
   context->PSSetShaderResources(16u, static_cast<UINT>(previous.size()), previous.data());
-  saved->composite_inputs = {};
-  saved->composite_active = false;
+  if (saved->composite_output_active) {
+    std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> render_targets = {};
+    for (size_t index = 0u; index < render_targets.size(); ++index) {
+      render_targets[index] = saved->render_targets[index].Get();
+    }
+    context->OMSetRenderTargets(static_cast<UINT>(render_targets.size()), render_targets.data(), saved->depth.Get());
+    context->OMSetBlendState(saved->blend.Get(), saved->blend_factor.data(), saved->sample_mask);
+  }
+  if (saved->composite_replacement_safe) {
+    // A following draw can reject replacement without rebinding its shader.
+    context->PSSetShader(saved->original_shader.Get(), nullptr, 0u);
+  }
+  *saved = {};
 }
 
 inline bool OnClearRenderTarget(reshade::api::command_list* cmd_list, reshade::api::resource_view rtv,

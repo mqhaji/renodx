@@ -47,7 +47,9 @@ void main(
     float4 v2 : TEXCOORD1,
     out float4 o0 : SV_Target0,
     out float4 o1 : SV_Target1,
-    out float4 o2 : SV_Target2) {
+    out float4 o2 : SV_Target2,
+    out float4 specular_reset : SV_Target3,
+    out float4 composition_reset : SV_Target4) {
   float4 r0, r1, r2, r3, r4, r5, r6, r7, r8, r9;
   uint4 bitmask, uiDest;
   float4 fDest;
@@ -260,5 +262,7 @@ void main(
   o1.rgb *= contact_shadow.visibility;
   ApplyBendDebug(contact_shadow, o0.rgb, o1.rgb);
   o2 = float4(0.0, 0.0, 0.0, 1.0);
+  specular_reset = 0.0;
+  composition_reset = 0.0;
   return;
 }

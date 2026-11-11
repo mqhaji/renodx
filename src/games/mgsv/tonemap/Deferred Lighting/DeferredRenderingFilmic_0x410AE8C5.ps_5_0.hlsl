@@ -59,7 +59,8 @@ Texture2D<float4> inOcclusion : register(t13);
 void main(
     float4 v0 : SV_Position0,
     float2 v1 : TEXCOORD0,
-    out float4 o0 : SV_Target0) {
+    out float4 o0 : SV_Target0,
+    out float4 reflection_mask : SV_Target1) {
   float4 r0, r1, r2, r3, r4, r5;
   uint4 bitmask, uiDest;
   float4 fDest;
@@ -105,7 +106,7 @@ void main(
   r3.xyz = r3.xyz;
   const float2 specular_uv = r0.xy;
   r0.x = inOcclusion.Sample(g_samplerLinear_Wrap_s, r0.xy).x;
-  const float3 specular_correction = GetEnvironmentSpecularCorrection(specular_uv, r0.x, r1.xyz);
+  const float3 specular_correction = GetEnvironmentSpecularCorrection(specular_uv, r0.x, r1.xyz, r3.xyz, r2.xyz);
   r0.xyw = r0.xxx;
   r2.xyz = r3.xyz * r2.xyz;
   // Diffuse already has ambient-only AO; the correction separates specular below.
@@ -191,5 +192,6 @@ void main(
 #if FIX_UNORM_SRGB
   o0.rgb = renodx::color::srgb::Encode(max(0, o0.rgb));
 #endif
+  reflection_mask = specular_replacement_applied ? 1.0 : 0.0;
   return;
 }

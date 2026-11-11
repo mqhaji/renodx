@@ -4,6 +4,7 @@
 #include "../gbuffer.hlsli"
 #include "../shared.h"
 #include "indirect_diffuse.hlsli"
+#include "specular_brdf.hlsli"
 #include "specular_occlusion.hlsli"
 
 // Reuse matching pixels from the previous frame before spatial filtering.
@@ -19,6 +20,17 @@ Texture2D<float4> previous_lighting : register(t5);
 Texture2D<uint2> previous_geometry : register(t6);
 Texture2D<float4> raw_specular : register(t9);
 Texture2D<float4> previous_specular : register(t10);
+Texture2D<float4> raw_transport : register(t7);
+Texture2D<float4> previous_transport : register(t8);
+Texture2D<float4> raw_response : register(t11);
+Texture2D<float4> previous_response : register(t12);
+Texture2D<float4> native_material : register(t13);
+Texture2D<float4> previous_material : register(t14);
+Texture2D<float4> material_palette : register(t15);
+Texture2D<float4> fresnel_table : register(t16);
+Texture2D<float4> current_material : register(t17);
+RWTexture2D<float4> transport_output : register(u3);
+RWTexture2D<float4> response_output : register(u5);
 RWTexture2D<float4> lighting_output : register(u0);
 RWTexture2D<uint2> geometry_output : register(u1);
 RWTexture2D<float4> diagnostic_output : register(u2);
@@ -63,8 +75,7 @@ groupshared float4 lighting_tile[TILE_PIXELS];
 groupshared float4 specular_tile[TILE_PIXELS];
 groupshared float4 geometry_tile[TILE_PIXELS];
 
-[numthreads(GROUP_WIDTH, GROUP_WIDTH, 1)]
-void main(uint3 thread_id : SV_DispatchThreadID, uint3 group_id : SV_GroupID, uint lane : SV_GroupIndex) {
+[numthreads(GROUP_WIDTH, GROUP_WIDTH, 1)] void main(uint3 thread_id : SV_DispatchThreadID, uint3 group_id : SV_GroupID, uint lane : SV_GroupIndex) {
   // 1. Cooperatively load the current neighborhoods only for active clamps.
   // RGB and alpha share one fetch; specular also needs native geometry to keep
   // different reflection directions and opposite surface sides out of its clamp.
@@ -125,6 +136,31 @@ void main(uint3 thread_id : SV_DispatchThreadID, uint3 group_id : SV_GroupID, ui
     normal = DecodeNormal(normal_buffer.Load(int3(full_pixel, 0)).xyz);
     geometry_valid = depth > 0.0 && z > 0.0 && z < 1.0e6 && all(isfinite(normal));
   }
+  const bool transport_active = CUSTOM_MGSV_SPECULAR_GI_ACTIVE >= 0.5;
+  uint material_width, material_height;
+  current_material.GetDimensions(material_width, material_height);
+  const bool material_ready = material_width == width && material_height == height;
+  float4 current_transport = float4(0.0, 0.0, 0.0, -1.0);
+  float4 current_response = current_transport;
+  SpecularMaterial material = (SpecularMaterial)0;
+  if (transport_active) {
+    current_transport = raw_transport.Load(int3(pixel, 0));
+    current_response = raw_response.Load(int3(pixel, 0));
+    if (material_ready) {
+      const float4 guide = LoadSpecularMaterialGuide(current_material, pixel);
+      material.f0 = guide.rgb;
+      material.roughness = guide.a;
+      material.valid = guide.a >= 0.0;
+    } else {
+      material = LoadSpecularMaterial(material_palette, fresnel_table, native_material.Load(int3(full_pixel, 0)));
+    }
+    // Seed all outputs before any camera, exposure, or history rejection.
+    // Missing data is explicit; it must never read as old ping-pong contents.
+    transport_output[pixel] = current_transport;
+    response_output[pixel] = current_response;
+  }
+  const bool transport_valid = transport_active && geometry_valid && material.valid
+                               && IsSpecularGIValid(current_transport, current_response);
   const bool gi_valid = geometry_valid && HasDiffuseGI(current_lighting);
   const bool ao_valid = geometry_valid && HasAmbientVisibility(current_lighting);
   float4 current_specular = float4(0.0, 0.0, 0.0, -1.0);
@@ -142,6 +178,7 @@ void main(uint3 thread_id : SV_DispatchThreadID, uint3 group_id : SV_GroupID, ui
   if (diagnostic == 6) diagnostic_output[pixel] = float4(current_radiance, 1.0);
   if (diagnostic == 8 || diagnostic == 9) diagnostic_output[pixel] = float4(current_visibility.xxx, 1.0);
   if (diagnostic == 7 || diagnostic == 11) diagnostic_output[pixel] = float4(0.0, 0.0, 0.0, 1.0);
+  if (diagnostic == 31) diagnostic_output[pixel] = float4(0.0, 0.0, 0.0, 1.0);
   if (diagnostic == 17) diagnostic_output[pixel] = float4(0.0, 0.0, 0.0, 1.0);
   if (!geometry_valid) {
     geometry_output[pixel] = uint2(0u, 0u);
@@ -170,24 +207,28 @@ void main(uint3 thread_id : SV_DispatchThreadID, uint3 group_id : SV_GroupID, ui
                                    && CUSTOM_MGSV_AO_TEMPORAL_ACTIVE >= 0.5
                                    && CUSTOM_MGSV_SPECULAR_HISTORY_VALID >= 0.5
                                    && CUSTOM_MGSV_OCCLUSION_HISTORY_WEIGHT > 0.0;
+  bool accumulate_transport = transport_valid && CUSTOM_MGSV_GT_TEMPORAL_ENABLED >= 0.5
+                              && CUSTOM_MGSV_GI_TEMPORAL_ACTIVE >= 0.5 && CUSTOM_MGSV_SPECULAR_GI_HISTORY_VALID >= 0.5
+                              && CUSTOM_MGSV_GI_HISTORY_WEIGHT > 0.0;
   // Cold or disabled signals keep their current values. No previous texture
   // is read unless at least one signal has usable history.
-  [branch]
-  if (!accumulate_gi && !accumulate_ao && !accumulate_specular) return;
+  [branch] if (!accumulate_gi && !accumulate_ao && !accumulate_specular && !accumulate_transport) return;
 
   float exposure_ratio = 1.0;
-  if (accumulate_gi) {
+  if (accumulate_gi || accumulate_transport) {
     const float current_exposure = current_scene.exposure.z;
     const float previous_exposure = previous_scene.exposure.z;
     if (current_exposure > 0.0 && previous_exposure > 0.0
         && isfinite(current_exposure) && isfinite(previous_exposure)) {
       exposure_ratio = current_exposure / previous_exposure;
-      accumulate_gi = isfinite(exposure_ratio);
+      accumulate_gi = accumulate_gi && isfinite(exposure_ratio);
+      accumulate_transport = accumulate_transport && isfinite(exposure_ratio);
     } else {
       accumulate_gi = false;
+      accumulate_transport = false;
     }
   }
-  if (!accumulate_gi && !accumulate_ao && !accumulate_specular) return;
+  if (!accumulate_gi && !accumulate_ao && !accumulate_specular && !accumulate_transport) return;
 
   // These snapshots must describe the same ordinary perspective view as the
   // scatter's geometry constants. A special-view or stale scene block may be
@@ -277,8 +318,7 @@ void main(uint3 thread_id : SV_DispatchThreadID, uint3 group_id : SV_GroupID, ui
   const int2 last = int2(width, height) - 1;
   const float2 penultimate_pixel = float2(last - 1) * scale + center_offset;
   const float2 last_pixel = min(float2(last) * scale + center_offset, full_size - 1.0);
-  [unroll]
-  for (int axis = 0; axis < 2; ++axis) {
+  [unroll] for (int axis = 0; axis < 2; ++axis) {
     if (last[axis] == 0) {
       history_position[axis] = 0.0;
     } else if (previous_pixel[axis] >= penultimate_pixel[axis]) {
@@ -295,10 +335,14 @@ void main(uint3 thread_id : SV_DispatchThreadID, uint3 group_id : SV_GroupID, ui
   float ao_accepted_weight = 0.0;
   float2 specular_history_sum = 0.0;
   float specular_accepted_weight = 0.0;
+  float3 transport_history_sum = 0.0;
+  float3 response_history_sum = 0.0;
+  float transport_accepted_weight = 0.0;
+  float3 transport_lobe = GetSpecularLobeParameters(current_transport.a);
   float3 current_reflection = 0.0;
   float3 current_lobe = 0.0;
   float current_side = 1.0;
-  if (accumulate_specular) {
+  if (accumulate_specular || accumulate_transport) {
     const float3 view = normalize(-ViewPos(float2(full_pixel) + 0.5, z));
     current_reflection = reflect(-view, normal);
     current_lobe = GetSpecularLobeParameters(current_specular.z);
@@ -307,8 +351,7 @@ void main(uint3 thread_id : SV_DispatchThreadID, uint3 group_id : SV_GroupID, ui
   // 5. Validate four bilinear history taps individually before interpolation.
   // Shared depth/normal reads feed separate GI, AO, and specular acceptance;
   // a rejected or missing signal cannot enter another signal's weight sum.
-  [unroll]
-  for (int i = 0; i < 4; ++i) {
+  [unroll] for (int i = 0; i < 4; ++i) {
     const int2 offset = int2(i & 1, i >> 1);
     const int2 q = base + offset;
     if (any(q < 0) || any(q > last)) continue;
@@ -357,29 +400,50 @@ void main(uint3 thread_id : SV_DispatchThreadID, uint3 group_id : SV_GroupID, ui
         ao_accepted_weight += weight;
       }
     }
-    if (accumulate_specular && normal_weights.y > 0.0
-        && depth_difference <= CUSTOM_MGSV_OCCLUSION_DEPTH_REJECTION * reference_depth) {
-      const float4 history = previous_specular.Load(int3(q, 0));
-      if (IsSpecularSampleValid(history)) {
-        // Reconstruct the old receiver's actual reflected direction, then
-        // rotate it into this camera basis. Current view direction cannot
-        // stand in for the previous one when a glossy receiver moves.
-        const int2 history_pixel = min(int2(floor((float2(q) + 0.5) * scale)), int2(full_size) - 1);
-        const float2 history_ndc = ((float2(history_pixel) + 0.5) / full_size - 0.5) * float2(2.0, -2.0);
-        const float3 history_position = float3((history_ndc - previous_scene.camera_center_offset.xy)
-                                                   * previous_projection.xy * history_z,
-                                               history_z);
-        const float3 history_view = normalize(-history_position);
-        if (GetSpecularSurfaceSide(history_normal, history_view) != current_side) continue;
-        const float3 history_reflection = reflect(-history_view, history_normal);
-        const float3 world_reflection = previous_x.xyz * history_reflection.x
-                                        + previous_y.xyz * history_reflection.y + previous_z.xyz * history_reflection.z;
-        const float3 reflection = float3(dot(world_reflection, current_x.xyz),
-                                         dot(world_reflection, current_y.xyz), dot(world_reflection, current_z.xyz));
-        const float lobe_weight = GetSpecularLobeWeight(current_reflection, current_lobe, reflection, history.z);
-        const float weight = bilinear * normal_weights.y * lobe_weight;
-        specular_history_sum += history.xy * weight;
-        specular_accepted_weight += weight;
+    const bool specular_geometry_matches = accumulate_specular && normal_weights.y > 0.0
+                                           && depth_difference <= CUSTOM_MGSV_OCCLUSION_DEPTH_REJECTION * reference_depth;
+    const bool transport_geometry_matches = accumulate_transport && normal_weights.x > 0.0
+                                            && depth_difference <= CUSTOM_MGSV_GI_DEPTH_REJECTION * reference_depth;
+    if (specular_geometry_matches || transport_geometry_matches) {
+      // Reconstruct the old receiver's actual reflected direction, then
+      // rotate it into this camera basis. Current view direction cannot
+      // stand in for the previous one when a glossy receiver moves.
+      const int2 history_pixel = min(int2(floor((float2(q) + 0.5) * scale)), int2(full_size) - 1);
+      const float2 history_ndc = ((float2(history_pixel) + 0.5) / full_size - 0.5) * float2(2.0, -2.0);
+      const float3 history_position = float3((history_ndc - previous_scene.camera_center_offset.xy)
+                                                 * previous_projection.xy * history_z,
+                                             history_z);
+      const float3 history_view = normalize(-history_position);
+      const bool same_side = GetSpecularSurfaceSide(history_normal, history_view) == current_side;
+      const float3 history_reflection = reflect(-history_view, history_normal);
+      const float3 world_reflection = previous_x.xyz * history_reflection.x
+                                      + previous_y.xyz * history_reflection.y + previous_z.xyz * history_reflection.z;
+      const float3 reflection = float3(dot(world_reflection, current_x.xyz),
+                                       dot(world_reflection, current_y.xyz), dot(world_reflection, current_z.xyz));
+
+      if (same_side && specular_geometry_matches) {
+        const float4 history = previous_specular.Load(int3(q, 0));
+        if (IsSpecularSampleValid(history)) {
+          const float weight = bilinear * normal_weights.y * GetSpecularLobeWeight(current_reflection, current_lobe, reflection, history.z);
+          specular_history_sum += history.xy * weight;
+          specular_accepted_weight += weight;
+        }
+      }
+      if (same_side && transport_geometry_matches) {
+        const float4 history = previous_transport.Load(int3(q, 0));
+        const float4 response = previous_response.Load(int3(q, 0));
+        const float4 guide = previous_material.Load(int3(q, 0));
+        if (IsSpecularGIValid(history, response) && all(isfinite(guide)) && guide.a >= 0.0) {
+          const float3 exposed = history.rgb * exposure_ratio;
+          const float weight = bilinear * normal_weights.x
+                               * GetSpecularLobeWeight(current_reflection, transport_lobe, reflection, history.a)
+                               * GetSpecularMaterialWeight(material.f0, guide.rgb);
+          if (all(isfinite(exposed))) {
+            transport_history_sum += exposed * weight;
+            response_history_sum += response.rgb * weight;
+            transport_accepted_weight += weight;
+          }
+        }
       }
     }
   }
@@ -387,7 +451,9 @@ void main(uint3 thread_id : SV_DispatchThreadID, uint3 group_id : SV_GroupID, ui
   const bool gi_history_valid = gi_accepted_weight > 1.0e-4 && all(isfinite(gi_history_sum));
   const bool ao_history_valid = ao_accepted_weight > 1.0e-4 && isfinite(ao_history_sum);
   const bool specular_history_valid = specular_accepted_weight > 1.0e-4 && all(isfinite(specular_history_sum));
-  if (!gi_history_valid && !ao_history_valid && !specular_history_valid) return;
+  const bool transport_history_valid = transport_accepted_weight > 1e-4
+                                       && all(isfinite(transport_history_sum)) && all(isfinite(response_history_sum));
+  if (!gi_history_valid && !ao_history_valid && !specular_history_valid && !transport_history_valid) return;
   float3 gi_history = current_radiance;
   float ao_history = current_visibility;
   if (gi_history_valid) gi_history = gi_history_sum / gi_accepted_weight;
@@ -415,10 +481,8 @@ void main(uint3 thread_id : SV_DispatchThreadID, uint3 group_id : SV_GroupID, ui
     float specular_open_sum = 0.0;
     const float3 receiver_position = ViewPos(float2(full_pixel), z);
     const float specular_plane_scale = max(0.02 * length(receiver_position), 1e-6);
-    [unroll]
-    for (int y = -1; y <= 1; ++y) {
-      [unroll]
-      for (int x = -1; x <= 1; ++x) {
+    [unroll] for (int y = -1; y <= 1; ++y) {
+      [unroll] for (int x = -1; x <= 1; ++x) {
         const int2 q = pixel + int2(x, y);
         if (any(q < 0) || any(q > last)) continue;
         const uint sample_index = uint(int(center) + y * int(TILE_WIDTH) + x);
@@ -497,6 +561,64 @@ void main(uint3 thread_id : SV_DispatchThreadID, uint3 group_id : SV_GroupID, ui
       // keeping that area so history can fill gaps in the current samples.
       specular_history.x = saturate(ratio) * specular_history.y;
     }
+  }
+
+  if (transport_history_valid) {
+    const float3 history = transport_history_sum / transport_accepted_weight;
+    const float3 response = response_history_sum / transport_accepted_weight;
+    float trust = 1.0;
+    if (CUSTOM_MGSV_GI_HISTORY_CLAMP > 0.0) {
+      float3 mean = 0.0;
+      float3 squared_difference = 0.0;
+      float3 response_min = current_response.rgb;
+      float3 response_max = current_response.rgb;
+      float count = 0.0;
+      // Shared reprojection above already checked the old surface and lobe.
+      // Here only compatible current neighbors set the allowed brightness.
+      [unroll] for (int y = -1; y <= 1; ++y) {
+        [unroll] for (int x = -1; x <= 1; ++x) {
+          const int2 q = pixel + int2(x, y);
+          if (any(q < 0) || any(q > last)) continue;
+          const float4 sample = raw_transport.Load(int3(q, 0));
+          const float4 sample_response = raw_response.Load(int3(q, 0));
+          if (!IsSpecularGIValid(sample, sample_response)) continue;
+          const int2 full = min(int2(floor((float2(q) + 0.5) * scale)), int2(full_size) - 1);
+          const float sample_depth = depth_buffer.Load(int3(full, 0)).r;
+          const float sample_z = LinearZ(sample_depth);
+          const float3 sample_normal = DecodeNormal(normal_buffer.Load(int3(full, 0)).xyz);
+          float4 sample_material;
+          if (material_ready) {
+            sample_material = LoadSpecularMaterialGuide(current_material, q);
+          } else {
+            const SpecularMaterial decoded = LoadSpecularMaterial(material_palette, fresnel_table, native_material.Load(int3(full, 0)));
+            sample_material = decoded.valid ? float4(decoded.f0, decoded.roughness) : float4(0.0, 0.0, 0.0, -1.0);
+          }
+          if (sample_material.a < 0.0 || !(sample_depth > 0.0 && sample_z > 0.0)
+              || dot(normal, sample_normal) < 0.9 || GetSpecularMaterialWeight(material.f0, sample_material.rgb) <= 0.0) continue;
+          const float plane = abs(dot(normal, ViewPos(float2(full), sample_z) - ViewPos(float2(full_pixel), z)));
+          if (plane > max(0.02 * z, 1e-6)) continue;
+          const float3 view = normalize(-ViewPos(float2(full) + 0.5, sample_z));
+          if (GetSpecularSurfaceSide(sample_normal, view) != current_side
+              || GetSpecularLobeWeight(current_reflection, transport_lobe, reflect(-view, sample_normal), sample.a) <= 0.0) continue;
+          count += 1.0;
+          const float3 delta = sample.rgb - mean;
+          mean += delta / count;
+          squared_difference += delta * (sample.rgb - mean);
+          response_min = min(response_min, sample_response.rgb);
+          response_max = max(response_max, sample_response.rgb);
+        }
+      }
+      const float3 extent = CUSTOM_MGSV_GI_HISTORY_CLAMP * sqrt(max(squared_difference / max(count, 1.0), 0.0));
+      trust = GetSpecularHistoryTrust(current_transport.rgb, history,
+                                      min(mean - extent, current_transport.rgb), max(mean + extent, current_transport.rgb));
+      trust = min(trust, GetSpecularHistoryTrust(current_response.rgb, response, response_min, response_max));
+    }
+    // Reject both halves with one factor. Scaling only radiance for exposure
+    // and never the dimensionless response preserves their physical meanings.
+    const float blend = saturate(CUSTOM_MGSV_GI_HISTORY_WEIGHT) * saturate(transport_accepted_weight) * trust;
+    transport_output[pixel] = float4(min(lerp(current_transport.rgb, history, blend), 65504.0), current_transport.a);
+    response_output[pixel] = float4(saturate(lerp(current_response.rgb, response, blend)), current_response.a);
+    if (diagnostic == 31) diagnostic_output[pixel] = float4(blend.xxx, 1.0);
   }
 
   // 7. Blend with the user weight multiplied by actual accepted coverage.

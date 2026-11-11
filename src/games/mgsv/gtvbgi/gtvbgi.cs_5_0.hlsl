@@ -10,7 +10,10 @@
 #include "../gbuffer.hlsli"
 #include "../shared.h"
 #include "indirect_diffuse.hlsli"
+#include "source_radiance.hlsli"
+#include "specular_brdf.hlsli"
 #include "specular_occlusion.hlsli"
+#include "specular_trace.hlsli"
 
 #define AO_PI 3.14159265358979323846
 // Each bit owns an equal share of the slice's weighted angular measure.
@@ -21,12 +24,21 @@
 Texture2D<float4> depth_buffer : register(t0);
 Texture2D<float4> normal_buffer : register(t1);
 Texture2D<float4> depth_mips : register(t2);
+Texture2D<float4> material_palette : register(t5);
+Texture2D<float4> brdf_table : register(t9);
+Texture2D<float4> fresnel_table : register(t10);
+RWTexture2D<float4> specular_gi_output : register(u0);
+RWTexture2D<float4> specular_response_output : register(u4);
 Texture2DArray<float2> fast_noise : register(t6);
 Texture2D<float4> native_material : register(t7);
 Texture2D<float4> environment_specular : register(t8);
 
 Texture2D<float4> source_diffuse : register(t3);
 Texture2D<float4> source_albedo : register(t4);
+Texture2D<float4> clean_material : register(t11);
+Texture2D<uint4> material_owner : register(t12);
+Texture2D<float4> prepared_source : register(t13);
+RWTexture2D<float4> material_output : register(u5);
 RWTexture2D<float4> lighting_output : register(u1);
 RWTexture2D<float4> diagnostic_output : register(u2);
 // RG stores visible/open angular areas relative to the whole reflection cone.
@@ -42,8 +54,7 @@ bool ResolveDepthOwner(int2 sample_pixel, int mip_level, float sampled_depth, ou
   owner = clamp(sample_pixel >> mip_level, int2(0, 0),
                 max(int2(buffer_width, buffer_height) >> mip_level, 1) - 1);
   float owner_depth = sampled_depth;
-  [loop]
-  for (int level = mip_level; level > 0; --level) {
+  [loop] for (int level = mip_level; level > 0; --level) {
     const int2 parent_size = max(int2(buffer_width, buffer_height) >> level, 1);
     const int2 child_size = max(int2(buffer_width, buffer_height) >> (level - 1), 1);
     const int2 base = owner * 2;
@@ -51,23 +62,21 @@ bool ResolveDepthOwner(int2 sample_pixel, int mip_level, float sampled_depth, ou
                           owner.y + 1 == parent_size.y ? child_size.y : min(base.y + 2, child_size.y));
     const int2 preferred_child = clamp(sample_pixel >> (level - 1), base, end - 1);
     int2 selected = preferred_child;
-    [branch]
-    if (level == 1) {
+    [branch] if (level == 1) {
       owner_depth = depth_buffer.Load(int3(selected, 0)).x;
-    } else {
+    }
+    else {
       owner_depth = depth_mips.Load(int3(selected, level - 2)).x;
     }
-    [loop]
-    for (int y = base.y; y < end.y; ++y) {
-      [loop]
-      for (int x = base.x; x < end.x; ++x) {
+    [loop] for (int y = base.y; y < end.y; ++y) {
+      [loop] for (int x = base.x; x < end.x; ++x) {
         // The preferred child is already loaded and wins equal-depth ties.
         if (all(int2(x, y) == preferred_child)) continue;
         float candidate;
-        [branch]
-        if (level == 1) {
+        [branch] if (level == 1) {
           candidate = depth_buffer.Load(int3(x, y, 0)).x;
-        } else {
+        }
+        else {
           candidate = depth_mips.Load(int3(x, y, level - 2)).x;
         }
         if (candidate > owner_depth) {
@@ -124,10 +133,10 @@ float GetSliceCosineCDF(float x, float normal_angle, float cos_n, bool direction
 
 float LoadTraceDepth(int2 sample_pixel, int mip_level) {
   float sampled_depth = 0.0;
-  [branch]
-  if (mip_level == 0) {
+  [branch] if (mip_level == 0) {
     sampled_depth = depth_buffer.Load(int3(sample_pixel, 0)).x;
-  } else {
+  }
+  else {
     const int2 coarse_size = max(int2(buffer_width, buffer_height) >> mip_level, 1);
     const int2 coarse_pixel = clamp(sample_pixel >> mip_level, int2(0, 0), coarse_size - 1);
     sampled_depth = depth_mips.Load(int3(coarse_pixel, mip_level - 1)).x;
@@ -135,12 +144,22 @@ float LoadTraceDepth(int2 sample_pixel, int mip_level) {
   return sampled_depth;
 }
 
-uint2 GetCoverageMasks(float2 sample_position, float sample_depth, float thickness,
+uint GetSpecularCoverage(float2 horizon_cos, float side, float sector_offset, float4 interval) {
+  float2 measure = side * (1.0 - horizon_cos);
+  if (side < 0.0) measure = measure.yx;
+  float2 fraction = saturate((measure - interval.x) * interval.z);
+  fraction = (measure >= interval.y ? 1.0 : fraction);
+  const uint2 sectors = (uint2)floor(saturate(fraction + sector_offset) * float(AO_SECTORS));
+  return GetSectorMask(sectors.x, sectors.y);
+}
+
+uint3 GetCoverageMasks(float2 sample_position, float sample_depth, float thickness,
                        float3 position, float3 view_direction, float side, float normal_angle, float cos_n,
-                       float sector_offset, float4 specular_interval, bool2 unfinished) {
+                       float sector_offset, float4 specular_interval, float4 transport_interval, bool3 unfinished) {
   // Treat each depth sample as a finite slab, not an infinitely thick wall.
-  // Project its front/back into two separate angular intervals: one weighted
-  // for diffuse, the other restricted to the receiver's reflection cone.
+  // Project its front/back into the diffuse measure and both reflection cones.
+  // The existing visibility cone and the new material-mapped cone remain
+  // separate until the new transport replaces the old specular resolve.
   const float sample_z = LinearZ(sample_depth);
   // Native reverse-Z zero is background, not a finite surface slab.
   if (!(sample_depth > 0.0 && sample_z > 0.0) || sample_z > 1.0e6) return 0u;
@@ -152,18 +171,15 @@ uint2 GetCoverageMasks(float2 sample_position, float sample_depth, float thickne
   if (any(lengths_squared < 1e-12)) return 0u;
   const float2 horizon_cos = clamp(float2(dot(front, view_direction), dot(back, view_direction)) * rsqrt(lengths_squared), -1.0, 1.0);
   uint specular_mask = 0u;
-  [branch]
   if (unfinished.y && specular_interval.w > 0.0) {
-    float2 measure = side * (1.0 - horizon_cos);
-    if (side < 0.0) measure = measure.yx;
-    float2 fraction = saturate((measure - specular_interval.x) * specular_interval.z);
-    fraction = (measure >= specular_interval.y ? 1.0 : fraction);
-    const uint2 sectors = (uint2)floor(saturate(fraction + sector_offset) * float(AO_SECTORS));
-    specular_mask = GetSectorMask(sectors.x, sectors.y);
+    specular_mask = GetSpecularCoverage(horizon_cos, side, sector_offset, specular_interval);
+  }
+  uint transport_mask = 0u;
+  if (unfinished.z && transport_interval.w > 0.0) {
+    transport_mask = GetSpecularCoverage(horizon_cos, side, sector_offset, transport_interval);
   }
   uint diffuse_mask = 0u;
-  [branch]
-  if (unfinished.x) {
+  [branch] if (unfinished.x) {
     float2 horizon = saturate(acos(horizon_cos) * (side / AO_PI) + normal_angle / AO_PI + 0.5);
     if (side < 0.0) horizon = horizon.yx;
     horizon.x = GetSliceCosineCDF(horizon.x, normal_angle, cos_n, side > 0.0);
@@ -171,11 +187,10 @@ uint2 GetCoverageMasks(float2 sample_position, float sample_depth, float thickne
     const uint2 sectors = (uint2)floor(saturate(horizon + sector_offset) * float(AO_SECTORS));
     diffuse_mask = GetSectorMask(sectors.x, sectors.y);
   }
-  return uint2(diffuse_mask, specular_mask);
+  return uint3(diffuse_mask, specular_mask, transport_mask);
 }
 
-[numthreads(8, 8, 1)]
-void main(uint3 thread_id : SV_DispatchThreadID) {
+[numthreads(8, 8, 1)] void main(uint3 thread_id : SV_DispatchThreadID) {
   // 1. Select a representative full-resolution receiver for this lighting
   // pixel. Round the allocation up, but clamp its last sample to the scene edge.
   const uint2 ao_pixel = thread_id.xy;
@@ -183,6 +198,17 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
   lighting_output.GetDimensions(ao_width, ao_height);
   if (ao_pixel.x >= ao_width || ao_pixel.y >= ao_height) return;
   const bool specular_active = CUSTOM_MGSV_SPECULAR_ACTIVE >= 0.5;
+  const bool transport_active = CUSTOM_MGSV_SPECULAR_GI_ACTIVE >= 0.5;
+  uint prepared_width, prepared_height, guide_width, guide_height;
+  prepared_source.GetDimensions(prepared_width, prepared_height);
+  material_output.GetDimensions(guide_width, guide_height);
+  const bool prepared_available = prepared_width == buffer_width && prepared_height == buffer_height;
+  const bool write_material = transport_active && guide_width == ao_width && guide_height == ao_height;
+  if (write_material) material_output[ao_pixel] = float4(0.0, 0.0, 0.0, -1.0);
+  if (transport_active) {
+    specular_gi_output[ao_pixel] = float4(0.0, 0.0, 0.0, -1.0);
+    specular_response_output[ao_pixel] = float4(0.0, 0.0, 0.0, -1.0);
+  }
   const int diagnostic = (int)CUSTOM_MGSV_GT_DEBUG_VIEW;
   if (diagnostic >= 2 && diagnostic <= 11) {
     diagnostic_output[ao_pixel] = diagnostic == 4 ? float4(1.0, 0.0, 0.0, 1.0) : float4(0.0, 0.0, 0.0, 1.0);
@@ -292,6 +318,34 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
     }
   }
 
+  // Specular GI shares geometry with diffuse GI, but integrates a different
+  // BRDF. Keep the native normal's reflection direction; the diffuse fold
+  // above is only a two-sided diffuse approximation.
+  SpecularMaterial material = (SpecularMaterial)0;
+  if (transport_active) {
+    material = LoadSpecularMaterial(material_palette, fresnel_table, native_material.Load(int3(receiver_pixel, 0)));
+    if (write_material && material.valid) material_output[ao_pixel] = float4(material.f0, material.roughness);
+  }
+  float3 transport_view = normalize(-ViewPos(pixel + 0.5, z));
+  float transport_radius = 0.0;
+  float transport_support = 0.0;
+  bool transport_valid = false;
+  float3 screen_sum = 0.0;
+  float2 cone_weights = 0.0;
+  float2 open_weights = 0.0;
+  if (transport_active && specular_valid) {
+    transport_radius = GetSpecularConeRadius(material.roughness);
+    transport_support = smoothstep(0.0, 0.2, abs(dot(native_normal, transport_view)))
+                        * GetSpecularSliceSupport(length(normal_xy), dot(reflection, view_direction), transport_radius, float(slices));
+    const float view_difference = acos(clamp(dot(transport_view, view_direction), -1.0, 1.0));
+    transport_support *= 1.0 - smoothstep(0.1 * transport_radius, 0.25 * transport_radius, view_difference);
+    transport_valid = material.valid;
+  }
+  const float transport_alpha = material.roughness * material.roughness;
+  const float transport_alpha_squared = transport_alpha * transport_alpha;
+  const bool transport_material_valid = transport_valid;
+  const float broad_weight = smoothstep(0.35, 0.8, transport_support);
+
   float visibility = 0.0;
   float3 indirect = 0.0;
   float accepted_coverage = 0.0;
@@ -304,8 +358,7 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
 
   // 4. Rotate each slice using IS-FAST noise on the lighting grid. Each slice
   // searches both screen directions with exponentially increasing distances.
-  [loop]
-  for (int slice = 0; slice < slices; ++slice) {
+  [loop] for (int slice = 0; slice < slices; ++slice) {
     // Use the stored uniform channels directly.
     // A separated R2 offset supplies the third variate, following EA's guidance.
     // Address the trace lattice, avoiding decimation of noise at reduced scale.
@@ -340,6 +393,8 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
     // Share one mask across both search sides so GI cannot count it twice.
     uint occupied = 0u;
     uint specular_occupied = 0u;
+    uint transport_occupied = 0u;
+    float4 transport_interval = 0.0;
     float4 specular_interval = 0.0;
     float specular_weight = 0.0;
     if (specular_valid) {
@@ -353,14 +408,23 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
       }
     }
 
-    [loop]
-    for (int side = 0; side < 2 && (occupied != 0xFFFFFFFFu || (specular_interval.w > 0.0 && specular_occupied != 0xFFFFFFFFu)); ++side) {
+    if (transport_valid && broad_weight > 0.0) {
+      transport_interval = GetSpecularSliceInterval(float2(dot(specular_normal, view_direction), dot(specular_normal, slice_direction_3d)),
+                                                    float2(dot(reflection, view_direction), dot(reflection, slice_direction_3d)),
+                                                    cos(transport_radius));
+    }
+    // Undo the diffuse-biased azimuth PDF for the BRDF integral. The signed
+    // slice measure already contains sin(theta), so do not add another cosine
+    // or inverse-square factor to outgoing source radiance.
+    const float transport_slice_weight = transport_interval.w > 0.0
+                                             ? GetSpecularSliceWeight(length(normal_xy), length(normal_xy) > 0.0 ? saturate(dot(normal_xy, slice_direction) / length(normal_xy)) : 1.0)
+                                             : 0.0;
+    [loop] for (int side = 0; side < 2 && (occupied != 0xFFFFFFFFu || (specular_interval.w > 0.0 && specular_occupied != 0xFFFFFFFFu) || (transport_valid && transport_interval.w > 0.0 && transport_occupied != 0xFFFFFFFFu)); ++side) {
       const float side_sign = side == 0 ? -1.0 : 1.0;
       const float2 ray_direction = screen_direction * side_sign;
       const float side_phase = side == 0 ? radial_phase : 1.0 - radial_phase;
       float distance_px = pow(step_multiplier, side_phase);
-      [loop]
-      for (int step = 0; step < steps; ++step) {
+      [loop] for (int step = 0; step < steps; ++step) {
         const float sample_distance = distance_px;
         distance_px *= step_multiplier;
         // One shared geometry sample supplies both visibility and bounce.
@@ -369,26 +433,33 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
 
         const int2 sample_pixel = min((int2)floor(sample_position + 0.5), int2(buffer_width, buffer_height) - 1);
         int mip_level = 0;
-        [branch]
-        if (CUSTOM_MGSV_GT_DEPTH_MIPS_ENABLED > 0.5) {
+        [branch] if (CUSTOM_MGSV_GT_DEPTH_MIPS_ENABLED > 0.5) {
           mip_level = clamp((int)floor(log2(max(sample_distance, 1.0)) - 3.3), 0, AO_DEPTH_MIP_LEVELS);
         }
         const float sample_depth = LoadTraceDepth(sample_pixel, mip_level);
-        const uint2 coverage = GetCoverageMasks(sample_position, sample_depth, thickness, position, view_direction, side_sign,
-                                                normal_angle, cos_n, sector_offset, specular_interval,
-                                                bool2(occupied != 0xFFFFFFFFu, specular_occupied != 0xFFFFFFFFu));
+        const uint3 coverage = GetCoverageMasks(sample_position, sample_depth, thickness, position, view_direction, side_sign,
+                                                normal_angle, cos_n, sector_offset, specular_interval, transport_interval,
+                                                bool3(occupied != 0xFFFFFFFFu, specular_occupied != 0xFFFFFFFFu, transport_valid && transport_occupied != 0xFFFFFFFFu));
         const uint covered = coverage.x;
         specular_occupied |= coverage.y;
         // 5. Gather radiance only for newly covered diffuse sectors. A coarse
         // depth has no color of its own, so descend to its full-size owner first.
         uint fresh = covered & ~occupied;
-        if (fresh != 0u) {
+        // One missing source rejects the broad specular estimate. Stop its
+        // remaining sector work then; diffuse/AO and the focused fallback still
+        // run. Finishing a discarded estimate cannot improve the final image.
+        uint fresh_transport = transport_valid ? coverage.z & ~transport_occupied : 0u;
+        if (fresh != 0u || fresh_transport != 0u) {
           int2 owner;
           if (!ResolveDepthOwner(sample_pixel, mip_level, sample_depth, owner)) {
-            gi_valid = false;
+            if (fresh != 0u) gi_valid = false;
+            if (fresh_transport != 0u) transport_valid = false;
           } else {
-            if (CUSTOM_MGSV_GI_REJECT_BACKFACES > 0.5) {
-              const float3 source_normal = DecodeNormal(normal_buffer.Load(int3(owner, 0)).xyz);
+            float3 source_normal = 0.0;
+            if ((CUSTOM_MGSV_GI_REJECT_BACKFACES > 0.5 && fresh != 0u) || fresh_transport != 0u) {
+              source_normal = DecodeNormal(normal_buffer.Load(int3(owner, 0)).xyz);
+            }
+            if (CUSTOM_MGSV_GI_REJECT_BACKFACES > 0.5 && fresh != 0u) {
               if (any(!isfinite(source_normal))) {
                 gi_valid = false;
                 fresh = 0u;
@@ -412,16 +483,53 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
                 fresh &= source_mask;
               }
             }
-            if (fresh != 0u) {
+            // A source faces the receiver according to its original normal.
+            // A backface still blocks environment light; it contributes no
+            // opaque outgoing radiance. Translucent source shading is future work.
+            bool source_faces_receiver = true;
+            if (fresh_transport != 0u) {
+              if (any(!isfinite(source_normal))) {
+                transport_valid = false;
+                fresh_transport = 0u;
+              }
+              source_faces_receiver = all(isfinite(source_normal))
+                                      && dot(source_normal, surface_position - ViewPos(float2(owner), LinearZ(sample_depth))) > 0.0;
+            }
+            if (fresh != 0u || fresh_transport != 0u) {
               // Albedo is already decoded by its sRGB SRV. Diffuse lighting
               // is linear and pre-exposed; source alpha is an SSS
               // mask and must not reject non-skin or valid black samples.
-              const float3 albedo = source_albedo.Load(int3(owner, 0)).rgb;
-              const float3 diffuse = source_diffuse.Load(int3(owner, 0)).rgb;
-              const float3 radiance = albedo * diffuse;
-              if (any(!isfinite(radiance))) {
-                gi_valid = false;
+              float4 source;
+              if (transport_active && prepared_available) {
+                source = prepared_source.Load(int3(owner, 0));
               } else {
+                source = LoadSourceRadiance(source_diffuse, source_albedo, native_material, clean_material, material_owner,
+                                            owner, uint2(buffer_width, buffer_height), normal_buffer.Load(int3(owner, 0)), sample_depth, transport_active);
+              }
+              if (source.a < 0.5 && fresh_transport != 0u) {
+                // Missing material color is not a black surface. Preserve
+                // geometric occlusion, but reject its specular-light estimate.
+                transport_valid = false;
+                fresh_transport = 0u;
+              }
+              const float3 radiance = source.rgb;
+              if (any(!isfinite(radiance))) {
+                if (fresh != 0u) gi_valid = false;
+                if (fresh_transport != 0u) transport_valid = false;
+              } else {
+                // Each newly claimed angular sector carries BRDF*cosine mass.
+                // Accumulate the same mass even for valid black/backfacing
+                // sources, otherwise an unlit blocker would leak environment.
+                [loop] while (fresh_transport != 0u) {
+                  const uint sector = firstbitlow(fresh_transport);
+                  fresh_transport &= fresh_transport - 1u;
+                  const float2 coefficients = GetSpecularSectorWeights(transport_interval, sector, sector_offset,
+                                                                       view_direction, slice_direction_3d, specular_normal, transport_view,
+                                                                       transport_alpha_squared)
+                                              * transport_slice_weight;
+                  cone_weights += coefficients;
+                  if (source_faces_receiver) screen_sum += (material.f0 * coefficients.x + coefficients.y) * max(radiance, 0.0);
+                }
                 const float fresh_coverage = float(countbits(fresh)) / float(AO_SECTORS);
                 indirect += max(radiance, 0.0) * fresh_coverage;
                 accepted_coverage += fresh_coverage;
@@ -431,7 +539,22 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
         }
         // Rejected or invalid source radiance must not make geometry transparent.
         occupied |= covered;
-        if (occupied == 0xFFFFFFFFu && (specular_interval.w <= 0.0 || specular_occupied == 0xFFFFFFFFu)) break;
+        transport_occupied |= coverage.z;
+        if (occupied == 0xFFFFFFFFu && (specular_interval.w <= 0.0 || specular_occupied == 0xFFFFFFFFu)
+            && (!transport_valid || transport_interval.w <= 0.0 || transport_occupied == 0xFFFFFFFFu)) break;
+      }
+    }
+    if (transport_valid && transport_interval.w > 0.0) {
+      uint unclaimed = ~transport_occupied;
+      [loop] while (unclaimed != 0u) {
+        const uint sector = firstbitlow(unclaimed);
+        unclaimed &= unclaimed - 1u;
+        const float2 coefficients = GetSpecularSectorWeights(transport_interval, sector, sector_offset,
+                                                             view_direction, slice_direction_3d, specular_normal, transport_view,
+                                                             transport_alpha_squared)
+                                    * transport_slice_weight;
+        cone_weights += coefficients;
+        open_weights += coefficients;
       }
     }
     // Importance sampling already accounts for slice weight. Fractional band
@@ -456,6 +579,79 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
   }
   if (specular_active) {
     specular_output[ao_pixel] = specular_sample;
+  }
+  if (transport_active && transport_material_valid) {
+    float3 broad_screen = 0.0;
+    float3 broad_remaining = 1.0;
+    bool broad_valid = false;
+    [branch] if (transport_valid) {
+      // Normalize only a usable broad estimate. A rejected one needs neither
+      // the BRDF-table reads nor its remaining-energy calculation.
+      const float4 integral = GetSpecularBRDFIntegral(brdf_table, abs(dot(native_normal, transport_view)), material.roughness);
+      const float3 full_energy = material.f0 * integral.x + integral.y;
+      const float3 cone_energy = material.f0 * integral.z + integral.w;
+      const float3 sampled_energy = material.f0 * cone_weights.x + cone_weights.y;
+      const float3 unclaimed_energy = material.f0 * open_weights.x + open_weights.y;
+      const bool3 represented = sampled_energy > 1e-8 && full_energy > 1e-8;
+      const float3 gain = represented ? cone_energy / max(sampled_energy, 1e-8) : 0.0;
+      const float3 replacement = represented ? cone_energy : 0.0;
+      broad_screen = screen_sum * gain / max(full_energy, 1e-8);
+      broad_remaining = saturate((full_energy - replacement + unclaimed_energy * gain) / max(full_energy, 1e-8));
+      broad_valid = all(isfinite(broad_screen)) && all(broad_screen >= 0.0)
+                    && all(broad_screen <= 65504.0) && all(isfinite(broad_remaining));
+    }
+    float weight = broad_valid ? broad_weight : 0.0;
+    float3 focused_screen = 0.0;
+    float3 focused_remaining = 1.0;
+    bool focused_valid = true;
+    [branch] if (weight < 1.0) {
+      // Narrow lobes need a focused ray. Sample a visible GGX normal using the
+      // same roughness mapping, then share the broad estimator's source and
+      // demodulated storage. This normalized split-sum estimator avoids large
+      // inverse-PDF weights; the common DFG response is applied once at resolve.
+      const float3 tangent = normalize(cross(abs(specular_normal.z) < 0.999 ? float3(0.0, 0.0, 1.0) : float3(0.0, 1.0, 0.0), specular_normal));
+      const float3 bitangent = cross(specular_normal, tangent);
+      const float3 local_view = float3(dot(transport_view, tangent), dot(transport_view, bitangent), dot(transport_view, specular_normal));
+      const float2 sample = (fast_noise.Load(int4((noise_pixel + uint2(56u, 24u)) & 127u, noise_frame & 31u, 0)) * 255.0 + 0.5) / 256.0;
+      const float3 local_half = SampleSpecularVisibleNormal(local_view, transport_alpha, sample);
+      const float3 half_vector = tangent * local_half.x + bitangent * local_half.y + specular_normal * local_half.z;
+      const float3 direction = reflect(-transport_view, half_vector);
+      const float3 receiver_position = ViewPos(pixel + 0.5, z);
+      const float bias = min(max(CUSTOM_MGSV_GT_SURFACE_OFFSET, 0.0), 0.5 * max(dot(specular_normal, -receiver_position), 0.0));
+      const float3 origin = receiver_position + specular_normal * bias;
+      if (dot(direction, specular_normal) > 0.0) {
+        const SpecularRayHit hit = TraceSpecularRay(depth_buffer, depth_mips, origin, direction, receiver_pixel);
+        if (hit.hit) {
+          focused_remaining = 0.0;
+          const float source_depth = depth_buffer.Load(int3(hit.pixel, 0)).r;
+          const float4 source_normal = normal_buffer.Load(int3(hit.pixel, 0));
+          const float3 source_position = ViewPos(float2(hit.pixel) + 0.5, LinearZ(source_depth));
+          const float3 source_facing = DecodeNormal(source_normal.xyz);
+          if (dot(source_facing, origin - source_position) > 0.0) {
+            float4 source;
+            if (prepared_available) {
+              source = prepared_source.Load(int3(hit.pixel, 0));
+            } else {
+              source = LoadSourceRadiance(source_diffuse, source_albedo, native_material, clean_material, material_owner,
+                                          hit.pixel, uint2(buffer_width, buffer_height), source_normal, source_depth, true);
+            }
+            focused_valid = source.a >= 0.5;
+            if (focused_valid) focused_screen = max(source.rgb, 0.0);
+          }
+        }
+      }
+      if (!focused_valid && broad_valid) weight = 1.0;
+    }
+    const float3 screen = lerp(focused_screen, broad_screen, weight);
+    const float3 remaining = lerp(focused_remaining, broad_remaining, weight);
+    const float support = lerp(1.0, transport_support, weight);
+    // These are complementary estimates of one lobe, not extra reflection
+    // strengths. Valid black hits remove environment while adding zero color.
+    if ((focused_valid || weight == 1.0) && all(isfinite(screen)) && all(screen >= 0.0)
+        && all(screen <= 65504.0) && all(isfinite(remaining))) {
+      specular_gi_output[ao_pixel] = float4(screen, material.roughness);
+      specular_response_output[ao_pixel] = float4(saturate(remaining), support);
+    }
   }
   const float applied = saturate(occlusion * CUSTOM_MGSV_AO_STRENGTH);
   if (diagnostic >= 8 && diagnostic <= 10) {

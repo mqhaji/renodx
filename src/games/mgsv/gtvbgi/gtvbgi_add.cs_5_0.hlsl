@@ -8,8 +8,10 @@
 // Fog, tone curves, and display encoding still happen in the game's later passes.
 
 #include "../gbuffer.hlsli"
+#include "../gbuffer/material_source.hlsli"
 #include "../shared.h"
 #include "indirect_diffuse.hlsli"
+#include "specular_brdf.hlsli"
 #include "specular_occlusion.hlsli"
 
 Texture2D<float4> lighting_buffer : register(t0);
@@ -23,6 +25,15 @@ Texture2D<float4> temporal_specular : register(t8);
 Texture2D<float4> filtered_specular : register(t9);
 Texture2D<float4> ambient_diffuse : register(t10);
 Texture2D<float4> ambient_weights : register(t11);
+Texture2D<float4> transport_buffer : register(t3);
+Texture2D<float4> material_palette : register(t12);
+Texture2D<float4> brdf_table : register(t13);
+Texture2D<float4> response_buffer : register(t14);
+Texture2D<float4> fresnel_table : register(t15);
+Texture2D<float4> clean_material : register(t16);
+Texture2D<uint4> material_owner : register(t17);
+Texture2D<float4> source_albedo : register(t18);
+Texture2D<float4> current_material : register(t19);
 SamplerState ambient_point_wrap : register(s0);
 cbuffer AmbientSampling : register(b3) {
   float4 ambient_object_unused[9];
@@ -31,14 +42,17 @@ cbuffer AmbientSampling : register(b3) {
 RWTexture2D<float4> light_output : register(u0);
 RWTexture2D<float2> specular_output : register(u1);
 RWTexture2D<float4> scattering_copy : register(u2);
+RWTexture2D<float4> resolved_transport : register(u3);
+RWTexture2D<float4> resolved_response : register(u4);
 
-[numthreads(8, 8, 1)]
-void main(uint3 thread_id : SV_DispatchThreadID) {
+[numthreads(8, 8, 1)] void main(uint3 thread_id : SV_DispatchThreadID) {
   // 1. Reconstruct full-resolution lighting from four low-resolution taps.
   // Depth weights prevent foreground bounce from spreading into the background;
   // specular additionally checks normal, roughness, reflected direction, and side.
   const uint2 pixel = thread_id.xy;
   if (pixel.x >= buffer_width || pixel.y >= buffer_height) return;
+  resolved_transport[pixel] = 0.0;
+  resolved_response[pixel] = 0.0;
 
   const float scale = max(CUSTOM_MGSV_GT_RESOLUTION_DIVISOR, 1.0);
   const float2 position = (float2(pixel) + 0.5) / scale - 0.5;
@@ -60,7 +74,7 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
   float weight_sum = 0.0;
   float visibility = 0.0;
   float visibility_weight = 0.0;
-  const int diagnostic = (int)clamp(CUSTOM_MGSV_GT_DEBUG_VIEW, 0.0, 22.0);
+  const int diagnostic = (int)clamp(CUSTOM_MGSV_GT_DEBUG_VIEW, 0.0, 37.0);
   const bool specular_active = CUSTOM_MGSV_SPECULAR_ACTIVE >= 0.5;
   float3 center_normal = float3(0.0, 0.0, -1.0);
   float3 center_reflection = 0.0;
@@ -85,6 +99,26 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
       specular_receiver = true;
     }
   }
+  const bool transport_active = CUSTOM_MGSV_SPECULAR_GI_ACTIVE >= 0.5;
+  uint material_width, material_height;
+  current_material.GetDimensions(material_width, material_height);
+  const bool material_guide_available = material_width == gi_width && material_height == gi_height;
+  SpecularMaterial material = (SpecularMaterial)0;
+  float3 transport_lobe = 0.0;
+  float3 integrated_response = 0.0;
+  if (transport_active && specular_receiver) {
+    material = LoadSpecularMaterial(material_palette, fresnel_table, native_material.Load(int3(pixel, 0)));
+    transport_lobe = GetSpecularLobeParameters(material.roughness);
+    const float3 view = normalize(-ViewPos(float2(pixel) + 0.5, z));
+    const float4 integral = GetSpecularBRDFIntegral(brdf_table, abs(dot(center_normal, view)), material.roughness);
+    // Material response is removed during denoising and restored only here.
+    // The native rate stays distinct from F0 and is applied exactly once.
+    integrated_response = GetSpecularEnergy(material.f0, integral.xy) * material.rate;
+  }
+  float3 transport_sum = 0.0;
+  float3 response_sum = 0.0;
+  float transport_support = 0.0;
+  float transport_weight_sum = 0.0;
   float3 diagnostic_sum = 0.0;
   float diagnostic_weight = 0.0;
   [unroll]
@@ -116,31 +150,61 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
       // Invalid GI must remain visible in the validity view. Diagnostic RGB
       // therefore has its own weights and never feeds the radiance result.
       if ((diagnostic >= 2 && diagnostic <= 11)
-          || (diagnostic == 17 && CUSTOM_MGSV_SPECULAR_HISTORY_VALID >= 0.5)) {
+          || (diagnostic == 17 && CUSTOM_MGSV_SPECULAR_HISTORY_VALID >= 0.5)
+          || (diagnostic == 31 && transport_active)) {
         diagnostic_sum += diagnostic_buffer.Load(int3(q, 0)).rgb * weight;
         diagnostic_weight += weight;
       }
+      // Both specular signals use this tap's geometry. Reconstruct it once;
+      // their roughness tests and accepted weight sums remain independent.
+      bool specular_tap_valid = false;
+      float normal_weight = 0.0;
+      float3 sample_reflection = 0.0;
       if (specular_receiver) {
         const float3 sample_normal = DecodeNormal(normal_buffer.Load(int3(full, 0)).xyz);
         if (all(isfinite(sample_normal))) {
-          float normal_weight = saturate(dot(center_normal, sample_normal));
+          const float3 view = normalize(-ViewPos(float2(full) + 0.5, qz));
+          specular_tap_valid = GetSpecularSurfaceSide(sample_normal, view) == center_side;
+          sample_reflection = reflect(-view, sample_normal);
+          normal_weight = saturate(dot(center_normal, sample_normal));
           normal_weight *= normal_weight;
           normal_weight *= normal_weight;
           normal_weight *= normal_weight;
           normal_weight *= normal_weight;
-          const float4 sample = (diagnostic == 14   ? raw_specular.Load(int3(q, 0))
-                                 : diagnostic == 15 ? temporal_specular.Load(int3(q, 0))
-                                                    : filtered_specular.Load(int3(q, 0)));
-          if (IsSpecularSampleValid(sample)) {
-            const float3 view = normalize(-ViewPos(float2(full) + 0.5, qz));
-            if (GetSpecularSurfaceSide(sample_normal, view) != center_side) continue;
-            const float3 reflection = reflect(-view, sample_normal);
-            const float lobe_weight = GetSpecularLobeWeight(center_reflection, center_lobe, reflection, sample.z);
-            const float specular_weight = weight * normal_weight * lobe_weight;
-            specular_mass_sum += sample.xy * specular_weight;
-            specular_support_sum += sample.a * specular_weight;
-            specular_weight_sum += specular_weight;
-          }
+        }
+      }
+      if (transport_active && material.valid && specular_tap_valid) {
+        const float4 sample = transport_buffer.Load(int3(q, 0));
+        const float4 response = response_buffer.Load(int3(q, 0));
+        // Neighbors use the lighting grid's current material guide. Keep the
+        // receiver's full-resolution lookup above: it also supplies native rate.
+        float4 sample_material = float4(0.0, 0.0, 0.0, -1.0);
+        if (material_guide_available) {
+          sample_material = LoadSpecularMaterialGuide(current_material, q);
+        } else {
+          const SpecularMaterial native = LoadSpecularMaterial(material_palette, fresnel_table, native_material.Load(int3(full, 0)));
+          if (native.valid) sample_material = float4(native.f0, native.roughness);
+        }
+        if (IsSpecularGIValid(sample, response) && sample_material.a >= 0.0) {
+          const float accepted = weight * normal_weight
+                                 * GetSpecularLobeWeight(center_reflection, transport_lobe, sample_reflection, sample.a)
+                                 * GetSpecularMaterialWeight(material.f0, sample_material.rgb);
+          transport_sum += sample.rgb * accepted;
+          response_sum += response.rgb * accepted;
+          transport_support += response.a * accepted;
+          transport_weight_sum += accepted;
+        }
+      }
+      if (specular_tap_valid) {
+        const float4 sample = (diagnostic == 14   ? raw_specular.Load(int3(q, 0))
+                               : diagnostic == 15 ? temporal_specular.Load(int3(q, 0))
+                                                  : filtered_specular.Load(int3(q, 0)));
+        if (IsSpecularSampleValid(sample)) {
+          const float lobe_weight = GetSpecularLobeWeight(center_reflection, center_lobe, sample_reflection, sample.z);
+          const float specular_weight = weight * normal_weight * lobe_weight;
+          specular_mass_sum += sample.xy * specular_weight;
+          specular_support_sum += sample.a * specular_weight;
+          specular_weight_sum += specular_weight;
         }
       }
     }
@@ -239,6 +303,47 @@ void main(uint3 thread_id : SV_DispatchThreadID) {
   if (diagnostic == 20) output = ambient_valid ? direct : float3(1.0, 0.0, 1.0);
   if (diagnostic == 21) output = shaded_diffuse + bounce;
   if (diagnostic == 22) output = ambient_valid ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 1.0);
+  // Stage views show the same paired estimate used by normal composition.
+  // Empty native SSR hits preserve this estimate after deferred composition.
+  if (diagnostic >= 23) {
+    output = float3(1.0, 0.0, 1.0);
+    if (transport_active && material.valid) {
+      if (diagnostic == 23) output = material.f0;
+      if (diagnostic == 24) output = material.roughness.xxx;
+      if (diagnostic == 29) output = integrated_response;
+      if (diagnostic == 31) output = diagnostic_sum / max(diagnostic_weight, 1e-4);
+      if (transport_weight_sum > 1e-4) {
+        if (diagnostic >= 25 && diagnostic <= 27) output = transport_sum / transport_weight_sum * integrated_response;
+        if (diagnostic == 28) output = response_sum / transport_weight_sum;
+        if (diagnostic == 30) output = (transport_support / transport_weight_sum).xxx;
+      }
+    }
+  }
+  // Publish a complete paired result only for a receiver whose material is
+  // still owned by the captured producer. Missing data keeps native reflections.
+  const float4 albedo = source_albedo.Load(int3(pixel, 0));
+  const float4 clean = LoadCleanMaterial(clean_material, material_owner, pixel,
+                                         uint2(buffer_width, buffer_height), albedo, normal_buffer.Load(int3(pixel, 0)),
+                                         native_material.Load(int3(pixel, 0)), depth);
+  const bool transport_ready = transport_active && material.valid && clean.a >= 0.0
+                               && transport_weight_sum > 1e-4;
+  const float3 surface_light = transport_sum / max(transport_weight_sum, 1e-4) * integrated_response;
+  const float3 remaining_environment = response_sum / max(transport_weight_sum, 1e-4);
+  if (transport_ready && all(isfinite(surface_light)) && all(surface_light >= 0.0)) {
+    resolved_transport[pixel] = float4(min(surface_light, 65504.0), 1.0);
+    resolved_response[pixel] = float4(saturate(remaining_environment), saturate(transport_support / transport_weight_sum));
+  }
+  if (diagnostic >= 32 && diagnostic <= 34) {
+    output = float3(1.0, 0.0, 1.0);
+    if (clean.a >= 0.0) {
+      if (diagnostic == 32) output = clean.rgb;
+      if (diagnostic == 33) output = max(albedo.rgb - clean.rgb, 0.0);
+      if (diagnostic == 34) output = float3(0.0, 1.0, 0.0);
+    }
+  }
+  if (diagnostic == 35) output = transport_ready ? surface_light : float3(1.0, 0.0, 1.0);
+  if (diagnostic == 36) output = transport_ready ? remaining_environment : float3(1.0, 0.0, 1.0);
+  if (diagnostic == 37) output = transport_ready ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 1.0);
   // 5. Update both diffuse consumers before skin scattering. The copy's alpha
   // selects scattering materials; it is not a general lighting-validity flag.
   // Preserve finite values in the native RGBA16F destination at high strengths.

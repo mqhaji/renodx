@@ -46,6 +46,7 @@ struct ShaderInjectData {
   float gt_enabled;  // 0 = Off, 1 = GT-VBGI.
   float ao_strength;
   float gi_strength;
+  float specular_gi_strength;
   float specular_occlusion_strength;
   float gt_resolution;  // Pixel count: 0 = full, 1 = 1/4, 2 = 1/16, 3 = 1/64.
   float gt_search_radius_pixels;
@@ -100,6 +101,10 @@ struct ShaderInjectData {
   float shadow_noise_frame;
 
   float bloom_type;  // 0 = Vanilla, 1 = Enhanced.
+
+  // Dispatch-local specular transport availability and history.
+  float gt_specular_gi_active;
+  float gt_specular_gi_history_valid;
 };
 
 #ifndef __cplusplus
@@ -153,6 +158,7 @@ cbuffer RenoDXSettings : register(b13) {
 #define CUSTOM_MGSV_LIGHTING_ENABLED            (shader_injection.gt_enabled >= 0.5)
 #define CUSTOM_MGSV_AO_STRENGTH                 shader_injection.ao_strength
 #define CUSTOM_MGSV_GI_STRENGTH                 shader_injection.gi_strength
+#define CUSTOM_MGSV_SPECULAR_GI_STRENGTH        shader_injection.specular_gi_strength
 #define CUSTOM_MGSV_SPECULAR_OCCLUSION_STRENGTH shader_injection.specular_occlusion_strength
 #define CUSTOM_MGSV_GT_SEARCH_RADIUS_PIXELS     shader_injection.gt_search_radius_pixels
 #define CUSTOM_MGSV_GT_SURFACE_THICKNESS        shader_injection.gt_surface_thickness
@@ -175,20 +181,22 @@ cbuffer RenoDXSettings : register(b13) {
 #define CUSTOM_MGSV_GT_FILTER_TAPS              shader_injection.gt_filter_taps
 #define CUSTOM_MGSV_GT_DEBUG_VIEW               shader_injection.gt_debug_view
 
-#define CUSTOM_MGSV_GT_RESOLUTION_DIVISOR    shader_injection.gt_resolution_divisor
-#define CUSTOM_MGSV_GT_NOISE_FRAME           shader_injection.gt_noise_frame
-#define CUSTOM_MGSV_GI_HISTORY_VALID         shader_injection.gi_history_valid
-#define CUSTOM_MGSV_GI_TEMPORAL_ACTIVE       shader_injection.gi_temporal_active
-#define CUSTOM_MGSV_GT_FILTER_STEP           shader_injection.gt_filter_step
-#define CUSTOM_MGSV_GT_CURRENT_JITTER_X      shader_injection.gt_current_jitter_x
-#define CUSTOM_MGSV_GT_CURRENT_JITTER_Y      shader_injection.gt_current_jitter_y
-#define CUSTOM_MGSV_GT_PREVIOUS_JITTER_X     shader_injection.gt_previous_jitter_x
-#define CUSTOM_MGSV_GT_PREVIOUS_JITTER_Y     shader_injection.gt_previous_jitter_y
-#define CUSTOM_MGSV_GT_VELOCITY_JITTER_SCALE shader_injection.gt_velocity_jitter_scale
-#define CUSTOM_MGSV_AO_HISTORY_VALID         shader_injection.ao_history_valid
-#define CUSTOM_MGSV_AO_TEMPORAL_ACTIVE       shader_injection.ao_temporal_active
-#define CUSTOM_MGSV_SPECULAR_ACTIVE          shader_injection.gt_specular_active
-#define CUSTOM_MGSV_SPECULAR_HISTORY_VALID   shader_injection.gt_specular_history_valid
+#define CUSTOM_MGSV_GT_RESOLUTION_DIVISOR     shader_injection.gt_resolution_divisor
+#define CUSTOM_MGSV_GT_NOISE_FRAME            shader_injection.gt_noise_frame
+#define CUSTOM_MGSV_GI_HISTORY_VALID          shader_injection.gi_history_valid
+#define CUSTOM_MGSV_GI_TEMPORAL_ACTIVE        shader_injection.gi_temporal_active
+#define CUSTOM_MGSV_GT_FILTER_STEP            shader_injection.gt_filter_step
+#define CUSTOM_MGSV_GT_CURRENT_JITTER_X       shader_injection.gt_current_jitter_x
+#define CUSTOM_MGSV_GT_CURRENT_JITTER_Y       shader_injection.gt_current_jitter_y
+#define CUSTOM_MGSV_GT_PREVIOUS_JITTER_X      shader_injection.gt_previous_jitter_x
+#define CUSTOM_MGSV_GT_PREVIOUS_JITTER_Y      shader_injection.gt_previous_jitter_y
+#define CUSTOM_MGSV_GT_VELOCITY_JITTER_SCALE  shader_injection.gt_velocity_jitter_scale
+#define CUSTOM_MGSV_AO_HISTORY_VALID          shader_injection.ao_history_valid
+#define CUSTOM_MGSV_AO_TEMPORAL_ACTIVE        shader_injection.ao_temporal_active
+#define CUSTOM_MGSV_SPECULAR_ACTIVE           shader_injection.gt_specular_active
+#define CUSTOM_MGSV_SPECULAR_HISTORY_VALID    shader_injection.gt_specular_history_valid
+#define CUSTOM_MGSV_SPECULAR_GI_ACTIVE        shader_injection.gt_specular_gi_active
+#define CUSTOM_MGSV_SPECULAR_GI_HISTORY_VALID shader_injection.gt_specular_gi_history_valid
 
 #include "../../shaders/renodx.hlsl"
 

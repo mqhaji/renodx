@@ -157,7 +157,15 @@ DLSS uses the selected quality mode, automatic exposure, no sharpening, and the 
 
 ## Known limitations and validation status
 
-The user reported that the rain-related flicker was fixed in the latest gameplay test. Isolated GPU and ReShade checks cover overlapping scene recordings, native post-processing at several scaling ratios, and UI display without a new scene, including color and stencil clears. Loading and save-reload gameplay confirmation remains pending. Other scenes, special views, display changes, and failure recovery still need coverage.
+Open rendering issues reported on November 11, 2026:
+
+- ACC rain: rain appears inside the ACC when Upscaling Quality is not Native.
+- Mother Base rain: occasional flashes occur with reconstruction enabled, including at Native quality.
+- Sortie menu: the ground occasionally flashes black, apparently near the horizon. Whether this depends on reconstruction or upscaling quality is not yet known.
+
+These symptoms remain unresolved. Their causes and whether they share a cause have not been established.
+
+Isolated GPU and ReShade checks cover overlapping scene recordings, native post-processing at several scaling ratios, and UI display without a new scene, including color and stencil clears. Loading and save-reload gameplay confirmation remains pending. Other scenes, special views, display changes, and failure recovery still need coverage.
 
 - Character wobble remains unexplained. Previous gameplay comparisons found no improvement from Analytical Jitter Off or Auto versus Direct object motion. Matrix Camera Everywhere caused too much ghosting to judge wobble. DLSS also showed wobble, although newer models hid it better. Motion ownership and submission changes have not established a fix.
 - Previous readbacks did not prove that the same character's color, motion, geometry, and accumulated history matched. Correspondence between native previous bones/object transforms and the last accumulated frame remains unverified. Camera-only comparisons do not establish a native-pose cause.

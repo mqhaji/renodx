@@ -59,9 +59,9 @@ Texture2D<float4> g_tex_fog : register(t12);
 #define cmp -
 
 void main(
-    float4 v0: SV_Position0,
-    float2 v1: TEXCOORD0,
-    out float4 o0: SV_Target0) {
+    float4 v0 : SV_Position0,
+    float2 v1 : TEXCOORD0,
+    out float4 o0 : SV_Target0) {
   float4 r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14;
   uint4 bitmask, uiDest;
   float4 fDest;
@@ -71,6 +71,9 @@ void main(
   r1.xy = r1.xy;
   r1.xy = float2(0.49609375, 0.49609375) + r1.xy;
   r1.xy = g_psSystem.m_renderBuffer.zw * r1.xy;
+  // GT-VBGI supplies a filtered lighting estimate, but native SSR can still
+  // find reflection detail it misses. Keep tracing; the later compositor
+  // blends valid hits against the current scene with complementary weights.
   r1.xy = r1.xy;
   r0.xyzw = r0.xyzw;
   r0.xyzw = r0.xyzw;

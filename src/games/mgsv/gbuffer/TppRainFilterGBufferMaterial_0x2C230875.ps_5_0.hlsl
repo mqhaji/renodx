@@ -1,4 +1,5 @@
 #include "../common.hlsli"
+#include "rain_material_capture.hlsli"
 
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:23 2026
 
@@ -53,10 +54,16 @@ Texture2D<float4> inDepthMap : register(t12);
 #define cmp -
 
 void main(
-    float4 v0: TEXCOORD0,
-    float4 v1: SV_Position0,
-    out float4 o0: SV_Target0,
-    out float4 o1: SV_Target1) {
+    float4 v0 : TEXCOORD0,
+    float4 v1 : SV_Position0,
+    out float4 o0 : SV_Target0,
+    out float4 o1 : SV_Target1,
+    out float4 clean_color : SV_Target2,
+    out uint4 clean_owner : SV_Target3,
+    out float4 specular_reset : SV_Target4,
+    out float4 composition_reset : SV_Target5) {
+  specular_reset = 0.0;
+  composition_reset = 0.0;
   float4 r0, r1, r2, r3, r4;
   uint4 bitmask, uiDest;
   float4 fDest;
@@ -128,6 +135,7 @@ void main(
   r0.w = r0.w;
   r1.xyz = r0.www * r0.zzz;
   r1.xyz = r1.xyz;
+  const float3 rain_multiplier = 1.0 + (g_psMaterial.m_materials[0].x - 1.0) * r1.xyz;
   r2.xyzw = inAlbedoMap.Sample(g_samplerLinear_Wrap_s, r0.xy).xyzw;
 
   // #if FIX_UNORM_SRGB
@@ -195,5 +203,9 @@ void main(
   r2.xyzw = r2.xyzw;
   o0.xyzw = r2.xyzw;
   o1.xyzw = r0.xyzw;
+  const int2 material_pixel = (int2)v1.xy;
+  CaptureRainMaterial(material_pixel, inAlbedoMap.Load(int3(material_pixel, 0)),
+                      inMaterialMap.Load(int3(material_pixel, 0)), inDepthMap.Load(int3(material_pixel, 0)).r,
+                      rain_multiplier, o0, o1, clean_color, clean_owner);
   return;
 }

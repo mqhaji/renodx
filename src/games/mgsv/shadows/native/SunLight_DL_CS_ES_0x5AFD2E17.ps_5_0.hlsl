@@ -77,7 +77,9 @@ void main(
     out float4 o1 : SV_Target1
 #ifdef MGSV_CAPTURE_ENVIRONMENT_SPECULAR
     ,
-    out float4 o2 : SV_Target2
+    out float4 o2 : SV_Target2,
+    out float4 specular_reset : SV_Target3,
+    out float4 composition_reset : SV_Target4
 #endif
 ) {
   float4 r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15;
@@ -461,6 +463,10 @@ void main(
   }
 #ifdef MGSV_CAPTURE_ENVIRONMENT_SPECULAR
   o2 = float4(environment_specular, 1.0);
+#endif
+#ifdef MGSV_CAPTURE_ENVIRONMENT_SPECULAR
+  specular_reset = 0.0;
+  composition_reset = 0.0;
 #endif
   return;
 }

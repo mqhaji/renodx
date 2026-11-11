@@ -26,6 +26,7 @@
 namespace mgsv::lighting::temporal_inputs {
 
 inline constexpr GUID DIFFUSE_SOURCE_GUID = {.Data1 = 0xa1465c19, .Data2 = 0x1276, .Data3 = 0x4697, .Data4 = {0x8a, 0xd0, 0x9c, 0x21, 0x35, 0xf7, 0xd8, 0x43}};
+inline constexpr GUID PREPARED_SOURCE_GUID = {.Data1 = 0xe7302e42, .Data2 = 0x2f76, .Data3 = 0x40fb, .Data4 = {0x91, 0x25, 0xeb, 0x27, 0x50, 0x2c, 0x45, 0x66}};
 
 // Own the native scene-buffer copy and its original D3D11.1 binding range.
 // Camera identity and jitter describe the producer, not the thread reading it.
@@ -81,6 +82,7 @@ struct Producer {
   ProducerKind kind = ProducerKind::SCENE;
   Microsoft::WRL::ComPtr<ID3D11Resource> copy_source;
   Microsoft::WRL::ComPtr<ID3D11Resource> copy_destination;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> prepared_source;
 };
 
 struct State {
@@ -133,6 +135,9 @@ inline void Publish(std::span<const Producer> producers) {
     const auto selected = inputs::ReadSelection(producer.device);
     if (selected.device != nullptr && selected.generation == producer.generation) {
       producer.copy_destination->SetPrivateDataInterface(DIFFUSE_SOURCE_GUID, producer.copy_source.Get());
+      // Publish preparation beside this exact copy, including null on fallback.
+      // A cached target or recent Present cannot prove that its draw executed.
+      producer.copy_destination->SetPrivateDataInterface(PREPARED_SOURCE_GUID, producer.prepared_source.Get());
     }
   }
 }

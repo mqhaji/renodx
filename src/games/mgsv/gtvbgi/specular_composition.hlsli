@@ -8,10 +8,15 @@
 
 Texture2D<float4> captured_environment : register(t16);
 Texture2D<float2> resolved_specular_visibility : register(t17);
+Texture2D<float4> resolved_specular_light : register(t18);
+Texture2D<float4> resolved_environment_response : register(t19);
+Texture2D<float4> resolved_material_color : register(t20);
+static bool specular_replacement_applied = false;
 
 // Separate the captured environment from direct highlights. Only environment
 // reflections use ambient occlusion; direct light keeps its own shadows.
-float3 GetEnvironmentSpecularCorrection(float2 uv, float native_visibility, float3 native_specular) {
+float3 GetEnvironmentSpecularCorrection(float2 uv, float native_visibility, float3 native_specular,
+                                        float3 native_albedo, float3 diffuse) {
   if (CUSTOM_MGSV_LIGHTING_ENABLED == 0.0) return 0.0;
   uint width, height;
   captured_environment.GetDimensions(width, height);
@@ -25,6 +30,31 @@ float3 GetEnvironmentSpecularCorrection(float2 uv, float native_visibility, floa
   const float3 rounding = max(abs(environment.rgb), abs(native_specular)) * (2.0 / 1024.0) + 1.2e-7;
   if (any(environment.rgb > native_specular + rounding)) return 0.0;
   const float3 direct = max(native_specular - environment.rgb, 0.0);
+  uint result_width, result_height, color_width, color_height;
+  resolved_specular_light.GetDimensions(result_width, result_height);
+  resolved_material_color.GetDimensions(color_width, color_height);
+  if (CUSTOM_MGSV_GT_DEBUG_VIEW == 0.0 && result_width == width && result_height == height
+      && color_width == width && color_height == height) {
+    const float4 screen = resolved_specular_light.Load(int3(pixel, 0));
+    const float4 response = resolved_environment_response.Load(int3(pixel, 0));
+    const float4 material = resolved_material_color.Load(int3(pixel, 0));
+    if (screen.a > 0.5 && material.a >= 0.0 && all(isfinite(screen)) && all(isfinite(response))
+        && all(isfinite(material)) && all(response.rgb >= 0.0) && all(response.rgb <= 1.0)) {
+      // Native cube color was stored inside albedo. Move that contribution
+      // beside native environment lighting before replacing either with hits.
+      // This fallback retains MGSV's integrated material response; it is not
+      // raw GGX environment radiance recovered from the authored LDR cube.
+      const float3 native_cube = max(native_albedo - material.rgb, 0.0) * diffuse;
+      const float3 fallback_environment = environment.rgb + native_cube;
+      const float3 remaining = lerp(1.0, response.rgb, CUSTOM_MGSV_SPECULAR_OCCLUSION_STRENGTH);
+      // Apply strength after filtering, so comparisons keep the same history.
+      // Zero removes added light while retaining the chosen specular occlusion.
+      const float3 indirect = screen.rgb * CUSTOM_MGSV_SPECULAR_GI_STRENGTH + fallback_environment * remaining;
+      specular_replacement_applied = true;
+      return (material.rgb - native_albedo) * diffuse
+             + (1.0 - native_visibility) * direct + indirect - native_visibility * environment.rgb;
+    }
+  }
   // The caller already applied native AO to total specular. Add a delta that
   // restores direct highlights, then changes only environment occlusion:
   // direct + environment * lerp(native AO, custom visibility, strength * confidence).

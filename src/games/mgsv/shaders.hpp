@@ -5,9 +5,12 @@
 
 #pragma once
 
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <shared_mutex>
 #include <span>
+#include <utility>
 
 #include <embed/shaders.h>
 
@@ -15,8 +18,13 @@
 
 #include "../../mods/shader.hpp"
 #include "../../utils/mutex.hpp"
+#include "gbuffer/material_inputs.hpp"
+#include "gbuffer/material_shaders.h"
 #include "gtvbgi/ambient_diffuse.hpp"
+#include "gtvbgi/environment_specular.hpp"
 #include "gtvbgi/lighting.hpp"
+#include "gtvbgi/source_preparation.hpp"
+#include "gtvbgi/temporal_inputs.hpp"
 #include "inputs.hpp"
 #include "reconstruction/postprocess/resources.hpp"
 #include "resource_upgrades.hpp"
@@ -50,20 +58,22 @@ namespace mgsv::game {
       },                                                                                \
   }
 
-#define MGSV_UPGRADE_DEFERRED_TONEMAP_OUTPUT_RTV(value)                                    \
-  {                                                                                        \
-      value,                                                                               \
-      {                                                                                    \
-          .crc32 = (value),                                                                \
-          .code = __##value,                                                               \
+#define MGSV_UPGRADE_DEFERRED_TONEMAP_OUTPUT_RTV(value)                    \
+  {                                                                        \
+      value,                                                               \
+      {                                                                    \
+          .crc32 = (value),                                                \
+          .code = __##value,                                               \
+          .on_replace = [](auto* cmd_list) { \
+            const auto* state = cmd_list->template get_private_data<mgsv::lighting::environment_specular::DrawState>(); \
+            return state != nullptr && state->composite_replacement_safe; },                            \
           .on_draw = [](auto* cmd_list) {                                                  \
             mgsv::rendering::resource_upgrades::UpgradeDeferredSceneColorTarget(cmd_list); \
             mgsv::inputs::CaptureCompositeInputs(cmd_list);                                \
             mgsv::lighting::environment_specular::BeginComposite(cmd_list);                \
-            return true;                                                                   \
-          },                                                                               \
-          .on_drawn = &mgsv::lighting::environment_specular::EndComposite,                 \
-      },                                                                                   \
+            return true; },                               \
+          .on_drawn = &mgsv::lighting::environment_specular::EndComposite, \
+      },                                                                   \
   }
 
 #define MGSV_BLOOM_SHADER(value, reduction)                                                     \
@@ -80,6 +90,7 @@ namespace mgsv::game {
 
 // The supplied shader data must outlive this registry and its draw callbacks.
 inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shader_injection) {
+  mgsv::lighting::material_inputs::controls = shader_injection;
   // Take one settings snapshot for the added work. Bind the shared PCSS noise
   // only for lights with a native map; End restores every displaced pixel input.
   const auto begin_shadows = [shader_injection](reshade::api::command_list* cmd_list, uint32_t light_type,
@@ -163,7 +174,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
         .on_drawn = end_directional,
     };
   };
-  return {
+  renodx::mods::shader::CustomShaders shaders = {
       {
           0x4FBDBB39,
           {.crc32 = 0x4FBDBB39, .on_inject = [](auto*) { return false; }, .on_drawn = &mgsv::lighting::ambient_diffuse::OnSkyDrawn},
@@ -183,16 +194,24 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
       },
       {
           0xD71E843E,
-          {.crc32 = 0xD71E843E, .on_inject = [](auto*) { return false; }, .on_drawn = [shader_injection](auto* cmd_list) {
+          {.crc32 = 0xD71E843E, .code = __0xD71E843E, .on_replace = &mgsv::lighting::source_preparation::IsActive, .on_inject = [](auto*) { return false; }, .on_draw = [shader_injection](auto* cmd_list) {
+             {
+               const std::shared_lock lock(renodx::utils::mutex::global_mutex);
+               if (shader_injection->gt_enabled < 0.5f) return true;
+             }
+             return mgsv::lighting::source_preparation::Begin(cmd_list); }, .on_drawn = [shader_injection](auto* cmd_list) {
+             auto prepared = mgsv::lighting::source_preparation::End(cmd_list);
              bool enabled;
              {
                const std::shared_lock lock(renodx::utils::mutex::global_mutex);
                enabled = shader_injection->gt_enabled >= 0.5f;
              }
              if (enabled) {
-               mgsv::lighting::ambient_diffuse::OnDiffuseCopied(cmd_list);
+               mgsv::lighting::ambient_diffuse::OnDiffuseCopied(cmd_list, std::move(prepared));
              } }},
       },
+      {0x2C230875, {.crc32 = 0x2C230875, .code = __0x2C230875, .on_replace = &mgsv::lighting::material_inputs::IsCaptureActive, .on_inject = [](auto*) { return false; }, .on_draw = &mgsv::lighting::material_inputs::OnRainDraw, .on_drawn = &mgsv::lighting::material_inputs::EndCapture}},
+      {0xC3538951, {.crc32 = 0xC3538951, .code = __0xC3538951, .on_replace = &mgsv::lighting::material_inputs::IsCaptureActive, .on_inject = [](auto*) { return false; }, .on_draw = &mgsv::lighting::material_inputs::OnRainDraw, .on_drawn = &mgsv::lighting::material_inputs::EndCapture}},
       MGSV_BLOOM_SHADER(0x72C1D157, true),
       MGSV_BLOOM_SHADER(0x463195C2, false),
       MGSV_BLOOM_SHADER(0x1AC1A5EF, false),
@@ -343,6 +362,8 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
       {0xE82F8D58, local_shadow_shader(0xE82F8D58, __0xE82F8D58, 3u, false)},
       {0xFB8F891F, directional_shadow_shader(0xFB8F891F, __0xFB8F891F, true)},
 
+      {0xD6714838, {.crc32 = 0xD6714838, .code = __0xD6714838}},
+      {0xDC3A84C3, {.crc32 = 0xDC3A84C3, .code = __0xDC3A84C3, .on_draw = &mgsv::lighting::material_inputs::OnReflectionComposite, .on_drawn = &mgsv::lighting::material_inputs::EndReflections}},
       // Correct ambient lighting and add GI before either scatter consumes it.
       {
           0x6DAF0C4A,
@@ -365,8 +386,50 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
           },
       },
 
-      __ALL_CUSTOM_SHADERS,
   };
+  for (const auto& material : mgsv::lighting::material_inputs::MATERIAL_SHADERS) {
+    shaders.emplace(material.hash, renodx::mods::shader::CustomShader{
+                                       .crc32 = material.hash,
+                                       .code = material.code,
+                                       .on_replace = &mgsv::lighting::material_inputs::IsCaptureActive,
+                                       .on_inject = [](auto*) { return false; },
+                                       .on_draw = &mgsv::lighting::material_inputs::OnMaterialDraw,
+                                       .on_drawn = &mgsv::lighting::material_inputs::EndCapture,
+                                   });
+  }
+  // Retain these native variants and report their use once. The sortie floor
+  // trace uses the shared SSR fallback; the other color paths still need captures.
+  struct NativeVariant {
+    uint32_t hash;
+    const char* message;
+    reshade::log::level level = reshade::log::level::warning;
+  };
+  static constexpr auto NATIVE_VARIANTS = std::to_array<NativeVariant>({
+      {.hash = 0xA621C684, .message = "MgsvLighting: LocalReflectionTPP 0xA621C684 observed; native floor reflections retained through shared SSR composition", .level = reshade::log::level::info},
+      {.hash = 0xBC4665A3, .message = "MgsvLighting: LocalReflectionTPPA1 0xBC4665A3 observed; native shader retained, color path unverified"},
+      {.hash = 0xB301C16D, .message = "MgsvLighting: LocalReflectionTPPA2 0xB301C16D observed; native shader retained, color path unverified"},
+      {.hash = 0x93B69040, .message = "MgsvLighting: LocalReflectionComposite 0x93B69040 observed; native shader retained, color path unverified"},
+      {.hash = 0xEF64DAEB, .message = "MgsvLighting: DeferredRendering 0xEF64DAEB observed; native shader retained, color path unverified"},
+      {.hash = 0xCAE40369, .message = "MgsvLighting: DeferredRendering_VolFog 0xCAE40369 observed; native shader retained, color path unverified"},
+      {.hash = 0x4B10100E, .message = "MgsvLighting: DeferredRenderingTone 0x4B10100E observed; native shader retained, color path unverified"},
+      {.hash = 0xB42DC0EF, .message = "MgsvLighting: DeferredRenderingTone_GVFog 0xB42DC0EF observed; native shader retained, color path unverified"},
+  });
+  static std::array<std::atomic_flag, NATIVE_VARIANTS.size()> reported_variants = {};
+  for (uint32_t index = 0u; index < NATIVE_VARIANTS.size(); ++index) {
+    const auto& variant = NATIVE_VARIANTS[index];
+    shaders.emplace(variant.hash, renodx::mods::shader::CustomShader{
+                                      .crc32 = variant.hash,
+                                      .on_inject = [](auto*) { return false; },
+                                      .on_draw = [index, message = variant.message, level = variant.level](auto*) {
+          if (!reported_variants[index].test_and_set(std::memory_order_relaxed)) {
+            reshade::log::message(level, message);
+          }
+          return true; },
+                                  });
+  }
+  // Explicit callbacks win. Automatic entries supply the remaining replacements.
+  shaders.merge(renodx::mods::shader::CustomShaders{__ALL_CUSTOM_SHADERS});
+  return shaders;
 }
 
 #undef MGSV_UPGRADE_RTV_REPLACE_SHADER_CALLBACK
