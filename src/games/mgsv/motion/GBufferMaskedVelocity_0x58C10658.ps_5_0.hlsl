@@ -54,7 +54,7 @@ void main(
   r1.y = cmp(0 < r1.x);
   r0.zw = r0.zw / r1.xx;
   r1.x = max(0, r1.x);
-  if (CUSTOM_TAA == 0.f || CUSTOM_UNCLAMP_MOTION_VECTORS == 0.f) r1.x = min(1, r1.x);
+  if (CUSTOM_RECONSTRUCTION_MODE == 0.f || CUSTOM_UNCLAMP_MOTION_VECTORS == 0.f) r1.x = min(1, r1.x);
   r0.zw = r1.xx * r0.zw;
   r1.xy = r1.yy ? r0.zw : float2(0, 0);
   r1.z = -r1.y;

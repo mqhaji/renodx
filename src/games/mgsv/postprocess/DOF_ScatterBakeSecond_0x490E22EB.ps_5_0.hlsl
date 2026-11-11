@@ -157,7 +157,7 @@ void main(
   r5.w = r5.w;
   o0.xyzw = r1.xyzw;
   o1.xyzw = r2.xyzw;
-  // The reused bloom target is now float; retain its original UNORM range.
+  // This float target is reused for DoF controls; preserve their native UNORM range.
   o2.xyzw = saturate(r5.xyzw);
   return;
 }

@@ -1,6 +1,6 @@
 #include "../../../../shaders/color/srgb.hlsl"
 
-#include "./copy_constants.hlsli"
+#include "copy_constants.hlsli"
 
 Texture2D<float4> input_color : register(t0);
 RWTexture2D<float4> output_color : register(u0);

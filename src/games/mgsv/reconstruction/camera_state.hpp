@@ -9,7 +9,7 @@
 #include <cmath>
 #include <cstdint>
 
-#include "./state.hpp"
+#include "state.hpp"
 
 namespace mgsv::reconstruction::camera_state {
 

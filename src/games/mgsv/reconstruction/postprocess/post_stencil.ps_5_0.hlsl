@@ -1,4 +1,4 @@
-#include "./copy_constants.hlsli"
+#include "copy_constants.hlsli"
 
 Texture2D<uint2> input_stencil : register(t0);
 

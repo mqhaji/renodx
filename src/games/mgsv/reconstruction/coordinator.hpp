@@ -27,17 +27,17 @@
 #include <detours.h>
 #include <wrl/client.h>
 
-#include "../d3d11_compute_state.hpp"
-#include "../gtvbgi/temporal_inputs.hpp"
-#include "../inputs.hpp"
-#include "./analytical/runtime.hpp"
-#include "./camera_state.hpp"
-#include "./dlss/runtime.hpp"
-#include "./fsr3/runtime.hpp"
-#include "./input_capture.hpp"
-#include "./logging.hpp"
-#include "./postprocess/resources.hpp"
-#include "./state.hpp"
+#include "../rendering/d3d11_state.hpp"
+#include "../rendering/inputs.hpp"
+#include "../rendering/producer_records.hpp"
+#include "analytical/runtime.hpp"
+#include "camera_state.hpp"
+#include "dlss/runtime.hpp"
+#include "fsr3/runtime.hpp"
+#include "input_capture.hpp"
+#include "logging.hpp"
+#include "postprocess/resources.hpp"
+#include "state.hpp"
 
 namespace mgsv::reconstruction::coordinator {
 

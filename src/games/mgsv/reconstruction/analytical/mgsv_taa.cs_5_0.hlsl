@@ -141,7 +141,7 @@ Neighborhood BuildCurrentNeighborhood(float2 uv, float2 inv_screen_size, float3 
 //
 // Decoding to UV space inverts the * (size / 128) scale and the NDC→UV /2
 // factor, giving (encoded * 2 - 1) * 64 / screen_size. The shader's Y sign
-// flip is cancelled by UV.y being inverted vs NDC.y, so no extra negate.
+// flip is canceled by UV.y being inverted relative to NDC.y; do not negate again.
 //
 float2 DecodeVelocity(float2 uv, float2 screen_size) {
   const float4 raw = velocity_texture.SampleLevel(point_sampler, uv, 0);

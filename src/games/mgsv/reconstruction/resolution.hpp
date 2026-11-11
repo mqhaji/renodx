@@ -21,8 +21,8 @@
 #include <detours.h>
 #include <include/reshade.hpp>
 
-#include "./logging.hpp"
-#include "./state.hpp"
+#include "logging.hpp"
+#include "state.hpp"
 
 namespace mgsv::reconstruction::resolution {
 

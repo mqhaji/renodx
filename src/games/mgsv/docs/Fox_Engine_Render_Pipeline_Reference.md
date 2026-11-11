@@ -1,6 +1,6 @@
 # Fox Engine Render Pipeline — Reverse Engineering Reference
 
-Historical notes from retail executable inspection and Frida instrumentation. Plugin structure and CPU recording do not establish GPU execution order. See the [addon architecture](ARCHITECTURE.md) for current RenoDX ownership and lighting placement.
+Historical notes from executable inspection and Frida instrumentation. Addresses and inferred names below have not all been verified against the currently supported executable; do not use them as new hook targets without checking the installed bytes. Plugin structure and CPU recording do not establish GPU execution order. See the [addon architecture](ARCHITECTURE.md) for current RenoDX ownership and lighting placement.
 
 ## Table of Contents
 
@@ -16,7 +16,7 @@ Historical notes from retail executable inspection and Frida instrumentation. Pl
 - [DX11 Device Access](#dx11-device-access)
 - [Shader Constants Pushed Per-Frame](#shader-constants-pushed-per-frame)
 - [Key Function Addresses (Retail)](#key-function-addresses-retail)
-- [Proven Frida Techniques](#proven-frida-techniques)
+- [Historical Frida examples](#historical-frida-examples)
 - [What Can Be Modified Live](#what-can-be-modified-live)
 
 ---
@@ -98,7 +98,7 @@ Plugin execution is **hierarchical**, not flat. There are three distinct dispatc
 
 ## Plugin Node Layout
 
-**Confidence: 90%** — Offsets confirmed via Frida memory reads on live plugin instances. Name reading confirmed for all 42 plugins.
+The original investigation checked these offsets with Frida memory reads on live plugin instances and read names for 42 plugins. Recheck the layout before using it with another executable.
 
 | Offset | Type | Description |
 |--------|------|-------------|
@@ -120,7 +120,7 @@ const name = plugin.add(0x40).readPointer().readPointer().readUtf8String();
 
 ## Plugin Hierarchy
 
-Complete plugin tree as observed at runtime. **Confidence: 95%+** — every node confirmed via live Frida instrumentation of `_Exec` and `ExecChildPlugin`, cross-referenced against the MGSV Modding Wiki entity list and retail symbol dump.
+Plugin tree recorded by the original investigation through Frida instrumentation of `_Exec` and `ExecChildPlugin`, with names cross-referenced against the MGSV Modding Wiki entity list and a retail symbol dump. This is not a complete GPU pass inventory.
 
 ```
 Top-level plugins (dispatched via _Exec):
@@ -175,7 +175,7 @@ Top-level plugins (dispatched via _Exec):
 
 The hierarchy describes plugin responsibilities. Setup, Execute, child traversal, and deferred command recording must be distinguished from GPU execution; the tree alone does not establish draw order.
 
-The inspected native captures place geometry and motion before AO and lighting, then subsurface scattering before deferred composition/fog. Later grading follows LUT construction, late tonemap, FXAA, UI, and output. Transparency occurs on both sides of SSR, and reconstruction placement comes from addon source rather than these native-only captures. See the [lighting order and evidence limits](ARCHITECTURE.md#lighting-order).
+The inspected native captures place geometry and motion before AO and lighting, then subsurface scattering before deferred composition/fog. Later grading follows LUT construction, late tonemap, FXAA, UI, and output. Transparency occurs on both sides of SSR, and reconstruction placement comes from addon source rather than these native-only captures. See the [frame order and evidence limits](ARCHITECTURE.md#frame-order).
 
 ### Wiki Entity ↔ Runtime Name Mapping
 
@@ -245,9 +245,9 @@ These plugins exist in the entity system but were not seen in the active plugin 
 
 ## Plugin Enable/Disable System
 
-**Confidence: 90%** — Bitmask system decompiled from ExecChildPlugin and buildRendering. Skip path crash behavior confirmed experimentally (skipping vtbl+0x58 = crash).
+The original investigation recovered the bitmask checks from ExecChildPlugin and buildRendering. Omitting the child skip callback caused crashes in that test.
 
-### Native Bitmask System (Cleanest)
+### Native bitmask system
 
 Each viewport has a bitmask array at `viewport+0x528`. Each plugin checks its specific bit to determine execution. Clearing a bit causes the engine to call the skip/cleanup path (`vtbl+0x58`) instead of `_Exec`.
 
@@ -280,7 +280,7 @@ The sky plugin has its own enable system separate from bitmasks:
 
 ## Key Structures
 
-**Confidence: 85%** — Offsets derived from decompiled code. Viewport offsets partially confirmed via AnimateExposure hook work. Some field names are inferred from usage context.
+Offsets below came from decompiled code, with some viewport fields checked during AnimateExposure experiments. Several field names remain inferred from use.
 
 ### Viewport (GrViewport)
 
@@ -332,7 +332,7 @@ The sky plugin has its own enable system separate from bitmasks:
 
 ## Terrain System
 
-**Confidence: 95%** — ChangeHeightMapRange decompiled and confirmed via live memory writes. Real-time terrain deformation verified visually in-game.
+The original ChangeHeightMapRange investigation combined decompiled code, live memory writes, and an in-game terrain-deformation check.
 
 ### ChangeHeightMapRange
 
@@ -364,7 +364,7 @@ t.add(0x88).writeFloat(newRange * 1.5259022e-05);
 
 ### GrDaemon
 
-**Confidence: 95%** — Confirmed via constructor decompilation and init function analysis.
+These findings came from constructor and initialization-function inspection.
 
 The graphics system singleton. `s_Instance` at `142b77ac0`. Despite its central role, GrDaemon is a thin wrapper — it inherits from `Entity`, holds two jobs, and registers itself as a global singleton. It does NOT own plugin lists or render state directly.
 
@@ -377,11 +377,11 @@ The graphics system singleton. `s_Instance` at `142b77ac0`. Despite its central 
 
 The init function (`143a79020`) is pure job system plumbing — creates two jobs, wires sync packets for frame ordering, and adds both to the default JobPool. No plugin creation, no viewport management, no render state. `BuildRenderingALL` is where all rendering logic lives.
 
-**Verdict: Dead end for modding. All useful render control is in BuildRenderingALL and the plugin dispatch system.**
+The inspected GrDaemon methods did not expose direct render-pass controls; the frame builder and plugin dispatcher were more useful for that investigation.
 
 ### GrCamera
 
-**Confidence: 80%** — Layout partially mapped from buildRendering viewport access.
+This partial layout was inferred from buildRendering's viewport access.
 
 The camera entity attached to each viewport at `viewport->Camera`. Contains view and inverse view matrices. The camera's world position is extracted from `InvViewMatrix.m30–m33` and pushed as shader constant `0x142` every frame.
 
@@ -395,7 +395,7 @@ The camera entity attached to each viewport at `viewport->Camera`. Contains view
 
 ### GrTools
 
-**Confidence: 85%** — Lua bindings confirmed via mangled symbol names.
+Lua binding names were matched through mangled symbols; verify callable signatures before using them.
 
 A utility class exposing graphics functions to the Lua scripting system. Functions take a `Lua*` parameter — they're designed to be called from Lua scripts but can be called directly via Frida with the right Lua state pointer.
 
@@ -407,7 +407,7 @@ A utility class exposing graphics functions to the Lua scripting system. Functio
 
 ## Wireframe Rendering
 
-**Confidence: 95%** — StartWireframeCloneObject decompiled and called successfully in-game. Produces correct wireframe overlay on any plugin pass.
+The original investigation inspected StartWireframeCloneObject and used it for an in-game wireframe overlay. Coverage of every plugin pass was not established.
 
 ### Engine's Wireframe System
 
@@ -469,7 +469,7 @@ Interceptor.replace(_Exec, new NativeCallback(function(self, render, viewport) {
 
 ## DX11 Device Access
 
-**Confidence: 85%** — Device and context pointers confirmed. Render target access mid-frame requires further work with engine's internal RT management.
+The original investigation identified device/context pointers, but its mid-frame render-target lookup remained unresolved.
 
 ### Global Pointers
 
@@ -496,13 +496,13 @@ const ctx = ctxOut.readPointer();
 
 ### Render Target Access — Current State
 
-Attempting to call `OMGetRenderTargets` (vtable index 73 on `ID3D11DeviceContext`) mid-frame returns null — the engine manages render targets through its own abstraction layer, not standard DX11 OM bindings. Accessing render targets for custom drawing will require:
+The original experiment received null targets from its attempted `OMGetRenderTargets` call. That result does not prove native OM bindings were absent; the wrapper identity, method index, context, and call timing still need verification. The investigation proposed:
 
 1. Reverse engineering how `RenderContext` tracks bound render targets internally, OR
 2. Hooking `OMSetRenderTargets` to capture targets as they're bound, OR
 3. Using the engine's own RT management functions (needs further RE)
 
-This is a prerequisite for custom plugin injection (e.g. SMAA replacement for FXAA, custom post-processing).
+These were proposed investigation routes, not requirements of the current addon, which observes actual native D3D11 bindings.
 
 ### Key DX11 Functions
 
@@ -570,9 +570,11 @@ The projection matrix is also copied to `ShaderManager+0x680` (4x4 float matrix)
 
 ---
 
-## Proven Frida Techniques
+## Historical Frida examples
 
-### Live REPL Plugin Toggle (Recommended Workflow)
+These examples are retained as investigation records, not an approved live-modification workflow for the current addon. Verify every address, signature, context, and cleanup requirement before using them.
+
+### Live REPL plugin toggle
 
 ```javascript
 const base = Process.enumerateModules()[0].base;
@@ -773,7 +775,7 @@ t.add(0x88).writeFloat(newRange * 1.5259022e-05);
 
 | Plugin | Effect |
 |--------|--------|
-| TONEMAP | Removes tonemapping (raw HDR output) |
+| TONEMAP | Skips the late tonemap/bloom/grading stage; early tone curves in scene shaders remain, so this is not raw HDR output |
 | DEPTH_OF_FIELD | Removes depth of field blur |
 | MOTION_BLUR | Removes motion blur |
 | COLOR_CORRECTION | Removes color grading/LUT |

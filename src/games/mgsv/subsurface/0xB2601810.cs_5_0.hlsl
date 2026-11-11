@@ -1,24 +1,7 @@
-// MGSV screen-space subsurface scatter, stage 2 - CRC 0xB2601810, cs_5_0.
-//
-// Vertical sweep, then the translucency blend. The retail pass is dispatched
-// transposed relative to stage 1: groups on the row axis, threads on columns, so
-// this shader's vThreadID.y is the column and vThreadID.x is the row.
-//
-// The addon keeps the original second scatter. Custom lighting runs before
-// stage 1; this compiled stage-2 port is not active. Exact parity with retail
-// has not been established. See ssss.hlsli for its implementation.
-//
-// The tail is the retail translucency term:
-//
-//   NdotV        = dot(N, V)
-//   k            = 2 + 1 / (NdotV + 1e-9)
-//   translucency = saturate(cTweakParams.y * (1 - k * (0.15, 0.18, 0.20)))
-//   mixed        = translucency * diffused + (1 - translucency) * original
-//   output       = lerp(original, mixed, cFade)
-//
-// so the diffusion is strongest where the surface faces the camera and falls to
-// nothing at the silhouette. The per-channel constants make the term slightly
-// stronger in blue than red, matching the warmer band tint of the sweep.
+// Vertical skin-scattering port, with transposed dispatch coordinates and a
+// translucency blend against the original light. The registry retains native
+// bytecode instead of using this port. See ssss.hlsli for shared implementation
+// and the limits of native-parity checks.
 
 #include "ssss.hlsli"
 
@@ -37,8 +20,8 @@ void main(uint3 gid : SV_GroupID,
   if (pixel.y > cBufferHeight) return;
 
   // Unshaded pixel: the retail pass returns without storing anything.
-  const float4 centre = gTileLight[window.centerSlot];
-  if (centre.w == 0.0) return;
+    const float4 center = gTileLight[window.centerSlot];
+    if (center.w == 0.0) return;
 
   float ndotv;
   const float3 diffused = SweepDiffusedLight(

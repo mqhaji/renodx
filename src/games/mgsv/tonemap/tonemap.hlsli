@@ -1,6 +1,6 @@
 #include "../common.hlsli"
-#include "./customtest31.hlsli"
-#include "./uncharted2extended.hlsli"
+#include "customtest31.hlsli"
+#include "uncharted2extended.hlsli"
 
 float3 ApplyUnchartedFilmicTonemap(float3 untonemapped, float A, float B, float C, float D, float E, float F, float W) {
   [branch]
@@ -27,8 +27,8 @@ float3 ApplyTppTonemap(float3 untonemapped, float3 params) {
   return untonemapped * linear_weight + shoulder_curve * (1.f - linear_weight);
 }
 
-/// Identity through anchor to every derivative; then approaches peak
-/// monotonically and concave down. Requires anchor < peak and compression_strength >= 1.
+// Leave values through the anchor unchanged, then approach the peak smoothly.
+// Requires anchor < peak and compression_strength >= 1.
 #define APPLYANCHORED_CINFINITY_SHOULDER_GENERATOR(T)                                                      \
   T ApplyAnchoredCInfinityShoulder(T color, T peak, T anchor, float compression_strength) {                \
     T shoulder_range = peak - anchor;                                                                      \
@@ -90,8 +90,6 @@ float3 ApplyFinalTonemap(float3 untonemapped) {
 }
 
 float3 Sample2DLUT(float3 color, Texture2D<float4> inColorLUT, SamplerState g_samplerLinear_Clamp_s) {
-  // if (RENODX_TONE_MAP_TYPE != 0.f) return renodx::lut::SampleTetrahedral(inColorLUT, renodx::math::SqrtSafe(color), 16u);
-
   float4 r0;
   r0.rgb = color;
   float3 r1;

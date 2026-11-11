@@ -113,7 +113,7 @@ void main(
   r0.z = dot(r0.xy, r0.xy);
   r0.w = sqrt(r0.z);
   r0.w = max(0, r0.w);
-  if (CUSTOM_TAA == 0.f || CUSTOM_UNCLAMP_MOTION_VECTORS == 0.f) r0.w = min(1, r0.w);
+  if (CUSTOM_RECONSTRUCTION_MODE == 0.f || CUSTOM_UNCLAMP_MOTION_VECTORS == 0.f) r0.w = min(1, r0.w);
   r1.w = cmp(r0.w == 0.000000);
   r0.z = rsqrt(r0.z);
   r0.xy = r0.xy * r0.zz;

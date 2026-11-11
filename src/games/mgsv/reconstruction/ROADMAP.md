@@ -1,41 +1,42 @@
-# MGSV Temporal Reconstruction Roadmap
+# MGSV reconstruction roadmap
 
-Outstanding work only. [README.md](README.md) owns current defaults, architecture, safety contracts, and manual validation. The user tested resolution scaling and the jitter cleanup successfully. Recheck gameplay after the file reorganization, sampler-cache change, and depth/stencil and constant-update optimizations. Coverage remains incomplete for cold startup, loading, alt-tab/resize, DoF focus edges, special views, and missing-input recovery. Alternate DoF paths remain unsupported and request native-size recovery. Preserve native Off behavior, object motion, and scene alpha. Keep size changes limited to the identified effects.
+This page tracks outstanding work. The [reconstruction guide](README.md) owns current behavior, defaults, [known limitations](README.md#known-limitations-and-validation-status), and the [manual test matrix](README.md#manual-validation). Resolution scaling and basic quality switching have gameplay coverage, but cold startup, loading, resizing, special views, DoF focus edges, and missing-input recovery still need broader checks. No new performance gain is established by the file cleanup.
+
+## Rain, scene ownership, and transitions
+
+- Investigate rain inside the ACC at reduced input resolution, intermittent Mother Base flashes even at Native quality, and sortie horizon/ground flashes separately until evidence connects them. Match actual color/depth producers, resource roles, native planar reflections, and submitted command lists before changing routing.
+- Extend loading/save-reload, alt-tab/resize, device recreation, and rapid method/quality/reset coverage. Confirm canceled reconstruction preserves native prefixes/remainders and current scene alpha. Unsupported DoF paths must keep requesting native-size recovery rather than redirecting unknown resources.
+- The retired state-profile/cold-start flicker sweep is not a current test request. Legacy compute-only state restoration and the `0x200DBED9` light-VS workaround were removed; do not restore them as speculative fixes. Those removals did not establish a fix for character wobble or rapid night-vision skinned-mesh flicker.
+
+## Character motion and pose correspondence
+
+- Establish same-character color/velocity correspondence through semantic vertex elements, referenced vertex/index/skin data, object/instance identity, and the history actually accumulated. Shader input registers are not vertex-buffer slots, and matching all bindings or POSITION alone is insufficient.
+- Match the current color pose to current velocity and the previous velocity pose to the last accumulated color. Account for deferred execution, cached-list replay, skipped updates, and writes between motion composition and SDK preparation. Matching SRVs, first-bone values, CPU ordering, and successful readback do not establish matching pixels.
+- Native previous viewport matrices advance independently of addon history. The external velocity dispatcher at plugin `+0x68` / virtual `+0x30` and per-object inclusion remain unresolved. The descriptor pool is not a bone uploader. Prove a usable same-character pair before requesting another generic diagnostic run.
+- Analytical Jitter Off and Auto/Direct motion comparisons did not resolve wobble; Matrix Camera Everywhere caused too much ghosting to judge it. DLSS has also shown wobble. Keep Direct Object (6) and Auto Center Pixel (7) as diagnostics, and do not change motion sign/scale or relax frame/reset guards without evidence.
+
+## Projection coverage
+
+- Validate the four enabled experimental paths independently: sunlight/SH draw grids, terrain inverse-plane versus raster agreement, and general-light consumers. Their `1x` defaults do not establish correct alignment in every scene.
+- Keep Alternate Stream disabled after the settled `0x`/`1x` waveform comparison. Any reintroduction requires proven world/UI/glyph separation and stable output. Track older Preset M rail flicker separately.
+- Keep deferred SH packet correction at `0x27F450` disabled until its producer sample and reset version can be followed through consumption. A matching latest-camera matrix is insufficient.
+- Thermography's two guarded native setters have matching clip-position evidence, but the alternate branch still needs gameplay coverage. Check signed/fractional scales, SH kinds, rejected/nested scopes, foreign or null cameras, teardown, and normal exit.
+- Hooks remain loaded for the process lifetime. Restart for replacement/removal; do not add unsafe live detach or resource release while old work can still execute.
+
+## SDK lifecycle and validation
+
+- Exercise lazy DLSS startup from saved and manual selection, cancellation, missing-DLL/unsupported-device explanations, model-F fallback, query boundaries, insertion fallbacks, state restoration, and callbacks crossing Present.
+- Validate suspension/resume across DLSS, FSR, Analytical, and Off, then test model/size recreation and device teardown separately. One successful switch does not prove the earlier crash is resolved.
+- Compare methods on the same verified inputs: motion direction/scale, reverse-Z depth, current alpha, and downstream scene/UI output. Keep automatic exposure until a suitable MGSV exposure resource is proven.
+- Shared indirect lighting has its own submitted producer/history ledger and controlled replay coverage. Do not treat the older AA-Off motion compatibility concern as the current implementation or assume scene-reconstruction history proves lighting history. See the [lighting guide](../lighting/indirect/README.md).
+
+## Temporal quality after input correctness
+
+- Find a native camera-cut signal for aim/binocular/FOV changes, cuts, teleportation, pause/resume, and display changes. Do not restore the clip-space heuristic that reset SDK history continuously.
+- Consider linear RGBA16F Analytical history while preserving encoded game output and current alpha. Add previous-depth/disocclusion checks before relaxing RGB clipping or adding thin-feature locks.
+- Build reactive/transparency masks from verified material membership, starting with `TppFxRain`, then particles, animated textures, reflections, and emissive transparency. Preserve AMD's internal reactivity analysis and original material targets; test trails and stability separately.
+- A production unclamped-motion path should own temporal-only data rather than changing native motion blur. The shared Unclamp option remains a default-Off diagnostic. Consider luminance stabilization and optional sharpening only after motion, cuts, disocclusion, and masks are verified.
 
 ## Future frame generation
 
-Qualify a final scene image after scene post-processing and grading that excludes UI. The native 2D family also contains camera filters, so it is not a universal scene/UI boundary. The proposed Streamline path would receive a separate scene copy, with PQ conversion if required by the chosen SDK contract. Confirm API support, color/exposure handling, motion/depth, and the actual HUD boundary before implementation. Frame generation is separate future work.
-
-Draw routing is merged into `runtime.hpp`; identified velocity precision preparation precedes AA-enable and descriptor-data returns under the existing execution guard. Root `../inputs.hpp` owns retained native observations and bounded swapchain/device retirement; `input_capture.hpp` keeps reconstruction's camera, frame, sample and layout validation. GI uses a separate retained compatibility selection, not newly observed AA-Off motion. Producer/content/history-order proof and cold-history safety remain required before independent GI consumption. The pipeline-only lighting cache and shared 96-byte SDK preparation/include source are implemented, but fresh gameplay validation and performance measurements remain outstanding; ownership does not satisfy GI evidence gates.
-
-## 1. Unresolved character warble and pose ownership
-
-- Root cause remains unidentified. Latest user clarification (2026-09-09): Analytical Jitter Off gave no improvement; repeated Auto/Direct comparisons showed no noticeable difference. Matrix Camera Everywhere was **inconclusive**: heavy ghosting prevented judging warble, so it is not evidence that bypassing native object motion helped. The velocity ownership correction did not visually fix the observed warble. Do not repeat those sweeps or claim a fix.
-- The user tentatively thinks DLSS may not warble while Analytical TAA/FSR are noticeable; this is not confirmed. The native-pose coverage gaps below remain open, not presumed causal or prioritized by the camera-only test.
-- For any native-pose investigation, establish same-character color/velocity correspondence using semantic IA elements, referenced VB/IB/index/skin data, object/instance identity, and contributing history. Shader input registers are not IA slots; neither all-32-binding equality nor POSITION-only matching is sufficient.
-- Match current color to current velocity pose, and previous velocity pose to the prior actually accumulated color. Account for deferred execution, replays, skipped updates, and intervening resource writes through composite/Prepare. Successful readback, matching SRVs, first-bone values, and CPU commit order are not pixel-provenance proof.
-- Native previous viewport matrices advance independently of addon history. The concrete external velocity dispatcher at plugin `+0x68` / virtual `+0x30` and per-object inclusion remain unresolved; the descriptor pool is not a bone uploader. Resolve that route or prove a usable same-character pair before requesting another generic diagnostic run.
-- Direct Object (6) and Auto Center Pixel (7) stay diagnostics. Center-pixel selection has no established visual fix; selection differences alone do not establish causality. Do not change motion sign/scale or loosen epoch guards blindly.
-
-## 2. Native projection coverage and transitions
-
-- Validate the four enabled experimental paths independently: sunlight/SH live draw counts and target grid, terrain inverse-plane versus raster consistency, and general-light final consumers. Analytical `1x` defaults and fixed SDK `1x` scales do not constitute runtime validation.
-- Keep Alternate Stream correction disabled in every method after the settled `0x`/`1x` waveform reproduction. Verify the all-method disable in game; any future reintroduction requires proven world/UI/glyph separation and waveform stability. Track the older Preset M rail flicker separately.
-- **Deferred SH packet remains blocked:** prove producer generation/sample through consumption at `0x27F450`. Latest-camera VP equality is insufficient; preserve inverse-lighting math and avoid guessed packet fields/pointer caches.
-- **Thermography:** scene-depth ownership and missing jitter were confirmed, and setter returns `0x214531` and `0x214AC3` now receive guarded scene jitter. Verify the alternate branch and clean rendering without temporary diagnostics; live validation so far exercised `NewThermography` with original game shaders.
-- Check signed/fractional scales, all SH kinds, rejected/nested scopes, null/foreign cameras, device recreation, normal exit, and rapid preset/method/Off/reset transitions. Prove admitted old work cannot contaminate new history. Hooks remain process-lifetime pinned; restart for replacement/removal, never introduce unsafe live detach/reclamation.
-
-## 3. SDK lifecycle and gameplay validation
-
-- Run the [manual validation matrix](README.md#manual-validation) on the final cleanup build. The earlier gameplay run supports basic scaling and quality switching; it does not cover every transition or special view. No new performance improvement is claimed.
-- Validate lazy DLSS cold/saved activation, cancellation, missing DLL/unsupported device reasons, and F-default support fallback. Exercise query spans, natural recording boundaries, insertion fallbacks, restore-state flags, and epoch lag.
-- Validate DLSS suspension/resume across FSR/Analytical/Off, then model/resize recreation and device teardown separately. Preserve original command-list prefixes and cleanup ownership. One successful switch does not prove crash resolution.
-- Compare all methods on identical qualified inputs, including HUDless insertion/reintegration, reverse-Z disocclusion, motion direction/scale, current alpha, and downstream effects. Retain auto exposure until an MGSV resource is proven.
-
-## 4. Temporal quality after input correctness
-
-- Find a proven native camera-cut signal for aim/binocular/FOV changes, cuts, teleportation, pause/resume, and display changes. Do not restore the removed clip-space heuristic that caused continuous SDK resets.
-- Move Analytical history to linear RGBA16F for optimized reconstruction; preserve encoded game output and current alpha. Add previous-depth/disocclusion confidence before relaxing RGB clipping or adding depth-consistent thin-feature locks.
-- Build owned frame/sample/dimension-matched reactive and transparency masks from proven material membership, starting with `TppFxRain`; extend to particles, animated textures, reflections, and emissive transparency. Preserve AMD's internal reactivity analysis and original material targets; verify reduced trails without destabilizing opaque motion or foliage.
-- For production unclamped motion, use an owned temporal-only path; keep native motion blur a separate compatibility consumer. The shared Unclamp option remains default-Off diagnostic behavior.
-- Consider luminance stability and optional sharpening only after motion, cuts, disocclusion, and masks are validated.
+Identify a final post-processed/graded scene image without UI. Native 2D shaders also implement camera filters, so they do not define a universal HUD boundary. Before choosing a Streamline integration, verify API support, the scene-copy encoding/exposure contract, motion/depth, UI handling, and synchronization. Convert to PQ only if the selected SDK contract requires it. Frame generation is not part of the current reconstruction path.

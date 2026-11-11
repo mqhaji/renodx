@@ -7,7 +7,7 @@
 
 #include <include/reshade.hpp>
 
-#include "./camera_state.hpp"
+#include "camera_state.hpp"
 
 namespace mgsv::reconstruction {
 

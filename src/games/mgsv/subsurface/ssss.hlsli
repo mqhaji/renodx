@@ -1,34 +1,17 @@
-// MGSV's screen-space subsurface scatter - the shared core of both retail passes.
+// Shared implementation for the MGSV skin-scattering ports: horizontal
+// 0x6DAF0C4A and vertical 0xB2601810. Seven depth-weighted bands spread light
+// along each axis; the vertical port also blends with the original light.
+// The horizontal port is active. The registry keeps original vertical bytecode.
+// Exact native parity, including this port's normal decoder, is not established.
 //
-//   CRC 0x6DAF0C4A  horizontal sweep
-//   CRC 0xB2601810  vertical sweep, then the translucency blend
-//
-// This implementation was ported from retail DXBC, but is not a verified verbatim
-// match. The separable seven-band depth-aware blur runs along screen X and Y;
-// the second pass blends the result back over the light with a translucency term.
-//
-// What the retail pass does, in one paragraph: for the pixel centre it builds a
-// screen-space step from the angle between the surface normal and the view ray,
-// then walks six taps either side of the centre in seven distance bands (0, 1/6,
-// ... 1 of the step). Each tap is weighted by a per-channel depth difference -
-// exp2(-dz^2 * (313629, 515248, 655771)), so red survives a larger depth
-// difference than blue - and by a band tint that warms with distance. The result
-// is the per-channel weighted average of the light over those taps. Stage two
-// mixes that average over the light by a term built from 1/N.V, so the diffusion
-// lands on surfaces facing the camera and vanishes at grazing angles.
-//
-// Layout note: the retail passes are dispatched with the group axis along the
-// sweep. Stage one puts groups on the column axis and threads on rows; stage two
-// is transposed, groups on rows and threads on columns, which is why the engine
-// hands the same shader family two different group counts.
-//
-// Bindings (retail): b0 Constants, t0 light, t1 depth (r32_float), t2 normal
-// (b8g8r8a8), t4 light original (stage two only), u0 light output.
+// The vertical dispatch transposes the thread coordinates used by the horizontal
+// pass. Bindings are b0 constants, t0 light, t1 depth, t2 normal, u0 result, and
+// t4 original light for the vertical port only.
 
 #ifndef MGSV_SSSS_HLSLI
 #define MGSV_SSSS_HLSLI
 
-cbuffer Constants : register(b0)
+cbuffer SubsurfaceConstants : register(b0)
 {
   uint cBufferWidth : packoffset(c0);
   uint cBufferHeight : packoffset(c0.y);
@@ -55,9 +38,7 @@ Texture2D<float4> normalBuffer : register(t2);
 groupshared float4 gTileLight[SSSS_TILE];
 groupshared float2 gTileDepth[SSSS_TILE];  // raw depth, linear depth
 
-// The seven distance bands as a fraction of the step, and the tint each band
-// carries. The tint warms as the band gets further away, which is what turns the
-// blur into a scattering term rather than a plain blur.
+// Seven fractions of the sample step, with less blue at larger offsets.
 static const float kBandDistance[7] = {0.0, 0.1667, 0.3333, 0.5, 0.6667, 0.8333, 1.0};
 static const float3 kBandTint[7] = {
     float3(1.000000, 1.000000, 1.000000),
@@ -69,19 +50,16 @@ static const float3 kBandTint[7] = {
     float3(0.617933, 0.272743, 0.121903),
 };
 
-// Per-channel depth falloff, exp2(-dz^2 * k). Red reaches furthest, blue least,
-// which is the wavelength dependence of the scattering this approximates.
+// Per-channel depth falloff. Red tolerates larger depth differences than blue.
 static const float3 kDepthFalloff = float3(313629.34375, 515248.21875, 655770.5);
 
-// The retail linearisation, shared by every pass in the chain.
+// Convert native raw depth to view depth.
 float LinearDepth(float raw) {
   return cProjectionParam.z / (raw - cProjectionParam.w);
 }
 
-// Tile window for the sweep axis: where the centre pixel sits in the cache and
-// how the sample offsets are clamped. The retail shader recomputes these from
-// the group id in both the fill and the sample loop; keeping them together is the
-// only structural change from the disassembly.
+// Cache position and bounds for one sweep tile. Both ports use these bounds
+// while filling the cache and selecting samples.
 struct TileWindow {
   uint centerSlot;  // cache slot of the pixel this thread owns
   uint slotBias;    // 32 for every group but the first
@@ -144,10 +122,9 @@ float3 SweepDiffusedLight(uint2 pixel, float linear_z, TileWindow window, bool s
   // because it runs down the screen while the projection runs up.
   const float2 offset = float2(ndc.x, -ndc.y) - cCameraCenterOffset.xy;
 
-  // 8-bit packed normal: xy is the direction of the normal's tangential part and
-  // z encodes its view-space z as z^2 - 1, so the tangential length is
-  // sqrt(1 - z^2). The two normalisations are the retail pair, including the
-  // epsilon guard against a zero-length tangent.
+  // Preserve this port's existing packed-normal calculation. It is not the
+  // verified native decoder in rendering/geometry.hlsli; changing it requires
+  // a separate scattering comparison rather than a cleanup-only edit.
   const float3 encoded = normalBuffer.Load(int3(pixel, 0)).xyz;
   const float2 nxy = encoded.xy * 2.0 - 1.0;
   const float nz = encoded.z * encoded.z - 1.0;
@@ -179,7 +156,8 @@ float3 SweepDiffusedLight(uint2 pixel, float linear_z, TileWindow window, bool s
 
   // Retail walks -6..6 and folds the sign into the offset, so both directions of
   // a band are visited. Negative indices walk positive, which is symmetric.
-  [loop] for (int tap = -6; tap <= 6; ++tap) {
+  [loop]
+  for (int tap = -6; tap <= 6; ++tap) {
     const uint band = (uint)abs(tap);
     const float distance = min(kBandDistance[band] * step_pixels * cTweakParams.x, 32.0);
     const float direction = tap < 0 ? 1.0 : (tap > 0 ? -1.0 : 0.0);

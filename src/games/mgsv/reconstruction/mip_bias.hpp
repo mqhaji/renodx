@@ -23,9 +23,9 @@
 #include <include/reshade.hpp>
 
 #include "../../../utils/command_action.hpp"
-#include "./logging.hpp"
-#include "./resolution.hpp"
-#include "./state.hpp"
+#include "logging.hpp"
+#include "resolution.hpp"
+#include "state.hpp"
 
 namespace mgsv::reconstruction::mip_bias {
 

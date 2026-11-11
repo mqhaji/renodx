@@ -33,7 +33,7 @@
 #include "../logging.hpp"
 #include "../resolution.hpp"
 #include "../state.hpp"
-#include "./model.hpp"
+#include "model.hpp"
 
 #if defined(_WIN64)
 #if defined(_DEBUG)

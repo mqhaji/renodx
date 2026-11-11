@@ -20,19 +20,19 @@
 #include "../../../utils/shader.hpp"
 #include "../../../utils/state.hpp"
 #include "../../../utils/swapchain.hpp"
-#include "../inputs.hpp"
-#include "../resource_upgrades.hpp"
+#include "../rendering/inputs.hpp"
+#include "../rendering/resource_upgrades.hpp"
 #include "../shared.h"
-#include "./camera_state.hpp"
-#include "./coordinator.hpp"
-#include "./dlss/model.hpp"
-#include "./dlss/runtime.hpp"
-#include "./input_capture.hpp"
-#include "./logging.hpp"
-#include "./mip_bias.hpp"
-#include "./projection_jitter.hpp"
-#include "./resolution.hpp"
-#include "./state.hpp"
+#include "camera_state.hpp"
+#include "coordinator.hpp"
+#include "dlss/model.hpp"
+#include "dlss/runtime.hpp"
+#include "input_capture.hpp"
+#include "logging.hpp"
+#include "mip_bias.hpp"
+#include "projection_jitter.hpp"
+#include "resolution.hpp"
+#include "state.hpp"
 
 namespace mgsv::game::reconstruction {
 
@@ -58,15 +58,11 @@ inline constexpr uint32_t COPY_REDUCTION_X4_PS = 0x72C1D157u;
 // DoF inputs, so validation still checks t0 against captured depth and motion.
 inline constexpr uint32_t DOF_SCATTER_BAKE_FIRST_PS = 0xFE1DC3F8u;
 
-// Later fallback insertion point: CopyRenderBuffer is invoked as the
-// pre-DoF-Final snapshot and as the post-MB upsample in the same frame. Used
-// only if the earlier scene-color gates did not fire. HandleDraw gates by
-// frame-sequence markers (DoF or MB tile-prep having fired earlier in the
-// frame).
+// CopyRenderBuffer is a fallback after DoF composition or motion-blur tile
+// preparation. Sequence markers distinguish these uses from unrelated copies.
 inline constexpr uint32_t COPY_RENDER_BUFFER_PS = 0x83272BCBu;
 
-// Last fallback: tonemap. Used when none of the above fired (e.g. both DoF
-// and MB disabled in graphics options, menus, cutscenes).
+// Late grading is the last fallback when no earlier scene insertion ran.
 inline constexpr uint32_t TONEMAP_PS = 0xE04D1471u;
 inline constexpr uint32_t TONEMAP_1DLUT_PS = 0xC0C26E46u;
 
@@ -82,7 +78,7 @@ inline constexpr uint32_t MB_TILE_REFINE_PS = 0x512E2B48u;
 
 }  // namespace shader_hashes
 
-inline bool HandleDraw(reshade::api::command_list* cmd_list, const ShaderInjectData* = nullptr) {
+inline bool HandleDraw(reshade::api::command_list* cmd_list, [[maybe_unused]] const ShaderInjectData* shader_injection = nullptr) {
   if (cmd_list == nullptr) return false;
   auto* device = cmd_list->get_device();
   if (device == nullptr || device->get_api() != reshade::api::device_api::d3d11) return false;
@@ -306,8 +302,7 @@ using UnavailableReason = const char* (*)();
 struct TemporalModeOption {
   state::TemporalMode mode;
   const char* label;
-  // Return nullptr when available. Future DLSS/XeSS probes can return a
-  // DLL-missing, unsupported-adapter, or combined diagnostic here.
+  // Return nullptr when available, or the reason this method cannot run.
   UnavailableReason unavailable_reason = nullptr;
 };
 

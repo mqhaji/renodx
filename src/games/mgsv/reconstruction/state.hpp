@@ -97,9 +97,8 @@ struct FrameState {
   // is the right TAA insertion point. The primary DoF hash can also run on
   // lower-resolution inputs, so these later full-resolution gates remain
   // available when that candidate is skipped.
-  // Motion-blur tile prep is a fallback gate for scenes where DoF is
-  // somehow absent but MB is active. Both flags clear every frame in
-  // BeginFrame.
+  // Motion-blur tile preparation provides a fallback when DoF does not run.
+  // BeginFrame clears both flags.
   bool dof_fired = false;
   bool mb_tile_prep_fired = false;
 };

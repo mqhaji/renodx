@@ -1,4 +1,4 @@
-#include "./copy_constants.hlsli"
+#include "copy_constants.hlsli"
 
 Texture2D<float> input_depth : register(t0);
 

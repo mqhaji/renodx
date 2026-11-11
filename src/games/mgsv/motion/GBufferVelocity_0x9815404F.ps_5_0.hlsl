@@ -48,7 +48,7 @@ void main(
   r0.w = cmp(0 < r0.z);
   r0.xy = r0.xy / r0.zz;
   r0.z = max(0, r0.z);
-  if (CUSTOM_TAA == 0.f || CUSTOM_UNCLAMP_MOTION_VECTORS == 0.f) r0.z = min(1, r0.z);
+  if (CUSTOM_RECONSTRUCTION_MODE == 0.f || CUSTOM_UNCLAMP_MOTION_VECTORS == 0.f) r0.z = min(1, r0.z);
   r0.xy = r0.xy * r0.zz;
   r0.xy = r0.ww ? r0.xy : float2(0, 0);
   r0.z = -r0.y;

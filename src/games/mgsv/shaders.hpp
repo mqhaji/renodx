@@ -18,17 +18,17 @@
 
 #include "../../mods/shader.hpp"
 #include "../../utils/mutex.hpp"
-#include "gbuffer/material_inputs.hpp"
-#include "gbuffer/material_shaders.h"
-#include "gtvbgi/ambient_diffuse.hpp"
-#include "gtvbgi/environment_specular.hpp"
-#include "gtvbgi/lighting.hpp"
-#include "gtvbgi/source_preparation.hpp"
-#include "gtvbgi/temporal_inputs.hpp"
-#include "inputs.hpp"
+#include "lighting/indirect/ambient_diffuse.hpp"
+#include "lighting/indirect/environment_specular.hpp"
+#include "lighting/indirect/runtime.hpp"
+#include "lighting/indirect/source_preparation.hpp"
+#include "lighting/shadows/screen_space_shadows.hpp"
+#include "materials/capture.hpp"
+#include "materials/native/material_shaders.h"
 #include "reconstruction/postprocess/resources.hpp"
-#include "resource_upgrades.hpp"
-#include "shadows/screen_space_shadows.hpp"
+#include "rendering/inputs.hpp"
+#include "rendering/producer_records.hpp"
+#include "rendering/resource_upgrades.hpp"
 #include "shared.h"
 
 // Explicit registrations precede the generated shader entries.
@@ -64,13 +64,13 @@ namespace mgsv::game {
       {                                                                    \
           .crc32 = (value),                                                \
           .code = __##value,                                               \
-          .on_replace = [](auto* cmd_list) { \
+          .on_replace = [](auto* cmd_list) {                                                                 \
             const auto* state = cmd_list->template get_private_data<mgsv::lighting::environment_specular::DrawState>(); \
             return state != nullptr && state->composite_replacement_safe; },                            \
-          .on_draw = [](auto* cmd_list) {                                                  \
-            mgsv::rendering::resource_upgrades::UpgradeDeferredSceneColorTarget(cmd_list); \
-            mgsv::inputs::CaptureCompositeInputs(cmd_list);                                \
-            mgsv::lighting::environment_specular::BeginComposite(cmd_list);                \
+          .on_draw = [](auto* cmd_list) {                                                                     \
+            mgsv::rendering::resource_upgrades::UpgradeDeferredSceneColorTarget(cmd_list);                     \
+            mgsv::inputs::CaptureCompositeInputs(cmd_list);                                                    \
+            mgsv::lighting::environment_specular::BeginComposite(cmd_list);                                    \
             return true; },                               \
           .on_drawn = &mgsv::lighting::environment_specular::EndComposite, \
       },                                                                   \
@@ -118,7 +118,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
     bool lighting_enabled = false;
     {
       const std::shared_lock lock(renodx::utils::mutex::global_mutex);
-      lighting_enabled = shader_injection->gt_enabled >= 0.5f;
+      lighting_enabled = shader_injection->indirect_lighting_enabled >= 0.5f;
     }
     mgsv::lighting::environment_specular::BeginCapture(cmd_list, lighting_enabled);
     return true;
@@ -139,7 +139,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
     bool lighting_enabled = false;
     {
       const std::shared_lock lock(renodx::utils::mutex::global_mutex);
-      lighting_enabled = shader_injection->gt_enabled >= 0.5f;
+      lighting_enabled = shader_injection->indirect_lighting_enabled >= 0.5f;
     }
     mgsv::lighting::temporal_inputs::CaptureScene(cmd_list);
     mgsv::lighting::environment_specular::BeginCapture(cmd_list, lighting_enabled);
@@ -181,34 +181,45 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
       },
       {
           0x844CE327,
-          {.crc32 = 0x844CE327, .on_inject = [](auto*) { return false; }, .on_draw = [shader_injection](auto* cmd_list) {
-             bool enabled;
-             {
-               const std::shared_lock lock(renodx::utils::mutex::global_mutex);
-               enabled = shader_injection->gt_enabled >= 0.5f;
-             }
-             if (enabled) {
-               mgsv::lighting::ambient_diffuse::Capture(cmd_list);
-             }
-             return true; }},
+          {
+              .crc32 = 0x844CE327,
+              .on_inject = [](auto*) { return false; },
+              .on_draw = [shader_injection](auto* cmd_list) {
+                bool enabled;
+                {
+                  const std::shared_lock lock(renodx::utils::mutex::global_mutex);
+                  enabled = shader_injection->indirect_lighting_enabled >= 0.5f;
+                }
+                if (enabled) {
+                  mgsv::lighting::ambient_diffuse::Capture(cmd_list);
+                }
+                return true; },
+          },
       },
       {
           0xD71E843E,
-          {.crc32 = 0xD71E843E, .code = __0xD71E843E, .on_replace = &mgsv::lighting::source_preparation::IsActive, .on_inject = [](auto*) { return false; }, .on_draw = [shader_injection](auto* cmd_list) {
-             {
-               const std::shared_lock lock(renodx::utils::mutex::global_mutex);
-               if (shader_injection->gt_enabled < 0.5f) return true;
-             }
-             return mgsv::lighting::source_preparation::Begin(cmd_list); }, .on_drawn = [shader_injection](auto* cmd_list) {
-             auto prepared = mgsv::lighting::source_preparation::End(cmd_list);
-             bool enabled;
-             {
-               const std::shared_lock lock(renodx::utils::mutex::global_mutex);
-               enabled = shader_injection->gt_enabled >= 0.5f;
-             }
-             if (enabled) {
-               mgsv::lighting::ambient_diffuse::OnDiffuseCopied(cmd_list, std::move(prepared));
-             } }},
+          {
+              .crc32 = 0xD71E843E,
+              .code = __0xD71E843E,
+              .on_replace = &mgsv::lighting::source_preparation::IsActive,
+              .on_inject = [](auto*) { return false; },
+              .on_draw = [shader_injection](auto* cmd_list) {
+                {
+                  const std::shared_lock lock(renodx::utils::mutex::global_mutex);
+                  if (shader_injection->indirect_lighting_enabled < 0.5f) return true;
+                }
+                return mgsv::lighting::source_preparation::Begin(cmd_list); },
+              .on_drawn = [shader_injection](auto* cmd_list) {
+                auto prepared = mgsv::lighting::source_preparation::End(cmd_list);
+                bool enabled;
+                {
+                  const std::shared_lock lock(renodx::utils::mutex::global_mutex);
+                  enabled = shader_injection->indirect_lighting_enabled >= 0.5f;
+                }
+                if (enabled) {
+                  mgsv::lighting::ambient_diffuse::OnDiffuseCopied(cmd_list, std::move(prepared));
+                } },
+          },
       },
       {0x2C230875, {.crc32 = 0x2C230875, .code = __0x2C230875, .on_replace = &mgsv::lighting::material_inputs::IsCaptureActive, .on_inject = [](auto*) { return false; }, .on_draw = &mgsv::lighting::material_inputs::OnRainDraw, .on_drawn = &mgsv::lighting::material_inputs::EndCapture}},
       {0xC3538951, {.crc32 = 0xC3538951, .code = __0xC3538951, .on_replace = &mgsv::lighting::material_inputs::IsCaptureActive, .on_inject = [](auto*) { return false; }, .on_draw = &mgsv::lighting::material_inputs::OnRainDraw, .on_drawn = &mgsv::lighting::material_inputs::EndCapture}},

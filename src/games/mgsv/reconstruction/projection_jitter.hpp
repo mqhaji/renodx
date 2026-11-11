@@ -29,10 +29,10 @@
 
 #include <detours.h>
 
-#include "./camera_state.hpp"
-#include "./logging.hpp"
-#include "./resolution.hpp"
-#include "./state.hpp"
+#include "camera_state.hpp"
+#include "logging.hpp"
+#include "resolution.hpp"
+#include "state.hpp"
 
 namespace mgsv::reconstruction::projection_jitter {
 

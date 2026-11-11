@@ -41,7 +41,7 @@
 #include "../logging.hpp"
 #include "../resolution.hpp"
 #include "../state.hpp"
-#include "./resources.hpp"
+#include "resources.hpp"
 
 namespace mgsv::reconstruction::post_process {
 

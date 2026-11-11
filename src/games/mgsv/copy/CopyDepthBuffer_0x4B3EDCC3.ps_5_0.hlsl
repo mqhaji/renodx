@@ -46,7 +46,7 @@ void main(
   r0.x = r0.x;
   oDepth = r0.x;
 
-  // sometimes RTV0 is written to as UNORM_sRGB, but in this case it doesn't matter
+  // Zero RGB and unit alpha are unchanged by an sRGB render-target conversion.
   o0.xyzw = float4(0,0,0,1);
   return;
 }

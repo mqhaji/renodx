@@ -9,12 +9,12 @@
 #include <include/reshade.hpp>
 
 #include "../../../utils/resource_upgrade.hpp"
-#include "../inputs.hpp"
-#include "./camera_state.hpp"
-#include "./frame_inputs.hpp"
-#include "./logging.hpp"
-#include "./resolution.hpp"
-#include "./state.hpp"
+#include "../rendering/inputs.hpp"
+#include "camera_state.hpp"
+#include "frame_inputs.hpp"
+#include "logging.hpp"
+#include "resolution.hpp"
+#include "state.hpp"
 
 namespace mgsv::reconstruction::input_capture {
 

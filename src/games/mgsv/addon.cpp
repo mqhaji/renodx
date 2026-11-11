@@ -45,26 +45,26 @@
 #include "../../utils/shader.hpp"
 #include "../../utils/state.hpp"
 #include "../../utils/swapchain.hpp"
-#include "./bloom/bloom.hpp"
-#include "./gbuffer/material_inputs.hpp"
-#include "./gtvbgi/ambient_diffuse.hpp"
-#include "./gtvbgi/environment_specular.hpp"
-#include "./gtvbgi/lighting.hpp"
-#include "./gtvbgi/source_preparation.hpp"
-#include "./gtvbgi/temporal_inputs.hpp"
-#include "./inputs.hpp"
-#include "./output/output.hpp"
-#include "./reconstruction/coordinator.hpp"
-#include "./reconstruction/input_capture.hpp"
-#include "./reconstruction/postprocess/runtime.hpp"
-#include "./reconstruction/runtime.hpp"
-#include "./reconstruction/settings.hpp"
-#include "./resource_upgrades.hpp"
-#include "./settings.hpp"
-#include "./shaders.hpp"
-#include "./shadows/screen_space_shadows.hpp"
-#include "./shadows/settings.hpp"
-#include "./shared.h"
+#include "lighting/indirect/ambient_diffuse.hpp"
+#include "lighting/indirect/environment_specular.hpp"
+#include "lighting/indirect/runtime.hpp"
+#include "lighting/indirect/source_preparation.hpp"
+#include "lighting/shadows/screen_space_shadows.hpp"
+#include "lighting/shadows/settings.hpp"
+#include "materials/capture.hpp"
+#include "output/output.hpp"
+#include "postprocess/bloom/bloom.hpp"
+#include "reconstruction/coordinator.hpp"
+#include "reconstruction/input_capture.hpp"
+#include "reconstruction/postprocess/runtime.hpp"
+#include "reconstruction/runtime.hpp"
+#include "reconstruction/settings.hpp"
+#include "rendering/inputs.hpp"
+#include "rendering/producer_records.hpp"
+#include "rendering/resource_upgrades.hpp"
+#include "settings.hpp"
+#include "shaders.hpp"
+#include "shared.h"
 
 namespace {
 
@@ -381,8 +381,8 @@ void OnPresent(
   uint32_t shadow_noise_frame = 0u;
   {
     const std::shared_lock settings_lock(renodx::utils::mutex::global_mutex);
-    lighting_enabled = shader_injection.gt_enabled >= 0.5f;
-    temporal_lighting_enabled = lighting_enabled && shader_injection.gt_temporal_enabled >= 0.5f;
+    lighting_enabled = shader_injection.indirect_lighting_enabled >= 0.5f;
+    temporal_lighting_enabled = lighting_enabled && shader_injection.lighting_temporal_enabled >= 0.5f;
   }
   {
     const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
@@ -468,8 +468,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
 
         renodx::utils::settings::on_preset_changed_callbacks.emplace_back(
             [] { mgsv::reconstruction::transitions::ApplySettingsSnapshot(reconstruction_settings); });
-
-        // renodx::mods::shader::force_pipeline_cloning = true;
 
         renodx::mods::shader::expected_constant_buffer_index = 13;
         renodx::mods::shader::minimum_constant_buffer_stages =
@@ -604,7 +602,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   }
   mgsv::reconstruction::Use(fdw_reason, reconstruction_settings);
 
-  renodx::utils::random::Use(fdw_reason, {&shader_injection.custom_random});
+  renodx::utils::random::Use(fdw_reason, {&shader_injection.film_grain_random});
 
   renodx::mods::swapchain::v2::Use(fdw_reason, &shader_injection);
 

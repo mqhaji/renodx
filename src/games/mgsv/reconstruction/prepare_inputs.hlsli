@@ -1,4 +1,4 @@
-#include "./prepare_constants.hlsli"
+#include "prepare_constants.hlsli"
 
 Texture2D<float4> encoded_color_texture : register(t0);
 Texture2D<float4> native_velocity_texture : register(t1);

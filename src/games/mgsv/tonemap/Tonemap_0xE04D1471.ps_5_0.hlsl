@@ -1,5 +1,5 @@
-#include "../bloom/bloom.hlsli"
-#include "./tonemap.hlsli"
+#include "../postprocess/bloom/bloom.hlsli"
+#include "tonemap.hlsli"
 
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:33 2026
 
@@ -47,10 +47,10 @@ void main(
   [branch]  // Each mode reads only its own bloom representation.
   if (enhanced) {
     [branch]  // Zero strength also skips the four reconstruction samples.
-    if (CUSTOM_BLOOM != 0.f) {
+    if (CUSTOM_BLOOM_STRENGTH != 0.f) {
       bloom_color = SampleEnhancedBloom(inBloom, g_samplerLinear_Clamp_s, r0.zw);
       const float3 scene = renodx::color::srgb::DecodeSafe(r1.rgb);
-      r1.rgb = renodx::color::srgb::EncodeSafe(lerp(scene, bloom_color, CUSTOM_BLOOM * 0.1f));
+      r1.rgb = renodx::color::srgb::EncodeSafe(lerp(scene, bloom_color, CUSTOM_BLOOM_STRENGTH * 0.1f));
     }
   } else {
     bloom_color = inBloom.Sample(g_samplerLinear_Clamp_s, r0.zw + 2.f * g_psSystem.m_renderBuffer.zw).rgb;
@@ -73,7 +73,7 @@ void main(
     r0.xyz = r1.xyz;
   } else {
     const float3 with_bloom = lerp(r1.xyz, 1.f, min(0.5f, bloom_color));
-    r0.xyz = lerp(r1.xyz, with_bloom, CUSTOM_BLOOM);
+    r0.xyz = lerp(r1.xyz, with_bloom, CUSTOM_BLOOM_STRENGTH);
   }
 
   // Reconstruct bloom in HDR, then use a hue-preserving SDR proxy for the LUT.

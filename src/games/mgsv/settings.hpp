@@ -18,8 +18,8 @@
 #include "../../utils/mutex.hpp"
 #include "../../utils/platform.hpp"
 #include "../../utils/settings.hpp"
-#include "./output/output.hpp"
-#include "./shared.h"
+#include "output/output.hpp"
+#include "shared.h"
 
 namespace mgsv::settings {
 
@@ -227,7 +227,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           },
           new renodx::utils::settings::Setting{
               .key = "FxSunBrightnessBoostEnabled",
-              .binding = &shader_injection->custom_boost_sun,
+              .binding = &shader_injection->sun_brightness_boost_enabled,
               .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
               .default_value = 1.f,
               .label = "Boost Sun Brightness",
@@ -236,7 +236,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           },
           new renodx::utils::settings::Setting{
               .key = "FxMotionBlurStrength",
-              .binding = &shader_injection->custom_motion_blur,
+              .binding = &shader_injection->motion_blur_strength,
               .default_value = 100.f,
               .label = "Motion Blur",
               .section = "Effects",
@@ -246,7 +246,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           },
           new renodx::utils::settings::Setting{
               .key = "FxFilmGrainStrength",
-              .binding = &shader_injection->custom_grain_strength,
+              .binding = &shader_injection->film_grain_strength,
               .default_value = 0.f,
               .label = "Film Grain",
               .section = "Effects",
@@ -302,7 +302,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           },
           new renodx::utils::settings::Setting{
               .value_type = renodx::utils::settings::SettingValueType::BUTTON,
-              .label = "Github",
+              .label = "GitHub",
               .section = "Links",
               .group = "button-line-2",
               .tint = 0x2B3137,

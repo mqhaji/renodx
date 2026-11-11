@@ -1,6 +1,6 @@
 # MGSV pixel shader name map (retail 1.0.15.4, DX11)
 
-This historical live DevKit snapshot maps native shader hashes to source filenames from a running open-world frame. It is a discovery reference, not an exhaustive shader inventory or the addon's active replacement list; current registrations live in [shaders.hpp](../shaders.hpp).
+This historical live DevKit snapshot maps native shader hashes to source filenames from a running open-world frame. It is a discovery reference, not an exhaustive shader inventory or the addon's active replacement list; current registrations live in [../shaders.hpp](../shaders.hpp).
 
 Method: the DXBC embeds `#line` directives pointing at the original build path, e.g.
 
@@ -173,4 +173,4 @@ Method: the DXBC embeds `#line` directives pointing at the original build path, 
 | `0x6DAF0C4A` | 5868 | 5 | Subsurface scatter, horizontal sweep |
 | `0xB2601810` | 6344 | 6 | Subsurface scatter, vertical sweep + translucency blend |
 
-Both belong to subsurface scattering, not AO. [Current registration](../shaders.hpp) runs custom lighting before the first scatter, which uses the existing replacement. The second scatter uses the original game shader. [Port sources](../subsurface) exist for both; the second port is not active. See the [lighting integration](../gtvbgi/README.md) for the custom chain. This table does not establish either port's fidelity or coverage of unrelated scene permutations.
+Both belong to subsurface scattering, not AO. [Current registration](../shaders.hpp) runs custom lighting before the first scatter, which uses the existing replacement. The second scatter uses the original game shader. [Port sources](../subsurface) exist for both; the second port is not active. See the [lighting integration](../lighting/indirect/README.md) for the custom chain. This table does not establish either port's fidelity or coverage of unrelated scene permutations.

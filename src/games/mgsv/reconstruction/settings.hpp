@@ -11,10 +11,10 @@
 
 #include "../../../utils/settings.hpp"
 #include "../shared.h"
-#include "./dlss/runtime.hpp"
-#include "./logging.hpp"
-#include "./runtime.hpp"
-#include "./state.hpp"
+#include "dlss/runtime.hpp"
+#include "logging.hpp"
+#include "runtime.hpp"
+#include "state.hpp"
 
 namespace mgsv::reconstruction::settings {
 
@@ -31,7 +31,7 @@ inline void AppendSettings(
 
   settings_state->temporal_mode_setting = new renodx::utils::settings::Setting{
       .key = "FxTemporalReconstructionMode",
-      .binding = &shader_injection->custom_taa,
+      .binding = &shader_injection->reconstruction_mode,
       .value_type = renodx::utils::settings::SettingValueType::INTEGER,
       .default_value = static_cast<float>(state::DEFAULT_TEMPORAL_MODE),
       .label = "Temporal Reconstruction Mode",
@@ -273,7 +273,7 @@ inline void AppendSettings(
           .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
       },
       new renodx::utils::settings::Setting{
-          .key = "FxTaaUnclampMotionVectors",
+          .key = "FxUnclampMotionVectorsEnabled",
           .binding = &shader_injection->unclamp_motion_vectors,
           .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
           .default_value = 0.f,

@@ -1,4 +1,4 @@
-#include "./prepare_constants.hlsli"
+#include "prepare_constants.hlsli"
 
 Texture2D<float4> MGSV_LINEAR_OUTPUT : register(t0);
 Texture2D<float4> encoded_scene_input : register(t1);

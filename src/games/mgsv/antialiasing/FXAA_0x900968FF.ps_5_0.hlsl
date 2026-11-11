@@ -1,4 +1,4 @@
-#include "./antialiasing.hlsli"
+#include "antialiasing.hlsli"
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:29 2026
 
 // clang-format off
@@ -37,10 +37,10 @@ void main(
   r0.x = r0.x;
   r0.y = r0.y;
 
-  if (CUSTOM_TAA > 0.f) {
+  if (CUSTOM_RECONSTRUCTION_MODE > 0.f) {
     o0.rgb = renodx_game::antialiasing::SampleLevelScene(g_Image, g_samplerLinear_Clamp_s, r0.xy, 0).xyz;
 
-    o0.rgb = renodx::effects::ApplyFilmGrain(o0.rgb, r0.xy, CUSTOM_RANDOM, CUSTOM_GRAIN_STRENGTH * 0.03f, 1.f);
+    o0.rgb = renodx::effects::ApplyFilmGrain(o0.rgb, r0.xy, CUSTOM_FILM_GRAIN_RANDOM, CUSTOM_FILM_GRAIN_STRENGTH * 0.03f, 1.f);
 
     o0.rgb = renodx_game::antialiasing::ApplySceneScale(o0.rgb);
     o0.w = 0;
@@ -389,7 +389,7 @@ void main(
     r4.xyz = renodx_game::antialiasing::SampleLevelScene(g_Image, g_samplerLinear_Clamp_s, r0.xy, 0).xyz;
   }
 
-  r4.xyz = renodx::effects::ApplyFilmGrain(r4.xyz, r0.xy, CUSTOM_RANDOM, CUSTOM_GRAIN_STRENGTH * 0.03f, 1.f);
+  r4.xyz = renodx::effects::ApplyFilmGrain(r4.xyz, r0.xy, CUSTOM_FILM_GRAIN_RANDOM, CUSTOM_FILM_GRAIN_STRENGTH * 0.03f, 1.f);
 
   o0.xyz = renodx_game::antialiasing::ApplySceneScale(r4.xyz);
   o0.w = 0;
