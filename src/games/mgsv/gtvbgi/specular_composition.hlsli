@@ -11,6 +11,7 @@ Texture2D<float2> resolved_specular_visibility : register(t17);
 Texture2D<float4> resolved_specular_light : register(t18);
 Texture2D<float4> resolved_environment_response : register(t19);
 Texture2D<float4> resolved_material_color : register(t20);
+Texture2D<float> resolved_specular_ready : register(t21);
 static bool specular_replacement_applied = false;
 
 // Separate the captured environment from direct highlights. Only environment
@@ -30,11 +31,15 @@ float3 GetEnvironmentSpecularCorrection(float2 uv, float native_visibility, floa
   const float3 rounding = max(abs(environment.rgb), abs(native_specular)) * (2.0 / 1024.0) + 1.2e-7;
   if (any(environment.rgb > native_specular + rounding)) return 0.0;
   const float3 direct = max(native_specular - environment.rgb, 0.0);
-  uint result_width, result_height, color_width, color_height;
+  uint result_width, result_height, color_width, color_height, ready_width, ready_height;
   resolved_specular_light.GetDimensions(result_width, result_height);
   resolved_material_color.GetDimensions(color_width, color_height);
+  resolved_specular_ready.GetDimensions(ready_width, ready_height);
   if (CUSTOM_MGSV_GT_DEBUG_VIEW == 0.0 && result_width == width && result_height == height
-      && color_width == width && color_height == height) {
+      && color_width == width && color_height == height && ready_width == width && ready_height == height
+      && resolved_specular_ready.Load(int3(pixel, 0)) > 0.5) {
+    // Native surface writes reset readiness without touching HDR RGB. A failed
+    // or skipped application therefore cannot expose a previous reflection.
     const float4 screen = resolved_specular_light.Load(int3(pixel, 0));
     const float4 response = resolved_environment_response.Load(int3(pixel, 0));
     const float4 material = resolved_material_color.Load(int3(pixel, 0));

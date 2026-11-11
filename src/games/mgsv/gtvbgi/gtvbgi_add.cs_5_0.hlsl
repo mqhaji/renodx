@@ -44,15 +44,18 @@ RWTexture2D<float2> specular_output : register(u1);
 RWTexture2D<float4> scattering_copy : register(u2);
 RWTexture2D<float4> resolved_transport : register(u3);
 RWTexture2D<float4> resolved_response : register(u4);
+RWTexture2D<float> resolved_readiness : register(u5);
 
-[numthreads(8, 8, 1)] void main(uint3 thread_id : SV_DispatchThreadID) {
+[numthreads(8, 8, 1)]
+void main(uint3 thread_id : SV_DispatchThreadID) {
   // 1. Reconstruct full-resolution lighting from four low-resolution taps.
   // Depth weights prevent foreground bounce from spreading into the background;
   // specular additionally checks normal, roughness, reflected direction, and side.
   const uint2 pixel = thread_id.xy;
   if (pixel.x >= buffer_width || pixel.y >= buffer_height) return;
-  resolved_transport[pixel] = 0.0;
-  resolved_response[pixel] = 0.0;
+  // Only the small readiness image needs resetting. Deferred composition
+  // ignores HDR results until this invocation writes both halves below.
+  resolved_readiness[pixel] = 0.0;
 
   const float scale = max(CUSTOM_MGSV_GT_RESOLUTION_DIVISOR, 1.0);
   const float2 position = (float2(pixel) + 0.5) / scale - 0.5;
@@ -332,6 +335,7 @@ RWTexture2D<float4> resolved_response : register(u4);
   if (transport_ready && all(isfinite(surface_light)) && all(surface_light >= 0.0)) {
     resolved_transport[pixel] = float4(min(surface_light, 65504.0), 1.0);
     resolved_response[pixel] = float4(saturate(remaining_environment), saturate(transport_support / transport_weight_sum));
+    resolved_readiness[pixel] = 1.0;
   }
   if (diagnostic >= 32 && diagnostic <= 34) {
     output = float3(1.0, 0.0, 1.0);

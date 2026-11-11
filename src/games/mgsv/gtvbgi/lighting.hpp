@@ -1817,7 +1817,8 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
                     frame.scattering_copy.handle != 0u ? frame.scattering_copy : fallback_outputs[1],
                     transport_result != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(transport_result->images[0].uav.Get())} : fallback_outputs[2],
                     transport_result != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(transport_result->images[1].uav.Get())} : fallback_outputs[3],
-                    fallback_outputs[4], fallback_outputs[5], frame.width, frame.height);
+                    transport_result != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(transport_result->ready.uav.Get())} : fallback_outputs[4],
+                    fallback_outputs[5], frame.width, frame.height);
   static std::atomic_flag recorded = {};
   LogLightOnce(&recorded, reshade::log::level::info,
                "GT-VBGI commands recorded; effect=", width, "x", height,

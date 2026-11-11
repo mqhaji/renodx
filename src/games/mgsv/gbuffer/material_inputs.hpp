@@ -51,6 +51,22 @@ struct Blend {
   uint32_t native_count = 0u;
 };
 
+// Store immutable layout checks on the view itself. Its lifetime protects the
+// borrowed resource pointer and prevents a reused address from hitting an old
+// cache entry. DrawState retains the live views while these pointers are used.
+struct __declspec(uuid("7A79EC50-FB6E-46C9-9DF5-71AEE74E86B2")) RenderTargetLayout {
+  uint64_t generation = 0u;
+  ID3D11Resource* resource = nullptr;
+  uint32_t width = 0u;
+  uint32_t height = 0u;
+  bool qualified = false;
+};
+
+struct __declspec(uuid("BA690226-89E3-47D9-BF21-7521D7558E67")) DepthTargetLayout {
+  uint64_t generation = 0u;
+  bool qualified = false;
+};
+
 struct __declspec(uuid("45157F10-3393-4BC7-ADB1-197E2C1781AF")) DeviceState {
   std::shared_mutex mutex;
   std::vector<Blend> blends;
@@ -154,29 +170,55 @@ inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
   if ((!rain && state.depth == nullptr)
       || std::ranges::any_of(bound.begin(), bound.begin() + native_count, [](const auto* view) { return view == nullptr; })
       || std::ranges::any_of(bound.begin() + native_count, bound.end(), [](const auto* view) { return view != nullptr; })) return true;
-  std::array<Microsoft::WRL::ComPtr<ID3D11Resource>, 3> resources;
-  D3D11_TEXTURE2D_DESC albedo_desc = {};
+  std::array<ID3D11Resource*, 3> resources = {};
+  uint32_t width = 0u;
+  uint32_t height = 0u;
   for (size_t index = 0u; index < native_count; ++index) {
-    D3D11_RENDER_TARGET_VIEW_DESC view = {};
-    bound[index]->GetDesc(&view);
-    if (view.ViewDimension != D3D11_RTV_DIMENSION_TEXTURE2D || view.Texture2D.MipSlice != 0u
-        || (view.Format != DXGI_FORMAT_B8G8R8A8_UNORM && view.Format != DXGI_FORMAT_R8G8B8A8_UNORM)) return true;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
-    bound[index]->GetResource(&resources[index]);
-    if (FAILED(resources[index].As(&texture))) return true;
-    D3D11_TEXTURE2D_DESC description = {};
-    texture->GetDesc(&description);
-    if (description.ArraySize != 1u || description.SampleDesc.Count != 1u || description.MipLevels != 1u) return true;
+    RenderTargetLayout layout;
+    auto bytes = static_cast<UINT>(sizeof(layout));
+    if (FAILED(bound[index]->GetPrivateData(__uuidof(RenderTargetLayout), &bytes, &layout))
+        || bytes != sizeof(layout) || layout.generation != selected.generation) {
+      layout = {.generation = selected.generation};
+      D3D11_RENDER_TARGET_VIEW_DESC view = {};
+      bound[index]->GetDesc(&view);
+      if (view.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2D && view.Texture2D.MipSlice == 0u
+          && (view.Format == DXGI_FORMAT_B8G8R8A8_UNORM || view.Format == DXGI_FORMAT_R8G8B8A8_UNORM)) {
+        Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        bound[index]->GetResource(&resource);
+        if (SUCCEEDED(resource.As(&texture))) {
+          D3D11_TEXTURE2D_DESC description = {};
+          texture->GetDesc(&description);
+          layout.resource = resource.Get();
+          layout.width = description.Width;
+          layout.height = description.Height;
+          layout.qualified = description.ArraySize == 1u && description.SampleDesc.Count == 1u
+                             && description.MipLevels == 1u;
+        }
+      }
+      bound[index]->SetPrivateData(__uuidof(RenderTargetLayout), sizeof(layout), &layout);
+    }
+    if (!layout.qualified) return true;
+    resources[index] = layout.resource;
     if (index == 0u) {
-      albedo_desc = description;
-    } else if (description.Width != albedo_desc.Width || description.Height != albedo_desc.Height) {
+      width = layout.width;
+      height = layout.height;
+    } else if (layout.width != width || layout.height != height) {
       return true;
     }
   }
   if (state.depth != nullptr) {
-    D3D11_DEPTH_STENCIL_VIEW_DESC depth_view = {};
-    state.depth->GetDesc(&depth_view);
-    if (depth_view.Format != DXGI_FORMAT_D32_FLOAT_S8X24_UINT && depth_view.Format != DXGI_FORMAT_D32_FLOAT) return true;
+    DepthTargetLayout layout;
+    auto bytes = static_cast<UINT>(sizeof(layout));
+    if (FAILED(state.depth->GetPrivateData(__uuidof(DepthTargetLayout), &bytes, &layout))
+        || bytes != sizeof(layout) || layout.generation != selected.generation) {
+      D3D11_DEPTH_STENCIL_VIEW_DESC view = {};
+      state.depth->GetDesc(&view);
+      layout = {.generation = selected.generation,
+                .qualified = view.Format == DXGI_FORMAT_D32_FLOAT_S8X24_UINT || view.Format == DXGI_FORMAT_D32_FLOAT};
+      state.depth->SetPrivateData(__uuidof(DepthTargetLayout), sizeof(layout), &layout);
+    }
+    if (!layout.qualified) return true;
   }
   std::shared_ptr<Target> rain_source;
   if (rain) {
@@ -185,9 +227,9 @@ inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
     context->PSGetShaderResources(8u, 1u, &source);
     if (source == nullptr) return true;
     source->GetResource(&resource);
-    if (resource == resources[0]) return true;
+    if (resource.Get() == resources[0]) return true;
     rain_source = Read(cmd_list->get_device(), resource.Get());
-    if (rain_source == nullptr || rain_source->width != albedo_desc.Width || rain_source->height != albedo_desc.Height) return true;
+    if (rain_source == nullptr || rain_source->width != width || rain_source->height != height) return true;
   }
   std::array<ID3D11UnorderedAccessView*, D3D11_PS_CS_UAV_REGISTER_COUNT> native_uavs = {};
   context->OMGetRenderTargetsAndUnorderedAccessViews(0u, nullptr, nullptr, 0u, static_cast<UINT>(native_uavs.size()), native_uavs.data());
@@ -251,15 +293,15 @@ inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
   // 3. Reuse two attachments per native albedo allocation.
   // Native color/normal/material codes and exact depth reject stale data from an
   // unsupported foreground writer instead of guessing from material ID or alpha.
-  auto target = Read(cmd_list->get_device(), resources[0].Get());
+  auto target = Read(cmd_list->get_device(), resources[0]);
   if (target == nullptr) {
     auto created = std::make_shared<Target>();
     created->generation = selected.generation;
-    created->width = albedo_desc.Width;
-    created->height = albedo_desc.Height;
+    created->width = width;
+    created->height = height;
     D3D11_TEXTURE2D_DESC description = {
-        .Width = albedo_desc.Width,
-        .Height = albedo_desc.Height,
+        .Width = width,
+        .Height = height,
         .MipLevels = 1u,
         .ArraySize = 1u,
         .Format = DXGI_FORMAT_R16G16B16A16_FLOAT,
@@ -285,47 +327,54 @@ inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
     context->ClearRenderTargetView(created->color_rtv.Get(), invalid.data());
     context->ClearRenderTargetView(created->owner_rtv.Get(), empty.data());
     std::shared_ptr<Target> retired;
-    targets.lazy_emplace_l(resources[0].Get(), [&](auto& entry) {
+    targets.lazy_emplace_l(resources[0], [&](auto& entry) {
       auto& [native_albedo, capture] = entry;
       if (capture == nullptr || capture->generation != selected.generation) {
         retired = std::exchange(capture, created);
       }
-      target = capture; }, [&](const auto& insert) { insert(resources[0].Get(), created); target = created; });
+      target = capture; }, [&](const auto& insert) { insert(resources[0], created); target = created; });
     static std::atomic_flag reported = {};
     if (!reported.test_and_set(std::memory_order_relaxed)) {
       reshade::log::message(reshade::log::level::info, "MgsvMaterials: separate linear material color and native owner guides created");
     }
   }
-  if (target->width != albedo_desc.Width || target->height != albedo_desc.Height) return true;
+  if (target->width != width || target->height != height) return true;
 
-  auto result = specular_result::Read(cmd_list->get_device(), resources[native_count - 1u].Get());
+  auto result = specular_result::Read(cmd_list->get_device(), resources[native_count - 1u]);
   if (result == nullptr) {
     auto created = std::make_shared<specular_result::Target>();
     created->generation = selected.generation;
-    created->width = albedo_desc.Width;
-    created->height = albedo_desc.Height;
+    created->width = width;
+    created->height = height;
     D3D11_TEXTURE2D_DESC description = {
-        .Width = albedo_desc.Width,
-        .Height = albedo_desc.Height,
+        .Width = width,
+        .Height = height,
         .MipLevels = 1u,
         .ArraySize = 1u,
         .Format = DXGI_FORMAT_R16G16B16A16_FLOAT,
         .SampleDesc = {.Count = 1u},
         .Usage = D3D11_USAGE_DEFAULT,
-        .BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+        .BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
     };
     const std::array<float, 4> empty = {};
     for (auto& image : created->images) {
       if (FAILED(device->CreateTexture2D(&description, nullptr, &image.texture))
-          || FAILED(device->CreateRenderTargetView(image.texture.Get(), nullptr, &image.rtv))
           || FAILED(device->CreateShaderResourceView(image.texture.Get(), nullptr, &image.srv))
           || FAILED(device->CreateUnorderedAccessView(image.texture.Get(), nullptr, &image.uav))) {
         report_failure();
         return true;
       }
-      context->ClearRenderTargetView(image.rtv.Get(), empty.data());
     }
     description.Format = DXGI_FORMAT_R8_UNORM;
+    description.BindFlags |= D3D11_BIND_RENDER_TARGET;
+    if (FAILED(device->CreateTexture2D(&description, nullptr, &created->ready.texture))
+        || FAILED(device->CreateRenderTargetView(created->ready.texture.Get(), nullptr, &created->ready.rtv))
+        || FAILED(device->CreateShaderResourceView(created->ready.texture.Get(), nullptr, &created->ready.srv))
+        || FAILED(device->CreateUnorderedAccessView(created->ready.texture.Get(), nullptr, &created->ready.uav))) {
+      report_failure();
+      return true;
+    }
+    context->ClearRenderTargetView(created->ready.rtv.Get(), empty.data());
     description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     if (FAILED(device->CreateTexture2D(&description, nullptr, &created->composed.texture))
         || FAILED(device->CreateRenderTargetView(created->composed.texture.Get(), nullptr, &created->composed.rtv))
@@ -335,12 +384,12 @@ inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
     }
     context->ClearRenderTargetView(created->composed.rtv.Get(), empty.data());
     std::shared_ptr<specular_result::Target> retired;
-    specular_result::targets.lazy_emplace_l(resources[native_count - 1u].Get(), [&](auto& entry) {
+    specular_result::targets.lazy_emplace_l(resources[native_count - 1u], [&](auto& entry) {
       auto& [native_material, capture] = entry;
       if (capture == nullptr || capture->generation != selected.generation) {
         retired = std::exchange(capture, created);
       }
-      result = capture; }, [&](const auto& insert) { insert(resources[native_count - 1u].Get(), created); result = created; });
+      result = capture; }, [&](const auto& insert) { insert(resources[native_count - 1u], created); result = created; });
   }
 
   // 4. Blended decals invalidate their captured inputs instead of treating
@@ -361,10 +410,10 @@ inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
   *saved = std::move(state);
   bound[native_count] = target->color_rtv.Get();
   bound[native_count + 1u] = target->owner_rtv.Get();
-  bound[native_count + 2u] = result->images[0].rtv.Get();
+  bound[native_count + 2u] = result->ready.rtv.Get();
   bound[native_count + 3u] = result->composed.rtv.Get();
-  // Every native G-buffer write resets reflected-color readiness in GPU order.
-  // If the later lighting chain fails, the original SSR remains enabled.
+  // Reset one byte of readiness instead of overwriting HDR reflection RGB.
+  // GPU ordering still keeps native reflections when the lighting chain fails.
   context->OMSetRenderTargets(native_count + 4u, bound.data(), saved->depth.Get());
   context->OMSetBlendState(blend.capture.Get(), saved->blend_factor.data(), saved->sample_mask);
   const std::array<ID3D11ShaderResourceView*, 3> inputs = {
@@ -443,7 +492,7 @@ inline bool OnClearRenderTarget(reshade::api::command_list* cmd_list, reshade::a
   if (const auto result = specular_result::Read(cmd_list->get_device(), resource.Get())) {
     const std::array<float, 4> empty = {};
     auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
-    context->ClearRenderTargetView(result->images[0].rtv.Get(), empty.data());
+    context->ClearRenderTargetView(result->ready.rtv.Get(), empty.data());
     context->ClearRenderTargetView(result->composed.rtv.Get(), empty.data());
   }
   const auto target = Read(cmd_list->get_device(), resource.Get());

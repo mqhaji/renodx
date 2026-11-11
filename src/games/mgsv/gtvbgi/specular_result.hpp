@@ -30,8 +30,9 @@ struct Target {
   uint64_t generation = 0u;
   uint32_t width = 0u;
   uint32_t height = 0u;
-  std::array<Image, 2> images;  // Reflected RGB/readiness; remaining environment/support.
-  Image composed;               // Set only by a deferred pixel that actually used this result.
+  std::array<Image, 2> images;  // Reflected light and remaining environment response.
+  Image ready;                  // R8: both images were written for this native material.
+  Image composed;               // R8: a deferred pixel actually used the ready result.
 };
 
 inline renodx::utils::data::ParallelFlatHashMap<ID3D11Resource*, std::shared_ptr<Target>, std::shared_mutex> targets;

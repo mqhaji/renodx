@@ -67,6 +67,7 @@ struct __declspec(uuid("E86B6354-AF43-4D25-9CDE-C72A331B8D91")) DrawState {
   bool composite_active = false;
   bool composite_output_active = false;
   bool composite_replacement_safe = false;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> composite_readiness_input;
 };
 
 struct CaptureBlend {
@@ -363,7 +364,7 @@ inline void BeginCapture(reshade::api::command_list* cmd_list, bool lighting_ena
   material->GetResource(&material_resource);
   const auto result = specular_result::Read(selected.device, material_resource.Get());
   if (result != nullptr) {
-    render_targets[3] = result->images[0].rtv.Get();
+    render_targets[3] = result->ready.rtv.Get();
     render_targets[4] = result->composed.rtv.Get();
   }
   state.active = true;
@@ -423,7 +424,8 @@ inline reshade::api::pipeline GetShadowedCapturePipeline(reshade::api::command_l
 
 inline void BeginComposite(reshade::api::command_list* cmd_list) {
   // 4. Match deferred composition's native specular/depth inputs, then bind
-  // only their capture and visibility pair. EndComposite restores t16..t20 and the temporary mask output.
+  // only their capture and lighting results. EndComposite restores t16..t21
+  // and the temporary mask output, including displaced native bindings.
   auto* saved = cmd_list->get_private_data<DrawState>();
   if (saved == nullptr || saved->composite_active) return;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
@@ -446,11 +448,12 @@ inline void BeginComposite(reshade::api::command_list* cmd_list) {
       view->Release();
     }
   }
-  std::array<ID3D11ShaderResourceView*, 5> previous = {};
+  std::array<ID3D11ShaderResourceView*, 6> previous = {};
   context->PSGetShaderResources(16u, static_cast<UINT>(previous.size()), previous.data());
-  for (uint32_t index = 0u; index < previous.size(); ++index) {
+  for (size_t index = 0u; index < saved->composite_inputs.size(); ++index) {
     saved->composite_inputs[index].Attach(previous[index]);
   }
+  saved->composite_readiness_input.Attach(previous.back());
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> specular;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
   Microsoft::WRL::ComPtr<ID3D11Resource> specular_resource;
@@ -466,7 +469,7 @@ inline void BeginComposite(reshade::api::command_list* cmd_list) {
     depth->GetResource(&depth_resource);
   }
   const auto target = Read(cmd_list->get_device(), specular_resource.Get());
-  std::array<ID3D11ShaderResourceView*, 5> inputs = {};
+  std::array<ID3D11ShaderResourceView*, 6> inputs = {};
   if (target != nullptr && target->depth.Get() == depth_resource.Get()) {
     inputs[0] = target->srv.Get();
     inputs[1] = target->visibility_srv.Get();
@@ -541,6 +544,7 @@ inline void BeginComposite(reshade::api::command_list* cmd_list) {
         inputs[2] = result->images[0].srv.Get();
         inputs[3] = result->images[1].srv.Get();
         inputs[4] = material->color_srv.Get();
+        inputs[5] = result->ready.srv.Get();
       }
     }
     static std::atomic_flag reported = {};
@@ -557,10 +561,11 @@ inline void EndComposite(reshade::api::command_list* cmd_list) {
   auto* saved = cmd_list->get_private_data<DrawState>();
   if (saved == nullptr || !saved->composite_active) return;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
-  std::array<ID3D11ShaderResourceView*, 5> previous = {};
-  for (size_t index = 0u; index < previous.size(); ++index) {
+  std::array<ID3D11ShaderResourceView*, 6> previous = {};
+  for (size_t index = 0u; index < saved->composite_inputs.size(); ++index) {
     previous[index] = saved->composite_inputs[index].Get();
   }
+  previous.back() = saved->composite_readiness_input.Get();
   context->PSSetShaderResources(16u, static_cast<UINT>(previous.size()), previous.data());
   if (saved->composite_output_active) {
     std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> render_targets = {};
