@@ -1,5 +1,5 @@
 #include "../common.hlsli"
-#include "customtest31.hlsli"
+#include "customtest35.hlsli"
 #include "uncharted2extended.hlsli"
 
 float3 ApplyUnchartedFilmicTonemap(float3 untonemapped, float A, float B, float C, float D, float E, float F, float W) {
@@ -59,16 +59,31 @@ float3 ApplyFinalTonemap(float3 untonemapped) {
 
   [branch]
   if (RENODX_TONE_MAP_TYPE != 0.f) {
-    r0.rgb = renodx::tonemap::psychov::custom_psychotm_test31(
-        r0.rgb, RENODX_PEAK_WHITE_NITS / RENODX_DIFFUSE_WHITE_NITS, RENODX_TONE_MAP_EXPOSURE, RENODX_TONE_MAP_HIGHLIGHTS, RENODX_TONE_MAP_SHADOWS,
-        RENODX_TONE_MAP_CONTRAST, 0.10f * pow(RENODX_TONE_MAP_FLARE, 10.f), RENODX_TONE_MAP_CONTRAST_HIGHLIGHTS, RENODX_TONE_MAP_CONTRAST_SHADOWS,
-        RENODX_TONE_MAP_SATURATION, RENODX_TONE_MAP_HIGHLIGHT_SATURATION, RENODX_TONE_MAP_DECHROMA,
-        0.1f, 0.1f, RENODX_GAMMA_CORRECTION, 1.f,
-        RENODX_SWAP_CHAIN_OUTPUT_PRESET == renodx::draw::SWAP_CHAIN_OUTPUT_PRESET_SDR
-            ? renodx::tonemap::psychov::CUSTOM_PSYCHO31_TARGET_GAMUT_BT709
-            : renodx::tonemap::psychov::CUSTOM_PSYCHO31_TARGET_GAMUT_BT2020,
-        1.5f, 1.f, renodx::tonemap::psychov::PSYCHO30_SOURCE_BOUNDARY_NONE, 0.f);
-
+    r0.rgb = renodx::tonemap::psychov::custom_psychotm_test35(
+        r0.rgb,                                                                                 // bt709_linear_input
+        RENODX_PEAK_WHITE_NITS / RENODX_DIFFUSE_WHITE_NITS,                                     // peak_value
+        RENODX_TONE_MAP_EXPOSURE,                                                               // exposure
+        RENODX_TONE_MAP_HIGHLIGHTS,                                                             // highlights
+        RENODX_TONE_MAP_SHADOWS,                                                                // shadows
+        RENODX_TONE_MAP_CONTRAST,                                                               // contrast
+        0.10f * pow(RENODX_TONE_MAP_FLARE, 10.f),                                               // flare
+        RENODX_TONE_MAP_CONTRAST_HIGHLIGHTS,                                                    // highlight_contrast
+        RENODX_TONE_MAP_CONTRAST_SHADOWS,                                                       // shadow_contrast
+        RENODX_TONE_MAP_SATURATION,                                                             // purity_scale
+        RENODX_TONE_MAP_HIGHLIGHT_SATURATION,                                                   // highlight_saturation
+        RENODX_TONE_MAP_DECHROMA,                                                               // dechroma
+        0.1f,                                                                                   // current_adaptive_state_bt709
+        0.1f,                                                                                   // current_background_state_bt709
+        RENODX_GAMMA_CORRECTION,                                                                // sdr_eotf_emulation
+        1.f,                                                                                    // gamut_compression
+        RENODX_SWAP_CHAIN_OUTPUT_PRESET == renodx::draw::SWAP_CHAIN_OUTPUT_PRESET_SDR ? 0 : 1,  // gamut_compression_mode
+        1.5f,                                                                                   // compression
+        100.f,                                                                                  // clip_point
+        false,                                                                                  // human_gamut_conditioning
+        false,                                                                                  // gamut_fill
+        2,                                                                                      // fit_mode
+        0.f                                                                                     // fit_power
+    );
   } else {
     [branch]
     if (RENODX_GAMMA_CORRECTION != 0.f) {
