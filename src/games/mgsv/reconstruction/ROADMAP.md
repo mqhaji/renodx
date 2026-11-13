@@ -32,6 +32,8 @@ Constant preparation now uses one copy per native prefix. The Mother Base decal 
 
 Further reuse across draws requires a complete source-write record, the exact bound range, patch kind, and output plan. The current captures omit some buffer writes, so an unchanged address cannot establish reuse. Keep utility views, native buffer layouts, command-list lifetime, and reset boundaries explicit. Audit shared camera constants together with their consumers before changing their preparation.
 
+CPU target preparation now uses one mapping for an intermediate's resource, view, previous write status, and immutable dimensions throughout the draw. Cached target views use shared access, and role publication follows full draw validation. Local D3D11 checks cover producer changes, concurrent view creation, rejected draws, native-size storage, clear ordering, and saved-list replay. The ACC check passed with DLSS Auto, bloom, DoF, menu rendering, and Native/Auto switching. The log confirms reconstruction resumes at the requested sizes without an upscaling failure. Performance has not been measured.
+
 ## SDK lifecycle and validation
 
 - Exercise lazy DLSS startup from saved and manual selection, cancellation, missing-DLL/unsupported-device explanations, model-F fallback, query boundaries, insertion fallbacks, state restoration, and callbacks crossing Present.

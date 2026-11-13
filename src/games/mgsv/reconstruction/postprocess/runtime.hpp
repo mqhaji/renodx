@@ -579,7 +579,7 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
   }
   // Creating a target does not make its pixels valid. Delay clears and role
   // updates until the entire draw passes validation.
-  std::array<std::shared_ptr<Surface>, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> pending_surfaces;
+  std::array<MappedTarget, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> mapped_targets;
   std::array<std::optional<ClearColor>, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> pending_clears;
   const bool create_targets = (resize_targets || ui_view) && !display_output;
   // Qualify each destination separately. The first color write may also need
@@ -587,18 +587,13 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
   for (size_t i = 0u; i < targets.size(); ++i) {
     if (targets[i] == nullptr) continue;
     saved->rtv_count = static_cast<uint32_t>(i) + 1u;
-    Microsoft::WRL::ComPtr<ID3D11Resource> target_resource;
-    targets[i]->GetResource(&target_resource);
-    bool first_color_write = output->IsScaled() && target_role != Surface::Role::DATA && !output->IsSceneTarget(target_resource.Get());
-    auto previous_role = Surface::Role::DATA;
-    if (first_color_write && output->GetSurface(target_resource.Get(), false, route.frame, route.producer.get(), &previous_role) != nullptr) {
-      first_color_write = previous_role != target_role;
-    }
-    const auto mapped = output->MapTarget(targets[i], create_targets, scene_only, target_role, route.frame, route.producer.get(), false);
-    if (mapped != nullptr) {
-      if (create_targets && !output->IsSceneTarget(target_resource.Get())) {
-        pending_surfaces[i] = output->GetSurface(target_resource.Get(), true, route.frame, route.producer.get());
-      }
+    auto& mapped = mapped_targets[i];
+    mapped = output->MapTarget(targets[i], create_targets, scene_only, route.frame, route.producer.get());
+    const auto& target_resource = mapped.original;
+    const bool first_color_write = output->IsScaled() && target_role != Surface::Role::DATA
+                                   && !output->IsSceneTarget(target_resource.Get())
+                                   && (!mapped.has_previous_write || mapped.previous_role != target_role);
+    if (mapped.view != nullptr) {
       if (first_color_write) {
         // Cropped bloom and blended flare layers need their native initial
         // color and alpha, including clears recorded before alias activation.
@@ -622,17 +617,15 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
           return false;
         }
       }
-      targets[i] = mapped.Get();
+      targets[i] = mapped.view.Get();
       saved->targets_changed = true;
     } else if (output->IsScaled() && resize_targets && (!pass->require_scene_input || pass->role == Surface::Role::BLOOM)) {
       // Qualified DoF and motion-blur passes require matching output targets.
       // Generic copies and 2D draws may legitimately keep fixed-size targets.
       if (!resolution::failed.load(std::memory_order_acquire)) {
-        Microsoft::WRL::ComPtr<ID3D11Resource> resource;
         Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
-        targets[i]->GetResource(&resource);
         D3D11_TEXTURE2D_DESC description = {};
-        if (SUCCEEDED(resource.As(&texture))) {
+        if (SUCCEEDED(target_resource.As(&texture))) {
           texture->GetDesc(&description);
         }
         logging::Warn("required post-processing target unavailable pass=", pass->name, " shader=", logging::Hex{pass->shader_hash},
@@ -733,33 +726,40 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
     auto viewports = saved->viewports;
     auto scissors = saved->scissors;
     auto patch = saved->output->size_patches[0];
-    D3D11_TEXTURE2D_DESC native_description = {};
-    D3D11_TEXTURE2D_DESC output_description = {};
-    Microsoft::WRL::ComPtr<ID3D11Resource> native_target;
+    resolution::Size native_size;
+    resolution::Size output_size;
+    const auto& native_target = mapped_targets[0].original;
     if (saved->rtv_count != 0u && saved->rtvs[0] == nullptr) {
       resolution::Fail("unsupported output target layout");
       *saved = {};
       return false;
     }
-    if (saved->rtvs[0] != nullptr) {
-      saved->rtvs[0]->GetResource(&native_target);
-    }
     if (native_target != nullptr && targets[0] != nullptr) {
-      Microsoft::WRL::ComPtr<ID3D11Resource> resource;
-      Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
-      if (SUCCEEDED(native_target.As(&texture))) {
-        texture->GetDesc(&native_description);
-      }
-      targets[0]->GetResource(resource.ReleaseAndGetAddressOf());
-      texture.Reset();
-      if (SUCCEEDED(resource.As(&texture))) {
-        texture->GetDesc(&output_description);
-      }
-      // Find the patch by native identity, not the newly allocated destination.
-      const auto surface = (pending_surfaces[0] != nullptr ? pending_surfaces[0]
-                                                           : saved->output->GetSurface(native_target.Get(), false, route.frame, route.producer.get()));
+      const auto& surface = mapped_targets[0].surface;
       if (surface != nullptr) {
         patch = surface->size_patch;
+      }
+      if (mapped_targets[0].view != nullptr && surface != nullptr) {
+        // The accepted mapping already owns these immutable dimensions and
+        // constants. Its write role is still committed at the end of Begin.
+        native_size = surface->native_size;
+        output_size = surface->output_size;
+      } else {
+        // Scene and display targets can follow separate allocation paths.
+        // Read their actual extents, including native aliases and utility views.
+        Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        D3D11_TEXTURE2D_DESC description = {};
+        if (SUCCEEDED(native_target.As(&texture))) {
+          texture->GetDesc(&description);
+          native_size = {.width = description.Width, .height = description.Height};
+        }
+        targets[0]->GetResource(&resource);
+        texture.Reset();
+        if (SUCCEEDED(resource.As(&texture))) {
+          texture->GetDesc(&description);
+          output_size = {.width = description.Width, .height = description.Height};
+        }
       }
     }
     float scale_x = 1.f;
@@ -770,16 +770,15 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
         scale_x = static_cast<float>(saved->output->target.width) / static_cast<float>(saved->output->render_width);
         scale_y = static_cast<float>(saved->output->target.height) / static_cast<float>(saved->output->render_height);
       }
-      output_description.Width = saved->output->target.width;
-      output_description.Height = saved->output->target.height;
+      output_size = {.width = saved->output->target.width, .height = saved->output->target.height};
     }
     const bool native_output_view = pass != nullptr && resolution::dof_plan.IsScaled()
                                     && !saved->output->IsSceneTarget(native_target.Get());
-    if (!native_output_view && !fixed_bloom_reduction && native_description.Width != 0u && native_description.Height != 0u && saved->viewport_count != 0u
-        && viewports[0].Width <= static_cast<float>(native_description.Width)
-        && viewports[0].Height <= static_cast<float>(native_description.Height)) {
-      scale_x = static_cast<float>(output_description.Width) / static_cast<float>(native_description.Width);
-      scale_y = static_cast<float>(output_description.Height) / static_cast<float>(native_description.Height);
+    if (!native_output_view && !fixed_bloom_reduction && native_size.width != 0u && native_size.height != 0u && saved->viewport_count != 0u
+        && viewports[0].Width <= static_cast<float>(native_size.width)
+        && viewports[0].Height <= static_cast<float>(native_size.height)) {
+      scale_x = static_cast<float>(output_size.width) / static_cast<float>(native_size.width);
+      scale_y = static_cast<float>(output_size.height) / static_cast<float>(native_size.height);
     }
     for (UINT i = 0u; i < saved->viewport_count; ++i) {
       viewports[i].TopLeftX *= scale_x;
@@ -1012,22 +1011,23 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
     saved->rectangles_changed = true;
     if (fixed_bloom_reduction && (saved->output->observed_passes.fetch_or(8192u, std::memory_order_relaxed) & 8192u) == 0u) {
       logging::Info("recorded fixed bloom region=", BLOOM_GRID_WIDTH, "x", BLOOM_GRID_HEIGHT,
-                    " buffer=", native_description.Width, "x", native_description.Height,
-                    " -> ", output_description.Width, "x", output_description.Height);
+                    " buffer=", native_size.width, "x", native_size.height,
+                    " -> ", output_size.width, "x", output_size.height);
     }
     context->RSSetViewports(saved->viewport_count, viewports.data());
     context->RSSetScissorRects(saved->scissor_count, scissors.data());
   }
-  for (size_t i = 0u; i < pending_surfaces.size(); ++i) {
+  for (size_t i = 0u; i < mapped_targets.size(); ++i) {
     if (pending_clears[i].has_value()) {
       context->ClearRenderTargetView(targets[i], pending_clears[i]->color.data());
     }
-    if (pending_surfaces[i] != nullptr) {
+    if (create_targets && mapped_targets[i].view != nullptr && mapped_targets[i].surface != nullptr) {
+      const auto& surface = mapped_targets[i].surface;
       const std::unique_lock lock(saved->output->surface_mutex);
-      pending_surfaces[i]->routed_frame = route.frame;
-      pending_surfaces[i]->role = (scene_only ? Surface::Role::SCENE_COLOR : target_role);
+      surface->routed_frame = route.frame;
+      surface->role = (scene_only ? Surface::Role::SCENE_COLOR : target_role);
       if (route.producer != nullptr) {
-        route.producer->SetSurfaceRole(pending_surfaces[i]->original.Get(), pending_surfaces[i]->role);
+        route.producer->SetSurfaceRole(surface->original.Get(), surface->role);
       }
     }
   }
@@ -1188,14 +1188,14 @@ inline bool OnClearRenderTarget(reshade::api::command_list* command_list, reshad
   // Mirror clears for known output targets. A clear alone cannot identify a
   // post-processing surface; its first qualified draw can use the saved clear.
   auto mapped = output->MapTarget(reinterpret_cast<ID3D11RenderTargetView*>((clone.handle == 0u ? view : clone).handle), dof, !dof,  // NOLINT(performance-no-int-to-ptr)
-                                  Surface::Role::DATA, recording_frame, route.producer.get(), false);
-  if (mapped != nullptr) {
+                                  recording_frame, route.producer.get());
+  if (mapped.view != nullptr) {
     Microsoft::WRL::ComPtr<ID3D11Resource> mapped_resource;
-    mapped->GetResource(&mapped_resource);
+    mapped.view->GetResource(&mapped_resource);
     if (reinterpret_cast<uint64_t>(mapped_resource.Get()) == resource.handle) return false;
     auto* context = reinterpret_cast<ID3D11DeviceContext*>(command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
     if (full_clear) {
-      context->ClearRenderTargetView(mapped.Get(), color);
+      context->ClearRenderTargetView(mapped.view.Get(), color);
       if (route.producer != nullptr) {
         const std::unique_lock lock(output->surface_mutex);
         if (std::ranges::find(route.producer->cleared_surfaces, reinterpret_cast<ID3D11Resource*>(resource.handle)) == route.producer->cleared_surfaces.end()) {  // NOLINT(performance-no-int-to-ptr)
@@ -1221,7 +1221,7 @@ inline bool OnClearRenderTarget(reshade::api::command_list* command_list, reshad
           }
           native_rects = converted.data();
         }
-        context1->ClearView(mapped.Get(), color, native_rects, rect_count);
+        context1->ClearView(mapped.view.Get(), color, native_rects, rect_count);
       }
     }
   }

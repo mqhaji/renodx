@@ -151,6 +151,10 @@ struct Surface {
   Microsoft::WRL::ComPtr<ID3D11Resource> original;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
   Microsoft::WRL::ComPtr<ID3D11Buffer> size_patch;
+  // Texture extents are immutable. Keep them with the allocation so later
+  // draws can prepare rectangles without querying both textures again.
+  resolution::Size native_size;
+  resolution::Size output_size;
   // Allocation alone does not make this texture a valid current input.
   uint64_t routed_frame = std::numeric_limits<uint64_t>::max();
   Role role = Role::DATA;
@@ -166,6 +170,17 @@ struct Surface {
   // Retaining the native views also prevents their identities from being reused.
   std::vector<TargetView> targets;
   std::vector<SampleView> samples;
+};
+
+// One draw's target lookup. A previous role is valid only when the write check
+// succeeds, including the dedicated flare-layer rule in GetSurface. Recheck
+// that association when another scene uses this allocation.
+struct MappedTarget {
+  Microsoft::WRL::ComPtr<ID3D11Resource> original;
+  Microsoft::WRL::ComPtr<ID3D11RenderTargetView> view;
+  std::shared_ptr<Surface> surface;
+  Surface::Role previous_role = Surface::Role::DATA;
+  bool has_previous_write = false;
 };
 
 // These objects depend on the device, not on the current render/output size.
@@ -592,7 +607,11 @@ struct Output {
   // MapTarget or CopySurface records that producer separately.
   std::shared_ptr<Surface> GetSurface(ID3D11Resource* original, bool create,
                                       uint64_t recording_frame = reconstruction::state::CurrentFrameToken(),
-                                      const OutputProducer* producer = nullptr, Surface::Role* role = nullptr) {
+                                      const OutputProducer* producer = nullptr, Surface::Role* role = nullptr,
+                                      bool* current_write = nullptr) {
+    if (current_write != nullptr) {
+      *current_write = false;
+    }
     if (original == nullptr || render_width == 0u || render_height == 0u) return nullptr;
     // Called with either lock held, including the recheck after a cache miss.
     const auto find_surface = [&]() -> std::shared_ptr<Surface> {
@@ -608,8 +627,12 @@ struct Output {
           // General intermediates can change purpose each frame. The dedicated
           // flare layer keeps its producer/consumer link: another thread can
           // record the scene copy before recording the current flare draws.
-          if (!create && (producer != nullptr ? binding == nullptr : surface->routed_frame != recording_frame)
-              && surface->role != Surface::Role::FLARE_LAYER) return nullptr;
+          const bool written = (producer != nullptr ? binding != nullptr : surface->routed_frame == recording_frame)
+                               || surface->role == Surface::Role::FLARE_LAYER;
+          if (!create && !written) return nullptr;
+          if (current_write != nullptr) {
+            *current_write = written;
+          }
           if (role != nullptr) {
             *role = (binding != nullptr ? binding->role : surface->role);
           }
@@ -638,14 +661,16 @@ struct Output {
     // Fixed-size UI and utility targets share these draw paths. Their size
     // alone does not make them part of the output-resolution scene chain.
     if (level > MAX_SURFACE_REDUCTION) return nullptr;
+    auto surface = std::make_shared<Surface>();
+    surface->original = original;
+    surface->native_size = {.width = description.Width, .height = description.Height};
     description.Width = std::max(1u, target.width >> level);
     description.Height = std::max(1u, target.height >> level);
     description.Usage = D3D11_USAGE_DEFAULT;
     description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     description.CPUAccessFlags = 0u;
     description.MiscFlags = 0u;
-    auto surface = std::make_shared<Surface>();
-    surface->original = original;
+    surface->output_size = {.width = description.Width, .height = description.Height};
     auto* native_device = reinterpret_cast<ID3D11Device*>(device->get_native());  // NOLINT(performance-no-int-to-ptr)
     if (IsScaled()) {
       if (FAILED(native_device->CreateTexture2D(&description, nullptr, &surface->texture))) {
@@ -662,30 +687,34 @@ struct Output {
     return surface;
   }
 
-  // create allows new storage and views. With create enabled, record_write also
-  // updates their role. Begin delays that update until the draw passes validation.
-  // Existing targets still need a valid role; scene_only excludes effect data.
-  Microsoft::WRL::ComPtr<ID3D11RenderTargetView> MapTarget(ID3D11RenderTargetView* view, bool create, bool scene_only = false,
-                                                           Surface::Role role = Surface::Role::DATA,
-                                                           uint64_t recording_frame = reconstruction::state::CurrentFrameToken(),
-                                                           OutputProducer* producer = nullptr, bool record_write = true) {
-    if (view == nullptr) return nullptr;
-    Microsoft::WRL::ComPtr<ID3D11Resource> original;
-    view->GetResource(&original);
-    if (IsSceneTarget(original.Get())) return rtv;
-    auto previous_role = Surface::Role::DATA;
-    const auto surface = GetSurface(original.Get(), create, recording_frame, producer, &previous_role);
-    if (surface == nullptr) return nullptr;
-    if (scene_only && previous_role == Surface::Role::DATA && !create) return nullptr;
+  // Resolve storage, role, and view together. Allocation does not publish a
+  // write; Begin commits the role only after every draw binding is accepted.
+  MappedTarget MapTarget(ID3D11RenderTargetView* view, bool create, bool scene_only = false,
+                         uint64_t recording_frame = reconstruction::state::CurrentFrameToken(),
+                         const OutputProducer* producer = nullptr) {
+    MappedTarget result;
+    if (view == nullptr) return result;
+    view->GetResource(&result.original);
+    if (IsSceneTarget(result.original.Get())) {
+      result.view = rtv;
+      return result;
+    }
+    result.surface = GetSurface(result.original.Get(), create, recording_frame, producer, &result.previous_role, &result.has_previous_write);
+    if (result.surface == nullptr) return result;
+    if (scene_only && result.previous_role == Surface::Role::DATA && !create) return result;
+    const auto& surface = result.surface;
     const auto find_view = [&]() -> ID3D11RenderTargetView* {
       for (const auto& target_view : surface->targets) {
         if (target_view.original.Get() == view) return target_view.replacement.Get();
       }
       return nullptr;
     };
-    if (!create) {
+    {
       const std::shared_lock lock(surface_mutex);
-      if (auto* cached = find_view(); cached != nullptr) return cached;
+      if (auto* cached = find_view(); cached != nullptr) {
+        result.view = cached;
+        return result;
+      }
     }
     const std::unique_lock lock(surface_mutex);
     auto* mapped = find_view();
@@ -696,19 +725,13 @@ struct Output {
       auto* native_device = reinterpret_cast<ID3D11Device*>(device->get_native());  // NOLINT(performance-no-int-to-ptr)
       if (FAILED(native_device->CreateRenderTargetView(surface->texture.Get(), &description, &target_view.replacement))) {
         resolution::Fail("post-processing target view allocation failed");
-        return nullptr;
+        return result;
       }
       surface->targets.push_back(std::move(target_view));
       mapped = surface->targets.back().replacement.Get();
     }
-    if (create && record_write) {
-      surface->routed_frame = recording_frame;
-      surface->role = (scene_only ? Surface::Role::SCENE_COLOR : role);
-      if (producer != nullptr) {
-        producer->SetSurfaceRole(original.Get(), surface->role);
-      }
-    }
-    return mapped;
+    result.view = mapped;
+    return result;
   }
 
   // Redirect reads only when this recording has a matching scene, depth, or
