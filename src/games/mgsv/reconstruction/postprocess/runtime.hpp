@@ -339,6 +339,10 @@ inline void OnBindTargets(reshade::api::command_list* command_list, uint32_t cou
 // claim that any scene reconstruction ran. Callers still qualify exact bound
 // scene/depth identities before changing a draw or clear.
 inline Recording GetUiRoute(const reshade::api::device* device) {
+  const auto owner = rendering::native_context::GetScope().owner;
+  // A utility view can draw into the same pooled texture as the main scene.
+  // Its clears and Draw2D work must keep the utility view's pixel grid.
+  if (owner.scene != 0u && (!owner.main_view || !owner.active_member || !owner.presentation_matches)) return {};
   const auto plan = resolution::Read();
   if (!plan.IsScaled() || resolution::failed.load(std::memory_order_acquire)) return {};
   const std::shared_lock lock(state.mutex);
@@ -346,7 +350,7 @@ inline Recording GetUiRoute(const reshade::api::device* device) {
   if (cached == nullptr || cached->device != device
       || cached->render_width != plan.render.width || cached->render_height != plan.render.height
       || cached->target.width != plan.output.width || cached->target.height != plan.output.height) return {};
-  return {.output = cached, .frame = reconstruction::state::CurrentFrameToken(), .generation = state.generation};
+  return {.output = cached, .frame = reconstruction::state::CurrentFrameToken(), .generation = state.generation, .owner = owner};
 }
 
 inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = nullptr) {
@@ -397,8 +401,23 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
     }
     return false;
   }
-  auto* saved = &draw->bindings;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
+  const bool scene_only = pass != nullptr && pass->shader_hash == 0u;
+  if (scene_only) {
+    // Draw2D also initializes fixed-size captures in pooled scene textures.
+    // Resource identity alone cannot qualify those color and stencil writes
+    // for the main view. UI clipping uses scissors, not a smaller viewport.
+    std::array<D3D11_VIEWPORT, D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE> viewports = {};
+    UINT viewport_count = static_cast<UINT>(viewports.size());
+    context->RSGetViewports(&viewport_count, viewports.data());
+    if (viewport_count != 1u) return false;
+    const auto& viewport = viewports[0];
+    // Some UI already uses output coordinates and must not be enlarged twice.
+    const bool main_view = (viewport.Width == static_cast<float>(output->render_width) && viewport.Height == static_cast<float>(output->render_height))
+                           || (viewport.Width == static_cast<float>(output->target.width) && viewport.Height == static_cast<float>(output->target.height));
+    if (viewport.TopLeftX != 0.f || viewport.TopLeftY != 0.f || !main_view) return false;
+  }
+  auto* saved = &draw->bindings;
   std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> targets = {};
   // Inspect the shader actually bound after replacement. Unknown metadata uses
   // conservative saved bindings; known texture reads avoid remapping stale slots.
@@ -431,7 +450,6 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
   for (size_t index = 0u; index < inputs.size(); ++index) {
     saved->srvs[index].Attach(inputs[index]);
   }
-  const bool scene_only = pass != nullptr && pass->shader_hash == 0u;
   bool qualified_flare = true;
   if (pass != nullptr && pass->shader_hash == LENS_FLARE_SHADER_HASH && output->IsScaled()) {
     Microsoft::WRL::ComPtr<ID3D11Resource> depth_resource;
@@ -567,7 +585,7 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
         ClearColor clear = {};
         UINT bytes = sizeof(clear);
         if (SUCCEEDED(target_resource->GetPrivateData(CLEAR_COLOR_GUID, &bytes, &clear)) && bytes == sizeof(clear)
-            && clear.frame == route.frame) {
+            && clear.frame == route.frame && clear.scene == route.owner.scene && clear.generation == route.owner.generation) {
           pending_clears[i] = clear;
         } else if (pass != nullptr && pass->shader_hash == LENS_FLARE_SHADER_HASH) {
           // A blended layer must not start with undefined color or alpha.
@@ -719,8 +737,11 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
     float scale_x = 1.f;
     float scale_y = 1.f;
     if (depth_only && saved->rtv_count == 0u) {
-      scale_x = static_cast<float>(saved->output->target.width) / static_cast<float>(saved->output->render_width);
-      scale_y = static_cast<float>(saved->output->target.height) / static_cast<float>(saved->output->render_height);
+      if (viewports[0].Width == static_cast<float>(saved->output->render_width)
+          && viewports[0].Height == static_cast<float>(saved->output->render_height)) {
+        scale_x = static_cast<float>(saved->output->target.width) / static_cast<float>(saved->output->render_width);
+        scale_y = static_cast<float>(saved->output->target.height) / static_cast<float>(saved->output->render_height);
+      }
       output_description.Width = saved->output->target.width;
       output_description.Height = saved->output->target.height;
     }
@@ -1006,12 +1027,13 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
     // Release replaced views after unlocking; their callbacks can reenter here.
     Recording retired;
     const std::unique_lock lock(state.mutex);
-    const auto sequence = std::ranges::find(state.sequences, post_sequence_id, &Sequence::id);
+    const auto sequence = std::ranges::find_if(state.sequences, [&](const Recording& candidate) {
+      return candidate.owner.scene == route.owner.scene && candidate.owner.generation == route.owner.generation;
+    });
     if (sequence == state.sequences.end()) {
-      post_sequence_id = ++state.next_sequence_id;
-      state.sequences.push_back({.id = post_sequence_id, .recording = route});
+      state.sequences.push_back(route);
     } else {
-      retired = std::exchange(sequence->recording, route);
+      retired = std::exchange(*sequence, route);
     }
   }
   if (context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED) {
@@ -1080,6 +1102,8 @@ inline void End(reshade::api::command_list* command_list) {
 // aliases created later. Return false so the native target is cleared as usual.
 inline bool OnClearRenderTarget(reshade::api::command_list* command_list, reshade::api::resource_view view,
                                 const float* color, uint32_t rect_count, const reshade::api::rect* rects) {
+  const auto owner = rendering::native_context::GetScope().owner;
+  if (owner.scene != 0u && (!owner.main_view || !owner.active_member || !owner.presentation_matches)) return false;
   Recording route;
   auto output = GetActive(command_list, &route);
   const uint64_t recording_frame = (output != nullptr ? route.frame : reconstruction::state::CurrentFrameToken());
@@ -1113,7 +1137,7 @@ inline bool OnClearRenderTarget(reshade::api::command_list* command_list, reshad
                  && std::cmp_greater_equal(rects[0].bottom, description.texture.height);
   }
   if ((output == nullptr || output->IsScaled()) && full_clear && resource.handle != 0u) {
-    ClearColor clear = {.frame = recording_frame};
+    ClearColor clear = {.frame = recording_frame, .scene = owner.scene, .generation = owner.generation};
     std::copy_n(color, clear.color.size(), clear.color.begin());
     auto* native_resource = reinterpret_cast<ID3D11Resource*>(resource.handle);  // NOLINT(performance-no-int-to-ptr)
     native_resource->SetPrivateData(CLEAR_COLOR_GUID, sizeof(clear), &clear);
@@ -1294,12 +1318,15 @@ inline constexpr auto DRAW_CALLBACK = [](auto& command) {
           // Release the sequence's views after dropping the state lock.
           Recording retired;
           const std::unique_lock lock(state.mutex);
-          const auto sequence = std::ranges::find(state.sequences, post_sequence_id, &Sequence::id);
+          const auto owner = rendering::native_context::GetScope().owner;
+          const uint64_t scene = (owner.scene != 0u ? owner.scene : owner.presentation_scene);
+          const auto sequence = std::ranges::find_if(state.sequences, [&](const Recording& candidate) {
+            return candidate.owner.scene == scene && candidate.owner.generation == owner.generation;
+          });
           if (sequence != state.sequences.end()) {
-            retired = std::move(sequence->recording);
+            retired = std::move(*sequence);
             state.sequences.erase(sequence);
           }
-          post_sequence_id = 0u;
         }
       },
   };

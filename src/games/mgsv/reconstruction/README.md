@@ -33,6 +33,10 @@ Failed output allocation, an unsupported native path, or repeated failures with 
 
 [runtime.hpp](runtime.hpp) manages requested/effective methods and insertion. [settings.hpp](settings.hpp) binds controls to addon-owned storage. The shared [input owner](../rendering/inputs.hpp) selects one device/swapchain and retains native material/motion views; [input_capture.hpp](input_capture.hpp) checks reconstruction's camera, sample, size, and texture layout. Velocity precision remains active with reconstruction Off.
 
+[Native view ownership](../rendering/native_context.hpp) follows each scene build into its worker jobs. Camera and motion records are selected by that scene and presentation generation. The coordinator carries the copied scope into immediate-context evaluation. Post-processing checks the same owner before choosing a recording route, a continuation on another command list, or the active output. Full-clear records carry the owner too. This prevents fixed-size rain work from selecting a main-scene route through a pooled texture or a reused worker thread.
+
+The first Present selects the game's main swapchain and connects native ownership to it. Swapchain creation can happen before that selection. When the main view ends, its enclosing renderer retains the scene ID for final display conversion, which runs outside the view scope. Display completion releases that scene's recording sequence while other scenes keep their routes.
+
 [frame_inputs.hpp](frame_inputs.hpp) separates render and output dimensions. [resolution.hpp](resolution.hpp) requests native renderer size changes through its normal update, not around individual draws, and adapts DoF rectangle/sprite-grid arguments. [mip_bias.hpp](mip_bias.hpp) owns replacement samplers. Native hooks check the executable and expected code before installation.
 
 [postprocess/resources.hpp](postprocess/resources.hpp) owns enlarged scene/intermediate textures, typed views, and depth/stencil copies. [postprocess/runtime.hpp](postprocess/runtime.hpp) routes native draws/copies/clears and restores their bindings. Its helper shaders share [32-byte copy constants](postprocess/copy_constants.hlsli). Native source names and reflected texture/constant reads identify supported 2D shaders; no external dump is needed at runtime.
@@ -55,6 +59,8 @@ When shader reads are known, the supported native constant layout must fit both 
 
 Only texture slots read by the pixel shader are remapped. Native order remains late tonemap, FXAA, then UI even when UI records first on another worker. Draw2D normal-blending, normal-encoding, and roughness-blending shaders produce packed data, not UI color. Treating all Draw2D shaders as UI previously redirected rain/material work incorrectly.
 
+Generic Draw2D routing also requires one origin-aligned viewport covering the full render or output extent before any bindings change. The game uses the same shaders and pooled scene/depth textures to initialize fixed-size captures, including rain occlusion; those smaller views must keep their native color and stencil writes together. Scissor-clipped main-view UI still routes normally. Explicitly identified post-processing passes retain their own cropped-view rules.
+
 Loading/save reload may draw UI without a new scene. UI and display conversion share the matching output allocation, and native color/depth/stencil clears reach it even when no reconstruction dispatch runs. The original clears still execute. Cancellation or replay fills output from current native scene data before the remaining game work continues.
 
 ## Frame and resource contracts
@@ -65,7 +71,7 @@ Loading/save reload may draw UI without a new scene. UI and display conversion s
 4. One accepted resolve produces output and restores state. The shared dispatcher selects that output before routing the first consuming draw. Camera history advances only if the reset counter and sample still match.
 5. Enabled reconstruction bypasses FXAA filtering but preserves the draw's other scene processing. Scene alpha remains current-frame data for downstream DoF/highlights.
 
-Inputs must match device, dimensions, layout, temporal sample, and presentation interval. A callback crossing Present may use the preceding interval only for the same sample. Missing full-resolution work preserves history; a matching candidate that fails at every insertion invalidates it. Creation, resize, relevant settings, and missing previous camera data restart accumulation.
+Inputs must match native scene, presentation generation, device, dimensions, layout, temporal sample, and presentation interval. A callback crossing Present may use the preceding interval only for the same sample. Missing full-resolution work preserves history; a matching candidate that fails at every insertion invalidates it. Creation, resize, relevant settings, and missing previous camera data restart accumulation.
 
 [coordinator.hpp](coordinator.hpp) runs all methods on the immediate D3D11 context between preserved native command-list prefixes and remainders. Changing methods cancels obsolete reconstruction, not game commands. [GT-VBGI](../lighting/indirect/README.md) uses the same bridge but its own submitted camera/motion and history ledger, including with reconstruction Off. Retained objects and CPU recording order do not prove matching pixels or GPU completion.
 
@@ -134,9 +140,13 @@ DLSS needs a compatible `nvngx_dlss.dll` beside the game executable and NVIDIA's
 
 ## Known limitations and validation status
 
-Rain inside the ACC at reduced resolution and occasional Mother Base flashes even at Native quality remain unresolved. Do not assume they share a cause with scene projection discontinuities. Sortie ground stability depends on forward geometry keeping the same camera jitter as scene rendering and reconstruction; Present alone does not mark the end of a camera sample.
+Live checks with DLSS at 1920×1080 input and 3840×2160 output passed in the ACC/main menu, a loading screen, sheltered rain, and a paused wormhole effect. Captures verified that the 512×512 rain utility view kept its native size while the main scene used enlarged post-processing targets. They also verified the utility capture's reads by rain materials, deferred composition, and particles, plus the main scene's continuation into final display conversion.
 
-Controlled GPU/ReShade tests cover overlapping recordings, output-sized native processing, odd dimensions, depth/stencil, ranges, copies, fallbacks, and UI/clears without a new scene. They do not recover geometry missing at lower resolution. Loading/save-reload gameplay, display changes, special views, and failure recovery still need broader checks.
+An occasional flash around the transition into rain remains unresolved. The user reported improved stability and could not reproduce the flash during the final walking test. Earlier small image samples contain brief brightness changes before DLSS, but their timing could not be matched confidently to the reported flash. Rain inside the ACC, sortie ground flashes, death/save reload, display changes, and special-view transitions still need targeted checks.
+
+Scene ownership qualifies camera/motion capture, queued addon work, and post-processing routes. Temporal sample advancement still follows the existing reconstruction state. Scene-owned jitter/history advancement and tracking which submitted write supplies each output remain planned work. Sortie ground stability also depends on forward geometry using the same camera jitter as scene rendering and reconstruction.
+
+Controlled GPU/ReShade tests cover overlapping recordings, output-sized native processing, odd dimensions, depth/stencil, ranges, copies, fallbacks, and UI/clears without a new scene. Gameplay verification remains necessary for geometry lost at lower resolution and for transitions between these paths.
 
 - Character wobble remains unexplained. Analytical Jitter Off and Auto/Direct motion comparisons did not help. Matrix Camera Everywhere caused too much ghosting to judge it. DLSS also showed wobble, although newer models hid it better. Readbacks have not proved matching current/previous character poses and accumulated color.
 - Thermography has matching clip-position evidence at two guarded setters, and original-shader NVG looked clean in the reported test. The alternate branch and four experimental projection paths still need transition/gameplay coverage.

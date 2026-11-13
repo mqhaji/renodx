@@ -2,9 +2,11 @@
 
 /* Adapt retained native bindings to reconstruction's camera, frame, and sample checks. */
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <utility>
+#include <vector>
 
 #include <include/reshade.hpp>
 
@@ -25,7 +27,9 @@ struct Resources {
   uint32_t capture_sample_index = std::numeric_limits<uint32_t>::max();
 };
 
-inline Resources resources;
+// Accessed under the coordinator execution lock. Each entry belongs to one
+// native scene. Queued dispatches retain their own views when these entries age out.
+inline std::vector<Resources> scene_resources;
 inline uint64_t last_missing_inputs_log = std::numeric_limits<uint64_t>::max();
 inline uint64_t last_capture_missing_log = std::numeric_limits<uint64_t>::max();
 inline uint64_t last_stale_capture_log = std::numeric_limits<uint64_t>::max();
@@ -39,10 +43,7 @@ inline bool LogEvery(uint64_t& last_frame, uint64_t interval = 120u) {
 
 inline void InvalidateCapturedFrame() {
   // Reconstruction resets do not retire lighting's shared compatibility selection.
-  resources.motion = {};
-  resources.camera = {};
-  resources.capture_frame = std::numeric_limits<uint64_t>::max();
-  resources.capture_sample_index = std::numeric_limits<uint32_t>::max();
+  scene_resources.clear();
 }
 
 inline void Destroy(reshade::api::device* device) {
@@ -63,13 +64,13 @@ inline reshade::api::format GetTypedViewFormat(
   return reshade::api::format_to_default_typed(device->get_resource_desc(resource).texture.format);
 }
 
-inline void CaptureCameraMotionLocked(
+inline Resources CaptureCameraMotionLocked(
     reshade::api::command_list* cmd_list,
     const inputs::descriptor_tracker::CommandListData& command_data,
     reshade::api::resource_view velocity_rtv) {
   if (velocity_rtv.handle == 0u) {
     if (LogEvery(last_capture_missing_log)) logging::Warn("camera velocity pass has no RTV0");
-    return;
+    return {};
   }
   if (command_data.pixel_srv_t2.handle == 0u || command_data.pixel_srv_t3.handle == 0u) {
     if (LogEvery(last_capture_missing_log)) {
@@ -77,25 +78,36 @@ inline void CaptureCameraMotionLocked(
                     " depth=", logging::Hex{command_data.pixel_srv_t2.handle},
                     " object_velocity=", logging::Hex{command_data.pixel_srv_t3.handle});
     }
-    return;
+    return {};
   }
 
   // Retain live native bindings and preserve the precision module's selected RTV and enabled object clone.
   auto motion = inputs::CaptureMotion(cmd_list, velocity_rtv, true);
-  if (motion.velocity == nullptr) {
-    const auto shared_inputs = inputs::Read(cmd_list != nullptr ? cmd_list->get_device() : nullptr);
-    if (shared_inputs.generation == 0u
-        || resources.motion.generation != shared_inputs.generation
-        || shared_inputs.lighting_motion.velocity == nullptr) {
-      InvalidateCapturedFrame();
-    }
-    return;
+  if (motion.velocity == nullptr) return {};
+  Resources resources = {
+      .motion = std::move(motion),
+      .camera = camera_state::GetForCapture(),
+      .capture_frame = state::CurrentFrameToken(),
+      .capture_sample_index = state::CurrentSampleIndex(),
+  };
+  if (resources.camera.scene == 0u) return resources;
+  // Validation already rejects captures older than the preceding interval.
+  // Retire those references here, including scenes with no reconstruction pass.
+  std::erase_if(scene_resources, [&](const Resources& candidate) {
+    return candidate.camera.owner_generation != resources.camera.owner_generation
+           || (resources.capture_frame > 1u && candidate.capture_frame < resources.capture_frame - 1u);
+  });
+  const auto existing = std::ranges::find_if(scene_resources, [&](const Resources& candidate) {
+    return candidate.camera.scene == resources.camera.scene && candidate.camera.owner_generation == resources.camera.owner_generation;
+  });
+  if (existing != scene_resources.end()) {
+    *existing = resources;
+  } else if (scene_resources.size() < camera_state::MAX_SCENE_PUBLICATIONS) {
+    scene_resources.push_back(resources);
+  } else if (LogEvery(last_capture_missing_log)) {
+    logging::Warn("native scene input capacity reached before reconstruction consumed the recordings");
   }
-
-  resources.motion = std::move(motion);
-  resources.camera = camera_state::GetForCapture();
-  resources.capture_frame = state::CurrentFrameToken();
-  resources.capture_sample_index = state::CurrentSampleIndex();
+  return resources;
 }
 
 inline bool IsSingleSampleTexture(const reshade::api::resource_desc& description) {
@@ -111,13 +123,23 @@ inline bool BuildValidatedFrameInputsLocked(
     const char* insertion_name,
     ValidatedFrameInputs& output) {
   auto* device = cmd_list != nullptr ? cmd_list->get_device() : nullptr;
-  const auto shared_inputs = inputs::Read(device);
-  if (shared_inputs.generation == 0u || resources.motion.generation != shared_inputs.generation) {
-    InvalidateCapturedFrame();
+  const auto owner = rendering::native_context::GetScope().owner;
+  const auto captured = std::ranges::find_if(scene_resources, [&](const Resources& candidate) {
+    return candidate.camera.scene == owner.scene && candidate.camera.owner_generation == owner.generation;
+  });
+  if (owner.scene == 0u || captured == scene_resources.end()) {
+    if (LogEvery(last_missing_inputs_log)) {
+      logging::Warn("reconstruction has no motion recorded for scene=", owner.scene, " generation=", owner.generation);
+    }
+    return false;
   }
-  // Pin this adapter's selection throughout validation; a newer shared observation must not replace it.
-  // Shared ownership and layout checks do not prove pixel contents or producer execution order.
-  const auto motion = resources.motion;
+  // Resource creation below can reenter addon callbacks and reset this cache.
+  // Keep this validation's camera and retained views together through those calls.
+  const Resources resources = *captured;  // NOLINT(performance-unnecessary-copy-initialization)
+  const auto shared_inputs = inputs::Read(device);
+  if (shared_inputs.generation == 0u || resources.motion.generation != shared_inputs.generation) return false;
+  // The local snapshot retains these views through reentrant allocation calls.
+  const auto& motion = resources.motion;
   const reshade::api::resource_view velocity_srv = {reinterpret_cast<uintptr_t>(motion.velocity.Get())};
   const reshade::api::resource_view depth_srv = {reinterpret_cast<uintptr_t>(motion.depth.Get())};
   const reshade::api::resource_view object_velocity_srv = {reinterpret_cast<uintptr_t>(motion.object_velocity.Get())};

@@ -12,6 +12,7 @@ This guide covers ownership and rules shared by multiple features. The [addon gu
 | `shaders.hpp` | Explicit shader registrations and draw/dispatch callbacks |
 | `rendering/inputs.hpp` | Selected device/swapchain, reset versions, and retained native material/motion views |
 | `rendering/producer_records.hpp` | Camera/exposure, motion, diffuse-copy, prepared-source, and material-table records published in submission order |
+| `rendering/native_context.hpp` | Native renderer/view ownership, worker handoff, and copied scopes for submitted addon work |
 | `rendering/resource_upgrades.hpp` | Shared precision upgrades, resource roles, clone activation, and scoped copies |
 | `rendering/d3d11_state.hpp`, `rendering/geometry.hlsli` | D3D11 state preservation and native geometry reconstruction |
 | `materials/capture.hpp`, `materials/native/` | Clean material/owner capture, native ports, and material registration inventory |
@@ -34,6 +35,12 @@ This guide covers ownership and rules shared by multiple features. The [addon gu
 Feature headers are included at file scope and do not depend on hidden addon globals. Existing `mgsv::ao`, `mgsv::il`, and `mgsv::lighting::temporal_inputs` namespaces remain in use. Submission stays in `reconstruction/coordinator.hpp` because that code also evaluates the selected backend. Native material decoding and GGX remain together in `materials/brdf.hlsli`; indirect resources, controls, and orchestration remain together in `runtime.hpp`.
 
 ## Frame order
+
+Native ownership follows each renderer build into its views and worker jobs. It records renderer and viewport lifetimes, active view membership, scene/output sizes, and copied worker subcontexts. A node generation identifies each use of the native command pool. Worker scopes restore their previous association on exit. The coordinator carries copied ownership with queued addon work through command-list submission and deferred merging. The local probe connects native recording and submission to its shader/resource inventory through command-list IDs and per-operation owner records.
+
+Ownership tracking runs throughout the selected device's lifetime. One pinned addon owns the hooks and native allocations. The game addon and local probe exchange copied scopes through the shared addon API. Detailed probe observation starts on request and stops at a bounded Present interval. Unknown cached lists, missing worker associations, changed branch matrices, failed finishes, and capture limits have explicit counters. Presentation matching uses canonical COM identity, the supported ReShade unwrap interface, and an exact backbuffer-identity fallback. Native hooks require the verified executable timestamp, image size, and entry-point bytes.
+
+Camera and motion capture, submitted lighting input pairs, reconstruction jobs, and post-processing routes carry the native scene ID and presentation generation. A worker serving a 512×512 rain capture cannot acquire the main view's enlarged output even when both use the same pooled scene texture. Immediate reconstruction and indirect-lighting dispatches restore the scope copied into their recorded job. UI without a scene can still use compatible presentation storage after its actual resource bindings are checked.
 
 The main path is camera/jitter setup and resource upgrades, native geometry/material data and motion, native AO, ambient/direct lighting, diffuse copy and source preparation, custom indirect lighting, both native skin scatters, deferred composition/fog, sky/forward effects, native reflections, ocean/remaining effects, exposure preparation, reconstruction, bloom/DoF/motion blur, late grading, FXAA, UI, and output encoding. Some phases are interleaved or conditional; this is not one fixed list of contiguous passes for every scene.
 

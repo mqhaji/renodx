@@ -38,6 +38,7 @@
 
 #include "../../../../utils/resource.hpp"
 #include "../../../../utils/resource_upgrade.hpp"
+#include "../../rendering/native_context.hpp"
 #include "../frame_inputs.hpp"
 #include "../resolution.hpp"
 #include "../state.hpp"
@@ -98,6 +99,8 @@ inline constexpr GUID CLEAR_COLOR_GUID = {
 struct ClearColor {
   uint64_t frame;  // CPU recording interval; does not establish GPU completion.
   std::array<float, 4> color;
+  uint64_t scene = 0u;
+  uint64_t generation = 0u;
 };
 
 // Retrieve the exact depth/stencil view observed alongside this scene target.
@@ -783,60 +786,61 @@ struct __declspec(uuid("71618f64-fc26-4a78-91de-6e20f879a85a")) Recording {
   std::shared_ptr<OutputProducer> producer;
   uint64_t frame = 0u;       // Recording interval used to qualify intermediate writes.
   uint64_t generation = 0u;  // Reset counter used to reject retired output resources.
+  rendering::native_context::Owner owner;
 };
 
 // Native post-processing can finish one list and continue on another while
 // another worker publishes the next scene. Keep ownership until display output
 // closes this recording sequence, rather than borrowing the latest publication.
-struct Sequence {
-  uint64_t id;
-  Recording recording;
-};
-
 struct State {
   std::shared_mutex mutex;
   // Shader/state objects can be reused at any size. Cached textures match one
   // render/output size pair; outstanding recordings can retain older textures.
   std::shared_ptr<Pipelines> pipelines;
   // cached can serve independently recorded UI even without a new scene.
-  // active is the most recently published scene, qualified by frame below.
+  // active belongs to the native scene identified by active_owner.
   std::shared_ptr<Output> cached;
   std::shared_ptr<Output> active;
   std::shared_ptr<OutputProducer> producer;
-  std::vector<Sequence> sequences;
-  uint64_t next_sequence_id = 0u;
+  std::vector<Recording> sequences;
   uint64_t frame = 0u;
   // Invalidates old Recording values without relying on CPU/GPU timing.
   uint64_t generation = 0u;
+  rendering::native_context::Owner active_owner;
 };
 inline State state;
-// Only the identity is thread-local. Device state owns and retires GPU objects.
-inline thread_local uint64_t post_sequence_id = 0u;
 
-// Prefer ownership tied to the unfinished command list, then its wider
-// post-processing sequence. Only then may a new recording use the latest scene.
+// Match the recorded native scene at every lookup. A worker may serve another
+// viewport between two calls, and a pooled target may belong to either view.
 inline std::shared_ptr<Output> GetActive(reshade::api::command_list* command_list, Recording* selected = nullptr) {
+  const auto owner = rendering::native_context::GetScope().owner;
+  const uint64_t scene = (owner.scene != 0u ? owner.scene : owner.presentation_scene);
+  if (scene == 0u || !owner.presentation_matches
+      || (owner.scene != 0u && (!owner.main_view || !owner.active_member))) return nullptr;
   const std::shared_lock lock(state.mutex);
+  const auto matches = [&](const Recording& recording) {
+    return recording.owner.generation == owner.generation && recording.owner.scene == scene
+           && recording.generation == state.generation && recording.output != nullptr
+           && recording.output->device == command_list->get_device();
+  };
   const auto* recording = command_list->get_private_data<Recording>();
-  if (recording != nullptr && recording->output != nullptr && recording->generation == state.generation
-      && recording->output->device == command_list->get_device()) {
+  if (recording != nullptr && matches(*recording)) {
     if (selected != nullptr) {
       *selected = *recording;
     }
     return recording->output;
   }
-  const auto sequence = std::ranges::find(state.sequences, post_sequence_id, &Sequence::id);
-  if (sequence != state.sequences.end() && sequence->recording.generation == state.generation
-      && sequence->recording.output != nullptr && sequence->recording.output->device == command_list->get_device()) {
+  const auto sequence = std::ranges::find_if(state.sequences, matches);
+  if (sequence != state.sequences.end()) {
     if (selected != nullptr) {
-      *selected = sequence->recording;
+      *selected = *sequence;
     }
-    return sequence->recording.output;
+    return sequence->output;
   }
-  if (state.frame != reconstruction::state::CurrentFrameToken()
+  if (state.active_owner.generation != owner.generation || state.active_owner.scene != scene
       || state.active == nullptr || state.active->device != command_list->get_device()) return nullptr;
   if (selected != nullptr) {
-    *selected = {.output = state.active, .producer = state.producer, .frame = state.frame, .generation = state.generation};
+    *selected = {.output = state.active, .producer = state.producer, .frame = state.frame, .generation = state.generation, .owner = state.active_owner};
   }
   return state.active;
 }
@@ -848,13 +852,14 @@ inline void Reset(bool release_pipelines = false) {
   std::shared_ptr<Pipelines> pipelines;
   std::shared_ptr<Output> cached;
   std::shared_ptr<Output> active;
-  std::vector<Sequence> sequences;
+  std::vector<Recording> sequences;
   {
     const std::unique_lock lock(state.mutex);
     cached.swap(state.cached);
     active.swap(state.active);
     sequences.swap(state.sequences);
     state.producer.reset();
+    state.active_owner = {};
     ++state.generation;
     if (release_pipelines) {
       pipelines.swap(state.pipelines);

@@ -29,6 +29,7 @@
 
 #include "../rendering/d3d11_state.hpp"
 #include "../rendering/inputs.hpp"
+#include "../rendering/native_context.hpp"
 #include "../rendering/producer_records.hpp"
 #include "analytical/runtime.hpp"
 #include "camera_state.hpp"
@@ -57,6 +58,7 @@ enum class LightingPolicy : uint8_t {
 };
 
 struct PendingTemporalDispatch {
+  rendering::native_context::Scope scope;
   reshade::api::command_list* deferred_context = nullptr;
   Microsoft::WRL::ComPtr<ID3D11CommandList> prefix;
   Microsoft::WRL::ComPtr<ID3D11CommandList> post;
@@ -526,6 +528,7 @@ inline bool ScheduleLighting(
   CompleteRecording(cmd_list, prefix.Get());
   const std::unique_lock lock(submission.mutex);
   submission.pending_dispatches.push_back({
+      .scope = rendering::native_context::GetScope(),
       .deferred_context = cmd_list,
       .prefix = std::move(prefix),
       .lighting_callback = std::move(callback),
@@ -583,6 +586,7 @@ inline void OnExecuteSecondaryCommandList(
   std::ranges::reverse(chain);
   if (context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) {
     for (const auto& pending : chain) {
+      const rendering::native_context::ScopedOwner owner_scope(pending.scope);
       context->ExecuteCommandList(pending.prefix.Get(), TRUE);
       if (pending.is_lighting && pending.lighting_policy == LightingPolicy::SHADOW_BATCH
           && pending.lighting_callback) {
@@ -606,6 +610,7 @@ inline void OnExecuteSecondaryCommandList(
   const ExecutionGuard execution_guard;
   const ImmediateContextStateGuard state_guard(context);
   for (auto& pending : chain) {
+    const rendering::native_context::ScopedOwner owner_scope(pending.scope);
     context->ExecuteCommandList(pending.prefix.Get(), state_guard.IsActive() ? FALSE : TRUE);
     lighting::temporal_inputs::Submit(pending.prefix.Get());
     if (pending.is_lighting) {
@@ -715,6 +720,25 @@ inline void MaybeRunLocked(
       || state::frame_state.reconstruction_completed) {
     return;
   }
+  const auto scope = rendering::native_context::GetScope();
+  // Utility views keep their native size and do not schedule reconstruction.
+  if (scope.owner.scene != 0u && !scope.owner.main_view) return;
+  static bool missing_owner = false;
+  if (scope.owner.scene == 0u || !scope.owner.main_view || !scope.owner.active_member || !scope.owner.presentation_matches) {
+    if (!missing_owner) {
+      logging::Warn("reconstruction waiting for main-view ownership at ", insertion_name,
+                    " scene=", scope.owner.scene, " generation=", scope.owner.generation,
+                    " main=", scope.owner.main_view, " member=", scope.owner.active_member,
+                    " presentation=", scope.owner.presentation_matches);
+      missing_owner = true;
+    }
+    return;
+  }
+  if (missing_owner) {
+    logging::Info("reconstruction main-view ownership recovered scene=", scope.owner.scene,
+                  " generation=", scope.owner.generation);
+    missing_owner = false;
+  }
 
   ValidatedFrameInputs inputs = {};
   if (!input_capture::BuildValidatedFrameInputsLocked(
@@ -791,9 +815,10 @@ inline void MaybeRunLocked(
     post_process::state.active.swap(post_output);
     post_process::state.producer = output_producer;
     post_process::state.frame = inputs.frame_token;
+    post_process::state.active_owner = scope.owner;
     if (native_context != nullptr && native_context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED) {
       if (auto* recording = cmd_list->get_private_data<post_process::Recording>(); recording != nullptr) {
-        *recording = {.output = post_process::state.active, .producer = output_producer, .frame = inputs.frame_token, .generation = post_process::state.generation};
+        *recording = {.output = post_process::state.active, .producer = output_producer, .frame = inputs.frame_token, .generation = post_process::state.generation, .owner = scope.owner};
       }
     }
   };
@@ -816,6 +841,7 @@ inline void MaybeRunLocked(
       if (queries == submission.active_queries.end() || !queries->second.empty()) return;
     }
     PendingTemporalDispatch pending = {
+        .scope = scope,
         .deferred_context = inputs.cmd_list,
         .color_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.color_srv.handle),                      // NOLINT(performance-no-int-to-ptr)
         .velocity_srv = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.velocity_srv.handle),                // NOLINT(performance-no-int-to-ptr)

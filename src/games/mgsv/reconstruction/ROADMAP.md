@@ -4,6 +4,7 @@ This page tracks outstanding work. The [reconstruction guide](README.md) owns cu
 
 ## Rain, scene ownership, and transitions
 
+- Extend native scene ownership to jitter/history advancement and submitted output contents. Track which write supplies each consumer and when its output can be reused, including cached command lists and overlapping scenes.
 - Investigate rain inside the ACC at reduced input resolution, intermittent Mother Base flashes even at Native quality, and sortie horizon/ground flashes separately until evidence connects them. Match actual color/depth producers, resource roles, native planar reflections, and submitted command lists before changing routing.
 - Extend loading/save-reload, alt-tab/resize, device recreation, and rapid method/quality/reset coverage. Confirm canceled reconstruction preserves native prefixes/remainders and current scene alpha. Unsupported DoF paths must keep requesting native-size recovery rather than redirecting unknown resources.
 - The retired state-profile/cold-start flicker sweep is not a current test request. Legacy compute-only state restoration and the `0x200DBED9` light-VS workaround were removed; do not restore them as speculative fixes. Those removals did not establish a fix for character wobble or rapid night-vision skinned-mesh flicker.

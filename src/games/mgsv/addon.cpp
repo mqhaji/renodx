@@ -24,6 +24,7 @@
 #include <windows.h>
 
 #include <d3d11.h>
+#include <dxgi.h>
 #include <wrl/client.h>
 
 #include <deps/imgui/imgui.h>
@@ -56,10 +57,14 @@
 #include "postprocess/bloom/bloom.hpp"
 #include "reconstruction/coordinator.hpp"
 #include "reconstruction/input_capture.hpp"
+#include "reconstruction/logging.hpp"
+#include "reconstruction/postprocess/resources.hpp"
 #include "reconstruction/postprocess/runtime.hpp"
+#include "reconstruction/resolution.hpp"
 #include "reconstruction/runtime.hpp"
 #include "reconstruction/settings.hpp"
 #include "rendering/inputs.hpp"
+#include "rendering/native_context.hpp"
 #include "rendering/producer_records.hpp"
 #include "rendering/resource_upgrades.hpp"
 #include "settings.hpp"
@@ -323,14 +328,28 @@ void OnPresetOff() {
   mgsv::settings::ApplyPresetOff(&settings, &shader_injection, output_state);
 }
 
+void UpdateNativePresentation(reshade::api::swapchain* swapchain) {
+  if (mgsv::rendering::native_context::Install()) {
+    mgsv::rendering::native_context::SetPresentation(reinterpret_cast<IDXGISwapChain*>(swapchain->get_native()));  // NOLINT(performance-no-int-to-ptr)
+    mgsv::reconstruction::logging::Info("native view ownership ready for selected presentation");
+  } else {
+    mgsv::reconstruction::logging::Warn("native view ownership unavailable: ", mgsv::rendering::native_context::installation_status);
+    mgsv::reconstruction::resolution::Fail("native view ownership unavailable");
+  }
+}
+
 void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
   mgsv::inputs::OnInitSwapchain(swapchain, resize);
   mgsv::output::OnInitSwapchain(&output_state, swapchain);
+  if (mgsv::inputs::IsSelectedSwapchain(swapchain)) {
+    UpdateNativePresentation(swapchain);
+  }
 }
 
 void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool resize) {
   const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
   if (!mgsv::inputs::IsSelectedSwapchain(swapchain)) return;
+  mgsv::rendering::native_context::SetPresentation(nullptr);
   mgsv::inputs::OnDestroySwapchain(swapchain, resize);
   mgsv::lighting::environment_specular::Reset();
   mgsv::lighting::material_inputs::Reset();
@@ -386,8 +405,14 @@ void OnPresent(
   }
   {
     const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
+    const bool was_selected = mgsv::inputs::IsSelectedSwapchain(swapchain);
     mgsv::inputs::OnPresent(queue, swapchain, source_rect, dest_rect, dirty_rect_count, dirty_rects);
     if (mgsv::inputs::IsSelectedSwapchain(swapchain)) {
+      // Initial creation precedes selection. Join the ownership provider when
+      // the first Present selects this swapchain, and refresh it after resize.
+      if (!was_selected) {
+        UpdateNativePresentation(swapchain);
+      }
       if (!lighting_enabled) {
         mgsv::lighting::environment_specular::Reset();
         mgsv::lighting::material_inputs::Reset();
@@ -425,6 +450,7 @@ void OnPresent(
 void OnDestroyDevice(reshade::api::device* device) {
   const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
   if (!mgsv::inputs::IsSelectedDevice(device)) return;
+  mgsv::rendering::native_context::Shutdown();
   mgsv::inputs::OnDestroyDevice(device);
   mgsv::lighting::environment_specular::Reset();
   mgsv::lighting::material_inputs::Reset();
@@ -508,6 +534,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
 
       break;
     case DLL_PROCESS_DETACH:
+      mgsv::rendering::native_context::Shutdown();
       reshade::unregister_overlay(nullptr, ADDON_SETTINGS);
       reshade::unregister_event<reshade::addon_event::copy_resource>(mgsv::rendering::resource_upgrades::OnCopyTonemapOutputResource);
       reshade::unregister_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);

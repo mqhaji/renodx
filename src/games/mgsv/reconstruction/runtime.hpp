@@ -175,14 +175,9 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list, [[maybe_unused]] co
 
   // MotionBlurCameraVelocity exposes pixel b2 and writes RTV0; capture stays at this pre-draw boundary.
   if (velocity_producer == VelocityProducer::CAMERA) {
-    const uint64_t previous_observation = runtime::input_capture::resources.motion.observation;
-    runtime::input_capture::CaptureCameraMotionLocked(cmd_list, *data, velocity_rtv);
+    auto captured = runtime::input_capture::CaptureCameraMotionLocked(cmd_list, *data, velocity_rtv);
     if (lighting_motion_needed) {
-      if (runtime::input_capture::resources.motion.observation != previous_observation) {
-        record_lighting_motion(runtime::input_capture::resources.motion, runtime::input_capture::resources.camera);
-      } else {
-        record_lighting_motion({}, {});
-      }
+      record_lighting_motion(std::move(captured.motion), captured.camera);
     }
   }
 

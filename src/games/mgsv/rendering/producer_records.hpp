@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: MIT
 // Copyright and license notices: ../lighting/indirect/README.md#credits-and-license.
 
-#ifndef SRC_GAMES_MGSV_GTVBGI_TEMPORAL_INPUTS_HPP_
-#define SRC_GAMES_MGSV_GTVBGI_TEMPORAL_INPUTS_HPP_
+#ifndef RENODX_GAMES_MGSV_RENDERING_PRODUCER_RECORDS_HPP_
+#define RENODX_GAMES_MGSV_RENDERING_PRODUCER_RECORDS_HPP_
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -22,6 +24,7 @@
 
 #include "../reconstruction/camera_state.hpp"
 #include "inputs.hpp"
+#include "native_context.hpp"
 
 namespace mgsv::lighting::temporal_inputs {
 
@@ -54,6 +57,7 @@ struct Scene {
 // One submitted camera/motion pair. Read() qualifies their depth, generation,
 // and camera sample against the scatter before history may use these pixels.
 struct Snapshot {
+  rendering::native_context::Owner owner;
   inputs::Motion motion;
   Scene scene;
   uint64_t generation = 0u;
@@ -82,6 +86,7 @@ struct MaterialTableBindings {
 };
 
 struct Producer {
+  rendering::native_context::Owner owner;
   reshade::api::device* device = nullptr;
   uint64_t generation = 0u;
   inputs::Motion motion;
@@ -105,7 +110,7 @@ struct State {
   // immutable and shared so publication can outlive removal of their map entry.
   std::unordered_map<ID3D11DeviceContext*, std::vector<Producer>> recordings;
   std::unordered_map<ID3D11CommandList*, std::shared_ptr<const std::vector<Producer>>> lists;
-  Snapshot submitted;
+  std::vector<Snapshot> submitted;
   reshade::api::device* device = nullptr;
   uint64_t next_submission = 0u;
 };
@@ -122,23 +127,35 @@ inline void Publish(std::span<const Producer> producers) {
     // Readers must not observe a partially updated producer sequence.
     for (const auto& producer : producers) {
       if (producer.kind != ProducerKind::SCENE && producer.kind != ProducerKind::MOTION) continue;
-      if (state.device != producer.device || state.submitted.generation != producer.generation) {
-        state.submitted = {};
+      if (producer.owner.scene == 0u) continue;
+      if (state.device != producer.device) {
+        state.submitted.clear();
         state.device = producer.device;
-        state.submitted.generation = producer.generation;
+      }
+      auto entry = std::ranges::find_if(state.submitted, [&](const Snapshot& candidate) {
+        return candidate.owner.scene == producer.owner.scene && candidate.owner.generation == producer.owner.generation;
+      });
+      if (entry == state.submitted.end()) {
+        if (state.submitted.size() >= reconstruction::camera_state::MAX_SCENE_PUBLICATIONS) continue;
+        state.submitted.push_back({.owner = producer.owner, .generation = producer.generation});
+        entry = std::prev(state.submitted.end());
+      }
+      auto& submitted = *entry;
+      if (submitted.generation != producer.generation) {
+        submitted = {.owner = producer.owner, .generation = producer.generation};
       }
       if (producer.kind == ProducerKind::MOTION) {
-        state.submitted.motion = producer.motion;
-        state.submitted.motion_jitter_uv = producer.motion_jitter_uv;
-        state.submitted.velocity_projection_jitter_scale = producer.velocity_projection_jitter_scale;
-        state.submitted.camera_publication = producer.camera_publication;
-        state.submitted.camera_generation = producer.camera_generation;
-        state.submitted.camera_sample = producer.camera_sample;
-        state.submitted.jitter_valid = producer.jitter_valid;
+        submitted.motion = producer.motion;
+        submitted.motion_jitter_uv = producer.motion_jitter_uv;
+        submitted.velocity_projection_jitter_scale = producer.velocity_projection_jitter_scale;
+        submitted.camera_publication = producer.camera_publication;
+        submitted.camera_generation = producer.camera_generation;
+        submitted.camera_sample = producer.camera_sample;
+        submitted.jitter_valid = producer.jitter_valid;
       } else {
-        state.submitted.scene = producer.scene;
+        submitted.scene = producer.scene;
       }
-      state.submitted.submission = ++state.next_submission;
+      submitted.submission = ++state.next_submission;
     }
   }
   // Input metadata is consumed after this prefix. Publish its final associations
@@ -177,6 +194,7 @@ inline void Publish(std::span<const Producer> producers) {
 inline void Record(reshade::api::command_list* cmd_list, Producer producer) {
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   if (context == nullptr) return;
+  producer.owner = rendering::native_context::GetScope().owner;
   if (context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED) {
     const std::unique_lock lock(state.mutex);
     state.recordings[context].push_back(std::move(producer));
@@ -198,7 +216,7 @@ inline void CaptureScene(reshade::api::command_list* cmd_list) {
   Microsoft::WRL::ComPtr<ID3D11DeviceContext1> context1;
   Scene scene;
   if (reconstruction::state::IsEnabled()) {
-    const auto camera = reconstruction::camera_state::Get();
+    const auto camera = reconstruction::camera_state::GetForCapture();
     scene.current_jitter_uv = {camera.jitter_uv_x, camera.jitter_uv_y};
     scene.camera_publication = camera.publication_sequence;
     scene.camera_generation = camera.reset_generation;
@@ -275,8 +293,13 @@ inline Snapshot Read(reshade::api::device* device, reshade::api::resource_view s
   Microsoft::WRL::ComPtr<ID3D11Resource> depth;
   depth_view->GetResource(&depth);
   const std::shared_lock lock(state.mutex);
-  if (state.device != device || state.submitted.generation != selected.generation) return {};
-  Snapshot result = state.submitted;
+  const auto owner = rendering::native_context::GetScope().owner;
+  if (state.device != device || owner.scene == 0u) return {};
+  const auto entry = std::ranges::find_if(state.submitted, [&](const Snapshot& candidate) {
+    return candidate.owner.scene == owner.scene && candidate.owner.generation == owner.generation;
+  });
+  if (entry == state.submitted.end() || entry->generation != selected.generation) return {};
+  Snapshot result = *entry;
   result.current_jitter_uv = result.scene.current_jitter_uv;
   Microsoft::WRL::ComPtr<ID3D11Resource> motion_depth;
   if (result.motion.depth != nullptr) result.motion.depth->GetResource(&motion_depth);
@@ -292,7 +315,7 @@ inline Snapshot Read(reshade::api::device* device, reshade::api::resource_view s
 
 inline void BeginFrame(reshade::api::device* device) {
   const std::unique_lock lock(state.mutex);
-  if (state.device == device) state.submitted = {};
+  if (state.device == device) state.submitted.clear();
 }
 
 inline void Forget(ID3D11CommandList* list) {
@@ -317,10 +340,10 @@ inline void Reset() {
   const std::unique_lock lock(state.mutex);
   state.recordings.clear();
   state.lists.clear();
-  state.submitted = {};
+  state.submitted.clear();
   state.device = nullptr;
 }
 
 }  // namespace mgsv::lighting::temporal_inputs
 
-#endif  // SRC_GAMES_MGSV_GTVBGI_TEMPORAL_INPUTS_HPP_
+#endif  // RENODX_GAMES_MGSV_RENDERING_PRODUCER_RECORDS_HPP_

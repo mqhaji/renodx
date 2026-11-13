@@ -4,10 +4,14 @@
 
 #include <intrin.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+
+#include "../rendering/native_context.hpp"
 
 #include "state.hpp"
 
@@ -36,7 +40,15 @@ struct CameraFrame {
   uint64_t reset_generation = 0u;
   uintptr_t viewport_identity = 0u;
   uintptr_t camera_identity = 0u;
+  uint64_t scene = 0u;
+  uint64_t owner_generation = 0u;
 };
+
+// Pending reconstruction jobs keep their own copies. This small CPU cache
+// connects camera publication to later motion recording for the same view build.
+inline constexpr size_t MAX_SCENE_PUBLICATIONS = 64u;
+inline std::array<CameraFrame, MAX_SCENE_PUBLICATIONS> scene_publications;
+inline size_t next_scene_publication = 0u;
 
 inline std::atomic<uint64_t> reset_generation = 0u;
 
@@ -177,6 +189,7 @@ struct PublicationWriterGuard {
 };
 
 inline void InvalidateLocked() {
+  scene_publications = {};
   published_sequence.fetch_add(1u, std::memory_order_acq_rel);
   published_valid.store(false, std::memory_order_relaxed);
   published_camera_matrix_valid.store(false, std::memory_order_relaxed);
@@ -185,7 +198,7 @@ inline void InvalidateLocked() {
 }
 
 inline void Invalidate() {
-  PublicationWriterGuard guard;
+  const PublicationWriterGuard guard;
   InvalidateLocked();
 }
 
@@ -212,6 +225,27 @@ inline void PublishLocked(const CameraFrame& frame) {
   }
   published_valid.store(frame.valid, std::memory_order_relaxed);
   published_sequence.fetch_add(1u, std::memory_order_release);
+  const auto owner = rendering::native_context::GetScope().owner;
+  if (owner.scene != 0u && owner.main_view && owner.presentation_matches
+      && owner.viewport == reinterpret_cast<uintptr_t>(staged_viewport)
+      && owner.camera == reinterpret_cast<uintptr_t>(staged_camera)) {
+    auto entry = std::ranges::find_if(scene_publications, [&](const CameraFrame& candidate) {
+      return candidate.scene == owner.scene && candidate.owner_generation == owner.generation;
+    });
+    if (entry == scene_publications.end()) {
+      entry = scene_publications.begin() + next_scene_publication;
+      next_scene_publication = (next_scene_publication + 1u) % scene_publications.size();
+    }
+    *entry = frame;
+    entry->current_view_projection = staged_current_view_projection;
+    entry->camera_matrix_valid = frame.camera_matrix_valid && staged_current_view_projection_valid;
+    entry->publication_sequence = published_sequence.load(std::memory_order_relaxed);
+    entry->reset_generation = reset_generation.load(std::memory_order_relaxed);
+    entry->viewport_identity = owner.viewport;
+    entry->camera_identity = owner.camera;
+    entry->scene = owner.scene;
+    entry->owner_generation = owner.generation;
+  }
 }
 
 inline CameraFrame Get() {
@@ -249,7 +283,14 @@ inline CameraFrame Get() {
 }
 
 inline CameraFrame GetForCapture() {
-  PublicationWriterGuard guard;
+  const PublicationWriterGuard guard;
+  const auto owner = rendering::native_context::GetScope().owner;
+  if (owner.scene != 0u) {
+    const auto entry = std::ranges::find_if(scene_publications, [&](const CameraFrame& candidate) {
+      return candidate.scene == owner.scene && candidate.owner_generation == owner.generation;
+    });
+    return (entry != scene_publications.end() ? *entry : CameraFrame{});
+  }
   CameraFrame result = Get();
   if (result.valid && result.camera_matrix_valid && staged_current_view_projection_valid) {
     result.current_view_projection = staged_current_view_projection;
@@ -260,7 +301,7 @@ inline CameraFrame GetForCapture() {
 }
 
 inline bool Commit(const CameraFrame& frame) {
-  PublicationWriterGuard guard;
+  const PublicationWriterGuard guard;
   const bool valid = frame.valid && frame.camera_matrix_valid
                      && frame.reset_generation == reset_generation.load(std::memory_order_relaxed)
                      && frame.sample_index == state::CurrentSampleIndex();
