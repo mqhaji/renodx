@@ -9,10 +9,18 @@ cbuffer OutputDimensions : register(b1) {
 RWByteAddressBuffer output_object : register(u0);
 
 // Keep the native Kawase kernel measured in pixels on the enlarged bloom grid.
-// Its weight and unrelated object parameters remain in the original buffer.
+// Copy the full native prefix, preserving every unrelated field as raw bits.
 [numthreads(1, 1, 1)] void main() {
   const float2 native_inverse_size = asfloat(native_object[12].xy);
   const float2 scale = output_buffer.zw / native_inverse_size;
-  output_object.Store4(0u, asuint(asfloat(native_object[9]) * scale.xyxy));
-  output_object.Store2(16u, asuint(output_buffer.zw));
+  [unroll]
+  for (uint row = 0u; row < 13u; ++row) {
+    uint4 values = native_object[row];
+    if (row == 9u) {
+      values = asuint(asfloat(values) * scale.xyxy);
+    } else if (row == 12u) {
+      values.xy = asuint(output_buffer.zw);
+    }
+    output_object.Store4(row * 16u, values);
+  }
 }

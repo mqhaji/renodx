@@ -284,8 +284,10 @@ struct Output {
   Microsoft::WRL::ComPtr<ID3D11Texture2D> color;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
   Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
-  // Immutable size-dependent values and the original scene's fallback input.
-  Microsoft::WRL::ComPtr<ID3D11Buffer> size_patch;
+  // One immutable patch per output reduction level. Equal-sized intermediate
+  // textures share these values for the lifetime of this output allocation.
+  // GetSurface fills reduced levels while holding surface_mutex.
+  std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>, MAX_SURFACE_REDUCTION + 1u> size_patches;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> source_view;
   Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> fallback_uav;
   // Saved-state support and dimensions/jitter shared by the copy shaders.
@@ -357,7 +359,7 @@ struct Output {
     if (pipelines == nullptr || pipelines->device != device) {
       pipelines = std::make_shared<Pipelines>(device);
     }
-    size_patch = CreateSizePatch(description.Width, description.Height);
+    GetSizePatch(0u);
     source_view = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.color_srv.handle);          // NOLINT(performance-no-int-to-ptr)
     geometry_depth = reinterpret_cast<ID3D11Resource*>(inputs.depth_resource.handle);            // NOLINT(performance-no-int-to-ptr)
     geometry_depth_view = reinterpret_cast<ID3D11ShaderResourceView*>(inputs.depth_srv.handle);  // NOLINT(performance-no-int-to-ptr)
@@ -547,7 +549,12 @@ struct Output {
 
   // Build once for each texture extent. Buffer dimensions can be reduced while
   // output_size still describes the full reconstructed scene.
-  Microsoft::WRL::ComPtr<ID3D11Buffer> CreateSizePatch(uint32_t width, uint32_t height) const {
+  // Called during construction or with surface_mutex held exclusively.
+  Microsoft::WRL::ComPtr<ID3D11Buffer> GetSizePatch(uint32_t level) {
+    auto& buffer = size_patches.at(level);
+    if (buffer != nullptr) return buffer;
+    const uint32_t width = std::max(1u, target.width >> level);
+    const uint32_t height = std::max(1u, target.height >> level);
     const float inverse_width = 1.f / static_cast<float>(width);
     const float inverse_height = 1.f / static_cast<float>(height);
     // Bloom's working region stays fixed while its backing buffers resize.
@@ -573,7 +580,6 @@ struct Output {
         .BindFlags = D3D11_BIND_CONSTANT_BUFFER,
     };
     const D3D11_SUBRESOURCE_DATA initial = {.pSysMem = &values};
-    Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;
     auto* native_device = reinterpret_cast<ID3D11Device*>(device->get_native());  // NOLINT(performance-no-int-to-ptr)
     if (FAILED(native_device->CreateBuffer(&description, &initial, &buffer))) {
       throw std::runtime_error("MGSV output-size constants allocation failed");
@@ -646,7 +652,7 @@ struct Output {
         resolution::Fail("post-processing resource allocation failed");
         return nullptr;
       }
-      surface->size_patch = CreateSizePatch(description.Width, description.Height);
+      surface->size_patch = GetSizePatch(level);
     } else {
       // Native-AA output still needs to recognize intermediate color layers
       // before they composite into the separate scene. Reuse their storage.

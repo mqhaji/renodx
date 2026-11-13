@@ -28,7 +28,9 @@ The current CPU checkpoint adds a producer-owned deferred SH projection correcti
 - Thermography's two guarded native setters have matching clip-position evidence, but the alternate branch still needs gameplay coverage. Check signed/fractional scales, SH kinds, rejected/nested scopes, foreign or null cameras, teardown, and normal exit.
 - Hooks remain loaded for the process lifetime. Restart for replacement/removal; do not add unsafe live detach or resource release while old work can still execute.
 
-The next CPU checkpoint is an audit of repeated size and constant preparation. Reuse the owning scene's verified dimensions and camera values where several consumers prepare the same data. Keep utility views, native buffer layouts, command-list lifetime, and reset boundaries explicit. Measure redundant preparation before adding another cache. Keep changes within the verified scene and consumer contracts.
+Constant preparation now uses one copy per native prefix. The Mother Base decal capture recorded 46 system-buffer adjustments and four Kawase adjustments, using 64-byte and 208-byte native buffers respectively. Each previously needed a full copy and two field copies. The adjustment shaders now preserve the complete native prefix and install it with one copy. Larger or offset allocations preserve their remaining bytes separately. Output allocations also share immutable dimension buffers between intermediates at the same reduction level. The ACC image check passed with saved DLSS Auto and repeated Native/Auto switches, including bloom, DoF, and the menu. The log confirms recovery after temporary missing-motion and lighting-size warnings during startup and switching. Performance measurements remain pending.
+
+Further reuse across draws requires a complete source-write record, the exact bound range, patch kind, and output plan. The current captures omit some buffer writes, so an unchanged address cannot establish reuse. Keep utility views, native buffer layouts, command-list lifetime, and reset boundaries explicit. Audit shared camera constants together with their consumers before changing their preparation.
 
 ## SDK lifecycle and validation
 

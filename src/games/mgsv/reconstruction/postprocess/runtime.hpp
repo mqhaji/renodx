@@ -72,7 +72,6 @@ inline constexpr uint32_t PIXEL_INPUTS_SHIFT = 16u;
 
 // Byte offsets in MGSV's native b0, b2, and b5 layouts. The remaining fields
 // are copied unchanged, including values outside a draw's selected range.
-inline constexpr UINT SYSTEM_VIEW_SIZE_OFFSET = 16u;
 inline constexpr UINT SYSTEM_BUFFER_SIZE_OFFSET = 32u;
 inline constexpr UINT SCENE_VIEWPORT_SIZE_OFFSET = 352u;
 inline constexpr UINT OBJECT_LOCAL_PARAM_OFFSET = 144u;
@@ -135,7 +134,8 @@ struct __declspec(uuid("9b2bb264-b9a8-4c77-b7e3-d72a281b1460")) DrawState {
   std::array<UINT, CONSTANT_BINDINGS.size()> output_constant_bytes = {};
   Microsoft::WRL::ComPtr<ID3D11Buffer> vertex_output_constants;
   UINT vertex_output_constant_bytes = 0u;
-  // Small compute shaders write adjusted fields here before GPU buffer copies.
+  // The compute shaders preserve the native prefix and adjust its size fields.
+  // One contiguous copy installs that prefix in the draw's constant buffer.
   Microsoft::WRL::ComPtr<ID3D11Buffer> system_scratch;
   Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> system_scratch_uav;
 };
@@ -732,7 +732,7 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
     }
     auto viewports = saved->viewports;
     auto scissors = saved->scissors;
-    auto patch = saved->output->size_patch;
+    auto patch = saved->output->size_patches[0];
     D3D11_TEXTURE2D_DESC native_description = {};
     D3D11_TEXTURE2D_DESC output_description = {};
     Microsoft::WRL::ComPtr<ID3D11Resource> native_target;
@@ -838,13 +838,15 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
     const auto run_constants = [&](ID3D11ComputeShader* shader, ID3D11Buffer* constants, UINT first_constant, UINT constant_count) {
       auto* native_device = reinterpret_cast<ID3D11Device*>(command_list->get_device()->get_native());  // NOLINT(performance-no-int-to-ptr)
       if (draw->system_scratch == nullptr || draw->system_scratch_uav == nullptr) {
-        const D3D11_BUFFER_DESC scratch = {.ByteWidth = 32u, .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_UNORDERED_ACCESS, .MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS};
+        // The object prefix is the larger of the two supported native layouts.
+        static constexpr UINT SCRATCH_BYTES = CONSTANT_BINDINGS[2].minimum_bytes;
+        const D3D11_BUFFER_DESC scratch = {.ByteWidth = SCRATCH_BYTES, .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_UNORDERED_ACCESS, .MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS};
         const D3D11_UNORDERED_ACCESS_VIEW_DESC scratch_view = {
             .Format = DXGI_FORMAT_R32_TYPELESS,
             .ViewDimension = D3D11_UAV_DIMENSION_BUFFER,
             .Buffer = {
                 .FirstElement = 0u,
-                .NumElements = 8u,
+                .NumElements = SCRATCH_BYTES / sizeof(uint32_t),
                 .Flags = D3D11_BUFFER_UAV_FLAG_RAW,
             },
         };
@@ -913,19 +915,24 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
         }
         draw->output_constant_bytes[i] = description.ByteWidth;
       }
-      context->CopyResource(draw->output_constants[i].Get(), saved->constants[i].Get());
+      const bool compute_patch = (i == 0u && !native_output_view)
+                                 || (i == 2u && pass != nullptr && pass->shader_hash == 0x9BE51873u);
+      // A complete native buffer needs only the compute result. Larger buffers
+      // can contain other ranges, so preserve those bytes before replacing the
+      // selected prefix. Replaying the list reads the native data again.
+      if (!compute_patch || offset != 0u || description.ByteWidth != CONSTANT_BINDINGS[i].minimum_bytes) {
+        context->CopyResource(draw->output_constants[i].Get(), saved->constants[i].Get());
+      }
       if (i == 0u) {
         if (native_output_view) {
-          // The immutable patch stores buffer size/inverses in its first row;
-          // the compute scratch below stores them in its second row.
+          // The native DoF helper already supplied the view size.
           copy_bytes(draw->output_constants[i].Get(), offset + SYSTEM_BUFFER_SIZE_OFFSET, patch.Get(), offsetof(SizePatch, buffer_size), 16u);
         } else {
           if (!run_constants(saved->output->pipelines->system_shader.Get(), saved->constants[i].Get(), saved->first_constants[i], saved->constant_counts[i])) {
             *saved = {};
             return false;
           }
-          copy_bytes(draw->output_constants[i].Get(), offset + SYSTEM_VIEW_SIZE_OFFSET, draw->system_scratch.Get(), 0u, 8u);
-          copy_bytes(draw->output_constants[i].Get(), offset + SYSTEM_BUFFER_SIZE_OFFSET, draw->system_scratch.Get(), 16u, 16u);
+          copy_bytes(draw->output_constants[i].Get(), offset, draw->system_scratch.Get(), 0u, CONSTANT_BINDINGS[i].minimum_bytes);
         }
       } else if (i == 1u) {
         // Scene b2 keeps the viewport dimensions in c22.xy.
@@ -937,8 +944,7 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
           *saved = {};
           return false;
         }
-        copy_bytes(draw->output_constants[i].Get(), offset + OBJECT_LOCAL_PARAM_OFFSET, draw->system_scratch.Get(), 0u, 16u);
-        copy_bytes(draw->output_constants[i].Get(), offset + OBJECT_LAST_PARAM_OFFSET, draw->system_scratch.Get(), 16u, 8u);
+        copy_bytes(draw->output_constants[i].Get(), offset, draw->system_scratch.Get(), 0u, CONSTANT_BINDINGS[i].minimum_bytes);
       } else if (patch_fixed_bloom) {
         // The native bloom region stays 246x138. Its offsets, flare center,
         // edge fade, and final-copy crop must describe the output-sized buffer.
