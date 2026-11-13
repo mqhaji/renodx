@@ -685,6 +685,8 @@ inline void __fastcall HookRequestLocalLightDraws(
 using SunPass = void(__fastcall*)(void*, void*, uint32_t, uint32_t, uint8_t, uint8_t);
 using SunVolume = void(__fastcall*)(void*, const float*, const void*, const void*, void*, void*);
 using ShFallback = uint32_t(__fastcall*)(void*, uint32_t, float*, float*, float*, void*, void*);
+using ShProducer = void(__fastcall*)(void*, void*, void*, void*);
+using SkyParameters = void*(__fastcall*)(void*, uint32_t*, void*, void*);
 using TerrainProducer = void(__fastcall*)(void*, void*, void*, void*, uint64_t);
 using AttachPacket = void(__fastcall*)(void*, void*, uint64_t, uint64_t);
 using AlternateProjection = void(__fastcall*)(void*);
@@ -693,6 +695,9 @@ using StageMatrix = void(__fastcall*)(void*, uint32_t, const float*);
 inline SunPass sun_pass = nullptr;
 inline SunVolume sun_volume = nullptr;
 inline ShFallback sh_fallback = nullptr;
+inline ShProducer sh_producer = nullptr;
+inline AttachPacket sh_attach = nullptr;
+inline SkyParameters sky_parameters = nullptr;
 inline TerrainProducer terrain_producer = nullptr;
 inline AttachPacket terrain_attach = nullptr;
 inline AlternateProjection alternate_projection = nullptr;
@@ -848,7 +853,7 @@ inline void __fastcall HookSunVolume(void* context, const float* vp, const void*
 inline uint32_t __fastcall HookShFallback(void* renderer, uint32_t kind, float* output, float* min_w,
                                           float* max_w, void* shape, void* viewport) {
   const bool qualified = _ReturnAddress() == native_base + 0x1F2529u && kind < SH_VERTEX_COUNTS.size();
-  const NativeProjectionScope scope(state::ProjectionJitterPath::SH_FALLBACK, qualified ? viewport : nullptr);
+  const NativeProjectionScope scope(state::ProjectionJitterPath::SH_LIGHTING, qualified ? viewport : nullptr);
   const uint32_t success = sh_fallback(renderer, kind, output, min_w, max_w, shape, viewport);
   if (success != 0u && scope.valid) {
     const camera_state::PublicationWriterGuard publication_guard;
@@ -857,6 +862,57 @@ inline uint32_t __fastcall HookShFallback(void* renderer, uint32_t kind, float* 
     }
   }
   return success;  // EAX is success, NOT a vertex count. Bounds/Z/W untouched.
+}
+
+inline void __fastcall HookShProducer(void* renderer, void* scene, void* viewport, void* inputs) {
+  const NativeProjectionScope scope(state::ProjectionJitterPath::SH_LIGHTING, viewport);
+  sh_producer(renderer, scene, viewport, inputs);
+}
+
+inline void __fastcall HookShAttach(void* job, void* packet, uint64_t c, uint64_t d) {
+  if (_ReturnAddress() == native_base + 0x282A8Bu && packet != nullptr && native_scope != nullptr
+      && native_scope->path == state::ProjectionJitterPath::SH_LIGHTING
+      && std::memcmp(static_cast<const uint8_t*>(packet) + 0x120u, native_scope->view.data(), 64u) == 0) {
+    // Both SH workers retain this packet. ExecuteDrawLight derives its clip
+    // vertices and inverse light-volume coordinates from the same render P/V.
+    // Correct it before publication so the two calculations use one sample.
+    CorrectNativeMatrix(reinterpret_cast<float*>(static_cast<uint8_t*>(packet) + 0x160u), *native_scope, true);
+  }
+  sh_attach(job, packet, c, d);
+}
+
+inline void* __fastcall HookSkyParameters(void* plugin, uint32_t* result, void* viewport, void* parameters) {
+  const bool qualified = _ReturnAddress() == native_base + 0x1F5990u && result != nullptr && parameters != nullptr;
+  const NativeProjectionScope scope(state::ProjectionJitterPath::SKY, qualified ? viewport : nullptr);
+  void* returned = sky_parameters(plugin, result, viewport, parameters);
+  if (!scope.valid || *result == UINT32_MAX) return returned;
+
+  const camera_state::PublicationWriterGuard publication_guard;
+  if (!scope.CurrentLocked()) return returned;
+  auto* inverse = reinterpret_cast<float*>(static_cast<uint8_t*>(parameters) + 0x40u);
+  // Sky_Draw reconstructs a ray from clip XY using this inverse projection.
+  // Validate the native inverse before composing inverse(P) * inverse(jitter).
+  // CalcShaderParameters stores inverse rows for direct shader dot products.
+  for (uint32_t column = 0u; column < 4u; ++column) {
+    for (uint32_t row = 0u; row < 4u; ++row) {
+      float value = 0.f;
+      for (uint32_t inner = 0u; inner < 4u; ++inner) {
+        value += scope.projection[(inner * 4u) + row] * inverse[(inner * 4u) + column];
+      }
+      const float expected = (column == row ? 1.f : 0.f);
+      if (!std::isfinite(value) || std::abs(value - expected) > 0.0001f) return returned;
+    }
+  }
+  std::array<float, 4> translated = {};
+  for (uint32_t row = 0u; row < 4u; ++row) {
+    translated[row] = inverse[(row * 4u) + 3u] - (2.f * scope.jitter[0] * inverse[row * 4u])
+                      + (2.f * scope.jitter[1] * inverse[(row * 4u) + 1u]);
+    if (!std::isfinite(translated[row])) return returned;
+  }
+  for (uint32_t row = 0u; row < 4u; ++row) {
+    inverse[(row * 4u) + 3u] = translated[row];
+  }
+  return returned;
 }
 
 inline void __fastcall HookTerrainProducer(void* a, void* b, void* scene, void* viewport, uint64_t e) {
@@ -902,6 +958,13 @@ inline bool InitializeNativeDiagnosticAddresses(HMODULE module) {
   const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
   const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
   if (nt->OptionalHeader.SizeOfImage != 0xA01D000u) return false;
+  // The SH output packet is still producer-owned at this call. The sky helper
+  // finishes its inverse matrices before MainExec uploads them for the draw.
+  if (!MatchesBytes(base + 0x281EF0u, std::array<uint8_t, 15>{0x48, 0x8B, 0xC4, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57})
+      || !MatchesBytes(base + 0x283B90u, std::array<uint8_t, 16>{0x40, 0x57, 0x48, 0x83, 0xEC, 0x30, 0x48, 0xC7, 0x44, 0x24, 0x20, 0xFE, 0xFF, 0xFF, 0xFF, 0x48})
+      || !MatchesBytes(base + 0x1F50D0u, std::array<uint8_t, 16>{0x48, 0x8B, 0xC4, 0x53, 0x55, 0x56, 0x57, 0x41, 0x56, 0x48, 0x81, 0xEC, 0x30, 0x01, 0x00, 0x00})
+      || DecodeRelativeCall(base + 0x282A86u) != base + 0x283B90u
+      || DecodeRelativeCall(base + 0x1F598Bu) != base + 0x1F50D0u) return false;
   // All checked RVAs (including the four-entry table) are below SizeOfImage.
   // Exact prologues include RIP displacements: other EXE builds fail closed.
   if (!MatchesBytes(base + 0x30AC50u, std::array<uint8_t, 16>{
@@ -1055,6 +1118,9 @@ inline bool InitializeNativeDiagnosticAddresses(HMODULE module) {
   sun_pass = reinterpret_cast<SunPass>(base + 0x30AC50u);
   sun_volume = reinterpret_cast<SunVolume>(base + 0x30B680u);
   sh_fallback = reinterpret_cast<ShFallback>(base + 0x27EF80u);
+  sh_producer = reinterpret_cast<ShProducer>(base + 0x281EF0u);
+  sh_attach = reinterpret_cast<AttachPacket>(base + 0x283B90u);
+  sky_parameters = reinterpret_cast<SkyParameters>(base + 0x1F50D0u);
   terrain_producer = reinterpret_cast<TerrainProducer>(base + 0x275280u);
   terrain_attach = reinterpret_cast<AttachPacket>(base + 0x2D18D0u);
   alternate_projection = reinterpret_cast<AlternateProjection>(base + 0x2E7330u);
@@ -1132,6 +1198,9 @@ inline bool Attach() {
   if (DetourAttach(reinterpret_cast<void**>(&sun_pass), reinterpret_cast<void*>(HookSunPass)) != NO_ERROR
       || DetourAttach(reinterpret_cast<void**>(&sun_volume), reinterpret_cast<void*>(HookSunVolume)) != NO_ERROR
       || DetourAttach(reinterpret_cast<void**>(&sh_fallback), reinterpret_cast<void*>(HookShFallback)) != NO_ERROR
+      || DetourAttach(reinterpret_cast<void**>(&sh_producer), reinterpret_cast<void*>(HookShProducer)) != NO_ERROR
+      || DetourAttach(reinterpret_cast<void**>(&sh_attach), reinterpret_cast<void*>(HookShAttach)) != NO_ERROR
+      || DetourAttach(reinterpret_cast<void**>(&sky_parameters), reinterpret_cast<void*>(HookSkyParameters)) != NO_ERROR
       || DetourAttach(reinterpret_cast<void**>(&terrain_producer), reinterpret_cast<void*>(HookTerrainProducer)) != NO_ERROR
       || DetourAttach(reinterpret_cast<void**>(&terrain_attach), reinterpret_cast<void*>(HookTerrainAttach)) != NO_ERROR
       || DetourAttach(reinterpret_cast<void**>(&alternate_projection), reinterpret_cast<void*>(HookAlternateProjection)) != NO_ERROR

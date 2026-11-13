@@ -40,6 +40,7 @@ Method: the DXBC embeds `#line` directives pointing at the original build path, 
 | `0xB067B01D` | `SunLight_DL_ps.hlsl` — direct sun with contact shadows, without a cascade map or environment specular |
 | `0xB7F05D55` | `TPPSunLightReflectMap_ps.hlsl` |
 | `0x4C4D58DA` | `SSLighting2_SH_MultiBlend_ps.hlsl` |
+| `0xCF257ADB` | `SSLighting2_SH_Occlusion_ps.hlsl` |
 | `0x4FBDBB39` | `SSLighting2_SH_SkyLight_Encode_ps.hlsl` |
 | `0xC82BC086` | `SSLighting2_Stencil_ps.hlsl` |
 | `0x08292A5E` | `SSLighting2_Spot_ps.hlsl` — **spot light with shadow (PCSS port target)** |

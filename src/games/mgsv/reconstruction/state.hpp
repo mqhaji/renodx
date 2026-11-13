@@ -64,10 +64,11 @@ enum class ProjectionJitterPath : std::uint8_t {
   OVERLAY_MODEL,
   LOCAL_LIGHT,
   SUN_VOLUME,
-  SH_FALLBACK,
+  SH_LIGHTING,
   TERRAIN_DECAL,
   ALTERNATE_CAMERA,
   THERMOGRAPHY,
+  SKY,
   COUNT,
 };
 
@@ -255,7 +256,7 @@ inline void SetProjectionJitterScale(ProjectionJitterPath path, float value) {
 inline float GetProjectionJitterScale(ProjectionJitterPath path) {
   // Alternate Stream jitter reproducibly destabilizes the waveform; keep native staging unchanged in every mode.
   if (path == ProjectionJitterPath::ALTERNATE_CAMERA) return 0.f;
-  // Thermography must match scene depth rather than a user-adjustable diagnostic scale.
+  // Thermography and sky rays follow the scene's sample directly.
   if (static_cast<std::size_t>(path) >= PROJECTION_JITTER_SLIDER_COUNT) return DEFAULT_PROJECTION_JITTER_SCALE;
 #if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
   if (GetTemporalMode() == TemporalMode::ANALYTICAL_TAA) {

@@ -443,11 +443,11 @@ inline void AppendSettings(
           .reason = "sun volume jitter changed",
       },
       {
-          .path = state::ProjectionJitterPath::SH_FALLBACK,
+          .path = state::ProjectionJitterPath::SH_LIGHTING,
           .key = "FxTaaShFallbackJitterScale",
-          .label = "SH Fallback Projection Jitter",
-          .tooltip = "Experimental: translates successful SH fallback clip vertices, preserving visibility, Z/W and depth bounds. Not the deferred SH packet route.",
-          .reason = "SH fallback jitter changed",
+          .label = "SH Lighting Projection Jitter",
+          .tooltip = "Scales jitter for ambient light volumes. Deferred draws share the corrected projection with their inverse-position calculation. Immediate draws offset their projected vertices.",
+          .reason = "SH lighting jitter changed",
       },
       {
           .path = state::ProjectionJitterPath::TERRAIN_DECAL,
