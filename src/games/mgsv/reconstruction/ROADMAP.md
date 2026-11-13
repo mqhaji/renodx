@@ -4,7 +4,7 @@ This page tracks outstanding work. The [reconstruction guide](README.md) owns cu
 
 ## Rain, scene ownership, and transitions
 
-- Validate scene-owned jitter reservations, history advancement at submission, and retained output allocations in gameplay. Offline checks cover overlapping scenes, repeated setup across Present, cached-list lifetime, loading UI, and reset rejection. Continue tracing the actual writers behind each GPU consumer when investigating flashes.
+- The latest saved-DLSS-Auto ACC check passed image, local-light, and startup-performance validation with scene-owned jitter, successful-output history commit, retained allocations, and late-worker flare-clear retention. Extend that coverage through gameplay transitions. Offline checks cover overlapping scenes, repeated setup across Present, cached-list lifetime, loading UI, and reset rejection. Continue tracing the actual writers behind each GPU consumer when investigating flashes.
 - Investigate rain inside the ACC at reduced input resolution, intermittent Mother Base flashes even at Native quality, and sortie horizon/ground flashes separately until evidence connects them. Match actual color/depth producers, resource roles, native planar reflections, and submitted command lists before changing routing.
 - Extend loading/save-reload, alt-tab/resize, device recreation, and rapid method/quality/reset coverage. Confirm canceled reconstruction preserves native prefixes/remainders and current scene alpha. Unsupported DoF paths must keep requesting native-size recovery rather than redirecting unknown resources.
 - The retired state-profile/cold-start flicker sweep is not a current test request. Legacy compute-only state restoration and the `0x200DBED9` light-VS workaround were removed; do not restore them as speculative fixes. Those removals did not establish a fix for character wobble or rapid night-vision skinned-mesh flicker.
@@ -17,6 +17,8 @@ This page tracks outstanding work. The [reconstruction guide](README.md) owns cu
 - Analytical Jitter Off and Auto/Direct motion comparisons did not resolve wobble; Matrix Camera Everywhere caused too much ghosting to judge it. DLSS has also shown wobble. Keep Direct Object (6) and Auto Center Pixel (7) as diagnostics, and do not change motion sign/scale or relax frame/reset guards without evidence.
 
 ## Projection coverage
+
+The next CPU checkpoint groups deferred SH ownership, terrain inverse/raster agreement, and sky-ray alignment into one investigation and gameplay visit. Follow the SH packet from its producer through the worker and final draw before enabling its correction. Compare projected coverage and inverse reconstruction using the same scene reservation, depth, and consumer grid. The [render map](../docs/render-map.html#next) records the verified native boundaries and the combined validation scope.
 
 - Local Light now corrects the owned draw packet before it reaches shadowed and unshadowed workers. The packet hook passed the ACC image, local-light alignment, and saved-DLSS-Auto startup check. Continue validation at Mother Base and through weather and special-view transitions. Offline checks cover scene/camera mismatches, duplicate requests, retained packet contents, and resets while waiting for publication.
 - Validate sunlight/SH draw grids and terrain inverse-plane versus raster agreement independently. Their `1x` defaults do not establish correct alignment in every scene.

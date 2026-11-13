@@ -4,6 +4,8 @@ This guide covers ownership and rules shared by multiple features. The [addon gu
 
 ## Ownership
 
+The [render map](render-map.html) follows these owners through the native frame, added lighting, worker recording, reconstruction, and display. It includes reference capture positions and a compact post-processing shader inventory.
+
 | File or directory | Responsibility |
 |---|---|
 | `addon.cpp` | Settings storage, assembled controls, ReShade events, and device cleanup |

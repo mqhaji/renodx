@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>MGSV render map</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --background: #10171f;
+      --surface: #18232e;
+      --text: #e3eaf1;
+      --muted: #acbdca;
+      --line: #344553;
+      --accent: #83d6ce;
+      --added: #b5caff;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-padding-top: 1rem; }
+    body {
+      margin: 0 auto;
+      padding: 2.5rem 1.5rem 4rem;
+      max-width: 88rem;
+      background: var(--background);
+      color: var(--text);
+      font: 1rem/1.6 system-ui, sans-serif;
+    }
+    h1, h2, h3 { line-height: 1.2; text-wrap: balance; }
+    h1 { margin: .35rem 0 1rem; font-size: clamp(2rem, 5vw, 3rem); }
+    h2 { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+    h3 { margin-top: 1.7rem; }
+    p { max-width: 90ch; }
+    a { color: var(--accent); text-underline-offset: .18em; }
+    a:hover { color: var(--text); }
+    a:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+    code { font: .88em/1.5 ui-monospace, Consolas, monospace; overflow-wrap: anywhere; }
+    nav { display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; margin: 1.5rem 0; }
+    .meta, .note, small { color: var(--muted); }
+    .summary { font-size: 1.15rem; }
+    .flow, .lanes { display: grid; gap: 1rem; margin: 1.5rem 0; }
+    .flow { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .flow article, .lanes article { border: 1px solid var(--line); border-radius: .5rem; padding: 1.2rem; background: var(--surface); }
+    .flow h3, .lanes h3 { margin: 0 0 .8rem; font-size: 1.05rem; }
+    .flow p, .lanes p { margin-bottom: 0; }
+    .flow .added { border-top: 3px solid var(--added); }
+    .lanes { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .lanes ol { padding-left: 1.2rem; }
+    li { margin: .5rem 0; }
+    .boundary { padding: .8rem 1.1rem; border-left: 3px solid var(--accent); background: var(--surface); }
+    .table-wrap { overflow-x: auto; margin: 1.3rem 0; }
+    table { border-collapse: collapse; width: 100%; font-size: .94rem; }
+    th, td { padding: .75rem .85rem; border-bottom: 1px solid var(--line); vertical-align: top; text-align: left; }
+    th { background: var(--surface); color: var(--accent); }
+    td:first-child { min-width: 10rem; }
+    .events { white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .shader { display: block; margin-bottom: .3rem; overflow-wrap: anywhere; }
+    .shader:last-child { margin-bottom: 0; }
+    .chain-list { padding-left: 1.3rem; }
+    .chain-list li { padding: .25rem 0 .8rem .5rem; }
+    .chain-list p { margin: .4rem 0; }
+    footer { border-top: 1px solid var(--line); margin-top: 3rem; padding-top: 1rem; color: var(--muted); }
+    @media (max-width: 900px) {
+      .flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .lanes { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 540px) {
+      body { padding: 1.5rem 1rem 3rem; }
+      .flow { grid-template-columns: 1fr; }
+      th, td { padding: .6rem; }
+    }
+    @media print {
+      :root { color-scheme: light; --background: white; --surface: #f1f3f5; --text: #121b24; --muted: #394957; --line: #bac5cd; --accent: #13574e; --added: #315596; }
+      body { max-width: none; padding: 0; font-size: 10pt; }
+      nav { display: none; }
+      .table-wrap { overflow: visible; }
+      tr, .flow article, .lanes article { break-inside: avoid; }
+      thead { display: table-header-group; }
+      a { text-decoration: none; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="meta">RenoDX · Metal Gear Solid V · Updated November 13, 2026</div>
+    <h1>Render map</h1>
+    <p class="summary">Follow the scene from native camera setup through lighting, reconstruction, post-processing, and display. The CPU and resource sections explain how work stays attached to its scene when several workers record at once.</p>
+    <p class="note">Source baseline <code>151b8ddba</code>. Captured event IDs below refer to the 3840 × 2160 Mother Base reference frame 32052. Added work is identified from the current source and probe checks. Each alternate game path needs its own evidence.</p>
+    <nav aria-label="Sections">
+      <a href="#order">Frame order</a>
+      <a href="#lighting">Lighting</a>
+      <a href="#workers">CPU and GPU</a>
+      <a href="#resources">Sizes and signals</a>
+      <a href="#native">Native phases</a>
+      <a href="#post">Post-processing shaders</a>
+      <a href="#branches">Conditional paths</a>
+      <a href="#next">Validation and next work</a>
+    </nav>
+    <p><a href="../README.md">Addon guide</a> · <a href="ARCHITECTURE.md">Rendering architecture</a> · <a href="../reconstruction/README.md">Reconstruction contracts</a></p>
+  </header>
+
+  <main>
+    <section id="order">
+      <h2>Frame order</h2>
+      <p>The reference frame supplies the native ordering. The source adds shared indirect lighting before skin scattering and reconstruction before bloom preparation. Transparent effects occur in several groups. Secondary views and utility jobs can have separate targets and recording schedules.</p>
+      <div class="flow" aria-label="Scene dependencies in order">
+        <article>
+          <h3>Scene inputs →</h3>
+          <p>Camera and scene size → fog preparation → opaque and masked surfaces → decals → object and camera motion → native AO and ambient lighting.</p>
+        </article>
+        <article class="added">
+          <h3>Lighting →</h3>
+          <p>Local and directional lights with Enhanced Shadows → diffuse copy and source preparation → shared indirect lighting → both skin scatters → deferred composition and fog.</p>
+        </article>
+        <article>
+          <h3>Remaining scene →</h3>
+          <p>Visible sky and clouds → forward objects → native SSR → ocean and remaining particles, liquids, and rain → brightness measurements.</p>
+        </article>
+        <article class="added">
+          <h3>Reconstruction and output</h3>
+          <p>TAA, FSR, or DLSS → bloom → DoF → flare-layer composition → motion blur → grading and late tonemap → FXAA bypass or native FXAA → UI → display encoding.</p>
+        </article>
+      </div>
+      <p class="boundary">The preferred reconstruction entry is immediately before the qualified <code>CopyReductionX4 0x72C1D157</code> draw. Its position in the reference frame is before EID 47966. Bloom and DoF therefore use the reconstructed scene. Supported later entries provide recovery when that opportunity is absent.</p>
+      <p>MGSV applies early color treatment in some scene shaders as well as a late tonemap. Float scene storage can contain encoded RGB. Each replacement follows the producer and view conversion at its actual position. <a href="ARCHITECTURE.md">Color and ordering contracts</a></p>
+    </section>
+
+    <section id="lighting">
+      <h2>Lighting and reflection handoffs</h2>
+      <ol class="chain-list">
+        <li>
+          <strong>Capture material meaning beside native geometry.</strong>
+          <p>Qualified opaque and wet-material replacements preserve the original outputs and add clean material color and exact surface ownership guides. Small readiness and composition masks are reset by native surface writes. Rain variants <code>0x2C230875</code> and <code>0xC3538951</code> have their own original two-target layout.</p>
+          <p><a href="../materials/capture.hpp">Material capture</a> · <a href="../materials/native/material_shaders.h">Qualified shader inventory</a></p>
+        </li>
+        <li>
+          <strong>Keep ambient diffuse separate from direct light.</strong>
+          <p><code>SSLighting2_SH_SkyLight_Encode 0x4FBDBB39</code> identifies the ambient family. <code>BilateralUpscale2x2 0x844CE327</code> supplies small-grid ambient at pixel t0, depth at t2, phase weights at t3, sampler s8, and the original vertex/pixel b5 ranges. The later application reproduces this upsample to isolate the ambient contribution.</p>
+          <p><a href="../lighting/indirect/ambient_diffuse.hpp">Ambient capture</a> · <a href="../lighting/indirect/compose/gtvbgi_add.cs_5_0.hlsl">Full-resolution application</a></p>
+        </li>
+        <li>
+          <strong>Apply direct-light shadows inside the native light draws.</strong>
+          <p>PCSS filters native sun/moon, spot, and point shadow maps. Bend contacts read camera depth and the exact light and scene constants. Compatible unshadowed local-light groups share setup, clear, and trace dispatches in a packed atlas. Shadow-map jobs and unsupported groups use the per-light route. The spot contact budget defaults to 34.</p>
+          <p>Contacts and soft map visibility affect direct diffuse and direct highlights. Native environment reflections, projected masks, fades, and alpha keep their separate roles. Local-light jitter is written once into the completed native packet before its workers inherit it.</p>
+          <p><a href="../lighting/shadows/README.md">Shadow algorithm and coverage</a> · <a href="../lighting/shadows/batch.hpp">Bend batching</a> · <a href="../reconstruction/projection_jitter.hpp">Owned light-packet correction</a></p>
+        </li>
+        <li>
+          <strong>Prepare shared radiance in the existing diffuse copy.</strong>
+          <p><code>CopyBuffer 0xD71E843E</code> reads original diffuse at t0 and material at t1. Target 0 retains the native diffuse and skin-mask alpha. Added inputs t18–t22 qualify albedo, normal, depth, clean color, and owner guides. Target 1 writes FP32 outgoing diffuse radiance for both diffuse and specular searches. A valid black source still blocks light.</p>
+          <p>Supported sun/environment draws separately capture environment RGB at target 2 and retain the matching palette t10 and Fresnel t9. Immutable lookup tables are reused. Mutable tables are copied in their native command stream.</p>
+          <p><a href="../lighting/indirect/source_preparation.hpp">Source preparation</a> · <a href="../lighting/indirect/environment_specular.hpp">Environment and table capture</a></p>
+        </li>
+        <li>
+          <strong>Trace and filter shared indirect light before skin scattering.</strong>
+          <p>The first scatter, compute <code>0x6DAF0C4A</code>, supplies copied diffuse t0, depth t1, normals t2, and 64-byte geometry b0. After submitting the native prefix, one trace shares depth samples between AO, diffuse GI, bitmask specular visibility, and broad reflected light. A focused GGX ray covers narrower lobes. The trace also writes the current material guide.</p>
+          <p>One temporal pass shares geometry and reprojection setup while accepting each signal independently. Paired reflected light and remaining environment use matching weights. Three default A-Trous passes retain the center and sample one quarter of the neighbor pattern. The final full-resolution application makes six default dispatches in total. Coarse depth sampling adds four optional reductions. The BRDF table is initialized once when needed.</p>
+          <p>The default lighting grid contains one quarter of the render pixels, with each axis divided by two and rounded up. Search radius is expressed in output pixels. Lighting noise uses the scene-reserved jitter sample when reconstruction is enabled. Lighting maintains its own submitted history and replay rules.</p>
+          <p><a href="../lighting/indirect/README.md">Full algorithm and signal rules</a> · <a href="../lighting/indirect/runtime.hpp">Input checks and scheduling</a> · <a href="../lighting/indirect/trace/gtvbgi.cs_5_0.hlsl">Trace</a> · <a href="../lighting/indirect/denoise/gtvbgi_temporal.cs_5_0.hlsl">Temporal accumulation</a> · <a href="../lighting/indirect/denoise/gtvbgi_filter.cs_5_0.hlsl">Spatial filter</a></p>
+        </li>
+        <li>
+          <strong>Apply diffuse and resolve the reflection pair.</strong>
+          <p>Diffuse becomes <code>direct + ambient × AO + diffuse GI</code>. Missing ambient capture skips custom diffuse AO. With the feature enabled, the six supported deferred shaders bypass native diffuse AO even if custom dispatch fails, so that failure case currently has no diffuse AO.</p>
+          <p>Both native skin-scattering passes still run once, with the original vertical bytecode for <code>0xB2601810</code>. The application resolves reflected color and remaining environment to two full-resolution images. Readiness marks produced pixels. Deferred composition marks actual use only after consuming them.</p>
+          <p><a href="../lighting/indirect/compose/specular_result.hpp">Reflection outputs and masks</a> · <a href="../shaders.hpp">Registration and scatter callbacks</a></p>
+        </li>
+        <li>
+          <strong>Compose before fog, then retain native SSR detail.</strong>
+          <p>Six supported deferred variants preserve direct highlights and replace qualified overlapping material-cube and environment response with screen light plus remaining environment. Their added t16–t21 inputs carry captured environment, visibility, reflected color, remaining environment, clean material, and readiness. Native fog, rain, and early color treatment follow within those draws.</p>
+          <p>Native SSR remains later in the scene. Its mask, trace, reduction, and Gaussian chain feed the original complementary scene blend. The compositor retains custom lighting where a native hit contributes nothing. The sortie floor keeps native planar tracing. The older separate enhanced-SSR compute experiment is parked.</p>
+          <p>Screen-light GGX and the game's integrated Blinn-Phong environment form the current approximation. Screen-visible diffuse source radiance also limits which reflection content the custom search can recover. Wider material, off-screen, and directional transport work remains ahead.</p>
+          <p><a href="../lighting/indirect/compose/specular_composition.hlsli">Deferred specular composition</a> · <a href="../lighting/indirect/compose/reflection_ownership.hlsli">Native SSR handoff</a> · <a href="../materials/brdf.hlsli">Material response</a></p>
+        </li>
+      </ol>
+    </section>
+
+    <section id="workers">
+      <h2>CPU recording, submission, and GPU execution</h2>
+      <p>The columns below describe dependencies. Workers can record overlapping scenes and effects. A finished command list retains its recorded commands until submission. GPU completion requires completion evidence. Column widths and list positions have no timing scale.</p>
+      <div class="lanes">
+        <article>
+          <h3>Scene preparation</h3>
+          <ol>
+            <li>The shared Dg renderer rebuilds scene resources when the native size plan changes.</li>
+            <li>A native scene build publishes renderer, viewport, presentation, and generation identity.</li>
+            <li>Main camera setup reserves jitter and saves the original matrices for that scene.</li>
+            <li>Plugin branches and copied subcontexts carry that identity into worker jobs.</li>
+          </ol>
+        </article>
+        <article>
+          <h3>Parallel worker recording</h3>
+          <ol>
+            <li>Lighting, scene effects, flares, and UI can record on different deferred contexts.</li>
+            <li>Every routed draw selects the scene's retained output and exact resource roles.</li>
+            <li>FinishCommandList transfers output references and ownership metadata to the native list.</li>
+            <li>Display recording closes the open sequence. Late workers still find that scene's producer and clears.</li>
+          </ol>
+        </article>
+        <article>
+          <h3>Ordered submission and execution</h3>
+          <ol>
+            <li>Native dependency traversal submits completed lists in its required order.</li>
+            <li>The coordinator preserves prefixes and remainders around custom immediate-context work.</li>
+            <li>Successful reconstruction installs output, then commits its camera-history endpoint.</li>
+            <li>Remaining post-processing, UI, and display work consume the retained output. GPU queries can establish completion.</li>
+          </ol>
+        </article>
+      </div>
+      <p>A worker finishing display recording before a flare worker is a supported order. Earlier native clears move into the output producer when its allocation is acquired. The producer keeps them until reuse, allowing that late worker to initialize the enlarged flare layer. Startup scenes that never acquire output retire their pending clear records at display completion.</p>
+      <p>Output reuse waits for recording contexts, open sequences, and native command lists to release their references. Compatible spare allocations support concurrent scenes. A cached list replay preserves native work. Reconstruction uses the spatial fallback for that repeated observation, Bend recomputes contacts, and indirect lighting consumes its copy association once.</p>
+      <p><a href="../rendering/native_context.hpp">Native ownership adapter</a> · <a href="../rendering/producer_records.hpp">Submitted producer records</a> · <a href="../reconstruction/coordinator.hpp">Submission coordinator</a> · <a href="../reconstruction/postprocess/resources.hpp">Output lifetime and clear records</a></p>
+
+      <h3>Verified executable boundaries</h3>
+      <p>Addresses are RVAs for executable SHA-256 <code>184e0d1abec30561eee4650cb7f913e838692ba30233e8aab5dcbce522d8c297</code>. The runtime checks expected code before enabling hooks.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Boundary</th><th>RVA</th><th>Role</th></tr></thead>
+        <tbody>
+          <tr><td>BuildRenderingALL</td><td><code>0x1BD390</code></td><td>Starts the shared renderer and visits its registered views.</td></tr>
+          <tr><td>DgStart / InitRender</td><td><code>0x24C220 / 0x2496A0</code></td><td>Rebuilds native size-dependent resources and establishes render dimensions.</td></tr>
+          <tr><td>Build rendering / plugin invocation</td><td><code>0x1BEEC0 / 0x1BED80</code></td><td>Scopes the native scene and its plugin calls.</td></tr>
+          <tr><td>DgBranch / command-buffer branch</td><td><code>0x2C5220 / 0x2D6F50</code></td><td>Transfers context into child recording work.</td></tr>
+          <tr><td>Draw2D packet / worker</td><td><code>0x2E7C20 / 0x2E7770</code></td><td>Carries the copied subcontext into queued 2D commands.</td></tr>
+          <tr><td>Local-light MainExec / RequestDrawAllLocalLightOnJob</td><td><code>0x20AA00 / 0x2A43E0</code></td><td>Builds the packet and hands it to unshadowed and shadowed workers. The verified call returns at <code>0x20B8A3</code>. Render P/V are at packet <code>+0x1A0/+0x1E0</code>, with independent culling P/V at <code>+0x120/+0x160</code>.</td></tr>
+          <tr><td>EndRecord</td><td><code>0x19F6900</code></td><td>Finalizes native deferred recording.</td></tr>
+          <tr><td>DgKick / node traversal</td><td><code>0x24A2C0 / 0x2483B0</code></td><td>Walks the native dependency tree.</td></tr>
+          <tr><td>Native submission</td><td><code>0x19F60A0</code></td><td>Submits finished lists through the immediate context.</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section id="resources">
+      <h2>Resource sizes and signal meaning</h2>
+      <p><strong>R</strong> is the actual scene render size. <strong>O</strong> is the display output size. Fractions below count pixels unless an axis divisor is stated. Native utility, shadow-map, and lookup sizes belong to their own resource roles.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Work or resource</th><th>Grid</th><th>Contract</th></tr></thead>
+        <tbody>
+          <tr><td>Geometry, motion, direct lighting</td><td>R</td><td>Scene owner, camera reservation, bound ranges, and actual allocation must agree.</td></tr>
+          <tr><td>Ambient diffuse input</td><td>R/4 pixels</td><td>Each axis is divided by two. Native phase weights and depth comparisons reconstruct the full-size contribution.</td></tr>
+          <tr><td>Indirect trace and histories</td><td>Default R/4 pixels</td><td>Each divided axis rounds up. The full-resolution application reads the final lighting and current material guide.</td></tr>
+          <tr><td>Native SSR</td><td>R/16 pixels, then four smaller levels</td><td>The reference trace begins at one quarter of each render axis. Gaussian X/Y and half-axis reductions preserve the native roughness-dependent chain.</td></tr>
+          <tr><td>Reconstruction</td><td>R → O</td><td>Analytical TAA requires equal sizes. FSR/DLSS prepare matching linear color, signed motion, and reverse-Z depth, then restore the game representation.</td></tr>
+          <tr><td>Bloom and fullscreen flares</td><td>246 × 138 working region in O-relative allocations</td><td>At 4K, quarter-axis allocations stay 960 × 540 across upscaling quality modes. Reduction offsets, center/fade, and crop follow their individual contracts.</td></tr>
+          <tr><td>DoF and motion-blur color</td><td>O and native fractions of O</td><td>DoF sprites sample enlarged inputs in vertex and pixel stages. Radius and bake cutoffs follow output width. Motion-depth and color ratios account for different grids.</td></tr>
+          <tr><td>Depth-tested flare sprites</td><td>Separate half-axis layer</td><td>Geometry depth follows the current scene. Native clear color, alpha, blend equations, and typed views are retained.</td></tr>
+          <tr><td>UI color and depth/stencil</td><td>O for qualified main-view work</td><td>Depth and all eight stencil bits are preserved. Sampled geometry depth has a separate role. Fixed-size utility work retains its native targets.</td></tr>
+          <tr><td>Display continuation</td><td>O</td><td>Uses the completed scene's identity even after its view scope ends. Loading UI can render without reconstruction.</td></tr>
+        </tbody>
+      </table></div>
+      <p>Auto selects by total output pixels. It chooses Native below 1920 × 1080, Quality through 2560 × 1440, Performance through 3840 × 2160, and Ultra Performance above that. Manual modes override Auto. DLSS queries supported input dimensions. FSR rounds its scaled dimensions to even values.</p>
+      <p>FSR/DLSS use <code>ceil(8 × (output_width / actual_render_width)²)</code> jitter phases, with at least eight. Their pixel-sampler bias adds <code>log2(actual_render_width / output_width) − 1</code> to the native bias. Analytical TAA and Off retain native sizing and mip bias.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Signal</th><th>Meaning</th><th>Use</th></tr></thead>
+        <tbody>
+          <tr><td>Native albedo</td><td>sRGB views decode base color once.</td><td>Source radiance and deferred material response use the decoded value.</td></tr>
+          <tr><td>Diffuse and specular light</td><td>Linear, pre-exposed light.</td><td>AO affects qualified ambient diffuse. Direct light and added GI retain their separate contributions.</td></tr>
+          <tr><td>Prepared source</td><td>RGBA32F outgoing diffuse radiance and validity.</td><td>Shared diffuse/specular searches read original light before application changes the destinations.</td></tr>
+          <tr><td>Filtered indirect results</td><td>Diffuse GI RGB with AO alpha, plus separate specular visibility and paired reflected/environment responses.</td><td>Per-signal rejection remains independent. The current FP16 F0/roughness guide is never accumulated.</td></tr>
+          <tr><td>Reflection readiness / composition</td><td>Separate R8 masks.</td><td>One proves that custom outputs were written. The other records actual use in deferred composition.</td></tr>
+          <tr><td>Scene color and alpha</td><td>Encoded scene RGB can remain in RGBA16F. Alpha carries current native data.</td><td>Decode for light math and SDK inputs. Preserve alpha for downstream DoF and highlights.</td></tr>
+          <tr><td>Motion and depth</td><td>Native motion is packed in .ba with object classification in .r. Depth is reverse-Z.</td><td>Preparation uses actual texture dimensions and the matching scene's camera endpoints.</td></tr>
+          <tr><td>Enhanced bloom</td><td>Normalized filtering in linear RGBA16F.</td><td>Late composition uses <code>lerp(scene, filtered_light, bloom_strength × 0.1)</code>. Native lens flares remain additive.</td></tr>
+        </tbody>
+      </table></div>
+      <p><a href="../reconstruction/README.md">Sizing, encoding, and recovery details</a> · <a href="../postprocess/bloom/README.md">Bloom filtering and composition</a> · <a href="../rendering/resource_upgrades.hpp">Role-qualified precision upgrades</a></p>
+    </section>
+
+    <section id="native">
+      <h2>Native phases in the reference frame</h2>
+      <p>The capture contains 5,550 draws, five dispatches, and 5,792 total actions. The table preserves the order of all 37 observed native phases. Event intervals include intervening API events. Their widths cannot be used to estimate cost. Fixed dimensions shown here are capture observations.</p>
+      <!-- NATIVE_PHASE_TABLE -->
+      <div class="table-wrap"><table>
+        <thead><tr><th>Native phase</th><th>Event IDs</th><th>Draws / dispatches</th><th>Observed grids</th></tr></thead>
+        <tbody>
+          <tr><td>Volumetric fog preparation</td><td class="events">74</td><td>1</td><td>512 × 256<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Opaque and masked geometry</td><td class="events">137–16822</td><td>1871</td><td>3840 × 2160<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Decals and surface layers</td><td class="events">16876–18711</td><td>191</td><td>3840 × 2160<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Reduced camera depth</td><td class="events">18764</td><td>1</td><td>1920 × 1080<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Object motion</td><td class="events">18822–19805</td><td>66</td><td>3840 × 2160<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Camera and object motion</td><td class="events">19858</td><td>1</td><td>3840 × 2160<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Line-integral ambient occlusion</td><td class="events">19879–19929</td><td>4</td><td>1920 × 1080, 3840 × 2160<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Ambient-obscurance AO</td><td class="events">19946–20001</td><td>5</td><td>3840 × 2160, 1920 × 1080<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Ambient lighting lookup</td><td class="events">20065–20119</td><td>2</td><td>128 × 512<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Ambient visibility volumes</td><td class="events">20189–22071</td><td>152</td><td>1920 × 1080<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Ambient diffuse lighting</td><td class="events">22125–22162</td><td>3</td><td>1920 × 1080, 3840 × 2160<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Unshadowed local lights</td><td class="events">22214–22581</td><td>50</td><td>3840 × 2160<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Local shadow maps and lights</td><td class="events">22640–25959</td><td>346</td><td>4096 × 4096, 3840 × 2160<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Sun and moon shadow maps</td><td class="events">26019–43665</td><td>2135</td><td>8192 × 8192<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Sun and environment lookup</td><td class="events">43719–43738</td><td>3</td><td>128 × 256<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Sun and environment lighting</td><td class="events">43762–43787</td><td>4</td><td>3840 × 2160<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Diffuse copy and skin mask</td><td class="events">43808</td><td>1</td><td>3840 × 2160<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Subsurface scattering</td><td class="events">43822–43829</td><td>2</td><td>3840 × 2160<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Deferred composition and fog</td><td class="events">43856</td><td>1</td><td>3840 × 2160<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Scene depth preparation</td><td class="events">43870</td><td>1</td><td>3840 × 2160<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Visible sky and clouds</td><td class="events">43897–43972</td><td>3</td><td>3840 × 2160<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Forward objects before SSR</td><td class="events">43992–44180</td><td>15</td><td>3840 × 2160<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Screen-space reflections</td><td class="events">44235–44475</td><td>17</td><td>960 × 540, 480 × 270, 240 × 135, 120 × 67, 60 × 33, 3840 × 2160<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Ocean rendering</td><td class="events">44526–45614</td><td>214</td><td>3840 × 2160<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Particles, liquids, and rain</td><td class="events">45670–47790</td><td>193</td><td>3840 × 2160<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Collectible and special-view geometry</td><td class="events">47844–47864</td><td>3</td><td>3840 × 2160<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Brightness and exposure preparation</td><td class="events">47917–47948</td><td>3</td><td>960 × 540, 128 × 128, 32 × 32<br><small>Bound target sizes</small></td></tr>
+          <tr><td>Bloom and fullscreen flares</td><td class="events">47966–48097</td><td>10</td><td>960 × 540, 246 × 138<br><small>Viewport sizes</small></td></tr>
+          <tr><td>Depth of field: scatter path</td><td class="events">48117–49661</td><td>199</td><td>1920 × 1080, 960 × 540, 480 × 270, 240 × 135, 3840 × 2160<br><small>Viewport sizes</small></td></tr>
+          <tr><td>Flare-layer composition</td><td class="events">49714</td><td>1</td><td>3840 × 2160<br><small>Viewport sizes</small></td></tr>
+          <tr><td>Motion-blur velocity tiles</td><td class="events">49734–49807</td><td>6</td><td>1920 × 1080, 960 × 540, 480 × 270, 240 × 135, 120 × 68<br><small>Viewport sizes</small></td></tr>
+          <tr><td>Motion blur</td><td class="events">49825–49884</td><td>5</td><td>1920 × 1080, 3840 × 2160<br><small>Viewport sizes</small></td></tr>
+          <tr><td>Color-grading LUT</td><td class="events">49904</td><td>1</td><td>256 × 16<br><small>Viewport sizes</small></td></tr>
+          <tr><td>Late tonemap and bloom composition</td><td class="events">49921</td><td>1</td><td>3840 × 2160<br><small>Viewport sizes</small></td></tr>
+          <tr><td>FXAA and film grain</td><td class="events">49928</td><td>1</td><td>3840 × 2160<br><small>Viewport sizes</small></td></tr>
+          <tr><td>2D effects, HUD, subtitles, and menus</td><td class="events">49980–50319</td><td>42</td><td>3840 × 2160<br><small>Viewport sizes</small></td></tr>
+          <tr><td>Display encoding and Present</td><td class="events">50370</td><td>1</td><td>3840 × 2160<br><small>Viewport sizes</small></td></tr>
+        </tbody>
+      </table></div>
+      <!-- END_NATIVE_PHASE_TABLE -->
+      <p>Material and geometry phases include many vertex/pixel permutations. The local interactive map retains every captured event, state, binding, and shader occurrence. The repository's <a href="MGSV_PixelShader_NameMap.md">shader name reference</a> records additional native names. A shader found in the dump still needs a live occurrence to establish its place in a particular branch.</p>
+    </section>
+
+    <section id="post">
+      <h2>Post-processing shader chains</h2>
+      <p>These are the actual pixel or compute stages in reference-frame order. The detailed local map also retains paired vertex shaders, constant-buffer ranges, views, outputs, and individual repeated draws. Shader links below open current replacements where they exist. Names without links identify native bytecode in the capture.</p>
+      <!-- POSTPROCESS_CHAIN_TABLES -->
+      <h3>Bloom and fullscreen flares</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Event IDs</th><th>Native shader stage</th><th>Invocations</th></tr></thead>
+        <tbody>
+          <tr><td class="events">47966–47982</td><td>
+              <span class="shader"><a href="../postprocess/bloom/CopyReductionX4_0x72C1D157.ps_5_0.hlsl"><code>CopyReductionX4_ps 0x72C1D157</code></a></span>
+            </td><td>2</td></tr>
+          <tr><td class="events">47998</td><td>
+              <span class="shader"><a href="../postprocess/bloom/TonemapBrightpass_0x463195C2.ps_5_0.hlsl"><code>TonemapBrightpass_ps 0x463195C2</code></a></span>
+            </td><td>1</td></tr>
+          <tr><td class="events">48013</td><td>
+              <span class="shader"><a href="../postprocess/bloom/SSLensFlarePass1_0x1AC1A5EF.ps_5_0.hlsl"><code>SSLensFlarePass1_ps 0x1AC1A5EF</code></a></span>
+            </td><td>1</td></tr>
+          <tr><td class="events">48027</td><td>
+              <span class="shader"><a href="../postprocess/bloom/SSLensFlarePass2_0x265053A6.ps_5_0.hlsl"><code>SSLensFlarePass2_ps 0x265053A6</code></a></span>
+            </td><td>1</td></tr>
+          <tr><td class="events">48044–48080</td><td>
+              <span class="shader"><a href="../postprocess/bloom/blur_kawase_0x9BE51873.ps_5_0.hlsl"><code>blur_kawase_ps 0x9BE51873</code></a></span>
+            </td><td>4</td></tr>
+          <tr><td class="events">48097</td><td>
+              <span class="shader"><a href="../copy/CopyRenderBuffer_0x83272BCB.ps_5_0.hlsl"><code>CopyRenderBuffer_ps 0x83272BCB</code></a></span>
+            </td><td>1</td></tr>
+        </tbody>
+      </table></div>
+      <h3>Depth of field: scatter path</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Event IDs</th><th>Native shader stage</th><th>Invocations</th></tr></thead>
+        <tbody>
+          <tr><td class="events">48117</td><td>
+              <span class="shader"><code>DOF_ScatterBakeFirst_ps 0xFE1DC3F8</code></span>
+            </td><td>1</td></tr>
+          <tr><td class="events">48137–48169</td><td>
+              <span class="shader"><a href="../postprocess/DOF_ScatterBakeSecond_0x490E22EB.ps_5_0.hlsl"><code>DOF_ScatterBakeSecond_ps 0x490E22EB</code></a></span>
+            </td><td>3</td></tr>
+          <tr><td class="events">48193–48864</td><td>
+              <span class="shader"><code>DOF_ScatterSprite_ps 0xD05F5ABC</code></span>
+            </td><td>94</td></tr>
+          <tr><td class="events">48880–48904</td><td>
+              <span class="shader"><code>DOF_ScatterGather1_ps 0xE26983EE</code></span>
+            </td><td>3</td></tr>
+          <tr><td class="events">48923</td><td>
+              <span class="shader"><a href="../postprocess/DOF_ScatterCompositeNear_0xE2D609B1.ps_5_0.hlsl"><code>DOF_ScatterCompositeNear_ps 0xE2D609B1</code></a></span>
+            </td><td>1</td></tr>
+          <tr><td class="events">48944–49611</td><td>
+              <span class="shader"><code>DOF_ScatterSprite_ps 0xD05F5ABC</code></span>
+            </td><td>94</td></tr>
+          <tr><td class="events">49627</td><td>
+              <span class="shader"><a href="../postprocess/DOF_ScatterCompositeFar_0x7C017264.ps_5_0.hlsl"><code>DOF_ScatterCompositeFar_ps 0x7C017264</code></a></span>
+            </td><td>1</td></tr>
+          <tr><td class="events">49645</td><td>
+              <span class="shader"><a href="../copy/CopyRenderBuffer_0x83272BCB.ps_5_0.hlsl"><code>CopyRenderBuffer_ps 0x83272BCB</code></a></span>
+            </td><td>1</td></tr>
+          <tr><td class="events">49661</td><td>
+              <span class="shader"><a href="../postprocess/DOF_ScatterCompositeFinal_0xFC5542BB.ps_5_0.hlsl"><code>DOF_ScatterCompositeFinal_ps 0xFC5542BB</code></a></span>
+            </td><td>1</td></tr>
+        </tbody>
+      </table></div>
+      <h3>Flare-layer composition</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Event IDs</th><th>Native shader stage</th><th>Invocations</th></tr></thead>
+        <tbody>
+          <tr><td class="events">49714</td><td>
+              <span class="shader"><a href="../copy/CopyRenderBuffer_0x83272BCB.ps_5_0.hlsl"><code>CopyRenderBuffer_ps 0x83272BCB</code></a></span>
+            </td><td>1</td></tr>
+        </tbody>
+      </table></div>
+      <h3>Motion-blur velocity tiles</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Event IDs</th><th>Native shader stage</th><th>Invocations</th></tr></thead>
+        <tbody>
+          <tr><td class="events">49734–49790</td><td>
+              <span class="shader"><code>MotionBlurTile_ps 0x260C371F</code></span>
+            </td><td>5</td></tr>
+          <tr><td class="events">49807</td><td>
+              <span class="shader"><code>MotionBlurTileNeighbour_ps 0xF05DCBFD</code></span>
+            </td><td>1</td></tr>
+        </tbody>
+      </table></div>
+      <h3>Motion blur</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Event IDs</th><th>Native shader stage</th><th>Invocations</th></tr></thead>
+        <tbody>
+          <tr><td class="events">49825</td><td>
+              <span class="shader"><a href="../postprocess/MotionBlurBakeVelocityDepth_0x512E2B48.ps_5_0.hlsl"><code>MotionBlurBakeVelocityDepth_ps 0x512E2B48</code></a></span>
+            </td><td>1</td></tr>
+          <tr><td class="events">49841</td><td>
+              <span class="shader"><a href="../copy/CopyRenderBuffer_0x83272BCB.ps_5_0.hlsl"><code>CopyRenderBuffer_ps 0x83272BCB</code></a></span>
+            </td><td>1</td></tr>
+          <tr><td class="events">49856–49868</td><td>
+              <span class="shader"><a href="../postprocess/MotionBlurMcGuire_0xBFC7D3C2.ps_5_0.hlsl"><code>MotionBlurMcGuire_ps 0xBFC7D3C2</code></a></span>
+            </td><td>2</td></tr>
+          <tr><td class="events">49884</td><td>
+              <span class="shader"><a href="../copy/CopyRenderBuffer_0x83272BCB.ps_5_0.hlsl"><code>CopyRenderBuffer_ps 0x83272BCB</code></a></span>
+            </td><td>1</td></tr>
+        </tbody>
+      </table></div>
+      <h3>Color-grading LUT</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Event IDs</th><th>Native shader stage</th><th>Invocations</th></tr></thead>
+        <tbody>
+          <tr><td class="events">49904</td><td>
+              <span class="shader"><code>ColorCorrection_BlndLut_Tex_Tex_ps 0xCA7F0E3D</code></span>
+            </td><td>1</td></tr>
+        </tbody>
+      </table></div>
+      <h3>Late tonemap and bloom composition</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Event IDs</th><th>Native shader stage</th><th>Invocations</th></tr></thead>
+        <tbody>
+          <tr><td class="events">49921</td><td>
+              <span class="shader"><a href="../tonemap/Tonemap_0xE04D1471.ps_5_0.hlsl"><code>Tonemap_ps 0xE04D1471</code></a></span>
+            </td><td>1</td></tr>
+        </tbody>
+      </table></div>
+      <h3>FXAA and film grain</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Event IDs</th><th>Native shader stage</th><th>Invocations</th></tr></thead>
+        <tbody>
+          <tr><td class="events">49928</td><td>
+              <span class="shader"><a href="../antialiasing/FXAA_0x900968FF.ps_5_0.hlsl"><code>Fxaa 0x900968FF</code></a></span>
+            </td><td>1</td></tr>
+        </tbody>
+      </table></div>
+      <h3>2D effects, HUD, subtitles, and menus</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Event IDs</th><th>Native shader stage</th><th>Invocations</th></tr></thead>
+        <tbody>
+          <tr><td class="events">49980–50022</td><td>
+              <span class="shader"><code>Draw2D_Ui2_BL_ps 0x2DD30911</code></span>
+            </td><td>4</td></tr>
+          <tr><td class="events">50037–50044</td><td>
+              <span class="shader"><code>Draw2D_ps 0xEF836D9D</code></span>
+            </td><td>2</td></tr>
+          <tr><td class="events">50062–50122</td><td>
+              <span class="shader"><code>Draw2D_Ui2_BL_ps 0x2DD30911</code></span>
+            </td><td>6</td></tr>
+          <tr><td class="events">50135–50201</td><td>
+              <span class="shader"><code>Draw2D_ps 0xEF836D9D</code></span>
+            </td><td>20</td></tr>
+          <tr><td class="events">50219</td><td>
+              <span class="shader"><code>Draw2D_Ui2_BL_ps 0x2DD30911</code></span>
+            </td><td>1</td></tr>
+          <tr><td class="events">50237</td><td>
+              <span class="shader"><code>Draw2D_ps 0xEF836D9D</code></span>
+            </td><td>1</td></tr>
+          <tr><td class="events">50256–50266</td><td>
+              <span class="shader"><code>Draw2D_Ui2_BL_ps 0x2DD30911</code></span>
+            </td><td>2</td></tr>
+          <tr><td class="events">50278–50284</td><td>
+              <span class="shader"><code>Draw2D_ps 0xEF836D9D</code></span>
+            </td><td>3</td></tr>
+          <tr><td class="events">50303–50319</td><td>
+              <span class="shader"><code>Draw2D_Ui2_BL_ps 0x2DD30911</code></span>
+            </td><td>3</td></tr>
+        </tbody>
+      </table></div>
+      <h3>Display encoding and Present</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Event IDs</th><th>Native shader stage</th><th>Invocations</th></tr></thead>
+        <tbody>
+          <tr><td class="events">50370</td><td>
+              <span class="shader"><a href="../output/GammaControl_0x1FF96E86.ps_5_0.hlsl"><code>GammaControl_ps 0x1FF96E86</code></a></span>
+            </td><td>1</td></tr>
+        </tbody>
+      </table></div>
+      <!-- END_POSTPROCESS_CHAIN_TABLES -->
+      <p>Enhanced bloom reuses the two captured reduction draws, brightpass, both fullscreen flare passes, four Kawase draws, and generic copy. It adds shader branches and precision upgrades. DoF also reuses a bloom image for control data, so those reads retain their data range. The separate flare-sprite layer is composited after DoF in this capture.</p>
+      <p>The current <code>CopyRenderBuffer 0x83272BCB</code> replacement retains its generic native copy behavior. Routing enlarges its destination only when a consumed input has an established scene-output role. A matching size or unused texture slot cannot establish that role.</p>
+    </section>
+
+    <section id="branches">
+      <h2>Conditional paths and coverage limits</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Path</th><th>Shader or boundary</th><th>Established behavior</th></tr></thead>
+        <tbody>
+          <tr><td>Late color grading</td><td><code>Tonemap 0xE04D1471</code><br><code>Tonemap_1DLUT 0xC0C26E46</code></td><td>Alternative late tone/grading paths before main-view UI. Either can provide a qualified reconstruction fallback.</td></tr>
+          <tr><td>Bloom reduction variant</td><td><code>CopyReductionX2</code></td><td>Supported source branch. The reference bloom chain uses CopyReductionX4 twice.</td></tr>
+          <tr><td>Flare sprites</td><td><code>0x93A0C8D8</code></td><td>Depth-tested sprites use a separate scene layer. Native clear retention and owner-qualified composition handle parallel workers.</td></tr>
+          <tr><td>Damage overlay</td><td><code>Draw2D_TppDamageDirection2 0xDC6A5DF6</code></td><td>User identified the blood/bullet-hole overlay. The shader samples a sprite mask and a displaced screen image. Executable evidence establishes related damage controls and the generic 2D material path. The exact shader-specific owner and submission position remain unverified.</td></tr>
+          <tr><td>Sortie floor</td><td><code>LocalReflectionTPP 0xA621C684</code></td><td>Native planar tracing stays enabled. The native reflection compositor retains custom lighting outside contributing hits.</td></tr>
+          <tr><td>Alternative reflection/deferred families</td><td><code>LocalReflectionTPPA1/A2</code>, <code>LocalReflectionComposite</code>, generic deferred variants</td><td>Retain native behavior and report first use. Their existence in the dump does not prove current custom coverage.</td></tr>
+          <tr><td>Rain occlusion and utility views</td><td>Observed 512 × 512 view and native Draw2D/material shaders</td><td>Separate view identity keeps utility color and stencil together. Generic Draw2D also handles packed normals and roughness.</td></tr>
+          <tr><td>Loading and save reload</td><td><code>Draw2D 0xEF836D9D</code>, <code>GammaControl 0x1FF96E86</code></td><td>Observed UI-only work uses matching scene output and clears without a reconstruction dispatch. Other transitions still need coverage.</td></tr>
+          <tr><td>Mirrors and thermography</td><td>Secondary views and guarded native projection setters</td><td>Require the correct view, camera, dimensions, and generation. The alternate thermography branch and full mirror matrix remain follow-up work.</td></tr>
+        </tbody>
+      </table></div>
+      <p>Deferred SH and sky ambient are relevant to indirect illumination. Direct-light Enhanced Shadows is applied in the sun and local-light shaders. Changing their contact shadows alone does not correct SH volume projection or ambient reconstruction.</p>
+    </section>
+
+    <section id="next">
+      <h2>Validation and the next CPU checkpoint</h2>
+      <p>The latest saved-DLSS-Auto ACC run passed the user's image, local-light, and startup-performance checks. Its log showed reconstruction from 1920 × 1080 to 3840 × 2160, active flare composition, and submitted AO/GI history. The earlier ownership capture followed 156 worker scopes, 36 child branches, and 162 submitted lists across three ACC scenes. Loading UI, sheltered rain, and a wormhole effect have additional scoped observations.</p>
+      <p>The one-frame rain-transition brightness flash remains unresolved. The sortie ground/horizon report, character pose correspondence, reduced-resolution thin geometry, and wider resize, device, weather, and special-view testing remain open.</p>
+      <h3>Deferred SH, terrain, and sky alignment</h3>
+      <ol>
+        <li>Follow deferred SH from packet producer <code>0x281EF0</code> through worker <code>0x280060</code>, volume helper <code>0x27F450</code>, and final draw. Carry its actual scene reservation and reset generation. Verify both raster coverage and inverse light-local reconstruction against the consumer grid before enabling the currently disabled correction.</li>
+        <li>At the same terrain-decal draw, compare the corrected packet projection with the inverse-plane constants, sampled depth, and viewport. Establish one consistent jitter convention for coverage and reconstruction.</li>
+        <li>Check sky inverse-camera rays and copied geometry camera-center offsets through raw lighting, filtered lighting, and reconstruction. Existing temporal lighting already removes current jitter during position reconstruction.</li>
+        <li>Validate the changes together using ACC/local lights, Mother Base sun/moon and ambient volumes, terrain decals, sky, rain utility views, and display-size changes. Add mirrors and thermography where available. Inspect owner, sample, raw lighting, and reconstructed outputs in the same visit.</li>
+      </ol>
+      <p>After those contracts are established, consolidate remaining duplicate size/constant preparation and replaced output-selection paths. Measure CPU recording time, GPU time, allocation churn, copy count, and constant patches in matched scenes before claiming a performance gain. <a href="../reconstruction/ROADMAP.md">Outstanding reconstruction work</a></p>
+      <h3>Later lighting work</h3>
+      <p>The shared scene, material, motion, exposure, and light records support further raster reflections, BRDF/SSS changes, fog scattering, volumetrics, sky, and water. Keep each signal's validity and history explicit. Future RT and Ray Reconstruction still require geometry and pose capture, acceleration structures, suitable noisy-light guides, and ordered D3D11/D3D12 resource ownership and synchronization.</p>
+    </section>
+  </main>
+
+  <footer>
+    <p>This page is a portable summary of source behavior and established native ordering. The detailed local map remains at <code>build/analysis/mgsv-render-map/index.html</code>, with capture events, bindings, shader positions, executable evidence, and historical logs. The reference captures are <code>MGSV Graphical Enhancements Off.rdc</code> and <code>GTVBGI temporal accumulation and spatial filtering.rdc</code>.</p>
+    <p>When changing a hook, pass, signal, or resource role, update the affected section here and its feature guide. Preserve capture-local event IDs, identify new evidence separately, and check current registration in <a href="../shaders.hpp">shaders.hpp</a>. The <a href="Fox_Engine_Render_Pipeline_Reference.md">Fox Engine reference</a> retains historical native findings.</p>
+  </footer>
+</body>
+</html>
