@@ -74,6 +74,22 @@ Every feature restores displaced graphics/compute state, including empty binding
 
 Explicit registrations precede generated entries and win duplicate keys. `on_inject = false` disables settings injection, not supplied replacement bytecode. Deferred callbacks activate the scene-color clone before capturing their native inputs; preserve that order.
 
+## Planned D3D12 integration
+
+The planned ray/path tracing, Ray Reconstruction, and DLSS Frame Generation backend will work alongside the game's D3D11 renderer. Scene ownership, material and light interpretation, signal encodings, history validity, and composition rules should carry forward. Current MGSV submission and resource allocation remain D3D11-specific and will need a D3D12 integration at those boundaries.
+
+RenoDX already provides shared GPU synchronization in [gpu_fence.hpp](../../../utils/gpu_fence.hpp). `Fence`, `QueueSignal`, and `QueueWait` accept supported ReShade or native submitters. D3D11 and D3D12 fences export shared handles and cache imports per destination device. GPU waits allow CPU command recording to continue. Use the callback-free overload for GPU dependencies. A delayed producer can still leave its GPU consumer waiting, so measure the complete schedule and keep unrelated work ahead of that wait.
+
+Organize the integration around these responsibilities.
+
+- Native capture keeps identifying the exact scene, camera sample, geometry/material inputs, and producer execution. Shared effect descriptions carry dimensions, encoding, validity, and history ownership. Keep native binding objects inside the backend that uses them.
+- Resource allocation owns the compatible shared images and their D3D11/D3D12 views. Import them once per allocation and retain them through all GPU uses. A resource handle remains tied to its originating device. When an existing game resource cannot be shared directly, prepare the required input in a compatible shared allocation at its established producer boundary.
+- Submission reuses `utils::gpu_fence` with a producer-owned timeline for each direction. D3D11 signals after the required native writes are submitted. D3D12 waits before reading them, records the dependent work, then signals completion. D3D11 waits before its first consumer or overwrite. Place these operations around the executed command-list segments, including replay. Worker recording order alone cannot establish readiness.
+- Group connected D3D12 work to reduce handoffs. Tracing, denoising or Ray Reconstruction, and composition can remain together when their dependencies permit it. Batch shared-input preparation, reuse shared allocations, and place waits immediately before dependent work. This allows independent work to proceed while the producer finishes.
+- Backend code owns descriptors, pipeline objects, resource transitions, and completion-based allocation reuse. The existing D3D11 state helper continues to preserve the game's bindings. Reuse ReShade APIs where they express the needed operation, and keep SDK-specific native calls local to their integration.
+
+The first interop checkpoint should pass one scene-owned image through D3D12 and back using shared resources and GPU waits, then verify deferred-list replay, resizing, cancellation, and allocation reuse. Compare its output and frame time against the existing path before moving an effect. The [reconstruction roadmap](../reconstruction/ROADMAP.md#d3d12-rendering-and-frame-generation) tracks the tracing and frame-generation inputs that follow.
+
 ## Verification limits
 
 Native RenderDoc captures establish the inspected game's order and bindings but omit addon work. Completed probe readbacks and local API/shader fixtures verify specific custom operations and controlled cases. Neither a retained view nor a command-recording log proves GPU completion, matching scene contents, gameplay quality, or a performance gain.

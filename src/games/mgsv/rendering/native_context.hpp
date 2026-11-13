@@ -59,6 +59,7 @@ inline constexpr size_t BRANCH_NODE_OFFSET = 0x10u;
 inline constexpr size_t BRANCH_TARGET_OFFSET = 0x18u;
 inline constexpr size_t BRANCH_MATRICES_OFFSET = 0x40u;
 inline constexpr size_t D3D_CONTEXT_OFFSET = 8u;
+inline constexpr size_t DOF_EFFECT_OFFSET = 0x68u;
 
 enum class Kind : uint8_t {
   RENDER,
@@ -77,8 +78,10 @@ enum class Kind : uint8_t {
   DESTROY_RENDER,
   MEMBERSHIP,
   PRESENTATION,
+  DOF,
+  END_DOF,
 };
-inline constexpr std::array KIND_NAMES = {"render", "view", "end_view", "branch", "worker_branch", "worker", "end_worker", "begin_recording", "end_recording", "finish", "execute", "merge", "destroy_view", "destroy_render", "membership", "presentation"};
+inline constexpr std::array KIND_NAMES = {"render", "view", "end_view", "branch", "worker_branch", "worker", "end_worker", "begin_recording", "end_recording", "finish", "execute", "merge", "destroy_view", "destroy_render", "membership", "presentation", "dof", "end_dof"};
 
 struct Owner {
   // scene identifies one InitView invocation. generation changes when the
@@ -150,12 +153,21 @@ struct Scope {
   Owner owner;
   uint64_t node = 0u;
 };
+
+// MainExec supplies the actual viewport and effect before the low-level draw.
+// Keep this association local to the invocation, including nested effects.
+struct DofScope {
+  Scope scope;
+  uintptr_t effect = 0u;
+  uint64_t invocation = 0u;
+  bool matches_view = false;
+};
 using Observer = void (*)(const Event&);
 
 // One module owns the hooks and all native bookkeeping. Other addons exchange
 // copied scopes through these entry points. No allocator-owned object crosses
 // the DLL boundary. The provider is pinned while native jobs can return to it.
-struct __declspec(uuid("b0a93411-20af-406d-8d72-0c1c47dbfba4")) Shared {
+struct __declspec(uuid("e9ee935e-2efd-4613-9cad-15e506da643c")) Shared {
   std::shared_mutex mutex;
   std::atomic<Scope (*)()> read = nullptr;
   Scope (*exchange)(Scope) = nullptr;
@@ -165,6 +177,8 @@ struct __declspec(uuid("b0a93411-20af-406d-8d72-0c1c47dbfba4")) Shared {
   uint32_t consumers = 0u;
   std::atomic<uint64_t> next_generation = 1u;
   bool (*healthy)() = nullptr;
+  Owner (*read_presentation_owner)() = nullptr;
+  DofScope (*read_dof)() = nullptr;
 };
 static renodx::utils::cross_addon::Shared<Shared> shared;
 static bool registered = false;
@@ -181,8 +195,10 @@ struct Runtime {
   renodx::utils::data::ParallelFlatHashMap<uintptr_t, Renderer> renders;
   renodx::utils::data::ParallelFlatHashMap<uintptr_t, uint64_t> views;
   Microsoft::WRL::ComPtr<IDXGISwapChain> presentation;
+  Owner presentation_owner;
 };
 static Runtime runtime;
+static thread_local DofScope dof_scope;
 static thread_local Owner owner;
 static thread_local uint64_t node_serial = 0u;
 struct Worker {
@@ -235,6 +251,16 @@ inline Scope GetScope() {
   if (shared.data == nullptr) return {};
   const auto read = shared.data->read.load(std::memory_order_acquire);
   return (read != nullptr ? read() : Scope{});
+}
+
+inline Owner GetPresentationOwner() {
+  if (shared.data == nullptr || shared.data->read_presentation_owner == nullptr) return {};
+  return shared.data->read_presentation_owner();
+}
+
+inline DofScope GetDofScope() {
+  if (shared.data == nullptr || shared.data->read_dof == nullptr) return {};
+  return shared.data->read_dof();
 }
 
 // A submitted addon dispatch runs on the immediate context, after the native
@@ -292,6 +318,8 @@ static Single destroy_view = nullptr;
 static Single destroy_render = nullptr;
 static Single update_views = nullptr;
 static Accessor get_main_view = nullptr;
+using DofMain = void(__fastcall*)(uintptr_t, uintptr_t, uintptr_t);
+static DofMain dof_main = nullptr;
 static std::shared_mutex hook_mutex;
 static std::vector<renodx::utils::detour::Function> hooks;
 static bool installed = false;
@@ -394,9 +422,38 @@ inline void __fastcall InitView(uintptr_t backend, uintptr_t viewport) {
       owner.membership = render->second.membership;
       owner.active_member = std::ranges::find(render->second.views, owner.view_id) != render->second.views.end();
     }
+    // Start runs before this frame's views. The next native size update can
+    // use this verified backend instead of choosing one by matching dimensions.
+    if (owner.main_view && owner.active_member && owner.presentation_matches) {
+      runtime.presentation_owner = owner;
+    }
     Emit({.kind = Kind::VIEW, .owner = owner, .subject = viewport, .related = backend});
   });
   init_view(backend, viewport);
+}
+
+inline void __fastcall DofMainExec(uintptr_t plugin, uintptr_t renderer, uintptr_t viewport) {
+  const auto previous = dof_scope;
+  dof_scope = {};
+  Track([&] {
+    const auto effect = Read<uintptr_t>(plugin, DOF_EFFECT_OFFSET);
+    const auto camera = Read<uintptr_t>(viewport, VIEW_CAMERA_OFFSET);
+    const std::unique_lock lock(runtime.mutex);
+    if (runtime.failed.load(std::memory_order_relaxed) || owner.generation != runtime.generation) return;
+    dof_scope = {
+        .scope = {.owner = owner, .node = node_serial},
+        .effect = effect,
+        .invocation = ++runtime.next_id,
+        .matches_view = owner.scene != 0u && owner.renderer == renderer && owner.viewport == viewport
+                        && owner.camera != 0u && owner.camera == camera,
+    };
+    Emit({.kind = Kind::DOF, .owner = owner, .subject = viewport, .related = effect, .node = node_serial, .recording = dof_scope.invocation, .result = dof_scope.matches_view ? 1 : 0});
+  });
+  dof_main(plugin, renderer, viewport);
+  Track([&] {
+    Emit({.kind = Kind::END_DOF, .owner = dof_scope.scope.owner, .subject = viewport, .related = dof_scope.effect, .node = dof_scope.scope.node, .recording = dof_scope.invocation});
+  });
+  dof_scope = previous;
 }
 
 inline void __fastcall EndView(uintptr_t backend, uintptr_t viewport) {
@@ -547,6 +604,9 @@ inline void __fastcall DestroyView(uintptr_t viewport) {
     const std::unique_lock lock(runtime.mutex);
     if (runtime.failed.load(std::memory_order_relaxed)) return;
     runtime.views.erase(viewport);
+    if (runtime.presentation_owner.viewport == viewport) {
+      runtime.presentation_owner = {};
+    }
     Emit({.kind = Kind::DESTROY_VIEW, .subject = viewport});
   });
   destroy_view(viewport);
@@ -557,6 +617,9 @@ inline void __fastcall DestroyRender(uintptr_t renderer) {
     const std::unique_lock lock(runtime.mutex);
     if (runtime.failed.load(std::memory_order_relaxed)) return;
     runtime.renders.erase(renderer);
+    if (runtime.presentation_owner.renderer == renderer) {
+      runtime.presentation_owner = {};
+    }
     Emit({.kind = Kind::DESTROY_RENDER, .subject = renderer});
   });
   destroy_render(renderer);
@@ -588,6 +651,10 @@ inline void __fastcall UpdateViews(uintptr_t renderer) {
       return;
     }
     if (render->second.membership == 0u || render->second.views != members) {
+      if (runtime.presentation_owner.renderer == renderer
+          && std::ranges::find(members, runtime.presentation_owner.view_id) == members.end()) {
+        runtime.presentation_owner = {};
+      }
       render->second.views = std::move(members);
       render->second.membership = ++runtime.next_id;
       Emit({.kind = Kind::MEMBERSHIP, .owner = {.generation = runtime.generation, .render_id = render->second.serial, .membership = render->second.membership}, .subject = renderer, .members = render->second.views});
@@ -644,6 +711,7 @@ inline bool Install() {
           Signature{.rva = 0x1B8600u, .bytes = "48894c2408574883ec3048c7442420fe", .function = {&destroy_view, DestroyView}},
           Signature{.rva = 0x1BCA60u, .bytes = "48894c2408574883ec3048c7442420fe", .function = {&destroy_render, DestroyRender}},
           Signature{.rva = 0x1BEA90u, .bytes = "488bc455574156488bec4883ec6048c7", .function = {&update_views, UpdateViews}},
+          Signature{.rva = 0x1DD1F0u, .bytes = "48895c240848896c2410488974241857415641574883ec30", .function = {&dof_main, DofMainExec}},
       };
       for (const auto& signature : signatures) {
         for (size_t index = 0u; index < signature.bytes.size() / 2u; ++index) {
@@ -689,6 +757,7 @@ inline bool Install() {
       runtime.branches.clear();
       runtime.renders.clear();
       runtime.views.clear();
+      runtime.presentation_owner = {};
     }
     shared.data->exchange = +[](Scope selected) {
       const Scope previous = {.owner = owner, .node = node_serial};
@@ -702,6 +771,7 @@ inline bool Install() {
       if (runtime.presentation.Get() == presentation) return;
       retired.Swap(runtime.presentation);
       runtime.presentation = presentation;
+      runtime.presentation_owner = {};
       runtime.generation = shared.data->next_generation.fetch_add(1u, std::memory_order_relaxed);
     };
     shared.data->set_observer = +[](Observer expected, Observer replacement) {
@@ -712,6 +782,17 @@ inline bool Install() {
     };
     shared.data->remove_hooks = RemoveHooks;
     shared.data->healthy = +[] { return !runtime.failed.load(std::memory_order_relaxed); };
+    shared.data->read_presentation_owner = +[]() -> Owner {
+      const std::shared_lock lock(runtime.mutex);
+      if (runtime.failed.load(std::memory_order_relaxed)) return {};
+      return runtime.presentation_owner;
+    };
+    shared.data->read_dof = +[]() -> DofScope {
+      const std::shared_lock lock(runtime.mutex);
+      if (runtime.failed.load(std::memory_order_relaxed)
+          || dof_scope.scope.owner.generation != runtime.generation) return {};
+      return dof_scope;
+    };
     shared.data->read.store(+[]() -> Scope {
       if (runtime.failed.load(std::memory_order_relaxed)) return {};
       return {.owner = owner, .node = node_serial}; }, std::memory_order_release);

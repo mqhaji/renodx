@@ -791,7 +791,7 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
       }
       output_size = {.width = saved->output->target.width, .height = saved->output->target.height};
     }
-    const bool native_output_view = pass != nullptr && resolution::dof_plan.IsScaled()
+    const bool native_output_view = pass != nullptr && resolution::active_dof.Matches(route.owner)
                                     && !saved->output->IsSceneTarget(native_target.Get());
     if (!native_output_view && !fixed_bloom_reduction && native_size.width != 0u && native_size.height != 0u && saved->viewport_count != 0u
         && viewports[0].Width <= static_cast<float>(native_size.width)
@@ -1201,9 +1201,9 @@ inline bool OnClearRenderTarget(reshade::api::command_list* command_list, reshad
   if (output == nullptr) return false;
   RetainOutput(command_list, output);
   const auto* draw = command_list->get_private_data<DrawState>();
-  const bool dof = resolution::dof_plan.IsScaled() && draw != nullptr && draw->dof_active
-                   && draw->dof_token == resolution::dof_token && draw->dof_frame == recording_frame;
-  if (resolution::dof_plan.IsScaled() && !dof && !output->IsSceneTarget(reinterpret_cast<ID3D11Resource*>(resource.handle))) return false;  // NOLINT(performance-no-int-to-ptr)
+  const bool dof = resolution::active_dof.Matches(route.owner) && draw != nullptr && draw->dof_active
+                   && draw->dof_token == resolution::active_dof.invocation && draw->dof_frame == recording_frame;
+  if (resolution::active_dof.IsScaled() && !dof && !output->IsSceneTarget(reinterpret_cast<ID3D11Resource*>(resource.handle))) return false;  // NOLINT(performance-no-int-to-ptr)
   // Mirror clears for known output targets. A clear alone cannot identify a
   // post-processing surface; its first qualified draw can use the saved clear.
   auto mapped = output->MapTarget(reinterpret_cast<ID3D11RenderTargetView*>((clone.handle == 0u ? view : clone).handle), dof, !dof,  // NOLINT(performance-no-int-to-ptr)
@@ -1228,7 +1228,7 @@ inline bool OnClearRenderTarget(reshade::api::command_list* command_list, reshad
         // partial clears still need the render-to-output rectangle conversion.
         std::vector<D3D11_RECT> converted;
         const auto* native_rects = reinterpret_cast<const D3D11_RECT*>(rects);
-        if (output->IsScaled() && !resolution::dof_plan.IsScaled()) {
+        if (output->IsScaled() && !resolution::active_dof.IsScaled()) {
           converted.assign(native_rects, native_rects + rect_count);
           const float scale_x = static_cast<float>(output->target.width) / static_cast<float>(output->render_width);
           const float scale_y = static_cast<float>(output->target.height) / static_cast<float>(output->render_height);
@@ -1322,12 +1322,14 @@ inline constexpr auto DRAW_CALLBACK = [](auto& command) {
   const auto& pass = command.template GetCallbackData<Pass>();
   auto* draw = command.cmd_list->template get_private_data<DrawState>();
   if (pass.shader_hash == 0u && (draw == nullptr || !draw->draw_2d || draw->flare_sprite)) return renodx::utils::command_action::CallbackResult<Context>{};
-  if (pass.shader_hash == 0u && resolution::dof_plan.IsScaled()) return renodx::utils::command_action::CallbackResult<Context>{};
+  if (pass.shader_hash == 0u && resolution::active_dof.IsScaled()) return renodx::utils::command_action::CallbackResult<Context>{};
   if (pass.dof_pass && draw != nullptr) {
     Recording route;
     const auto output = GetActive(command.cmd_list, &route);
     if (output != nullptr && output->IsScaled()) {
+      if (!resolution::active_dof.Matches(route.owner)) return renodx::utils::command_action::CallbackResult<Context>{};
       if (pass.shader_hash == 0xFE1DC3F8u) {
+        draw->dof_active = false;
         auto* context = reinterpret_cast<ID3D11DeviceContext*>(command.cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> input;
         Microsoft::WRL::ComPtr<ID3D11Resource> resource;
@@ -1336,12 +1338,12 @@ inline constexpr auto DRAW_CALLBACK = [](auto& command) {
           input->GetResource(&resource);
         }
         if (resource == output->source) {
-          draw->dof_token = resolution::dof_token;
+          draw->dof_token = resolution::active_dof.invocation;
           draw->dof_frame = route.frame;
           draw->dof_active = true;
         }
       }
-      if (!draw->dof_active || draw->dof_token != resolution::dof_token
+      if (!draw->dof_active || draw->dof_token != resolution::active_dof.invocation
           || draw->dof_frame != route.frame) return renodx::utils::command_action::CallbackResult<Context>{};
     }
   }

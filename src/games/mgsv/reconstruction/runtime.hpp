@@ -1,4 +1,5 @@
-#pragma once
+#ifndef RENODX_GAMES_MGSV_RECONSTRUCTION_RUNTIME_HPP_
+#define RENODX_GAMES_MGSV_RECONSTRUCTION_RUNTIME_HPP_
 
 /* MGSV draw routing, settings transitions, and ReShade lifecycle for temporal reconstruction. */
 
@@ -17,7 +18,6 @@
 
 #include "../../../utils/mutex.hpp"
 #include "../../../utils/settings.hpp"
-#include "../../../utils/shader.hpp"
 #include "../../../utils/state.hpp"
 #include "../../../utils/swapchain.hpp"
 #include "../rendering/inputs.hpp"
@@ -88,11 +88,11 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list, [[maybe_unused]] co
 
   // MGSV issues thousands of draws per frame. Classify first so unrelated
   // draws never touch TAA command-list state or contend on the resolve lock.
-  auto* shader_state = renodx::utils::shader::GetCurrentState(cmd_list);
-  if (shader_state == nullptr) return false;
-
-  const uint32_t vertex_hash = renodx::utils::shader::GetCurrentVertexShaderHash(shader_state);
-  const uint32_t pixel_hash = renodx::utils::shader::GetCurrentPixelShaderHash(shader_state);
+  renodx::utils::state::CommandListStateCache state_cache;
+  const uint32_t vertex_hash = renodx::utils::state::GetCurrentShaderHash(
+      cmd_list, reshade::api::pipeline_stage::vertex_shader, &state_cache);
+  const uint32_t pixel_hash = renodx::utils::state::GetCurrentShaderHash(
+      cmd_list, reshade::api::pipeline_stage::pixel_shader, &state_cache);
   const auto velocity_producer = upgrades::IdentifyVelocityProducer(vertex_hash, pixel_hash);
   const bool is_dof_marker = pixel_hash == shader_hashes::DOF_NEAR_PS
                              || pixel_hash == shader_hashes::DOF_FAR_PS
@@ -126,10 +126,7 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list, [[maybe_unused]] co
 
   reshade::api::resource_view velocity_rtv = {0};
   if (velocity_producer != VelocityProducer::NONE) {
-    const auto* render_state = renodx::utils::state::GetCurrentState(cmd_list);
-    if (render_state != nullptr && !render_state->render_targets.empty()) {
-      velocity_rtv = render_state->render_targets[0];
-    }
+    velocity_rtv = renodx::utils::state::GetRenderTarget(cmd_list, 0u);
     velocity_rtv = upgrades::PrepareVelocityTarget(cmd_list, velocity_rtv, vertex_hash, pixel_hash);
   }
 
@@ -617,7 +614,8 @@ inline void OnDestroyDevice(reshade::api::device* device) {
   projection_jitter::StopAdmission();
   {
     const std::unique_lock lock(resolution::sizing_state.mutex);
-    resolution::sizing_state.renderer = nullptr;
+    resolution::sizing_state.backend = 0u;
+    resolution::sizing_state.presentation_generation = 0u;
     resolution::sizing_state.requested = {};
     resolution::sizing_state.actual = {};
     ++resolution::sizing_state.generation;
@@ -849,3 +847,5 @@ inline void Use(DWORD fdw_reason, const settings::State& settings_state) {
 }
 
 }  // namespace mgsv::reconstruction
+
+#endif  // RENODX_GAMES_MGSV_RECONSTRUCTION_RUNTIME_HPP_

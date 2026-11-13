@@ -13,6 +13,7 @@
 #include <atomic>
 #include <bit>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -21,6 +22,7 @@
 #include <detours.h>
 #include <include/reshade.hpp>
 
+#include "../rendering/native_context.hpp"
 #include "logging.hpp"
 #include "state.hpp"
 
@@ -70,7 +72,8 @@ struct State {
   Plan requested;
   Size actual;
   uint64_t generation = 0u;
-  uint8_t* renderer = nullptr;  // Borrowed identity; dereferenced only during its own native step.
+  uintptr_t backend = 0u;  // Borrowed identity; read only during its native Start call.
+  uint64_t presentation_generation = 0u;
   Size engine_wanted;
   Size last_written;
 };
@@ -124,61 +127,90 @@ inline void Fail(const char* reason) {
   }
 }
 
-using RendererStep = void(__fastcall*)(uint8_t* renderer);
+using BackendStep = void(__fastcall*)(uint8_t* backend);
 using DofDraw = void(__fastcall*)(void* effect, const float* parameters);
-using DofDimensions = void(__fastcall*)(void* effect, uint32_t width, uint32_t height);
+using DofDimensions = void(__fastcall*)(void* resources, uint32_t width, uint32_t height);
 using DofSprites = void(__fastcall*)(void* effect, uint32_t width, uint32_t height, uint8_t level, char near_layer,
                                      float parameter6, float parameter7, float parameter8, float parameter9,
                                      float parameter10, float parameter11);
-inline RendererStep renderer_step = nullptr;
+inline BackendStep backend_step = nullptr;
 inline DofDraw dof_draw = nullptr;
 inline DofDimensions dof_dimensions = nullptr;
 inline DofSprites dof_sprites = nullptr;
-// Address of the game's active graphics-view pointer, also used by scatter.
-// Read the view only during the native DoF call; never keep the borrowed view.
-inline const uint8_t* const* native_dof_view_global = nullptr;
-inline thread_local Plan dof_plan;
-inline thread_local uint64_t dof_token = 0u;
-inline thread_local uint64_t dof_sequence = 0u;
-inline uintptr_t renderer_step_entry = 0u;
+inline uintptr_t backend_step_entry = 0u;
 
-inline void __fastcall HookRendererStep(uint8_t* renderer) {
-  // Preserve the selected renderer's own size requests, including display
-  // changes. Unrelated renderer instances must not replace its actual extent.
-  auto* wanted = reinterpret_cast<Size*>(renderer + 0x188u);
-  auto* flags = reinterpret_cast<uint32_t*>(renderer + 0x198u);
-  const auto display = *reinterpret_cast<const Size*>(renderer + 0x180u);
-  const auto* table = *reinterpret_cast<const uintptr_t* const*>(renderer);
-  bool selected = false;
+// These fields belong to the shared Dg backend. Its Start call applies size
+// requests before the game begins building views for the next render.
+inline constexpr size_t BACKEND_WANTED_SIZE_OFFSET = 0x188u;
+inline constexpr size_t BACKEND_FLAGS_OFFSET = 0x198u;
+inline constexpr uint32_t BACKEND_RESIZE_FLAG = 2u;
+inline constexpr uint32_t BACKEND_BUSY_FLAG = 4u;
+inline constexpr size_t BACKEND_START_SLOT = 6u;
+
+struct DofDrawState {
+  Plan plan;
+  uintptr_t effect = 0u;
+  uint64_t invocation = 0u;
+  uint64_t scene = 0u;
+  uint64_t generation = 0u;
+
+  [[nodiscard]] bool IsScaled() const { return plan.IsScaled(); }
+  [[nodiscard]] bool Matches(const rendering::native_context::Owner& owner) const {
+    return IsScaled() && scene != 0u && scene == owner.scene && generation == owner.generation;
+  }
+};
+static thread_local DofDrawState active_dof;
+
+inline void __fastcall HookBackendStep(uint8_t* backend) {
+  const auto presentation = rendering::native_context::GetPresentationOwner();
+  const auto backend_address = reinterpret_cast<uintptr_t>(backend);
+  auto* wanted = reinterpret_cast<Size*>(backend + BACKEND_WANTED_SIZE_OFFSET);
+  auto* flags = reinterpret_cast<uint32_t*>(backend + BACKEND_FLAGS_OFFSET);
+  const auto display = *reinterpret_cast<const Size*>(backend + rendering::native_context::OUTPUT_SIZE_OFFSET);
+  const auto* table = *reinterpret_cast<const uintptr_t* const*>(backend);
+  bool managed = false;
+  bool acquired = false;
   {
     const std::unique_lock lock(sizing_state.mutex);
     const auto& plan = sizing_state.requested;
-    if (sizing_state.renderer == nullptr && table != nullptr && table[6] == renderer_step_entry
-        && display.width != 0u && display == plan.output) {
-      sizing_state.renderer = renderer;
+    // A native-size scene establishes the swapchain/backend association during
+    // startup. Apply its scale at the next Start, without a settings toggle.
+    const bool selected = presentation.backend == backend_address && presentation.generation != 0u
+                          && table != nullptr && table[BACKEND_START_SLOT] == backend_step_entry;
+    if (selected && sizing_state.backend != backend_address) {
+      sizing_state.backend = backend_address;
       sizing_state.engine_wanted = *wanted;
       sizing_state.last_written = *wanted;
     }
-    selected = sizing_state.renderer == renderer;
-    if (selected) {
+    managed = sizing_state.backend == backend_address;
+    if (managed) {
+      acquired = selected && sizing_state.presentation_generation != presentation.generation;
+      sizing_state.presentation_generation = (selected ? presentation.generation : 0u);
       if (*wanted != sizing_state.last_written) {
         sizing_state.engine_wanted = *wanted;
       }
-      const bool scaled = installed.load(std::memory_order_acquire) && !failed.load(std::memory_order_acquire)
+      const bool scaled = selected && installed.load(std::memory_order_acquire) && !failed.load(std::memory_order_acquire)
                           && state::IsEnabled() && plan.IsScaled() && plan.output == display;
+      // Preserve the game's own request across resize, recovery, and a lost
+      // presentation association. Only a backend we already own is restored.
       const auto desired = (scaled ? plan.render : sizing_state.engine_wanted);
-      if ((*flags & 4u) == 0u && desired.width != 0u && desired.height != 0u && *wanted != desired) {
+      if ((*flags & BACKEND_BUSY_FLAG) == 0u && desired.width != 0u && desired.height != 0u && *wanted != desired) {
         *wanted = desired;
-        *flags |= 2u;
+        *flags |= BACKEND_RESIZE_FLAG;
       }
       sizing_state.last_written = *wanted;
     }
   }
-  renderer_step(renderer);
-  if (!selected) return;
-  const auto actual = *reinterpret_cast<const Size*>(renderer + 0x190u);
+  if (acquired) {
+    logging::Info("native scaling backend matched presentation generation=", presentation.generation,
+                  " render=", presentation.render_id, " view=", presentation.view_id);
+  }
+  backend_step(backend);
+  if (!managed) return;
+  const auto actual = *reinterpret_cast<const Size*>(backend + rendering::native_context::RENDER_SIZE_OFFSET);
   const std::unique_lock lock(sizing_state.mutex);
-  if (sizing_state.renderer == renderer && sizing_state.actual != actual) {
+  if (sizing_state.backend != backend_address) return;
+  if (sizing_state.actual != actual) {
     sizing_state.actual = actual;
     ++sizing_state.generation;
   }
@@ -188,25 +220,34 @@ inline void __fastcall HookRendererStep(uint8_t* renderer) {
 }
 
 inline void __fastcall HookDofDraw(void* effect, const float* parameters) {
+  const auto scope = rendering::native_context::GetDofScope();
+  const auto& owner = scope.scope.owner;
   Plan plan;
-  Size actual;
   {
     const std::shared_lock lock(sizing_state.mutex);
-    plan = sizing_state.requested;
-    actual = sizing_state.actual;
+    // MainExec supplies the viewport and camera. Dimensions then check that
+    // its scene was built with the plan currently applied to this backend.
+    if (scope.matches_view && scope.effect == reinterpret_cast<uintptr_t>(effect)
+        && owner.main_view && owner.active_member && owner.presentation_matches
+        && owner.backend == sizing_state.backend && owner.generation == sizing_state.presentation_generation
+        && sizing_state.requested.render == sizing_state.actual
+        && owner.render_size == std::array{sizing_state.actual.width, sizing_state.actual.height}
+        && owner.output_size == std::array{sizing_state.requested.output.width, sizing_state.requested.output.height}) {
+      plan = sizing_state.requested;
+    }
   }
-  const auto previous = dof_plan;
-  const uint64_t previous_token = dof_token;
-  dof_token = ++dof_sequence;
-  dof_plan = {};
-  const auto* active_view = (native_dof_view_global != nullptr ? *native_dof_view_global : nullptr);
-  const auto active_view_size = (active_view != nullptr ? *reinterpret_cast<const Size*>(active_view + 0x10u) : Size{});
-  if (plan.IsScaled() && plan.render == actual && active_view_size == actual
-      && !failed.load(std::memory_order_acquire)) {
-    const auto flags = std::bit_cast<uint32_t>(parameters[8]);
-    if ((flags & 8u) != 0u) {
-      dof_plan = plan;
-      std::array<float, 9> copied;
+  const auto previous = active_dof;
+  active_dof = {};
+  std::array<float, 9> copied;
+  const float* draw_parameters = parameters;
+  if (plan.IsScaled() && !failed.load(std::memory_order_acquire)) {
+    constexpr size_t FLAGS_INDEX = 8u;
+    constexpr uint32_t SCATTER_FLAG = 8u;
+    constexpr uint32_t NEAR_RADIUS_CAP_FLAG = 1u;
+    constexpr float NEAR_RADIUS_CAP = 6.f;
+    const auto flags = std::bit_cast<uint32_t>(parameters[FLAGS_INDEX]);
+    if ((flags & SCATTER_FLAG) != 0u) {
+      active_dof = {.plan = plan, .effect = scope.effect, .invocation = scope.invocation, .scene = owner.scene, .generation = owner.generation};
       std::memcpy(copied.data(), parameters, sizeof(copied));
       const float scale = static_cast<float>(plan.output.width) / static_cast<float>(plan.render.width);
       // The native scatter converts these physical blur terms into pixels
@@ -214,38 +255,38 @@ inline void __fastcall HookDofDraw(void* effect, const float* parameters) {
       copied[0] *= scale;
       copied[5] *= scale;
       copied[6] *= scale;
-      if ((flags & 1u) != 0u) {
-        // Bit 1 only enables the native near-radius cap of width/1280*6.
+      if ((flags & NEAR_RADIUS_CAP_FLAG) != 0u) {
+        // The near-radius flag enables the native cap of width/1280*6.
         // Apply that cap in output units and prevent a second render-size cap.
-        copied[5] = std::min(parameters[5], 6.f) * scale;
-        copied[8] = std::bit_cast<float>(flags & ~1u);
+        copied[5] = std::min(parameters[5], NEAR_RADIUS_CAP) * scale;
+        copied[FLAGS_INDEX] = std::bit_cast<float>(flags & ~NEAR_RADIUS_CAP_FLAG);
       }
-      dof_draw(effect, copied.data());
-      dof_plan = previous;
-      dof_token = previous_token;
-      return;
+      draw_parameters = copied.data();
+    } else {
+      Fail("unsupported native depth-of-field path");
     }
-    Fail("unsupported native depth-of-field path");
   }
-  dof_draw(effect, parameters);
-  dof_plan = previous;
-  dof_token = previous_token;
+  dof_draw(effect, draw_parameters);
+  active_dof = previous;
 }
 
-inline void __fastcall HookDofDimensions(void* effect, uint32_t width, uint32_t height) {
-  if (dof_plan.IsScaled() && Size{.width = width, .height = height} == dof_plan.render) {
-    width = dof_plan.output.width;
-    height = dof_plan.output.height;
+inline void __fastcall HookDofDimensions(void* resources, uint32_t width, uint32_t height) {
+  // DrawScatterDof passes its shared DgResources here. The enclosing admitted
+  // draw identifies the scene whose DoF rectangles need output dimensions.
+  if (active_dof.IsScaled() && Size{.width = width, .height = height} == active_dof.plan.render) {
+    width = active_dof.plan.output.width;
+    height = active_dof.plan.output.height;
   }
-  dof_dimensions(effect, width, height);
+  dof_dimensions(resources, width, height);
 }
 
 inline void __fastcall HookDofSprites(void* effect, uint32_t width, uint32_t height, uint8_t level, char near_layer,
                                       float parameter6, float parameter7, float parameter8, float parameter9,
                                       float parameter10, float parameter11) {
-  if (dof_plan.IsScaled() && Size{.width = width, .height = height} == dof_plan.render) {
-    width = dof_plan.output.width;
-    height = dof_plan.output.height;
+  if (active_dof.IsScaled() && active_dof.effect == reinterpret_cast<uintptr_t>(effect)
+      && Size{.width = width, .height = height} == active_dof.plan.render) {
+    width = active_dof.plan.output.width;
+    height = active_dof.plan.output.height;
   }
   dof_sprites(effect, width, height, level, near_layer, parameter6, parameter7, parameter8, parameter9, parameter10, parameter11);
 }
@@ -262,33 +303,28 @@ inline void OnInitDevice(reshade::api::device* device) {
   constexpr std::array<uint8_t, 16> draw = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48};
   constexpr std::array<uint8_t, 16> dimensions = {0x48, 0x89, 0x5C, 0x24, 0x20, 0x48, 0x89, 0x4C, 0x24, 0x08, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41};
   constexpr std::array<uint8_t, 16> sprites = {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x08, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56};
-  constexpr std::array<uint8_t, 7> scatter_view_load = {0x4C, 0x8B, 0x25, 0x29, 0x0E, 0x8A, 0x02};
-  constexpr std::array<uint8_t, 13> scatter_view_size = {0x45, 0x8B, 0x7C, 0x24, 0x10, 0x48, 0x8B, 0xD8, 0x41, 0x8B, 0x44, 0x24, 0x14};
   if (std::memcmp(base + 0x24C220u, step.data(), step.size()) != 0
       || std::memcmp(base + 0x2F1780u, draw.data(), draw.size()) != 0
       || std::memcmp(base + 0x2F64A0u, dimensions.data(), dimensions.size()) != 0
       || std::memcmp(base + 0x2F5D70u, sprites.data(), sprites.size()) != 0
-      || std::memcmp(base + 0x2F3290u, scatter_view_load.data(), scatter_view_load.size()) != 0
-      || std::memcmp(base + 0x2F32A9u, scatter_view_size.data(), scatter_view_size.size()) != 0
       || *reinterpret_cast<const float*>(base + 0x20AAE50u) != 6.f
       || *reinterpret_cast<const float*>(base + 0x211E04Cu) != 0.85f
       || *reinterpret_cast<const float*>(base + 0x211E048u) != (1.f / 1920.f)) {
     logging::Warn("native upscaling executable validation failed");
     return;
   }
-  renderer_step = reinterpret_cast<RendererStep>(base + 0x24C220u);
-  renderer_step_entry = reinterpret_cast<uintptr_t>(base + 0x24C220u);
+  backend_step = reinterpret_cast<BackendStep>(base + 0x24C220u);
+  backend_step_entry = reinterpret_cast<uintptr_t>(base + 0x24C220u);
   dof_draw = reinterpret_cast<DofDraw>(base + 0x2F1780u);
   dof_dimensions = reinterpret_cast<DofDimensions>(base + 0x2F64A0u);
   dof_sprites = reinterpret_cast<DofSprites>(base + 0x2F5D70u);
-  native_dof_view_global = reinterpret_cast<const uint8_t* const*>(base + 0x2B940C0u);
   HMODULE pinned = nullptr;
   if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-                         reinterpret_cast<LPCWSTR>(&HookRendererStep), &pinned)
+                         reinterpret_cast<LPCWSTR>(&HookBackendStep), &pinned)
       == FALSE) return;
   if (DetourTransactionBegin() != NO_ERROR) return;
   if (DetourUpdateThread(GetCurrentThread()) != NO_ERROR
-      || DetourAttach(reinterpret_cast<void**>(&renderer_step), reinterpret_cast<void*>(HookRendererStep)) != NO_ERROR
+      || DetourAttach(reinterpret_cast<void**>(&backend_step), reinterpret_cast<void*>(HookBackendStep)) != NO_ERROR
       || DetourAttach(reinterpret_cast<void**>(&dof_draw), reinterpret_cast<void*>(HookDofDraw)) != NO_ERROR
       || DetourAttach(reinterpret_cast<void**>(&dof_dimensions), reinterpret_cast<void*>(HookDofDimensions)) != NO_ERROR
       || DetourAttach(reinterpret_cast<void**>(&dof_sprites), reinterpret_cast<void*>(HookDofSprites)) != NO_ERROR) {

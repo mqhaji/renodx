@@ -1,10 +1,10 @@
-#pragma once
+#ifndef RENODX_GAMES_MGSV_RENDERING_D3D11_STATE_HPP_
+#define RENODX_GAMES_MGSV_RENDERING_D3D11_STATE_HPP_
 
 // Compute and affected graphics-state preservation for reconstruction and added lighting.
 
 #include <array>
-#include <cstdint>
-#include <utility>
+#include <cstddef>
 #include <vector>
 
 #include <d3d11_1.h>
@@ -12,15 +12,9 @@
 
 #include <include/reshade.hpp>
 
-#include "../../../utils/state.hpp"
-
 namespace mgsv::rendering::d3d11_compute_state {
 
 struct State {
-  std::array<std::pair<reshade::api::pipeline_stage, reshade::api::pipeline>, 4> pipelines = {};
-  uint32_t pipeline_count = 0u;
-  reshade::api::pipeline_layout layout = {0};
-  std::vector<reshade::api::descriptor_table> descriptor_tables;
   std::array<Microsoft::WRL::ComPtr<ID3D11SamplerState>, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT> samplers;
   std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT>
       shader_resources;
@@ -34,7 +28,7 @@ struct State {
       geometry_shader_resources;
   std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT>
       pixel_shader_resources;
-  std::array<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>, 8> unordered_access_views;
+  std::array<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>, D3D11_PS_CS_UAV_REGISTER_COUNT> unordered_access_views;
   std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT> constant_buffers;
   std::array<UINT, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT> first_constants = {};
   std::array<UINT, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT> constant_counts = {};
@@ -58,23 +52,12 @@ struct State {
 // Restore must follow the added work, including when that work is skipped after capture.
 inline State Capture(reshade::api::command_list* cmd_list) {
   State result = {};
-  const auto* tracked_state = renodx::utils::state::GetCurrentState(cmd_list);
-  if (tracked_state != nullptr) {
-    for (const auto& [stage, pipeline] : tracked_state->pipelines) {
-      const bool is_compute = (static_cast<uint32_t>(stage)
-                               & static_cast<uint32_t>(reshade::api::pipeline_stage::all_compute))
-                              != 0u;
-      if (!is_compute || result.pipeline_count >= result.pipelines.size()) continue;
-      result.pipelines[result.pipeline_count++] = {stage, pipeline};
-    }
-    result.layout = tracked_state->compute_pipeline_layout;
-    result.descriptor_tables = tracked_state->compute_descriptor_tables;
-  }
-
   if (cmd_list == nullptr || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return result;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   if (context == nullptr) return result;
 
+  // Capture native bindings once. Added work uses the native context or ReShade
+  // commands, which leave the game's tracked pipeline and descriptor state alone.
   std::array<ID3D11SamplerState*, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT> samplers = {};
   std::array<ID3D11ShaderResourceView*, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT> shader_resources = {};
   std::array<ID3D11ShaderResourceView*, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT> vertex_shader_resources = {};
@@ -82,7 +65,7 @@ inline State Capture(reshade::api::command_list* cmd_list) {
   std::array<ID3D11ShaderResourceView*, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT> domain_shader_resources = {};
   std::array<ID3D11ShaderResourceView*, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT> geometry_shader_resources = {};
   std::array<ID3D11ShaderResourceView*, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT> pixel_shader_resources = {};
-  std::array<ID3D11UnorderedAccessView*, 8> unordered_access_views = {};
+  std::array<ID3D11UnorderedAccessView*, D3D11_PS_CS_UAV_REGISTER_COUNT> unordered_access_views = {};
   std::array<ID3D11Buffer*, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT> constant_buffers = {};
   std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> render_targets = {};
   std::array<ID3D11UnorderedAccessView*, D3D11_PS_CS_UAV_REGISTER_COUNT> output_merger_unordered_access_views = {};
@@ -174,17 +157,6 @@ inline State Capture(reshade::api::command_list* cmd_list) {
 }
 
 inline void Restore(reshade::api::command_list* cmd_list, const State& state) {
-  for (uint32_t index = 0u; index < state.pipeline_count; ++index) {
-    cmd_list->bind_pipeline(state.pipelines[index].first, state.pipelines[index].second);
-  }
-  if (state.layout.handle != 0u) {
-    cmd_list->bind_descriptor_tables(
-        reshade::api::shader_stage::all_compute,
-        state.layout,
-        0,
-        static_cast<uint32_t>(state.descriptor_tables.size()),
-        state.descriptor_tables.data());
-  }
   if (!state.native_descriptors_captured
       || cmd_list == nullptr
       || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) {
@@ -200,7 +172,7 @@ inline void Restore(reshade::api::command_list* cmd_list, const State& state) {
   std::array<ID3D11ShaderResourceView*, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT> domain_shader_resources = {};
   std::array<ID3D11ShaderResourceView*, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT> geometry_shader_resources = {};
   std::array<ID3D11ShaderResourceView*, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT> pixel_shader_resources = {};
-  std::array<ID3D11UnorderedAccessView*, 8> unordered_access_views = {};
+  std::array<ID3D11UnorderedAccessView*, D3D11_PS_CS_UAV_REGISTER_COUNT> unordered_access_views = {};
   std::array<ID3D11Buffer*, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT> constant_buffers = {};
   std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> render_targets = {};
   std::array<ID3D11UnorderedAccessView*, D3D11_PS_CS_UAV_REGISTER_COUNT> output_merger_unordered_access_views = {};
@@ -234,7 +206,7 @@ inline void Restore(reshade::api::command_list* cmd_list, const State& state) {
 
   constexpr std::array<ID3D11ShaderResourceView*, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT>
       null_shader_resources = {};
-  constexpr std::array<ID3D11UnorderedAccessView*, 8> null_unordered_access_views = {};
+  constexpr std::array<ID3D11UnorderedAccessView*, D3D11_PS_CS_UAV_REGISTER_COUNT> null_unordered_access_views = {};
   context->CSSetShaderResources(
       0u,
       static_cast<UINT>(shader_resources.size()),
@@ -299,3 +271,5 @@ inline void Restore(reshade::api::command_list* cmd_list, const State& state) {
 }
 
 }  // namespace mgsv::rendering::d3d11_compute_state
+
+#endif  // RENODX_GAMES_MGSV_RENDERING_D3D11_STATE_HPP_
