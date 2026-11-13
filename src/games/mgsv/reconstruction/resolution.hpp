@@ -134,6 +134,9 @@ inline RendererStep renderer_step = nullptr;
 inline DofDraw dof_draw = nullptr;
 inline DofDimensions dof_dimensions = nullptr;
 inline DofSprites dof_sprites = nullptr;
+// Address of the game's active graphics-view pointer, also used by scatter.
+// Read the view only during the native DoF call; never keep the borrowed view.
+inline const uint8_t* const* native_dof_view_global = nullptr;
 inline thread_local Plan dof_plan;
 inline thread_local uint64_t dof_token = 0u;
 inline thread_local uint64_t dof_sequence = 0u;
@@ -196,7 +199,10 @@ inline void __fastcall HookDofDraw(void* effect, const float* parameters) {
   const uint64_t previous_token = dof_token;
   dof_token = ++dof_sequence;
   dof_plan = {};
-  if (plan.IsScaled() && plan.render == actual && !failed.load(std::memory_order_acquire)) {
+  const auto* active_view = (native_dof_view_global != nullptr ? *native_dof_view_global : nullptr);
+  const auto active_view_size = (active_view != nullptr ? *reinterpret_cast<const Size*>(active_view + 0x10u) : Size{});
+  if (plan.IsScaled() && plan.render == actual && active_view_size == actual
+      && !failed.load(std::memory_order_acquire)) {
     const auto flags = std::bit_cast<uint32_t>(parameters[8]);
     if ((flags & 8u) != 0u) {
       dof_plan = plan;
@@ -256,10 +262,14 @@ inline void OnInitDevice(reshade::api::device* device) {
   constexpr std::array<uint8_t, 16> draw = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48};
   constexpr std::array<uint8_t, 16> dimensions = {0x48, 0x89, 0x5C, 0x24, 0x20, 0x48, 0x89, 0x4C, 0x24, 0x08, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41};
   constexpr std::array<uint8_t, 16> sprites = {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x08, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56};
+  constexpr std::array<uint8_t, 7> scatter_view_load = {0x4C, 0x8B, 0x25, 0x29, 0x0E, 0x8A, 0x02};
+  constexpr std::array<uint8_t, 13> scatter_view_size = {0x45, 0x8B, 0x7C, 0x24, 0x10, 0x48, 0x8B, 0xD8, 0x41, 0x8B, 0x44, 0x24, 0x14};
   if (std::memcmp(base + 0x24C220u, step.data(), step.size()) != 0
       || std::memcmp(base + 0x2F1780u, draw.data(), draw.size()) != 0
       || std::memcmp(base + 0x2F64A0u, dimensions.data(), dimensions.size()) != 0
       || std::memcmp(base + 0x2F5D70u, sprites.data(), sprites.size()) != 0
+      || std::memcmp(base + 0x2F3290u, scatter_view_load.data(), scatter_view_load.size()) != 0
+      || std::memcmp(base + 0x2F32A9u, scatter_view_size.data(), scatter_view_size.size()) != 0
       || *reinterpret_cast<const float*>(base + 0x20AAE50u) != 6.f
       || *reinterpret_cast<const float*>(base + 0x211E04Cu) != 0.85f
       || *reinterpret_cast<const float*>(base + 0x211E048u) != (1.f / 1920.f)) {
@@ -271,6 +281,7 @@ inline void OnInitDevice(reshade::api::device* device) {
   dof_draw = reinterpret_cast<DofDraw>(base + 0x2F1780u);
   dof_dimensions = reinterpret_cast<DofDimensions>(base + 0x2F64A0u);
   dof_sprites = reinterpret_cast<DofSprites>(base + 0x2F5D70u);
+  native_dof_view_global = reinterpret_cast<const uint8_t* const*>(base + 0x2B940C0u);
   HMODULE pinned = nullptr;
   if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
                          reinterpret_cast<LPCWSTR>(&HookRendererStep), &pinned)

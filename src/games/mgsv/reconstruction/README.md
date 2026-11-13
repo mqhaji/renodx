@@ -43,11 +43,15 @@ Source geometry depth is resampled separately from UI depth/stencil, including c
 
 Bloom keeps a 246x138 working region inside output-sized reduced buffers. Size constants adjust reduction offsets, flare center/fade, and the final crop independently of Bloom Type. At 4K, quarter-axis buffers remain 960x540 across quality modes. The [bloom guide](../postprocess/bloom/README.md) owns filtering/color behavior. One bloom image is reused for DoF controls, which keep their data range rather than receiving color conversions.
 
-DoF sprites sample their enlarged bake inputs in both vertex and pixel stages. Radius limits and first-bake cutoffs follow output width; native physical blur terms are copied/converted without modifying the shared view. Shaders reading native view-to-buffer ratios receive only the required copied constant fields, using a small compute adjustment where necessary. Multiple adjustments share one state save; already resized native views do not receive a second scale.
+DoF sprites sample their enlarged bake inputs in both vertex and pixel stages. Radius limits and first-bake cutoffs follow output width. Native blur parameters are copied and scaled without changing the shared view. Scaling requires the active native graphics view to match the actual render dimensions; missing or differently sized views keep native parameters. Matching size alone does not identify a secondary camera of the same size. Shaders reading view-to-buffer ratios receive copied size fields, with a small compute adjustment where needed. Multiple adjustments share one state save; native views already at output size are not scaled twice.
 
 The depth-tested flare-sprite pass `0x93A0C8D8` writes a separate half-size layer. Its depth is matched to current scene geometry while typed views, blend equations, native shader, clear color, and alpha are retained. That layer keeps its producer/consumer mapping across frames because another worker can record its scene copy before the flare draws. Frames without flares keep a neutral layer through native clears. Native quality retains the original route.
 
 Each scene's recording sequence retains its output and intermediate roles from an accepted bloom/DoF start through display conversion. A new scene can reuse the same native texture while the previous scene is still being recorded; it cannot replace the older sequence's selection. Unfinished command lists retain their route until successful FinishCommandList. Resource resets retire both forms of ownership, with objects retained until outstanding commands release them.
+
+Creating an enlarged target does not make its pixels valid. Draw routing checks targets, active depth/stencil, rectangles, and required constant buffers before clearing targets or recording intermediate roles. A rejected draw leaves earlier output pixels, producer roles, and native bindings unchanged.
+
+When shader reads are known, the supported native constant layout must fit both the allocation and the bound D3D11.1 range. Missing buffers or insufficient ranges reject the enlarged route, including DoF sprite vertex constants. Constant preparation follows GPU command order; replacement buffers are bound only after the whole draw is accepted. Allocation or range failure must not mix native dimensions with enlarged targets.
 
 Only texture slots read by the pixel shader are remapped. Native order remains late tonemap, FXAA, then UI even when UI records first on another worker. Draw2D normal-blending, normal-encoding, and roughness-blending shaders produce packed data, not UI color. Treating all Draw2D shaders as UI previously redirected rain/material work incorrectly.
 
@@ -82,7 +86,7 @@ Shared SDK preparation constants are 96 bytes. State restoration covers compute/
 [projection_jitter.hpp](projection_jitter.hpp) accepts an enabled, full-resolution perspective viewport whose original projection matches the shader manager's copy. Setters change only `P[8] += 2*jitter_uv.x`, `P[9] -= 2*jitter_uv.y`, and required dirty flags. Path scales multiply these offsets; unrelated elements stay intact.
 
 - Original paths are Velocity, Forward, Model, Alpha Model, Overlay Model, and Local Light. Local Light temporarily changes its source viewport, then restores all sixteen elements; the main viewport remains unchanged.
-- Velocity/Thermography may use the preceding Present interval only for matching camera, viewport, original matrices, reset version, and sample. Their publication lock spans validation and the native write.
+- Velocity, Thermography, Forward, Model, Alpha Model, and Overlay Model may finish recording across one Present when the temporal sample has not advanced. Camera, viewport, original projection/view matrices, dimensions, and reset generation must still match. One publication lock covers validation and the native write, so another camera or reset cannot replace that state midway. Secondary cameras do not inherit jitter just because their sizes match, and an already-offset projection is not jittered twice.
 - Experimental paths own matrix/sequence/reset/sample copies. Lock order is transition, execution, then camera data; release guards before native calls, allocation, or logging. A rejected nested call must not inherit another call's valid correction.
 - Reject unrelated, stale, orthographic, nonfinite, already-offset, or ambiguous data. Deferred camera packets need their actual producer sample/reset association, not the latest matrix or a matching pointer.
 
@@ -130,7 +134,7 @@ DLSS needs a compatible `nvngx_dlss.dll` beside the game executable and NVIDIA's
 
 ## Known limitations and validation status
 
-Open reports from November 11, 2026 include rain inside the ACC at reduced resolution, occasional Mother Base flashes even at Native quality, and sortie ground/horizon black flashes with an unknown quality dependency. Their causes and whether they are related remain unresolved.
+Rain inside the ACC at reduced resolution and occasional Mother Base flashes even at Native quality remain unresolved. Do not assume they share a cause with scene projection discontinuities. Sortie ground stability depends on forward geometry keeping the same camera jitter as scene rendering and reconstruction; Present alone does not mark the end of a camera sample.
 
 Controlled GPU/ReShade tests cover overlapping recordings, output-sized native processing, odd dimensions, depth/stencil, ranges, copies, fallbacks, and UI/clears without a new scene. They do not recover geometry missing at lower resolution. Loading/save-reload gameplay, display changes, special views, and failure recovery still need broader checks.
 

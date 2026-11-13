@@ -24,7 +24,6 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
-#include <optional>
 #include <shared_mutex>
 
 #include <detours.h>
@@ -395,7 +394,7 @@ inline bool GetPublishedJitterForViewport(
   const uint32_t width = *reinterpret_cast<const uint32_t*>(viewport + 0x5D8u);
   const uint32_t height = *reinterpret_cast<const uint32_t*>(viewport + 0x5DCu);
   const uint8_t flags = *(viewport + 0x6E2u);
-  void* camera = *reinterpret_cast<void* const*>(viewport + 0x570u);
+  const void* camera = *reinterpret_cast<void* const*>(viewport + 0x570u);
   const camera_state::CameraFrame published = camera_state::Get();
   if (!LooksLikeGameplayProjection(projection, width, height, flags, camera)) {
     return false;
@@ -403,14 +402,18 @@ inline bool GetPublishedJitterForViewport(
   if (!published.valid) {
     return false;
   }
-  const uint64_t epoch = state::CurrentFrameToken();
-  // Velocity and thermography callers hold the publication writer lock through the native
-  // write. Present is not a camera/sample boundary: the temporal consumer can
-  // consume this exact camera in the next epoch, but never another sample.
+  const uint64_t frame_token = state::CurrentFrameToken();
+  // Present can happen before recording for a camera sample finishes. These
+  // scene paths may keep that sample across one Present only if the camera
+  // still matches. Their caller holds the publication lock through the write.
   const bool require_exact_camera = path == state::ProjectionJitterPath::VELOCITY
-                                    || path == state::ProjectionJitterPath::THERMOGRAPHY;
-  if (published.frame_token != epoch
-      && (!require_exact_camera || epoch == 0u || published.frame_token != epoch - 1u)) {
+                                    || path == state::ProjectionJitterPath::THERMOGRAPHY
+                                    || path == state::ProjectionJitterPath::FORWARD
+                                    || path == state::ProjectionJitterPath::MODEL
+                                    || path == state::ProjectionJitterPath::ALPHA_MODEL
+                                    || path == state::ProjectionJitterPath::OVERLAY_MODEL;
+  if (published.frame_token != frame_token
+      && (!require_exact_camera || frame_token == 0u || published.frame_token != frame_token - 1u)) {
     return false;
   }
   if (published.width != width || published.height != height) {
@@ -441,12 +444,10 @@ inline bool GetPublishedJitterForViewport(
 inline void ApplyPublishedJitterToActiveProjection(
     const uint8_t* viewport,
     state::ProjectionJitterPath jitter_path) {
-  // No execution gate here: native callbacks may run under it already. The
-  // writer lock excludes reset, camera replacement, scale changes and the
-  // camera+sample commit; no native calls or logging occur while it is held.
-  std::optional<camera_state::PublicationWriterGuard> publication_guard;
-  if (jitter_path == state::ProjectionJitterPath::VELOCITY
-      || jitter_path == state::ProjectionJitterPath::THERMOGRAPHY) publication_guard.emplace();
+  // Native callbacks may already hold the execution gate, so do not take it
+  // here. Keep camera validation and the write under one publication lock so
+  // reset, camera replacement, or sample advancement cannot split them.
+  const camera_state::PublicationWriterGuard publication_guard;
   std::array<float, 2> jitter_uv = {};
   void* shader_manager = shader_manager_global != nullptr ? *shader_manager_global : nullptr;
   if (shader_manager == nullptr) {

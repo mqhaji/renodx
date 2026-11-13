@@ -39,6 +39,7 @@
 #include "../../../../utils/resource.hpp"
 #include "../../../../utils/resource_upgrade.hpp"
 #include "../frame_inputs.hpp"
+#include "../resolution.hpp"
 #include "../state.hpp"
 
 namespace mgsv::reconstruction::post_process {
@@ -621,12 +622,13 @@ struct Output {
     return surface;
   }
 
-  // Redirect a native write. create marks a qualified producer; a lookup alone
-  // must use an already eligible target. scene_only excludes effect-data targets.
+  // create allows new storage and views. With create enabled, record_write also
+  // updates their role. Begin delays that update until the draw passes validation.
+  // Existing targets still need a valid role; scene_only excludes effect data.
   Microsoft::WRL::ComPtr<ID3D11RenderTargetView> MapTarget(ID3D11RenderTargetView* view, bool create, bool scene_only = false,
                                                            Surface::Role role = Surface::Role::DATA,
                                                            uint64_t recording_frame = reconstruction::state::CurrentFrameToken(),
-                                                           OutputProducer* producer = nullptr) {
+                                                           OutputProducer* producer = nullptr, bool record_write = true) {
     if (view == nullptr) return nullptr;
     Microsoft::WRL::ComPtr<ID3D11Resource> original;
     view->GetResource(&original);
@@ -646,24 +648,27 @@ struct Output {
       if (auto* cached = find_view(); cached != nullptr) return cached;
     }
     const std::unique_lock lock(surface_mutex);
-    if (create) {
+    auto* mapped = find_view();
+    if (mapped == nullptr) {
+      D3D11_RENDER_TARGET_VIEW_DESC description;
+      view->GetDesc(&description);
+      Surface::TargetView target_view = {.original = view};
+      auto* native_device = reinterpret_cast<ID3D11Device*>(device->get_native());  // NOLINT(performance-no-int-to-ptr)
+      if (FAILED(native_device->CreateRenderTargetView(surface->texture.Get(), &description, &target_view.replacement))) {
+        resolution::Fail("post-processing target view allocation failed");
+        return nullptr;
+      }
+      surface->targets.push_back(std::move(target_view));
+      mapped = surface->targets.back().replacement.Get();
+    }
+    if (create && record_write) {
       surface->routed_frame = recording_frame;
       surface->role = (scene_only ? Surface::Role::SCENE_COLOR : role);
       if (producer != nullptr) {
         producer->SetSurfaceRole(original.Get(), surface->role);
       }
     }
-    if (auto* cached = find_view(); cached != nullptr) return cached;
-    D3D11_RENDER_TARGET_VIEW_DESC description;
-    view->GetDesc(&description);
-    Surface::TargetView target_view = {.original = view};
-    auto* native_device = reinterpret_cast<ID3D11Device*>(device->get_native());  // NOLINT(performance-no-int-to-ptr)
-    if (FAILED(native_device->CreateRenderTargetView(surface->texture.Get(), &description, &target_view.replacement))) {
-      resolution::Fail("post-processing target view allocation failed");
-      return nullptr;
-    }
-    surface->targets.push_back(std::move(target_view));
-    return surface->targets.back().replacement;
+    return mapped;
   }
 
   // Redirect reads only when this recording has a matching scene, depth, or

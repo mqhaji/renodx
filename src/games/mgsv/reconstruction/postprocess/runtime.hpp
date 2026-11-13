@@ -36,7 +36,6 @@
 
 #include "../../../../utils/command_action.hpp"
 #include "../../../../utils/hash.hpp"
-#include "../../../../utils/resource.hpp"
 #include "../../../../utils/resource_upgrade.hpp"
 #include "../logging.hpp"
 #include "../resolution.hpp"
@@ -49,7 +48,7 @@ namespace mgsv::reconstruction::post_process {
 // These are the game's draw parameters, separate from injected user settings.
 struct ConstantBinding {
   UINT slot;           // Shader register: b0 system, b2 scene, or b5 object data.
-  UINT minimum_bytes;  // Required bytes after the start of the selected buffer range.
+  UINT minimum_bytes;  // Minimum supported native layout size within the bound range.
 };
 inline constexpr auto CONSTANT_BINDINGS = std::to_array<ConstantBinding>({
     {.slot = 0u, .minimum_bytes = 64u},
@@ -404,6 +403,7 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
   // Inspect the shader actually bound after replacement. Unknown metadata uses
   // conservative saved bindings; known texture reads avoid remapping stale slots.
   uint32_t constant_mask = CONSTANT_BINDINGS_MASK;
+  bool constant_reads_known = false;
   uint32_t pixel_inputs = PIXEL_INPUT_MASK;
   Microsoft::WRL::ComPtr<ID3D11PixelShader> pixel;
   context->PSGetShader(&pixel, nullptr, nullptr);
@@ -415,6 +415,7 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
     UINT bytes = sizeof(flags);
     if (SUCCEEDED(pixel->GetPrivateData(PIXEL_CONSTANTS_GUID, &bytes, &flags)) && bytes == sizeof(flags)) {
       constant_mask = flags & CONSTANT_BINDINGS_MASK;
+      constant_reads_known = true;
       if ((flags & PIXEL_INPUTS_KNOWN_FLAG) != 0u) {
         pixel_inputs = flags >> PIXEL_INPUTS_SHIFT;
       }
@@ -538,6 +539,11 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
       target_role = Surface::Role::BLOOM;
     }
   }
+  // Creating a target does not make its pixels valid. Delay clears and role
+  // updates until the entire draw passes validation.
+  std::array<std::shared_ptr<Surface>, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> pending_surfaces;
+  std::array<std::optional<ClearColor>, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> pending_clears;
+  const bool create_targets = (resize_targets || ui_view) && !display_output;
   // Qualify each destination separately. The first color write may also need
   // the native clear observed before its enlarged counterpart was allocated.
   for (size_t i = 0u; i < targets.size(); ++i) {
@@ -550,8 +556,11 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
     if (first_color_write && output->GetSurface(target_resource.Get(), false, route.frame, route.producer.get(), &previous_role) != nullptr) {
       first_color_write = previous_role != target_role;
     }
-    const auto mapped = output->MapTarget(targets[i], (resize_targets || ui_view) && !display_output, scene_only, target_role, route.frame, route.producer.get());
+    const auto mapped = output->MapTarget(targets[i], create_targets, scene_only, target_role, route.frame, route.producer.get(), false);
     if (mapped != nullptr) {
+      if (create_targets && !output->IsSceneTarget(target_resource.Get())) {
+        pending_surfaces[i] = output->GetSurface(target_resource.Get(), true, route.frame, route.producer.get());
+      }
       if (first_color_write) {
         // Cropped bloom and blended flare layers need their native initial
         // color and alpha, including clears recorded before alias activation.
@@ -559,17 +568,9 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
         UINT bytes = sizeof(clear);
         if (SUCCEEDED(target_resource->GetPrivateData(CLEAR_COLOR_GUID, &bytes, &clear)) && bytes == sizeof(clear)
             && clear.frame == route.frame) {
-          context->ClearRenderTargetView(mapped.Get(), clear.color.data());
+          pending_clears[i] = clear;
         } else if (pass != nullptr && pass->shader_hash == LENS_FLARE_SHADER_HASH) {
           // A blended layer must not start with undefined color or alpha.
-          if (const auto surface = output->GetSurface(target_resource.Get(), false, route.frame, route.producer.get()); surface != nullptr) {
-            const std::unique_lock lock(output->surface_mutex);
-            surface->routed_frame = std::numeric_limits<uint64_t>::max();
-            surface->role = Surface::Role::DATA;
-            if (route.producer != nullptr) {
-              std::erase_if(route.producer->surfaces, [&](const auto& binding) { return binding.resource == target_resource.Get(); });
-            }
-          }
           resolution::Fail("native lens-flare layer clear was not observed");
           *saved = {};
           return false;
@@ -667,8 +668,8 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
   // Raster rectangles and shader dimensions must agree about the enlarged
   // target. Some native DoF helpers already use output dimensions; preserve
   // those views while updating the dimensions of the textures they sample.
+  Microsoft::WRL::ComPtr<ID3D11DeviceContext1> context1;
   if (saved->output->IsScaled() && (saved->targets_changed || display_output)) {
-    Microsoft::WRL::ComPtr<ID3D11DeviceContext1> context1;
     if (FAILED(context->QueryInterface(IID_PPV_ARGS(&context1)))) {
       resolution::Fail("D3D11.1 post-processing context unavailable");
       *saved = {};
@@ -709,7 +710,9 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
         texture->GetDesc(&output_description);
       }
       // Find the patch by native identity, not the newly allocated destination.
-      if (const auto surface = saved->output->GetSurface(native_target.Get(), false, route.frame, route.producer.get()); surface != nullptr) {
+      const auto surface = (pending_surfaces[0] != nullptr ? pending_surfaces[0]
+                                                           : saved->output->GetSurface(native_target.Get(), false, route.frame, route.producer.get()));
+      if (surface != nullptr) {
         patch = surface->size_patch;
       }
     }
@@ -787,9 +790,15 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
       auto* native_device = reinterpret_cast<ID3D11Device*>(command_list->get_device()->get_native());  // NOLINT(performance-no-int-to-ptr)
       if (draw->system_scratch == nullptr || draw->system_scratch_uav == nullptr) {
         const D3D11_BUFFER_DESC scratch = {.ByteWidth = 32u, .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_UNORDERED_ACCESS, .MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS};
-        const D3D11_UNORDERED_ACCESS_VIEW_DESC scratch_view = {.Format = DXGI_FORMAT_R32_TYPELESS,
-                                                               .ViewDimension = D3D11_UAV_DIMENSION_BUFFER,
-                                                               .Buffer = {.FirstElement = 0u, .NumElements = 8u, .Flags = D3D11_BUFFER_UAV_FLAG_RAW}};
+        const D3D11_UNORDERED_ACCESS_VIEW_DESC scratch_view = {
+            .Format = DXGI_FORMAT_R32_TYPELESS,
+            .ViewDimension = D3D11_UAV_DIMENSION_BUFFER,
+            .Buffer = {
+                .FirstElement = 0u,
+                .NumElements = 8u,
+                .Flags = D3D11_BUFFER_UAV_FLAG_RAW,
+            },
+        };
         if (FAILED(native_device->CreateBuffer(&scratch, nullptr, draw->system_scratch.ReleaseAndGetAddressOf()))
             || FAILED(native_device->CreateUnorderedAccessView(draw->system_scratch.Get(), &scratch_view, draw->system_scratch_uav.ReleaseAndGetAddressOf()))) {
           resolution::Fail("post-processing constants scratch allocation failed");
@@ -822,11 +831,26 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
       if (i == 2u && (pass == nullptr || (pass->shader_hash != 0xFE1DC3F8u && pass->shader_hash != 0x9BE51873u && !patch_fixed_bloom))) continue;
       const UINT slot = CONSTANT_BINDINGS[i].slot;
       context1->PSGetConstantBuffers1(slot, 1u, &saved->constants[i], &saved->first_constants[i], &saved->constant_counts[i]);
-      if (saved->constants[i] == nullptr) continue;
+      if (saved->constants[i] == nullptr) {
+        if (!constant_reads_known) continue;
+        resolution::Fail("required post-processing constants are not bound");
+        *saved = {};
+        return false;
+      }
       D3D11_BUFFER_DESC description;
       saved->constants[i]->GetDesc(&description);
-      const UINT offset = saved->first_constants[i] * 16u;
-      if (description.ByteWidth < offset + CONSTANT_BINDINGS[i].minimum_bytes) continue;
+      const uint64_t offset_bytes = static_cast<uint64_t>(saved->first_constants[i]) * 16u;
+      // The buffer and its bound range must both contain the native fields.
+      // A large allocation does not make fields outside that range readable.
+      if (offset_bytes > description.ByteWidth
+          || CONSTANT_BINDINGS[i].minimum_bytes > description.ByteWidth - offset_bytes
+          || static_cast<uint64_t>(saved->constant_counts[i]) * 16u < CONSTANT_BINDINGS[i].minimum_bytes) {
+        if (!constant_reads_known) continue;
+        resolution::Fail("required post-processing constant range is unavailable");
+        *saved = {};
+        return false;
+      }
+      const auto offset = static_cast<UINT>(offset_bytes);
       if (draw->output_constants[i] == nullptr || draw->output_constant_bytes[i] != description.ByteWidth) {
         description.Usage = D3D11_USAGE_DEFAULT;
         description.CPUAccessFlags = 0u;
@@ -835,7 +859,8 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
         auto* native_device = reinterpret_cast<ID3D11Device*>(command_list->get_device()->get_native());  // NOLINT(performance-no-int-to-ptr)
         if (FAILED(native_device->CreateBuffer(&description, nullptr, draw->output_constants[i].ReleaseAndGetAddressOf()))) {
           resolution::Fail("post-processing constants allocation failed");
-          continue;
+          *saved = {};
+          return false;
         }
         draw->output_constant_bytes[i] = description.ByteWidth;
       }
@@ -846,7 +871,10 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
           // the compute scratch below stores them in its second row.
           copy_bytes(draw->output_constants[i].Get(), offset + SYSTEM_BUFFER_SIZE_OFFSET, patch.Get(), offsetof(SizePatch, buffer_size), 16u);
         } else {
-          if (!run_constants(saved->output->pipelines->system_shader.Get(), saved->constants[i].Get(), saved->first_constants[i], saved->constant_counts[i])) continue;
+          if (!run_constants(saved->output->pipelines->system_shader.Get(), saved->constants[i].Get(), saved->first_constants[i], saved->constant_counts[i])) {
+            *saved = {};
+            return false;
+          }
           copy_bytes(draw->output_constants[i].Get(), offset + SYSTEM_VIEW_SIZE_OFFSET, draw->system_scratch.Get(), 0u, 8u);
           copy_bytes(draw->output_constants[i].Get(), offset + SYSTEM_BUFFER_SIZE_OFFSET, draw->system_scratch.Get(), 16u, 16u);
         }
@@ -856,7 +884,10 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
       } else if (pass != nullptr && pass->shader_hash == 0x9BE51873u) {
         // Kawase stores four UV offsets in c9 and reciprocal size in c12.xy.
         // Preserve c12.zw and the rest of the native object buffer.
-        if (!run_constants(saved->output->pipelines->bloom_shader.Get(), saved->constants[i].Get(), saved->first_constants[i], saved->constant_counts[i])) continue;
+        if (!run_constants(saved->output->pipelines->bloom_shader.Get(), saved->constants[i].Get(), saved->first_constants[i], saved->constant_counts[i])) {
+          *saved = {};
+          return false;
+        }
         copy_bytes(draw->output_constants[i].Get(), offset + OBJECT_LOCAL_PARAM_OFFSET, draw->system_scratch.Get(), 0u, 16u);
         copy_bytes(draw->output_constants[i].Get(), offset + OBJECT_LAST_PARAM_OFFSET, draw->system_scratch.Get(), 16u, 8u);
       } else if (patch_fixed_bloom) {
@@ -885,38 +916,43 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
         // Only the first scatter bake's cutoff follows output width.
         copy_bytes(draw->output_constants[i].Get(), offset + OBJECT_LAST_PARAM_OFFSET, patch.Get(), offsetof(SizePatch, dof_cutoff), 4u);
       }
-      context1->PSSetConstantBuffers1(slot, 1u, draw->output_constants[i].GetAddressOf(), &saved->first_constants[i], &saved->constant_counts[i]);
       saved->changed_constants |= 1u << i;
     }
     if (saved->vertex_inputs_changed && native_output_view) {
       // DoF sprite UVs use VS b0's view/buffer ratio too. The native rectangle
       // helper already supplied the output view; only its buffer grid changes.
       context1->VSGetConstantBuffers1(0u, 1u, &saved->vertex_constants, &saved->vertex_first_constant, &saved->vertex_constant_count);
-      if (saved->vertex_constants != nullptr) {
-        D3D11_BUFFER_DESC description;
-        saved->vertex_constants->GetDesc(&description);
-        const UINT offset = saved->vertex_first_constant * 16u;
-        if (description.ByteWidth >= offset + 64u) {
-          if (draw->vertex_output_constants == nullptr || draw->vertex_output_constant_bytes != description.ByteWidth) {
-            description.Usage = D3D11_USAGE_DEFAULT;
-            description.CPUAccessFlags = 0u;
-            description.MiscFlags = 0u;
-            description.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-            auto* native_device = reinterpret_cast<ID3D11Device*>(command_list->get_device()->get_native());  // NOLINT(performance-no-int-to-ptr)
-            if (FAILED(native_device->CreateBuffer(&description, nullptr, draw->vertex_output_constants.ReleaseAndGetAddressOf()))) {
-              resolution::Fail("DoF vertex constants allocation failed");
-            } else {
-              draw->vertex_output_constant_bytes = description.ByteWidth;
-            }
-          }
-          if (draw->vertex_output_constants != nullptr) {
-            context->CopyResource(draw->vertex_output_constants.Get(), saved->vertex_constants.Get());
-            copy_bytes(draw->vertex_output_constants.Get(), offset + SYSTEM_BUFFER_SIZE_OFFSET, patch.Get(), offsetof(SizePatch, buffer_size), 16u);
-            context1->VSSetConstantBuffers1(0u, 1u, draw->vertex_output_constants.GetAddressOf(), &saved->vertex_first_constant, &saved->vertex_constant_count);
-            saved->vertex_constants_changed = true;
-          }
-        }
+      if (saved->vertex_constants == nullptr) {
+        resolution::Fail("required DoF vertex constants are not bound");
+        *saved = {};
+        return false;
       }
+      D3D11_BUFFER_DESC description;
+      saved->vertex_constants->GetDesc(&description);
+      const uint64_t offset_bytes = static_cast<uint64_t>(saved->vertex_first_constant) * 16u;
+      if (offset_bytes > description.ByteWidth || description.ByteWidth - offset_bytes < 64u
+          || static_cast<uint64_t>(saved->vertex_constant_count) * 16u < 64u) {
+        resolution::Fail("required DoF vertex constant range is unavailable");
+        *saved = {};
+        return false;
+      }
+      const auto offset = static_cast<UINT>(offset_bytes);
+      if (draw->vertex_output_constants == nullptr || draw->vertex_output_constant_bytes != description.ByteWidth) {
+        description.Usage = D3D11_USAGE_DEFAULT;
+        description.CPUAccessFlags = 0u;
+        description.MiscFlags = 0u;
+        description.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        auto* native_device = reinterpret_cast<ID3D11Device*>(command_list->get_device()->get_native());  // NOLINT(performance-no-int-to-ptr)
+        if (FAILED(native_device->CreateBuffer(&description, nullptr, draw->vertex_output_constants.ReleaseAndGetAddressOf()))) {
+          resolution::Fail("DoF vertex constants allocation failed");
+          *saved = {};
+          return false;
+        }
+        draw->vertex_output_constant_bytes = description.ByteWidth;
+      }
+      context->CopyResource(draw->vertex_output_constants.Get(), saved->vertex_constants.Get());
+      copy_bytes(draw->vertex_output_constants.Get(), offset + SYSTEM_BUFFER_SIZE_OFFSET, patch.Get(), offsetof(SizePatch, buffer_size), 16u);
+      saved->vertex_constants_changed = true;
     }
     saved->rectangles_changed = true;
     if (fixed_bloom_reduction && (saved->output->observed_passes.fetch_or(8192u, std::memory_order_relaxed) & 8192u) == 0u) {
@@ -926,6 +962,28 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
     }
     context->RSSetViewports(saved->viewport_count, viewports.data());
     context->RSSetScissorRects(saved->scissor_count, scissors.data());
+  }
+  for (size_t i = 0u; i < pending_surfaces.size(); ++i) {
+    if (pending_clears[i].has_value()) {
+      context->ClearRenderTargetView(targets[i], pending_clears[i]->color.data());
+    }
+    if (pending_surfaces[i] != nullptr) {
+      const std::unique_lock lock(saved->output->surface_mutex);
+      pending_surfaces[i]->routed_frame = route.frame;
+      pending_surfaces[i]->role = (scene_only ? Surface::Role::SCENE_COLOR : target_role);
+      if (route.producer != nullptr) {
+        route.producer->SetSurfaceRole(pending_surfaces[i]->original.Get(), pending_surfaces[i]->role);
+      }
+    }
+  }
+  if (context1 != nullptr) {
+    for (size_t i = 0u; i < saved->constants.size(); ++i) {
+      if ((saved->changed_constants & (1u << i)) == 0u) continue;
+      context1->PSSetConstantBuffers1(CONSTANT_BINDINGS[i].slot, 1u, draw->output_constants[i].GetAddressOf(), &saved->first_constants[i], &saved->constant_counts[i]);
+    }
+    if (saved->vertex_constants_changed) {
+      context1->VSSetConstantBuffers1(0u, 1u, draw->vertex_output_constants.GetAddressOf(), &saved->vertex_first_constant, &saved->vertex_constant_count);
+    }
   }
   // Keep native UAVs and pair redirected color with its qualified depth/stencil.
   if (saved->targets_changed) {
