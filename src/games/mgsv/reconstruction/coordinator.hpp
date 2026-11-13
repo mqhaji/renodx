@@ -26,6 +26,7 @@
 #include <d3d11_1.h>
 #include <detours.h>
 #include <wrl/client.h>
+#include <wrl/implements.h>
 
 #include "../rendering/d3d11_state.hpp"
 #include "../rendering/inputs.hpp"
@@ -48,6 +49,14 @@ inline constexpr size_t MAX_PENDING_DISPATCHES = 64u;
 inline constexpr size_t RESERVED_LIGHTING_DISPATCHES = 8u;
 inline auto& execution_lock = state::execution_lock;
 inline reshade::api::device* runtime_device = nullptr;
+
+// Admission follows native scene construction. Several scenes can be recorded
+// before Present, and a later insertion can occur on another worker.
+struct SceneAdmission {
+  uint64_t scene = 0u;
+  uint64_t owner_generation = 0u;
+};
+inline std::vector<SceneAdmission> admitted_scenes;
 
 using BeginQuery = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Asynchronous*);
 using EndQuery = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Asynchronous*);
@@ -170,6 +179,7 @@ inline bool IsForeignDevice(reshade::api::device* device) {
 }
 
 inline void ResetTemporalStateWithPublicationLocked(const char* reason) {
+  admitted_scenes.clear();
   input_capture::InvalidateCapturedFrame();
   analytical::InvalidateHistory(reason);
   dlss::InvalidateHistory();
@@ -226,6 +236,34 @@ inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
     }
     return false;
   }
+  {
+    const camera_state::PublicationWriterGuard guard;
+    auto& camera = inputs.camera;
+    const auto& previous = camera_state::committed_camera;
+    if (!camera.valid || !camera.camera_matrix_valid || camera.scene == 0u || camera.reservation == 0u
+        || camera.reset_generation != camera_state::reset_generation.load(std::memory_order_relaxed)
+        || (previous.valid && camera.reservation <= previous.reservation)) return false;
+
+    // Native motion describes the preceding scene. A skipped scene requires
+    // fresh history because its object motion cannot span the missing update.
+    camera.camera_reprojection_valid = previous.valid
+                                       && previous.owner_generation == camera.owner_generation
+                                       && previous.reservation + 1u == camera.reservation
+                                       && previous.viewport_identity == camera.viewport_identity
+                                       && previous.camera_identity == camera.camera_identity
+                                       && previous.width == camera.width && previous.height == camera.height;
+    camera.previous_jitter_uv_x = (camera.camera_reprojection_valid ? previous.jitter_uv_x : 0.f);
+    camera.previous_jitter_uv_y = (camera.camera_reprojection_valid ? previous.jitter_uv_y : 0.f);
+    camera.current_to_previous_clip = (camera.camera_reprojection_valid
+                                           ? camera_state::ToRowMajorFloatArray(camera_state::Multiply(
+                                                 previous.current_view_projection, camera.inverse_view_projection))
+                                           : std::array<float, 16>{});
+  }
+  if (!inputs.camera.camera_reprojection_valid) {
+    analytical::InvalidateHistory("scene history is not consecutive");
+    dlss::InvalidateHistory();
+    fsr3::InvalidateHistory();
+  }
   const auto previous_compute_state = mgsv::rendering::d3d11_compute_state::Capture(inputs.cmd_list);
   inputs.cmd_list->barrier(
       inputs.velocity_resource,
@@ -273,7 +311,14 @@ inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
       reshade::api::resource_usage::shader_resource,
       reshade::api::resource_usage::render_target);
   mgsv::rendering::d3d11_compute_state::Restore(inputs.cmd_list, previous_compute_state);
-  if (!succeeded) return false;
+  if (!succeeded) {
+    // An SDK evaluation may have changed its history before output validation
+    // failed. Its next evaluation must seed history again.
+    analytical::InvalidateHistory("reconstruction output was not installed");
+    dlss::InvalidateHistory();
+    fsr3::InvalidateHistory();
+    return false;
+  }
 
   if (!camera_state::Commit(inputs.camera)) {
     ResetTemporalState("native camera matrix commit failed");
@@ -469,7 +514,25 @@ inline void OnInitCommandList(reshade::api::command_list* command_list) {
 
 inline void CompleteRecording(reshade::api::command_list* recording, ID3D11CommandList* finished) {
   if (auto* route = recording->get_private_data<post_process::Recording>(); route != nullptr) {
-    *route = {};
+    post_process::RetainOutput(recording, route->output);
+    if (!route->retained_outputs.empty()) {
+      auto retained = Microsoft::WRL::Make<post_process::RetainedOutputs>();
+      retained->outputs = std::move(route->retained_outputs);
+      if (FAILED(finished->SetPrivateDataInterface(post_process::OUTPUT_LEASE_GUID, retained.Get()))) {
+        // Retire these allocations from reuse. The native list still owns its
+        // D3D resources, and the pool releases its references at reset.
+        const std::unique_lock lock(post_process::state.mutex);
+        for (const auto& output : retained->outputs) {
+          output->reusable = false;
+        }
+        resolution::Fail("cannot retain recorded post-processing output");
+      }
+    }
+    // The native list finished even if attachment failed, so its producer
+    // records and pending insertions must still be completed.
+    route->output.reset();
+    route->producer.reset();
+    route->owner = {};
   }
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(recording->get_native());  // NOLINT(performance-no-int-to-ptr)
   lighting::temporal_inputs::Finish(context, finished);
@@ -577,6 +640,21 @@ inline void OnExecuteSecondaryCommandList(
 
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   if (context == nullptr) return;
+  const auto retain_list_outputs = [&](ID3D11CommandList* native_list) {
+    // A merged list keeps every output used by the nested list, including UI
+    // lists that contain no reconstruction insertion of their own.
+    Microsoft::WRL::ComPtr<IUnknown> retained;
+    UINT retained_size = sizeof(IUnknown*);
+    if (SUCCEEDED(native_list->GetPrivateData(post_process::OUTPUT_LEASE_GUID, &retained_size, retained.GetAddressOf())) && retained != nullptr) {
+      const auto* leases = static_cast<post_process::RetainedOutputs*>(retained.Get());
+      for (const auto& output : leases->outputs) {
+        post_process::RetainOutput(command_list, output);
+      }
+    }
+  };
+  if (context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) {
+    retain_list_outputs(post);
+  }
   if (chain.empty()) {
     if (context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE) {
       lighting::temporal_inputs::Submit(post);
@@ -587,7 +665,11 @@ inline void OnExecuteSecondaryCommandList(
   if (context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) {
     for (const auto& pending : chain) {
       const rendering::native_context::ScopedOwner owner_scope(pending.scope);
+      retain_list_outputs(pending.prefix.Get());
       context->ExecuteCommandList(pending.prefix.Get(), TRUE);
+      if (pending.post_output != nullptr) {
+        post_process::RetainOutput(command_list, pending.post_output);
+      }
       if (pending.is_lighting && pending.lighting_policy == LightingPolicy::SHADOW_BATCH
           && pending.lighting_callback) {
         const ExecutionGuard execution_guard;
@@ -621,9 +703,8 @@ inline void OnExecuteSecondaryCommandList(
       }
       continue;
     }
-    if (pending.post_output != nullptr) {
-      pending.post_output->PrepareDepth(context, pending.inputs.camera.jitter_uv_x, pending.inputs.camera.jitter_uv_y);
-    }
+    const bool depth_ready = pending.post_output == nullptr
+                             || pending.post_output->PrepareDepth(context, pending.inputs.camera.jitter_uv_x, pending.inputs.camera.jitter_uv_y);
     // Every native prefix runs even when its added operation was canceled.
     if (pending.temporal_generation != state::frame_state.temporal_generation
         || state::GetTemporalMode() != pending.mode) {
@@ -632,11 +713,17 @@ inline void OnExecuteSecondaryCommandList(
       }
       continue;
     }
-    if (!state_guard.IsActive() || pending.dispatch_consumed
-        || pending.inputs.device != runtime_device
-        || pending.inputs.sample_index != state::CurrentSampleIndex()) {
+    if (pending.dispatch_consumed) {
+      // Replaying a cached scene refreshes its output from the native prefix.
+      // It does not add the same observation to temporal history a second time.
+      if (pending.post_output != nullptr) {
+        pending.post_output->CopyNative(context);
+      }
+      continue;
+    }
+    if (!depth_ready || !state_guard.IsActive() || pending.inputs.device != runtime_device) {
       state::frame_state.reconstruction_scheduled = false;
-      logging::Warn("rejected scene reconstruction submission: state, replay, or capture mismatch");
+      logging::Warn("rejected scene reconstruction submission because its device or saved state is unavailable");
       submission_failure_pending.store(true, std::memory_order_release);
       if (pending.post_output != nullptr) {
         pending.post_output->CopyNative(context);
@@ -654,8 +741,6 @@ inline void OnExecuteSecondaryCommandList(
       if (pending.post_output != nullptr) {
         pending.post_output->CopyNative(context);
       }
-    } else if (pending.inputs.frame_token != current_frame) {
-      state::frame_state.reconstruction_completed = false;
     }
   }
   // ReShade submits this final native remainder immediately after this event.
@@ -703,6 +788,12 @@ inline void OnDestroyCommandList(reshade::api::command_list* command_list) {
   }
   if (abandoned && state::IsEnabled()) {
     ExecutionGuard execution_guard;
+    for (const auto& pending : retired) {
+      if (pending.is_lighting || pending.dispatch_consumed) continue;
+      std::erase_if(admitted_scenes, [&](const SceneAdmission& candidate) {
+        return candidate.scene == pending.scope.owner.scene && candidate.owner_generation == pending.scope.owner.generation;
+      });
+    }
     if (abandoned_generation == state::frame_state.temporal_generation
         && state::frame_state.reconstruction_scheduled) {
       state::frame_state.reconstruction_scheduled = false;
@@ -715,11 +806,7 @@ inline void MaybeRunLocked(
     reshade::api::command_list* cmd_list,
     const inputs::descriptor_tracker::CommandListData& command_data,
     const char* insertion_name) {
-  if (!state::IsEnabled()
-      || state::frame_state.reconstruction_scheduled
-      || state::frame_state.reconstruction_completed) {
-    return;
-  }
+  if (!state::IsEnabled()) return;
   const auto scope = rendering::native_context::GetScope();
   // Utility views keep their native size and do not schedule reconstruction.
   if (scope.owner.scene != 0u && !scope.owner.main_view) return;
@@ -739,6 +826,9 @@ inline void MaybeRunLocked(
                   " generation=", scope.owner.generation);
     missing_owner = false;
   }
+  if (std::ranges::any_of(admitted_scenes, [&](const SceneAdmission& candidate) {
+        return candidate.scene == scope.owner.scene && candidate.owner_generation == scope.owner.generation;
+      })) return;
 
   ValidatedFrameInputs inputs = {};
   if (!input_capture::BuildValidatedFrameInputsLocked(
@@ -758,38 +848,18 @@ inline void MaybeRunLocked(
   if (!submission_bridge_installed) return;
 
   std::shared_ptr<post_process::Output> post_output;
-  std::shared_ptr<post_process::Pipelines> post_pipelines;
   if (!inputs.HasNativeOutputSize()
       && inputs.color_format == reshade::api::format::r16g16b16a16_float
       && (std::strcmp(insertion_name, "BeforeBloom") == 0
           || std::strcmp(insertion_name, "DOF_ScatterBakeFirst") == 0)) {
-    {
-      const std::shared_lock lock(post_process::state.mutex);
-      post_pipelines = post_process::state.pipelines;
-      const auto& cached = post_process::state.cached;
-      Microsoft::WRL::ComPtr<ID3D11Resource> native_depth;
-      if (const auto depth = post_process::ReadSceneDepth(reinterpret_cast<ID3D11Resource*>(inputs.color_resource.handle)); depth != nullptr) {  // NOLINT(performance-no-int-to-ptr)
-        depth->GetResource(&native_depth);
-      }
-      if (cached != nullptr && cached->device == inputs.device
-          && reinterpret_cast<uint64_t>(cached->source.Get()) == inputs.color_resource.handle
-          && cached->render_width == inputs.render_width && cached->render_height == inputs.render_height
-          && cached->target.width == inputs.output.width && cached->target.height == inputs.output.height
-          && cached->native_depth == native_depth
-          && reinterpret_cast<uint64_t>(cached->geometry_depth.Get()) == inputs.depth_resource.handle) {
-        post_output = cached;
-      }
+    post_output = post_process::GetActive(cmd_list);
+    if (post_output != nullptr && !post_output->MatchesInputs(inputs)) {
+      resolution::Fail("scene reconstruction inputs changed after output recording began");
+      return;
     }
     if (post_output == nullptr) {
       try {
-        post_output = std::make_shared<post_process::Output>(inputs, std::move(post_pipelines));
-        std::shared_ptr<post_process::Output> retired;
-        {
-          const std::unique_lock lock(post_process::state.mutex);
-          retired = std::exchange(post_process::state.cached, post_output);
-          post_process::state.pipelines = post_output->pipelines;
-        }
-        logging::Info("created separate post-processing output size=", inputs.output.width, "x", inputs.output.height);
+        post_output = post_process::AcquireOutput(inputs);
       } catch (const std::exception& error) {
         logging::Warn(error.what());
         resolution::Fail("scaled post-processing resources unavailable");
@@ -807,20 +877,43 @@ inline void MaybeRunLocked(
   auto* native_context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   std::shared_ptr<post_process::OutputProducer> output_producer;
   if (post_output != nullptr) {
-    output_producer = std::make_shared<post_process::OutputProducer>();
+    post_process::Recording route;
+    post_process::GetActive(cmd_list, &route, true);
+    output_producer = route.producer;
   }
   const auto publish_output = [&] {
     if (post_output == nullptr) return;
     const std::unique_lock lock(post_process::state.mutex);
-    post_process::state.active.swap(post_output);
+    post_process::Recording route = {.output = post_output, .producer = output_producer, .frame = inputs.frame_token, .generation = post_process::state.generation, .owner = scope.owner};
+    output_producer->reconstruction_recorded = true;
+    post_process::state.active = post_output;
     post_process::state.producer = output_producer;
     post_process::state.frame = inputs.frame_token;
     post_process::state.active_owner = scope.owner;
+    if (const auto pooled = std::ranges::find(post_process::state.pool, post_output, &post_process::Recording::output); pooled != post_process::state.pool.end()) {
+      *pooled = route;
+    }
+    const auto existing = std::ranges::find_if(post_process::state.sequences, [&](const post_process::Recording& candidate) {
+      return candidate.owner.scene == scope.owner.scene && candidate.owner.generation == scope.owner.generation;
+    });
+    if (existing == post_process::state.sequences.end()) {
+      post_process::state.sequences.push_back(route);
+    } else {
+      *existing = route;
+    }
     if (native_context != nullptr && native_context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED) {
       if (auto* recording = cmd_list->get_private_data<post_process::Recording>(); recording != nullptr) {
-        *recording = {.output = post_process::state.active, .producer = output_producer, .frame = inputs.frame_token, .generation = post_process::state.generation, .owner = scope.owner};
+        post_process::RetainOutput(cmd_list, recording->output);
+        route.retained_outputs = std::move(recording->retained_outputs);
+        *recording = std::move(route);
       }
     }
+  };
+  const auto admit_scene = [&] {
+    if (admitted_scenes.size() == MAX_PENDING_DISPATCHES) {
+      admitted_scenes.erase(admitted_scenes.begin());
+    }
+    admitted_scenes.push_back({.scene = scope.owner.scene, .owner_generation = scope.owner.generation});
   };
   if (native_context != nullptr && native_context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED) {
     const auto fail_submission = [] {
@@ -872,6 +965,7 @@ inline void MaybeRunLocked(
       submission.pending_dispatches.emplace_back(std::move(pending));
     }
     publish_output();
+    admit_scene();
     state::frame_state.reconstruction_scheduled = true;
     if (!logged_immediate_dispatch.load(std::memory_order_relaxed)) {
       logging::Info("scheduled temporal dispatch frame=", inputs.frame_token);
@@ -884,10 +978,9 @@ inline void MaybeRunLocked(
     submission_failure_pending.store(true, std::memory_order_release);
     return;
   }
-  if (post_output != nullptr) {
-    post_output->PrepareDepth(native_context, inputs.camera.jitter_uv_x, inputs.camera.jitter_uv_y);
-  }
-  const bool succeeded = DispatchValidatedLocked(inputs);
+  const bool depth_ready = post_output == nullptr || post_output->PrepareDepth(native_context, inputs.camera.jitter_uv_x, inputs.camera.jitter_uv_y);
+  const bool succeeded = depth_ready && DispatchValidatedLocked(inputs);
+  admit_scene();
   if (post_output != nullptr) {
     if (!succeeded) {
       post_output->CopyNative(native_context);

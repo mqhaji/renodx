@@ -4,7 +4,7 @@ This page tracks outstanding work. The [reconstruction guide](README.md) owns cu
 
 ## Rain, scene ownership, and transitions
 
-- Extend native scene ownership to jitter/history advancement and submitted output contents. Track which write supplies each consumer and when its output can be reused, including cached command lists and overlapping scenes.
+- Validate scene-owned jitter reservations, history advancement at submission, and retained output allocations in gameplay. Offline checks cover overlapping scenes, repeated setup across Present, cached-list lifetime, loading UI, and reset rejection. Continue tracing the actual writers behind each GPU consumer when investigating flashes.
 - Investigate rain inside the ACC at reduced input resolution, intermittent Mother Base flashes even at Native quality, and sortie horizon/ground flashes separately until evidence connects them. Match actual color/depth producers, resource roles, native planar reflections, and submitted command lists before changing routing.
 - Extend loading/save-reload, alt-tab/resize, device recreation, and rapid method/quality/reset coverage. Confirm canceled reconstruction preserves native prefixes/remainders and current scene alpha. Unsupported DoF paths must keep requesting native-size recovery rather than redirecting unknown resources.
 - The retired state-profile/cold-start flicker sweep is not a current test request. Legacy compute-only state restoration and the `0x200DBED9` light-VS workaround were removed; do not restore them as speculative fixes. Those removals did not establish a fix for character wobble or rapid night-vision skinned-mesh flicker.
@@ -18,9 +18,11 @@ This page tracks outstanding work. The [reconstruction guide](README.md) owns cu
 
 ## Projection coverage
 
-- Validate the four enabled experimental paths independently: sunlight/SH draw grids, terrain inverse-plane versus raster agreement, and general-light consumers. Their `1x` defaults do not establish correct alignment in every scene.
-- Keep Alternate Stream disabled after the settled `0x`/`1x` waveform comparison. Any reintroduction requires proven world/UI/glyph separation and stable output. Track older Preset M rail flicker separately.
+- Local Light now corrects the owned draw packet before it reaches shadowed and unshadowed workers. The packet hook passed the ACC image, local-light alignment, and saved-DLSS-Auto startup check. Continue validation at Mother Base and through weather and special-view transitions. Offline checks cover scene/camera mismatches, duplicate requests, retained packet contents, and resets while waiting for publication.
+- Validate sunlight/SH draw grids and terrain inverse-plane versus raster agreement independently. Their `1x` defaults do not establish correct alignment in every scene.
+- Keep Alternate Stream disabled after the settled `0x`/`1x` waveform comparison. Its hooks belong to Draw2D billboard and world-coordinate commands, and the renderer also handles glyphs and UI. Any selective correction requires the actual command type, scene owner, target, depth state, and position relative to reconstruction. Track older Preset M rail flicker separately.
 - Keep deferred SH packet correction at `0x27F450` disabled until its producer sample and reset version can be followed through consumption. A matching latest-camera matrix is insufficient.
+- Audit sky inverse-camera parameters and native geometry camera-center offsets together with their shader consumers. Existing temporal lighting already removes current jitter during position reconstruction, so any shared camera-constant change must account for that correction.
 - Thermography's two guarded native setters have matching clip-position evidence, but the alternate branch still needs gameplay coverage. Check signed/fractional scales, SH kinds, rejected/nested scopes, foreign or null cameras, teardown, and normal exit.
 - Hooks remain loaded for the process lifetime. Restart for replacement/removal; do not add unsafe live detach or resource release while old work can still execute.
 

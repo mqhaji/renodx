@@ -15,9 +15,11 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <stdexcept>
 #include <utility>
@@ -26,6 +28,7 @@
 #include <d3d11.h>
 #include <d3d11_1.h>
 #include <wrl/client.h>
+#include <wrl/implements.h>
 
 #include <embed/post_bloom.h>
 #include <embed/post_depth.h>
@@ -89,18 +92,15 @@ inline constexpr GUID SCENE_DEPTH_GUID = {
 
 // Stores the most recent full clear, so an alias created later starts with
 // the same color and alpha as the native target.
-inline constexpr GUID CLEAR_COLOR_GUID = {
-    .Data1 = 0x79C18D48u,
-    .Data2 = 0x3F10u,
-    .Data3 = 0x480Bu,
-    .Data4 = {0xB4u, 0x45u, 0x02u, 0x4Du, 0x33u, 0x96u, 0x65u, 0x19u},
-};
-
 struct ClearColor {
-  uint64_t frame;  // CPU recording interval; does not establish GPU completion.
   std::array<float, 4> color;
   uint64_t scene = 0u;
   uint64_t generation = 0u;
+};
+
+struct RecordedClear {
+  Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+  ClearColor value;
 };
 
 // Retrieve the exact depth/stencil view observed alongside this scene target.
@@ -230,9 +230,9 @@ struct Pipelines {
   }
 };
 
-// Each reconstruction insertion keeps its own intermediate roles. Access to
-// these bindings is protected by the owning Output's surface_mutex. This is
-// ownership and routing information, not a saved copy of the texture's pixels.
+// Each scene keeps the roles and initialization of its output intermediates.
+// Surface bindings use Output::surface_mutex. Clear records and reconstruction
+// admission use State::mutex so publication and lookup see the same scene.
 struct OutputProducer {
   struct SurfaceBinding {
     ID3D11Resource* resource;  // Borrowed identity; Output retains the texture.
@@ -241,6 +241,15 @@ struct OutputProducer {
   // The output owns the textures. Each producer records their roles separately:
   // the next scene can reuse a texture while this scene is still being recorded.
   std::vector<SurfaceBinding> surfaces;
+  // Set under State::mutex once the reconstruction insertion is recorded.
+  // Earlier UI clears can reserve storage without enabling scene routing.
+  bool reconstruction_recorded = false;
+  // Display recording can finish before the flare worker. Keep its clear
+  // colors with this scene until the output is released or reused.
+  std::vector<RecordedClear> clears;
+  // These clears are commands in the native stream. Replaying that stream
+  // initializes the same output again before its blended or cropped writes.
+  std::vector<ID3D11Resource*> cleared_surfaces;
 
   void SetSurfaceRole(ID3D11Resource* resource, Surface::Role role) {
     const auto binding = std::ranges::find(surfaces, resource, &SurfaceBinding::resource);
@@ -258,6 +267,8 @@ struct Output {
   // Protects the intermediate/view caches, their roles, and producer bindings.
   // Cache hits can share this lock; new views and role changes need exclusive access.
   std::shared_mutex surface_mutex;
+  // Protected by State::mutex once this allocation enters the pool.
+  bool reusable = true;
   std::vector<std::shared_ptr<Surface>> surfaces;
   std::shared_ptr<Pipelines> pipelines;
   reshade::api::device* device = nullptr;
@@ -303,9 +314,12 @@ struct Output {
   ColorTarget target;
   // One bit per diagnostic message group, to avoid repeating success logs.
   std::atomic<uint32_t> observed_passes = 0u;
+  // Allows a UI-only scene to acquire the same resource layout without
+  // borrowing an older scene's pixels or its outstanding command lists.
+  ValidatedFrameInputs allocation_inputs;
 
   explicit Output(const ValidatedFrameInputs& inputs, std::shared_ptr<Pipelines> shared_pipelines = nullptr)
-      : pipelines(std::move(shared_pipelines)), device(inputs.device), render_width(inputs.render_width), render_height(inputs.render_height) {
+      : pipelines(std::move(shared_pipelines)), device(inputs.device), render_width(inputs.render_width), render_height(inputs.render_height), allocation_inputs(inputs) {
     auto* native_device = reinterpret_cast<ID3D11Device*>(device->get_native());  // NOLINT(performance-no-int-to-ptr)
     source = reinterpret_cast<ID3D11Resource*>(inputs.color_resource.handle);     // NOLINT(performance-no-int-to-ptr)
     if (inputs.color_srv.handle != 0u && renodx::utils::resource::shared.data != nullptr) {
@@ -441,6 +455,19 @@ struct Output {
     }
   }
 
+  bool MatchesInputs(const ValidatedFrameInputs& inputs) const {
+    if (device != inputs.device || reinterpret_cast<uint64_t>(source.Get()) != inputs.color_resource.handle
+        || render_width != inputs.render_width || render_height != inputs.render_height
+        || target.width != inputs.output.width || target.height != inputs.output.height
+        || target.format != inputs.color_format
+        || reinterpret_cast<uint64_t>(geometry_depth.Get()) != inputs.depth_resource.handle) return false;
+    Microsoft::WRL::ComPtr<ID3D11Resource> current_depth;
+    if (const auto view = ReadSceneDepth(source.Get()); view != nullptr) {
+      view->GetResource(&current_depth);
+    }
+    return native_depth == current_depth;
+  }
+
   // Canceled reconstruction still has a native remainder that reads this
   // target. Fill it from this submission's native prefix, never old output.
   void CopyNative(ID3D11DeviceContext* context) const {
@@ -449,7 +476,10 @@ struct Output {
       return;
     }
     const ContextScope restore(context, empty_state.Get());
-    if (restore.saved == nullptr) return;
+    if (restore.saved == nullptr) {
+      resolution::Fail("cannot preserve the reconstruction fallback state");
+      return;
+    }
     context->CSSetShader(pipelines->fallback_shader.Get(), nullptr, 0u);
     context->CSSetShaderResources(0u, 1u, source_view.GetAddressOf());
     context->CSSetUnorderedAccessViews(0u, 1u, fallback_uav.GetAddressOf(), nullptr);
@@ -459,12 +489,12 @@ struct Output {
 
   // Called on the immediate context after the native prefix has executed.
   // Always rebuild current depth/masks on replay; CPU recording cannot seed it.
-  void PrepareDepth(ID3D11DeviceContext* context, float jitter_x, float jitter_y) const {
-    if (!IsScaled()) return;
+  bool PrepareDepth(ID3D11DeviceContext* context, float jitter_x, float jitter_y) const {
+    if (!IsScaled()) return true;
     const ContextScope restore(context, empty_state.Get());
     if (restore.saved == nullptr) {
       resolution::Fail("cannot preserve the output depth copy state");
-      return;
+      return false;
     }
     // The first row stores integer input/output dimensions. The second stores
     // a reserved mode, two float jitter values as raw bits, and padding.
@@ -479,7 +509,7 @@ struct Output {
       context->Dispatch((target.width + 7u) / 8u, (target.height + 7u) / 8u, 1u);
     }
     // Keep sampled geometry separate from the UI's depth and stencil tests.
-    if (native_depth == nullptr) return;
+    if (native_depth == nullptr) return true;
     context->CopyResource(depth_copy.Get(), native_depth.Get());
     if (stencil_view != nullptr) {
       // Stencil draws only write set bits; zero the others first.
@@ -504,6 +534,7 @@ struct Output {
         context->Draw(3u, 0u);
       }
     }
+    return true;
   }
 
   [[nodiscard]] bool IsSceneTarget(ID3D11Resource* resource) const {
@@ -787,11 +818,27 @@ struct __declspec(uuid("71618f64-fc26-4a78-91de-6e20f879a85a")) Recording {
   uint64_t frame = 0u;       // Recording interval used to qualify intermediate writes.
   uint64_t generation = 0u;  // Reset counter used to reject retired output resources.
   rendering::native_context::Owner owner;
+  // A recording can finish several scene sequences before FinishCommandList.
+  // Keep every referenced output, even after display conversion closes a route.
+  std::vector<std::shared_ptr<Output>> retained_outputs;
+};
+
+inline constexpr GUID OUTPUT_LEASE_GUID = {
+    .Data1 = 0x5241c06eu,
+    .Data2 = 0x5925u,
+    .Data3 = 0x4201u,
+    .Data4 = {0x96, 0xab, 0x68, 0x31, 0xed, 0xbc, 0x5d, 0xf0},
+};
+
+// The native list owns this object. It owns no list reference, so destroying
+// the last recorded user makes its output available to the pool again.
+struct RetainedOutputs : Microsoft::WRL::RuntimeClass<Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>, IUnknown> {
+  std::vector<std::shared_ptr<Output>> outputs;
 };
 
 // Native post-processing can finish one list and continue on another while
-// another worker publishes the next scene. Keep ownership until display output
-// closes this recording sequence, rather than borrowing the latest publication.
+// another worker publishes the next scene. Keep each allocation's scene identity
+// until reuse, including UI workers that record after display conversion.
 struct State {
   std::shared_mutex mutex;
   // Shader/state objects can be reused at any size. Cached textures match one
@@ -800,9 +847,13 @@ struct State {
   // cached can serve independently recorded UI even without a new scene.
   // active belongs to the native scene identified by active_owner.
   std::shared_ptr<Output> cached;
+  std::vector<Recording> pool;
   std::shared_ptr<Output> active;
   std::shared_ptr<OutputProducer> producer;
   std::vector<Recording> sequences;
+  // Clears recorded before a scene acquires output storage. AcquireOutput
+  // transfers them to its producer. Startup scenes retire them at display.
+  std::vector<RecordedClear> clears;
   uint64_t frame = 0u;
   // Invalidates old Recording values without relying on CPU/GPU timing.
   uint64_t generation = 0u;
@@ -810,9 +861,149 @@ struct State {
 };
 inline State state;
 
+// A later resource upgrade can transfer the same scene's earlier clear to its
+// float clone. Copies and writes use the resulting native resource identity.
+inline void RecordClear(ID3D11Resource* resource, const ClearColor& clear) {
+  const std::unique_lock lock(state.mutex);
+  const auto route = std::ranges::find_if(state.pool, [&](const Recording& candidate) {
+    return candidate.owner.scene == clear.scene && candidate.owner.generation == clear.generation
+           && candidate.producer != nullptr;
+  });
+  auto& clears = (route != state.pool.end() ? route->producer->clears : state.clears);
+  const auto existing = std::ranges::find_if(clears, [&](const RecordedClear& candidate) {
+    return candidate.resource.Get() == resource && candidate.value.scene == clear.scene
+           && candidate.value.generation == clear.generation;
+  });
+  if (existing == clears.end()) {
+    clears.push_back({.resource = resource, .value = clear});
+  } else {
+    existing->value = clear;
+  }
+}
+
+// Return a value copy so callers can release the lock before recording GPU work.
+inline std::optional<ClearColor> GetRecordedClear(ID3D11Resource* resource, uint64_t scene, uint64_t generation) {
+  const std::shared_lock lock(state.mutex);
+  const auto route = std::ranges::find_if(state.pool, [&](const Recording& candidate) {
+    return candidate.owner.scene == scene && candidate.owner.generation == generation
+           && candidate.producer != nullptr;
+  });
+  const auto& clears = (route != state.pool.end() ? route->producer->clears : state.clears);
+  const auto existing = std::ranges::find_if(clears, [&](const RecordedClear& candidate) {
+    return candidate.resource.Get() == resource && candidate.value.scene == scene
+           && candidate.value.generation == generation;
+  });
+  if (existing == clears.end()) return std::nullopt;
+  return existing->value;
+}
+
+// Pool ownership alone means no recording or finished native list can still
+// read these textures. A second worker for the same scene shares its route.
+// D3D11 orders subsequent GPU writes after earlier immediate submissions.
+inline std::shared_ptr<Output> AcquireOutput(const ValidatedFrameInputs& inputs) {
+  auto owner = rendering::native_context::GetScope().owner;
+  if (owner.scene == 0u) {
+    owner.scene = owner.presentation_scene;
+  }
+  const auto matches = [&](const Recording& route) {
+    return route.owner.scene == owner.scene && route.owner.generation == owner.generation
+           && route.output != nullptr && route.output->device == inputs.device;
+  };
+  std::shared_ptr<Pipelines> pipelines;
+  std::shared_ptr<Output> output;
+  std::vector<Recording> retired;
+  uint64_t generation = 0u;
+  {
+    const std::unique_lock lock(state.mutex);
+    if (const auto found = std::ranges::find_if(state.sequences, matches); found != state.sequences.end()) {
+      return (found->output->MatchesInputs(inputs) ? found->output : nullptr);
+    }
+    if (const auto found = std::ranges::find_if(state.pool, matches); found != state.pool.end()) {
+      return (found->output->MatchesInputs(inputs) ? found->output : nullptr);
+    }
+    generation = state.generation;
+    pipelines = state.pipelines;
+    // cached is a UI layout reference. Release it before checking pool users.
+    // A scene route or a recorded list independently retains any live output.
+    if (state.cached != nullptr && std::ranges::find(state.pool, state.cached, &Recording::output) == state.pool.end()) {
+      retired.push_back({.output = std::move(state.cached)});
+    } else {
+      state.cached.reset();
+    }
+    for (auto entry = state.pool.begin(); entry != state.pool.end();) {
+      if (!entry->output->reusable || entry->output.use_count() != 1) {
+        ++entry;
+        continue;
+      }
+      const auto& candidate = entry->output;
+      if (!candidate->MatchesInputs(inputs)) {
+        retired.push_back(std::move(*entry));
+        entry = state.pool.erase(entry);
+        continue;
+      }
+      if (output == nullptr) {
+        output = candidate;
+        // Claim the free allocation under the lock. An older scene lookup
+        // must stop matching before another worker starts recording into it.
+        entry->owner = {};
+        // Clear records retain native resources. Release them after unlocking,
+        // since resource destruction can invoke addon callbacks.
+        retired.push_back({.producer = std::move(entry->producer)});
+      }
+      // Several lists can finish together. Keep compatible spares so the
+      // next overlapping recordings can reuse that capacity without churn.
+      ++entry;
+    }
+  }
+  if (output == nullptr) {
+    output = std::make_shared<Output>(inputs, std::move(pipelines));
+  }
+  {
+    const std::unique_lock lock(state.mutex);
+    if (generation != state.generation) return nullptr;
+    if (const auto found = std::ranges::find_if(state.sequences, matches); found != state.sequences.end()) {
+      return (found->output->MatchesInputs(inputs) ? found->output : nullptr);
+    }
+    if (const auto found = std::ranges::find_if(state.pool, matches); found != state.pool.end()) {
+      return (found->output->MatchesInputs(inputs) ? found->output : nullptr);
+    }
+    Recording route = {.output = output, .producer = std::make_shared<OutputProducer>(), .frame = inputs.frame_token, .generation = generation, .owner = owner};
+    // Publish the output and its earlier clears together. A worker can then
+    // recover initialization even after display closes the open sequence.
+    const auto pending = std::ranges::partition(state.clears, [&](const RecordedClear& clear) {
+      return clear.value.scene != owner.scene || clear.value.generation != owner.generation;
+    });
+    route.producer->clears.assign(std::make_move_iterator(pending.begin()), std::make_move_iterator(pending.end()));
+    state.clears.erase(pending.begin(), pending.end());
+    const auto pooled = std::ranges::find(state.pool, output, &Recording::output);
+    if (pooled == state.pool.end()) {
+      state.pool.push_back(route);
+    } else {
+      *pooled = route;
+    }
+    state.pipelines = output->pipelines;
+    state.cached = output;
+    state.sequences.push_back(std::move(route));
+  }
+  return output;
+}
+
+inline void RetainOutput(reshade::api::command_list* command_list, const std::shared_ptr<Output>& output) {
+  if (command_list == nullptr || output == nullptr) return;
+  auto* context = reinterpret_cast<ID3D11DeviceContext*>(command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
+  // Immediate commands already enter submission order. Only deferred recording
+  // needs a lease that transfers to a finished, replayable native list.
+  if (context == nullptr || context->GetType() != D3D11_DEVICE_CONTEXT_DEFERRED) return;
+  auto* recording = command_list->get_private_data<Recording>();
+  if (recording != nullptr
+      && std::ranges::find(recording->retained_outputs, output) == recording->retained_outputs.end()) {
+    recording->retained_outputs.push_back(output);
+  }
+}
+
 // Match the recorded native scene at every lookup. A worker may serve another
 // viewport between two calls, and a pooled target may belong to either view.
-inline std::shared_ptr<Output> GetActive(reshade::api::command_list* command_list, Recording* selected = nullptr) {
+inline std::shared_ptr<Output> GetActive(reshade::api::command_list* command_list, Recording* selected = nullptr, bool include_ui = false) {
   const auto owner = rendering::native_context::GetScope().owner;
   const uint64_t scene = (owner.scene != 0u ? owner.scene : owner.presentation_scene);
   if (scene == 0u || !owner.presentation_matches
@@ -821,12 +1012,13 @@ inline std::shared_ptr<Output> GetActive(reshade::api::command_list* command_lis
   const auto matches = [&](const Recording& recording) {
     return recording.owner.generation == owner.generation && recording.owner.scene == scene
            && recording.generation == state.generation && recording.output != nullptr
-           && recording.output->device == command_list->get_device();
+           && recording.output->device == command_list->get_device()
+           && (include_ui || recording.producer == nullptr || recording.producer->reconstruction_recorded);
   };
   const auto* recording = command_list->get_private_data<Recording>();
   if (recording != nullptr && matches(*recording)) {
     if (selected != nullptr) {
-      *selected = *recording;
+      *selected = {.output = recording->output, .producer = recording->producer, .frame = recording->frame, .generation = recording->generation, .owner = recording->owner};
     }
     return recording->output;
   }
@@ -836,6 +1028,16 @@ inline std::shared_ptr<Output> GetActive(reshade::api::command_list* command_lis
       *selected = *sequence;
     }
     return sequence->output;
+  }
+  // Display recording releases the open sequence, but other workers can still
+  // record UI for the same scene. Its pooled route keeps the original pixels
+  // and producer roles available until the allocation is assigned a new owner.
+  const auto pooled = std::ranges::find_if(state.pool, matches);
+  if (pooled != state.pool.end()) {
+    if (selected != nullptr) {
+      *selected = *pooled;
+    }
+    return pooled->output;
   }
   if (state.active_owner.generation != owner.generation || state.active_owner.scene != scene
       || state.active == nullptr || state.active->device != command_list->get_device()) return nullptr;
@@ -853,11 +1055,15 @@ inline void Reset(bool release_pipelines = false) {
   std::shared_ptr<Output> cached;
   std::shared_ptr<Output> active;
   std::vector<Recording> sequences;
+  std::vector<Recording> pool;
+  std::vector<RecordedClear> clears;
   {
     const std::unique_lock lock(state.mutex);
     cached.swap(state.cached);
     active.swap(state.active);
     sequences.swap(state.sequences);
+    pool.swap(state.pool);
+    clears.swap(state.clears);
     state.producer.reset();
     state.active_owner = {};
     ++state.generation;

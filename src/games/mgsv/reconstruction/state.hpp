@@ -5,13 +5,13 @@
  *
  * Owns:
  *  - The availability-validated effective temporal mode.
- *  - Per-frame counters used to gate dispatch and advance the jitter sample.
+ *  - Presentation diagnostics and the next jitter sample to reserve.
  *  - Diagnostic Off and Halton (2,3) jitter in render-space UV coordinates.
  *    The pattern starts at eight phases and grows with the upscaling ratio.
  *
  * The native projection hook and ReShade callbacks can execute on different
- * threads. Atomic frame/sample mirrors let the hook choose the same sample
- * that the resolve expects without reading mutable render-callback state.
+ * threads. The projection hook reserves a sample for each native scene.
+ * Reconstruction uses that recorded sample when the scene reaches the GPU.
  */
 
 #include <algorithm>
@@ -66,7 +66,6 @@ enum class ProjectionJitterPath : std::uint8_t {
   SUN_VOLUME,
   SH_FALLBACK,
   TERRAIN_DECAL,
-  LIGHT_PACKET,
   ALTERNATE_CAMERA,
   THERMOGRAPHY,
   COUNT,
@@ -85,7 +84,7 @@ inline constexpr float DEFAULT_HISTORY_CLIP_STRENGTH = 1.f;
 inline constexpr float DEFAULT_CURRENT_FRAME_BLEND = 0.15f;
 
 struct FrameState {
-  uint32_t sample_index = 0u;
+  uint32_t sample_index = 0u;  // Successfully installed reconstruction outputs.
   uint64_t frame_index = 0u;
   uint64_t temporal_generation = 0u;
   bool reconstruction_scheduled = false;
@@ -105,7 +104,6 @@ struct FrameState {
 
 #if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
 inline constexpr std::array DEFAULT_PROJECTION_JITTER_SCALES = {
-    DEFAULT_PROJECTION_JITTER_SCALE,
     DEFAULT_PROJECTION_JITTER_SCALE,
     DEFAULT_PROJECTION_JITTER_SCALE,
     DEFAULT_PROJECTION_JITTER_SCALE,
@@ -136,14 +134,14 @@ inline std::array<std::atomic<float>, PROJECTION_JITTER_SLIDER_COUNT> runtime_pr
     std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
     std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
     std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
-    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
 };
-static_assert(PROJECTION_JITTER_SLIDER_COUNT == 10u, "Initialize every runtime jitter scale when adding slider paths");
+static_assert(PROJECTION_JITTER_SLIDER_COUNT == 9u, "Initialize every runtime jitter scale when adding slider paths");
 #endif
 inline std::atomic<float> runtime_clip_tightness = DEFAULT_CLIP_TIGHTNESS;
 inline std::atomic<float> runtime_history_clip_strength = DEFAULT_HISTORY_CLIP_STRENGTH;
 inline std::atomic<float> runtime_current_frame_blend = DEFAULT_CURRENT_FRAME_BLEND;
 inline std::atomic<uint64_t> current_frame_token = 0u;
+// Advances during native scene recording. History commits do not change it.
 inline std::atomic<uint32_t> current_sample_index = 0u;
 inline FrameState frame_state = {};
 inline constexpr uint32_t BASE_JITTER_PHASE_COUNT = 8u;
@@ -321,6 +319,7 @@ inline void ResetTemporalState() {
 
 inline void BeginFrame() {
   ++frame_state.frame_index;
+  frame_state.reconstruction_scheduled = false;
   frame_state.reconstruction_completed = false;
   frame_state.full_resolution_candidate_seen = false;
   frame_state.scaled_inputs_valid = false;
@@ -334,7 +333,6 @@ inline void CommitTemporalFrame() {
   frame_state.reconstruction_scheduled = false;
   frame_state.reconstruction_completed = true;
   ++frame_state.sample_index;
-  current_sample_index.store(frame_state.sample_index, std::memory_order_release);
 }
 
 }  // namespace mgsv::reconstruction::state

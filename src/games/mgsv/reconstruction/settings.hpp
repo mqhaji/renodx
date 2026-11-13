@@ -456,13 +456,6 @@ inline void AppendSettings(
           .tooltip = "Experimental: corrects the owned decal packet's copied P before publication. Affects inverse-plane reconstruction, not the separately captured raster P. Default 1.",
           .reason = "terrain decal jitter changed",
       },
-      {
-          .path = state::ProjectionJitterPath::LIGHT_PACKET,
-          .key = "FxTaaLightPacketJitterScale",
-          .label = "General Light Packet Jitter",
-          .tooltip = "Experimental: translates owned light-packet VP before publication, leaving clip-W and selection data unchanged. Final consumer coverage is not yet visually verified.",
-          .reason = "light packet jitter changed",
-      },
   });
   for (const auto& projection_setting : projection_settings) {
     reconstruction_settings.push_back(

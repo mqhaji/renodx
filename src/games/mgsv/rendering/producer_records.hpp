@@ -136,7 +136,9 @@ inline void Publish(std::span<const Producer> producers) {
         return candidate.owner.scene == producer.owner.scene && candidate.owner.generation == producer.owner.generation;
       });
       if (entry == state.submitted.end()) {
-        if (state.submitted.size() >= reconstruction::camera_state::MAX_SCENE_PUBLICATIONS) continue;
+        if (state.submitted.size() == reconstruction::camera_state::MAX_SCENE_PUBLICATIONS) {
+          state.submitted.erase(state.submitted.begin());
+        }
         state.submitted.push_back({.owner = producer.owner, .generation = producer.generation});
         entry = std::prev(state.submitted.end());
       }
@@ -311,11 +313,6 @@ inline Snapshot Read(reshade::api::device* device, reshade::api::resource_view s
                  && result.camera_generation == result.scene.camera_generation
                  && result.camera_sample == result.scene.camera_sample;
   return result;
-}
-
-inline void BeginFrame(reshade::api::device* device) {
-  const std::unique_lock lock(state.mutex);
-  if (state.device == device) state.submitted.clear();
 }
 
 inline void Forget(ID3D11CommandList* list) {

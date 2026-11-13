@@ -24,7 +24,6 @@ struct Resources {
   inputs::Motion motion;
   camera_state::CameraFrame camera = {};
   uint64_t capture_frame = std::numeric_limits<uint64_t>::max();
-  uint32_t capture_sample_index = std::numeric_limits<uint32_t>::max();
 };
 
 // Accessed under the coordinator execution lock. Each entry belongs to one
@@ -88,24 +87,24 @@ inline Resources CaptureCameraMotionLocked(
       .motion = std::move(motion),
       .camera = camera_state::GetForCapture(),
       .capture_frame = state::CurrentFrameToken(),
-      .capture_sample_index = state::CurrentSampleIndex(),
   };
   if (resources.camera.scene == 0u) return resources;
-  // Validation already rejects captures older than the preceding interval.
-  // Retire those references here, including scenes with no reconstruction pass.
+  // Pending jobs own their inputs. This bounded lookup only connects motion
+  // recording to a later insertion in the same native scene.
   std::erase_if(scene_resources, [&](const Resources& candidate) {
     return candidate.camera.owner_generation != resources.camera.owner_generation
-           || (resources.capture_frame > 1u && candidate.capture_frame < resources.capture_frame - 1u);
+           || candidate.camera.reset_generation != resources.camera.reset_generation;
   });
   const auto existing = std::ranges::find_if(scene_resources, [&](const Resources& candidate) {
     return candidate.camera.scene == resources.camera.scene && candidate.camera.owner_generation == resources.camera.owner_generation;
   });
   if (existing != scene_resources.end()) {
     *existing = resources;
-  } else if (scene_resources.size() < camera_state::MAX_SCENE_PUBLICATIONS) {
+  } else {
+    if (scene_resources.size() == camera_state::MAX_SCENE_PUBLICATIONS) {
+      scene_resources.erase(scene_resources.begin());
+    }
     scene_resources.push_back(resources);
-  } else if (LogEvery(last_capture_missing_log)) {
-    logging::Warn("native scene input capacity reached before reconstruction consumed the recordings");
   }
   return resources;
 }
@@ -212,16 +211,9 @@ inline bool BuildValidatedFrameInputsLocked(
   state::frame_state.full_resolution_candidate_seen = true;
 
   const uint64_t frame_token = state::CurrentFrameToken();
-  const uint32_t sample_index = state::CurrentSampleIndex();
-  const bool capture_frame_matches = resources.capture_frame == frame_token
-                                     || (frame_token != 0u && resources.capture_frame == frame_token - 1u);
-  const bool camera_frame_matches = resources.camera.frame_token == frame_token
-                                    || (frame_token != 0u && resources.camera.frame_token == frame_token - 1u);
-  if (!capture_frame_matches
-      || resources.capture_sample_index != sample_index
-      || !resources.camera.valid
-      || !camera_frame_matches
-      || resources.camera.sample_index != sample_index) {
+  const uint32_t sample_index = resources.camera.sample_index;
+  if (!resources.camera.valid
+      || resources.camera.reset_generation != camera_state::reset_generation.load(std::memory_order_acquire)) {
     if (!resources.camera.valid && sample_index == 0u) {
       if (!logged_waiting_for_camera) {
         logged_waiting_for_camera = true;
@@ -233,8 +225,6 @@ inline bool BuildValidatedFrameInputsLocked(
                     " capture_frame=", resources.capture_frame,
                     " camera_frame=", resources.camera.frame_token,
                     " frame=", frame_token,
-                    " capture_sample=", resources.capture_sample_index,
-                    " camera_sample=", resources.camera.sample_index,
                     " sample=", sample_index);
     }
     return false;
@@ -274,7 +264,7 @@ inline bool BuildValidatedFrameInputsLocked(
       .depth_format = GetTypedViewFormat(device, depth_srv),
       .object_velocity_srv = object_velocity_srv,
       .camera = resources.camera,
-      .frame_token = frame_token,
+      .frame_token = resources.camera.frame_token,
       .sample_index = sample_index,
       .render_width = width,
       .render_height = height,

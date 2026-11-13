@@ -90,7 +90,7 @@ Missing source material rejects the broad specular estimate. Once that happens, 
 
 ### 3. Accumulate matching previous samples
 
-The host requires a new submitted producer, matching device/depth/camera identity, compatible settings, and a consecutive frame phase before admitting history. The shader then validates the native projections and camera bases. It removes current jitter, reconstructs the receiver in the previous camera, and applies native object screen displacement where available.
+The host requires a new submitted producer, matching device/depth/camera identity, compatible settings, and a consecutive sample before admitting history. With reconstruction enabled, noise and history use the jitter sample reserved for that native scene. Present and later scene recording leave this sample intact. With reconstruction off, lighting keeps its existing frame phase. Switching between these sources or resetting camera history rejects the previous lighting history. The shader then validates the native projections and camera bases, removes current jitter, reconstructs the receiver in the previous camera, and applies native object screen displacement where available.
 
 Four previous lighting taps are tested individually against expected depth and normal before interpolation. Specular also checks roughness, reflected direction in the correct camera basis, and surface side. GI RGB is converted from previous to current exposure; AO and specular visibility are not exposure-scaled. Object motion does not provide previous object depth or deformation, so those changes can reject history.
 

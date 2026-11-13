@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -335,22 +336,41 @@ inline void OnBindTargets(reshade::api::command_list* command_list, uint32_t cou
   }
 }
 
-// Loading and independently recorded UI share one output allocation, but do not
-// claim that any scene reconstruction ran. Callers still qualify exact bound
-// scene/depth identities before changing a draw or clear.
-inline Recording GetUiRoute(const reshade::api::device* device) {
+// Loading and independently recorded UI acquire storage for their native scene.
+// Their clears and draws can run before any reconstruction insertion exists.
+// Callers qualify bound scene/depth identities before redirecting them.
+inline Recording GetUiRoute(reshade::api::command_list* command_list) {
+  Recording route;
+  if (GetActive(command_list, &route, true) != nullptr) return route;
+  const auto* device = command_list->get_device();
   const auto owner = rendering::native_context::GetScope().owner;
   // A utility view can draw into the same pooled texture as the main scene.
   // Its clears and Draw2D work must keep the utility view's pixel grid.
   if (owner.scene != 0u && (!owner.main_view || !owner.active_member || !owner.presentation_matches)) return {};
   const auto plan = resolution::Read();
   if (!plan.IsScaled() || resolution::failed.load(std::memory_order_acquire)) return {};
-  const std::shared_lock lock(state.mutex);
-  const auto& cached = state.cached;
+  std::shared_ptr<Output> cached;
+  {
+    const std::shared_lock lock(state.mutex);
+    cached = state.cached;
+  }
   if (cached == nullptr || cached->device != device
       || cached->render_width != plan.render.width || cached->render_height != plan.render.height
       || cached->target.width != plan.output.width || cached->target.height != plan.output.height) return {};
-  return {.output = cached, .frame = reconstruction::state::CurrentFrameToken(), .generation = state.generation, .owner = owner};
+  if (!owner.presentation_matches || (owner.scene == 0u && owner.presentation_scene == 0u)) return {};
+  auto inputs = cached->allocation_inputs;
+  inputs.frame_token = reconstruction::state::CurrentFrameToken();
+  // Keep the source layout alive until its views have been retained by the
+  // new output. Native UI clears and draws initialize the acquired storage.
+  try {
+    AcquireOutput(inputs);
+  } catch (const std::exception& error) {
+    logging::Warn(error.what());
+    resolution::Fail("UI output allocation failed");
+    return {};
+  }
+  GetActive(command_list, &route, true);
+  return route;
 }
 
 inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = nullptr) {
@@ -361,7 +381,7 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
   auto* draw = command_list->get_private_data<DrawState>();
   if (draw == nullptr || draw->bindings.output != nullptr) return false;
   if (output == nullptr && pass != nullptr && (pass->display_output || (pass->shader_hash == 0u && draw->ui_draw))) {
-    route = GetUiRoute(command_list->get_device());
+    route = GetUiRoute(command_list);
     output = route.output;
   }
   if (output == nullptr) {
@@ -582,14 +602,22 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
       if (first_color_write) {
         // Cropped bloom and blended flare layers need their native initial
         // color and alpha, including clears recorded before alias activation.
-        ClearColor clear = {};
-        UINT bytes = sizeof(clear);
-        if (SUCCEEDED(target_resource->GetPrivateData(CLEAR_COLOR_GUID, &bytes, &clear)) && bytes == sizeof(clear)
-            && clear.frame == route.frame && clear.scene == route.owner.scene && clear.generation == route.owner.generation) {
-          pending_clears[i] = clear;
-        } else if (pass != nullptr && pass->shader_hash == LENS_FLARE_SHADER_HASH) {
+        bool already_cleared = false;
+        {
+          const std::shared_lock lock(output->surface_mutex);
+          already_cleared = route.producer != nullptr
+                            && std::ranges::find(route.producer->cleared_surfaces, target_resource.Get()) != route.producer->cleared_surfaces.end();
+        }
+        if (!already_cleared) {
+          pending_clears[i] = GetRecordedClear(target_resource.Get(), route.owner.scene, route.owner.generation);
+        }
+        if (!already_cleared && !pending_clears[i].has_value() && pass != nullptr && pass->shader_hash == LENS_FLARE_SHADER_HASH) {
           // A blended layer must not start with undefined color or alpha.
-          resolution::Fail("native lens-flare layer clear was not observed");
+          std::ostringstream reason;
+          reason << "native lens-flare layer clear was not observed; scene=" << route.owner.scene
+                 << " generation=" << route.owner.generation << " target=" << target_resource.Get()
+                 << " deferred=" << (context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED);
+          resolution::Fail(reason.str().c_str());
           *saved = {};
           return false;
         }
@@ -1038,6 +1066,8 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
   }
   if (context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED) {
     if (auto* recording = command_list->get_private_data<Recording>(); recording != nullptr) {
+      RetainOutput(command_list, recording->output);
+      route.retained_outputs = std::move(recording->retained_outputs);
       *recording = std::move(route);
     }
   }
@@ -1104,6 +1134,8 @@ inline bool OnClearRenderTarget(reshade::api::command_list* command_list, reshad
                                 const float* color, uint32_t rect_count, const reshade::api::rect* rects) {
   const auto owner = rendering::native_context::GetScope().owner;
   if (owner.scene != 0u && (!owner.main_view || !owner.active_member || !owner.presentation_matches)) return false;
+  const uint64_t scene = (owner.scene != 0u ? owner.scene : owner.presentation_scene);
+  if (scene == 0u || !owner.presentation_matches) return false;
   Recording route;
   auto output = GetActive(command_list, &route);
   const uint64_t recording_frame = (output != nullptr ? route.frame : reconstruction::state::CurrentFrameToken());
@@ -1112,7 +1144,7 @@ inline bool OnClearRenderTarget(reshade::api::command_list* command_list, reshad
   const auto clone = renodx::utils::resource::upgrade::GetResourceViewClone(view);
   const auto resource = command_list->get_device()->get_resource_from_view(clone.handle == 0u ? view : clone);
   if (output == nullptr && resource.handle != 0u) {
-    auto ui_route = GetUiRoute(command_list->get_device());
+    auto ui_route = GetUiRoute(command_list);
     if (ui_route.output != nullptr) {
       auto* native_resource = reinterpret_cast<ID3D11Resource*>(resource.handle);  // NOLINT(performance-no-int-to-ptr)
       bool matched = ui_route.output->IsSceneTarget(native_resource);
@@ -1137,18 +1169,20 @@ inline bool OnClearRenderTarget(reshade::api::command_list* command_list, reshad
                  && std::cmp_greater_equal(rects[0].bottom, description.texture.height);
   }
   if ((output == nullptr || output->IsScaled()) && full_clear && resource.handle != 0u) {
-    ClearColor clear = {.frame = recording_frame, .scene = owner.scene, .generation = owner.generation};
+    ClearColor clear = {.scene = scene, .generation = owner.generation};
     std::copy_n(color, clear.color.size(), clear.color.begin());
-    auto* native_resource = reinterpret_cast<ID3D11Resource*>(resource.handle);  // NOLINT(performance-no-int-to-ptr)
-    native_resource->SetPrivateData(CLEAR_COLOR_GUID, sizeof(clear), &clear);
+    RecordClear(reinterpret_cast<ID3D11Resource*>(resource.handle), clear);  // NOLINT(performance-no-int-to-ptr)
   }
   if (output == nullptr) return false;
+  RetainOutput(command_list, output);
   const auto* draw = command_list->get_private_data<DrawState>();
   const bool dof = resolution::dof_plan.IsScaled() && draw != nullptr && draw->dof_active
                    && draw->dof_token == resolution::dof_token && draw->dof_frame == recording_frame;
   if (resolution::dof_plan.IsScaled() && !dof && !output->IsSceneTarget(reinterpret_cast<ID3D11Resource*>(resource.handle))) return false;  // NOLINT(performance-no-int-to-ptr)
-  auto mapped = output->MapTarget(reinterpret_cast<ID3D11RenderTargetView*>((clone.handle == 0u ? view : clone).handle), dof, !dof,
-                                  Surface::Role::DATA, recording_frame, route.producer.get());  // NOLINT(performance-no-int-to-ptr)
+  // Mirror clears for known output targets. A clear alone cannot identify a
+  // post-processing surface; its first qualified draw can use the saved clear.
+  auto mapped = output->MapTarget(reinterpret_cast<ID3D11RenderTargetView*>((clone.handle == 0u ? view : clone).handle), dof, !dof,  // NOLINT(performance-no-int-to-ptr)
+                                  Surface::Role::DATA, recording_frame, route.producer.get(), false);
   if (mapped != nullptr) {
     Microsoft::WRL::ComPtr<ID3D11Resource> mapped_resource;
     mapped->GetResource(&mapped_resource);
@@ -1156,6 +1190,12 @@ inline bool OnClearRenderTarget(reshade::api::command_list* command_list, reshad
     auto* context = reinterpret_cast<ID3D11DeviceContext*>(command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
     if (full_clear) {
       context->ClearRenderTargetView(mapped.Get(), color);
+      if (route.producer != nullptr) {
+        const std::unique_lock lock(output->surface_mutex);
+        if (std::ranges::find(route.producer->cleared_surfaces, reinterpret_cast<ID3D11Resource*>(resource.handle)) == route.producer->cleared_surfaces.end()) {  // NOLINT(performance-no-int-to-ptr)
+          route.producer->cleared_surfaces.push_back(reinterpret_cast<ID3D11Resource*>(resource.handle));                                                         // NOLINT(performance-no-int-to-ptr)
+        }
+      }
     } else {
       Microsoft::WRL::ComPtr<ID3D11DeviceContext1> context1;
       if (SUCCEEDED(context->QueryInterface(IID_PPV_ARGS(&context1)))) {
@@ -1186,9 +1226,10 @@ inline bool OnClearDepth(reshade::api::command_list* command_list, reshade::api:
                          const float* depth, const uint8_t* stencil, uint32_t rect_count, const reshade::api::rect* /*rects*/) {
   auto output = GetActive(command_list);
   if (output == nullptr) {
-    output = GetUiRoute(command_list->get_device()).output;
+    output = GetUiRoute(command_list).output;
   }
   if (output == nullptr || !output->IsScaled() || output->native_depth == nullptr) return false;
+  RetainOutput(command_list, output);
   auto* original = reinterpret_cast<ID3D11DepthStencilView*>(view.handle);  // NOLINT(performance-no-int-to-ptr)
   if (original == nullptr) return false;
   Microsoft::WRL::ComPtr<ID3D11Resource> resource;
@@ -1213,10 +1254,14 @@ inline bool OnCopyResource(reshade::api::command_list* command_list, reshade::ap
   const auto source_clone = renodx::utils::resource::upgrade::GetResourceClone(from, {.allow_create = false});
   const auto destination_clone = renodx::utils::resource::upgrade::GetResourceClone(to, {.allow_create = false});
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
-  return output->CopySurface(context,
-                             reinterpret_cast<ID3D11Resource*>((source_clone.handle != 0u ? source_clone : from).handle),          // NOLINT(performance-no-int-to-ptr)
-                             reinterpret_cast<ID3D11Resource*>((destination_clone.handle != 0u ? destination_clone : to).handle),  // NOLINT(performance-no-int-to-ptr)
-                             route.frame, route.producer.get());
+  const bool copied = output->CopySurface(context,
+                                          reinterpret_cast<ID3D11Resource*>((source_clone.handle != 0u ? source_clone : from).handle),          // NOLINT(performance-no-int-to-ptr)
+                                          reinterpret_cast<ID3D11Resource*>((destination_clone.handle != 0u ? destination_clone : to).handle),  // NOLINT(performance-no-int-to-ptr)
+                                          route.frame, route.producer.get());
+  if (copied) {
+    RetainOutput(command_list, output);
+  }
+  return copied;
 }
 
 // Existing native draw families that need output-size routing. This table
@@ -1275,7 +1320,48 @@ inline constexpr auto DRAW_CALLBACK = [](auto& command) {
           || draw->dof_frame != route.frame) return renodx::utils::command_action::CallbackResult<Context>{};
     }
   }
-  if (!Begin(command.cmd_list, &pass)) return renodx::utils::command_action::CallbackResult<Context>{};
+  // Display conversion closes the open route. Parallel workers can still use
+  // the pooled output and its clear records. Startup scenes with no output
+  // release their pending clears here so they cannot accumulate across frames.
+  static constexpr auto RETIRE_SCENE = [] {
+    const auto owner = rendering::native_context::GetScope().owner;
+    const uint64_t scene = (owner.scene != 0u ? owner.scene : owner.presentation_scene);
+    if (scene == 0u) return;
+    // Release resource references after dropping the state lock. Other scenes
+    // keep their clears, and recorded command lists retain their output textures.
+    Recording retired;
+    std::vector<RecordedClear> retired_clears;
+    const std::unique_lock lock(state.mutex);
+    // Lookup records have no ordering requirement. Group completed entries so
+    // removing several clears does not repeatedly shift the remaining records.
+    const auto completed = std::ranges::partition(state.clears, [&](const RecordedClear& clear) {
+      return clear.value.scene != scene || clear.value.generation != owner.generation;
+    });
+    retired_clears.assign(std::make_move_iterator(completed.begin()), std::make_move_iterator(completed.end()));
+    state.clears.erase(completed.begin(), completed.end());
+    const auto sequence = std::ranges::find_if(state.sequences, [&](const Recording& candidate) {
+      return candidate.owner.scene == scene && candidate.owner.generation == owner.generation;
+    });
+    if (sequence != state.sequences.end()) {
+      retired = std::move(*sequence);
+      state.sequences.erase(sequence);
+    }
+    if (state.active_owner.scene == scene && state.active_owner.generation == owner.generation) {
+      state.active.reset();
+      state.producer.reset();
+      state.active_owner = {};
+    }
+  };
+  if (!Begin(command.cmd_list, &pass)) {
+    if (!pass.display_output) return renodx::utils::command_action::CallbackResult<Context>{};
+    // Startup can reach display conversion before reconstruction has valid
+    // inputs. Finish its bookkeeping after the native draw even in that case.
+    return renodx::utils::command_action::CallbackResult<Context>{
+        .finalize_callback = [](Context&, const void*) {
+          RETIRE_SCENE();
+        },
+    };
+  }
   const auto* saved = &draw->bindings;
   if ((saved->output->observed_passes.fetch_or(pass.observation_bit, std::memory_order_relaxed) & pass.observation_bit) == 0u) {
     auto* context = reinterpret_cast<ID3D11DeviceContext*>(command.cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
@@ -1315,18 +1401,7 @@ inline constexpr auto DRAW_CALLBACK = [](auto& command) {
       .finalize_callback = [](Context& context, const void* data) {
         End(context.cmd_list);
         if (static_cast<const Pass*>(data)->display_output) {
-          // Release the sequence's views after dropping the state lock.
-          Recording retired;
-          const std::unique_lock lock(state.mutex);
-          const auto owner = rendering::native_context::GetScope().owner;
-          const uint64_t scene = (owner.scene != 0u ? owner.scene : owner.presentation_scene);
-          const auto sequence = std::ranges::find_if(state.sequences, [&](const Recording& candidate) {
-            return candidate.owner.scene == scene && candidate.owner.generation == owner.generation;
-          });
-          if (sequence != state.sequences.end()) {
-            retired = std::move(*sequence);
-            state.sequences.erase(sequence);
-          }
+          RETIRE_SCENE();
         }
       },
   };

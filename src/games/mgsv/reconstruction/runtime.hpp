@@ -193,8 +193,6 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list, [[maybe_unused]] co
     runtime::state::frame_state.mb_tile_prep_fired = true;
   }
 
-  if (runtime::state::frame_state.reconstruction_completed) return false;
-
   // Reconstruct the source before bloom downsamples it. Role and frame-input
   // checks reject unrelated reductions and the subsequent smaller bloom images.
   if (pixel_hash == shader_hashes::COPY_REDUCTION_X4_PS) {
@@ -398,7 +396,7 @@ inline void TransitionTemporalMode(
     return;
   }
   const uint64_t transition_frame = state::CurrentFrameToken();
-  const uint32_t completed_samples = state::CurrentSampleIndex();
+  const uint32_t reserved_samples = state::CurrentSampleIndex();
 
   // Disable projection writes before waiting for an in-flight resolve. Enable
   // only after history/sample state is reset, so the native hook cannot publish
@@ -438,7 +436,7 @@ inline void TransitionTemporalMode(
   } else {
     logging::Info("temporal reconstruction disabled reason=", reason,
                   " frame=", transition_frame,
-                  " completed_samples=", completed_samples);
+                  " reserved_samples=", reserved_samples);
   }
 }
 
@@ -797,11 +795,9 @@ inline void OnPresent(
     } else {
       missed_scaled_dispatches = 0u;
     }
-    // Candidate insertion draws may be lower-resolution DoF work. Preserve
-    // history when no new full-resolution scene was submitted, and reset only
-    // after a matching candidate was seen but no resolve completed.
-    coordinator::ResetTemporalState("enabled frame ended without TAA resolve");
   }
+  // Check history continuity at submission. A worker can cross Present while
+  // retaining the jitter and inputs recorded for its native scene.
   state::BeginFrame();
 }
 

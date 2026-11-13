@@ -42,6 +42,12 @@ struct CameraFrame {
   uintptr_t camera_identity = 0u;
   uint64_t scene = 0u;
   uint64_t owner_generation = 0u;
+  // Assigned when this scene first records geometry. Present and submission
+  // cannot change the sample already used by its recorded draws.
+  uint64_t reservation = 0u;
+  Matrix4d inverse_view_projection = {};
+  std::array<float, 16> projection = {};
+  std::array<float, 16> view = {};
 };
 
 // Pending reconstruction jobs keep their own copies. This small CPU cache
@@ -49,6 +55,8 @@ struct CameraFrame {
 inline constexpr size_t MAX_SCENE_PUBLICATIONS = 64u;
 inline std::array<CameraFrame, MAX_SCENE_PUBLICATIONS> scene_publications;
 inline size_t next_scene_publication = 0u;
+inline uint64_t next_reservation = 0u;
+inline CameraFrame committed_camera;
 
 inline std::atomic<uint64_t> reset_generation = 0u;
 
@@ -170,6 +178,8 @@ inline std::array<float, 16> ToRowMajorFloatArray(const Matrix4d& matrix) {
 
 inline void ResetMatrixHistoryLocked() {
   reset_generation.fetch_add(1u, std::memory_order_relaxed);
+  committed_camera = {};
+  next_reservation = 0u;
   committed_previous_view_projection = {};
   committed_previous_jitter_uv = {0.f, 0.f};
   committed_previous_view_projection_valid = false;
@@ -282,8 +292,8 @@ inline CameraFrame Get() {
   return result;
 }
 
-inline CameraFrame GetForCapture() {
-  const PublicationWriterGuard guard;
+// Callers hold the publication lock through any native projection write.
+inline CameraFrame GetForSceneLocked() {
   const auto owner = rendering::native_context::GetScope().owner;
   if (owner.scene != 0u) {
     const auto entry = std::ranges::find_if(scene_publications, [&](const CameraFrame& candidate) {
@@ -300,20 +310,27 @@ inline CameraFrame GetForCapture() {
   return result;
 }
 
+inline CameraFrame GetForCapture() {
+  const PublicationWriterGuard guard;
+  return GetForSceneLocked();
+}
+
 inline bool Commit(const CameraFrame& frame) {
   const PublicationWriterGuard guard;
   const bool valid = frame.valid && frame.camera_matrix_valid
                      && frame.reset_generation == reset_generation.load(std::memory_order_relaxed)
-                     && frame.sample_index == state::CurrentSampleIndex();
+                     && frame.scene != 0u && frame.reservation != 0u
+                     && (!committed_camera.valid || frame.reservation > committed_camera.reservation);
   if (valid) {
+    committed_camera = frame;
     committed_previous_view_projection = frame.current_view_projection;
     committed_previous_jitter_uv = {
         frame.jitter_uv_x,
         frame.jitter_uv_y,
     };
     committed_previous_view_projection_valid = true;
-    // Linearize sample advancement with native publication/correction. Releasing
-    // this lock before advancing allowed an old-sample correction after commit.
+    // The projection sample was reserved during recording. Only the history
+    // endpoint advances here, after the reconstructed output has been installed.
     state::CommitTemporalFrame();
   }
   return valid;

@@ -762,7 +762,9 @@ struct History {
   uint64_t generation = 0u;
   uint64_t submission = 0u;
   uintptr_t depth_identity = 0u;
-  uint32_t frame = 0u;
+  uint32_t sample = 0u;
+  uint64_t camera_generation = 0u;
+  bool scene_sample = false;
   uint32_t width = 0u;
   uint32_t height = 0u;
   uint32_t slot = 0u;
@@ -1187,8 +1189,9 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   }
   constants.lighting_resolution_divisor = static_cast<float>(scale);
 
-  const uint32_t present = lighting::noise_frame.load(std::memory_order_relaxed);
-  constants.lighting_noise_frame = static_cast<float>(present & 31u);
+  const bool scene_sample = temporal.camera_publication != 0u;
+  const uint32_t sample = (scene_sample ? temporal.camera_sample : lighting::noise_frame.load(std::memory_order_relaxed));
+  constants.lighting_noise_frame = static_cast<float>(sample & 31u);
   const bool new_submission = history_allowed && temporal.valid
                               && (temporal.submission != il::history.submission
                                   || temporal.generation != il::history.generation);
@@ -1483,25 +1486,29 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
                  "Lighting temporal unavailable; immediate=", immediate,
                  " ready=", temporal_ready, "; using current samples");
   }
-  // Present supplies only the phase-gap check. A new qualified producer
-  // submission is also required, so repeated hooks cannot advance history.
+  // Reconstruction supplies the sample reserved by this scene. Its workers
+  // can cross Present while keeping the same jitter and lighting noise layer.
+  // Reconstruction Off retains lighting's existing Present-based sequence.
+  const bool consecutive_sample = scene_sample == il::history.scene_sample
+                                  && (!scene_sample || temporal.camera_generation == il::history.camera_generation)
+                                  && sample - il::history.sample == 1u;
   constants.gi_history_valid = (constants.gi_temporal_active >= 0.5f && il::history.valid
-                                        && present - il::history.frame == 1u
+                                        && consecutive_sample
                                         && il::history_scenes[il::history.slot].buffer != nullptr
                                     ? 1.f
                                     : 0.f);
   constants.ao_history_valid = (constants.ao_temporal_active >= 0.5f && il::history.ao_valid
-                                        && present - il::history.frame == 1u
+                                        && consecutive_sample
                                         && il::history_scenes[il::history.slot].buffer != nullptr
                                     ? 1.f
                                     : 0.f);
   constants.specular_occlusion_history_valid = (specular_temporal_ready && constants.ao_temporal_active >= 0.5f
-                                                        && il::history.specular_valid && present - il::history.frame == 1u
+                                                        && il::history.specular_valid && consecutive_sample
                                                         && il::history_scenes[il::history.slot].buffer != nullptr
                                                     ? 1.f
                                                     : 0.f);
   constants.specular_gi_history_valid = (transport_temporal_ready && constants.gi_temporal_active >= 0.5f
-                                                 && il::history.specular_gi_valid && present - il::history.frame == 1u
+                                                 && il::history.specular_gi_valid && consecutive_sample
                                                  && il::history_scenes[il::history.slot].buffer != nullptr
                                              ? 1.f
                                              : 0.f);
@@ -1700,7 +1707,9 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
           .generation = temporal.generation,
           .submission = temporal.submission,
           .depth_identity = temporal.scene.depth_identity,
-          .frame = present,
+          .sample = sample,
+          .camera_generation = temporal.camera_generation,
+          .scene_sample = scene_sample,
           .width = width,
           .height = height,
           .slot = write_slot,

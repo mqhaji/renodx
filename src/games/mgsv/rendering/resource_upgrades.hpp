@@ -524,13 +524,13 @@ inline bool UpgradeBloomTarget(reshade::api::command_list* cmd_list, bool reduct
     cmd_list->clear_render_target_view(clone_view, black.data(), 0u, nullptr);
     const auto clone = renodx::utils::resource::upgrade::GetResourceClone(resource, {.allow_create = false});
     if (clone.handle != 0u) {
-      // Carry an earlier clear into the new clone; later clears update it directly.
-      auto* original = reinterpret_cast<ID3D11Resource*>(resource.handle);  // NOLINT(performance-no-int-to-ptr)
-      mgsv::reconstruction::post_process::ClearColor clear = {};
-      UINT bytes = sizeof(clear);
-      if (SUCCEEDED(original->GetPrivateData(mgsv::reconstruction::post_process::CLEAR_COLOR_GUID, &bytes, &clear)) && bytes == sizeof(clear)) {
-        auto* upgraded = reinterpret_cast<ID3D11Resource*>(clone.handle);  // NOLINT(performance-no-int-to-ptr)
-        upgraded->SetPrivateData(mgsv::reconstruction::post_process::CLEAR_COLOR_GUID, sizeof(clear), &clear);
+      // Keep an earlier clear attached to this scene when its bloom target
+      // becomes a float clone. Another scene can use the same native texture.
+      namespace post = mgsv::reconstruction::post_process;
+      const auto owner = native_context::GetScope().owner;
+      const auto clear = post::GetRecordedClear(reinterpret_cast<ID3D11Resource*>(resource.handle), owner.scene, owner.generation);  // NOLINT(performance-no-int-to-ptr)
+      if (clear.has_value()) {
+        post::RecordClear(reinterpret_cast<ID3D11Resource*>(clone.handle), *clear);  // NOLINT(performance-no-int-to-ptr)
       }
     }
   }

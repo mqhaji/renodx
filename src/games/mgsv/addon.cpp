@@ -421,7 +421,6 @@ void OnPresent(
         mgsv::lighting::ResetNativeLightViews(queue->get_device());
       }
       mgsv::lighting::temporal_inputs::enabled.store(temporal_lighting_enabled, std::memory_order_release);
-      mgsv::lighting::temporal_inputs::BeginFrame(queue->get_device());
       shadow_noise_frame = mgsv::lighting::noise_frame.fetch_add(1u, std::memory_order_relaxed) + 1u;
       selected_present = true;
     }

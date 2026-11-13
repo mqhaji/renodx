@@ -37,6 +37,9 @@ namespace mgsv::reconstruction::projection_jitter {
 
 using SetViewMatrixState = void(__fastcall*)(const float* view_matrix);
 using RenderPluginCallback = void(__fastcall*)(void* plugin, void* render, void* viewport);
+using RequestLocalLightDraws = void(__fastcall*)(
+    void* renderer, void* packet, void* visible_lights, void* shadow_ready,
+    void* input_context, void* output_context, const void* viewport, void* jobs);
 
 inline constexpr uintptr_t VELOCITY_SET_VIEW_RETURN_RVA = 0x1C57C8u;
 inline constexpr uintptr_t MODEL_SET_VIEW_RETURN_RVA = 0x1CD63Au;
@@ -46,7 +49,9 @@ inline constexpr uintptr_t OVERLAY_MODEL_SET_VIEW_RETURN_RVA = 0x208D9Cu;
 inline constexpr uintptr_t NEW_THERMOGRAPHY_SET_VIEW_RETURN_RVA = 0x214531u;
 inline constexpr uintptr_t THERMOGRAPHY_SET_VIEW_RETURN_RVA = 0x214AC3u;
 inline constexpr uintptr_t FORWARD_RENDERING_RVA = 0x1CD460u;
-inline constexpr uintptr_t LOCAL_LIGHT_MAIN_EXEC_RVA = 0x20AA00u;
+inline constexpr uintptr_t LOCAL_LIGHT_REQUEST_RVA = 0x2A43E0u;
+inline constexpr uintptr_t LOCAL_LIGHT_REQUEST_RETURN_RVA = 0x20B8A3u;
+inline constexpr uintptr_t LOCAL_LIGHT_REQUEST_VTABLE_RVA = 0x211E8D8u;
 inline constexpr uintptr_t LOCAL_LIGHT_VIEWPORT_280_COPY_RVA = 0x20B48Cu;
 
 inline constexpr std::array<uint8_t, 16> FORWARD_RENDERING_PROLOGUE = {
@@ -67,23 +72,64 @@ inline constexpr std::array<uint8_t, 16> FORWARD_RENDERING_PROLOGUE = {
     0xD8,
     0xE8,
 };
-inline constexpr std::array<uint8_t, 16> LOCAL_LIGHT_MAIN_EXEC_PROLOGUE = {
+inline constexpr std::array<uint8_t, 16> LOCAL_LIGHT_REQUEST_PROLOGUE = {
+    0x40,
+    0x57,
+    0x41,
+    0x56,
+    0x41,
+    0x57,
+    0x48,
+    0x83,
+    0xEC,
+    0x40,
+    0x48,
+    0xC7,
+    0x44,
+    0x24,
+    0x30,
+    0xFE,
+};
+// MainExec passes its completed packet in RDX and viewport as argument seven.
+inline constexpr std::array<uint8_t, 38> LOCAL_LIGHT_REQUEST_CALL_PATTERN = {
+    0x48,
+    0x89,
+    0x5C,
+    0x24,
+    0x38,
+    0x4C,
+    0x89,
+    0x7C,
+    0x24,
+    0x30,
+    0x48,
+    0x89,
+    0x44,
+    0x24,
+    0x28,
+    0x48,
+    0x89,
+    0x54,
+    0x24,
+    0x20,
+    0x4C,
+    0x8B,
+    0x4C,
+    0x24,
+    0x78,
+    0x4C,
+    0x8B,
+    0x45,
+    0x88,
     0x48,
     0x8B,
-    0xC4,
-    0x55,
-    0x56,
-    0x57,
-    0x41,
     0x54,
+    0x24,
+    0x58,
     0x41,
-    0x55,
-    0x41,
-    0x56,
-    0x41,
-    0x57,
+    0xFF,
+    0x52,
     0x48,
-    0x8D,
 };
 inline constexpr std::array<uint8_t, 16> LOCAL_LIGHT_VIEWPORT_280_COPY_PATTERN = {
     0x41,
@@ -197,7 +243,8 @@ inline constexpr uint32_t REQUIRED_RESTORATION_HITS = 3u;
 
 inline SetViewMatrixState set_view_matrix_state = nullptr;
 inline RenderPluginCallback forward_rendering = nullptr;
-inline RenderPluginCallback local_light_main_exec = nullptr;
+inline RequestLocalLightDraws request_local_light_draws = nullptr;
+inline const void* local_light_request_return_address = nullptr;
 inline uint8_t* expected_return_address = nullptr;
 inline void* velocity_return_address = nullptr;
 inline void* model_return_address = nullptr;
@@ -213,8 +260,6 @@ inline std::shared_mutex lifecycle_mutex;
 
 inline std::atomic<uint32_t> production_restoration_hits = 0u;
 inline std::atomic<bool> production_awaiting_restoration = false;
-inline std::atomic_flag local_light_projection_lock = ATOMIC_FLAG_INIT;
-inline thread_local bool local_light_projection_active = false;
 
 inline bool IsInstalled() {
   return installed.load(std::memory_order_acquire);
@@ -327,7 +372,9 @@ inline bool InitializeAdditionalHookAddresses(HMODULE module, const uint8_t* hel
       || DecodeRelativeCall(new_thermography_return - 5u) != helper_entry_address
       || DecodeRelativeCall(thermography_return - 5u) != helper_entry_address
       || !MatchesBytes(base + FORWARD_RENDERING_RVA, FORWARD_RENDERING_PROLOGUE)
-      || !MatchesBytes(base + LOCAL_LIGHT_MAIN_EXEC_RVA, LOCAL_LIGHT_MAIN_EXEC_PROLOGUE)
+      || !MatchesBytes(base + LOCAL_LIGHT_REQUEST_RVA, LOCAL_LIGHT_REQUEST_PROLOGUE)
+      || !MatchesBytes(base + LOCAL_LIGHT_REQUEST_RETURN_RVA - LOCAL_LIGHT_REQUEST_CALL_PATTERN.size(), LOCAL_LIGHT_REQUEST_CALL_PATTERN)
+      || *reinterpret_cast<const uintptr_t*>(base + LOCAL_LIGHT_REQUEST_VTABLE_RVA) != reinterpret_cast<uintptr_t>(base + LOCAL_LIGHT_REQUEST_RVA)
       || !MatchesBytes(base + LOCAL_LIGHT_VIEWPORT_280_COPY_RVA, LOCAL_LIGHT_VIEWPORT_280_COPY_PATTERN)) {
     logging::Warn("known additional projection jitter paths failed executable validation");
     return false;
@@ -340,7 +387,8 @@ inline bool InitializeAdditionalHookAddresses(HMODULE module, const uint8_t* hel
   new_thermography_return_address = new_thermography_return;
   thermography_return_address = thermography_return;
   forward_rendering = reinterpret_cast<RenderPluginCallback>(base + FORWARD_RENDERING_RVA);
-  local_light_main_exec = reinterpret_cast<RenderPluginCallback>(base + LOCAL_LIGHT_MAIN_EXEC_RVA);
+  request_local_light_draws = reinterpret_cast<RequestLocalLightDraws>(base + LOCAL_LIGHT_REQUEST_RVA);
+  local_light_request_return_address = base + LOCAL_LIGHT_REQUEST_RETURN_RVA;
   return true;
 }
 
@@ -381,10 +429,11 @@ inline void ApplyProjectionJitter(float* projection, float jitter_uv_x, float ji
   projection[9] -= 2.f * jitter_uv_y;
 }
 
-inline bool GetPublishedJitterForViewport(
+// Hold the publication lock through validation and the resulting matrix write.
+inline bool GetPublishedJitterForViewportLocked(
     const uint8_t* viewport,
     state::ProjectionJitterPath path,
-    std::array<float, 2>& jitter_uv) {
+    std::array<float, 2>* jitter_uv) {
   if (!state::IsEnabled() || viewport == nullptr) return false;
 
   const float scale = state::GetProjectionJitterScale(path);
@@ -395,46 +444,31 @@ inline bool GetPublishedJitterForViewport(
   const uint32_t height = *reinterpret_cast<const uint32_t*>(viewport + 0x5DCu);
   const uint8_t flags = *(viewport + 0x6E2u);
   const void* camera = *reinterpret_cast<void* const*>(viewport + 0x570u);
-  const camera_state::CameraFrame published = camera_state::Get();
+  const camera_state::CameraFrame published = camera_state::GetForSceneLocked();
   if (!LooksLikeGameplayProjection(projection, width, height, flags, camera)) {
     return false;
   }
   if (!published.valid) {
     return false;
   }
-  const uint64_t frame_token = state::CurrentFrameToken();
-  // Present can happen before recording for a camera sample finishes. These
-  // scene paths may keep that sample across one Present only if the camera
-  // still matches. Their caller holds the publication lock through the write.
-  const bool require_exact_camera = path == state::ProjectionJitterPath::VELOCITY
-                                    || path == state::ProjectionJitterPath::THERMOGRAPHY
-                                    || path == state::ProjectionJitterPath::FORWARD
-                                    || path == state::ProjectionJitterPath::MODEL
-                                    || path == state::ProjectionJitterPath::ALPHA_MODEL
-                                    || path == state::ProjectionJitterPath::OVERLAY_MODEL;
-  if (published.frame_token != frame_token
-      && (!require_exact_camera || frame_token == 0u || published.frame_token != frame_token - 1u)) {
-    return false;
-  }
   if (published.width != width || published.height != height) {
     return false;
   }
 
-  if (published.sample_index != state::CurrentSampleIndex()) {
+  const auto owner = rendering::native_context::GetScope().owner;
+  if (published.scene == 0u || published.scene != owner.scene
+      || published.owner_generation != owner.generation
+      || published.reset_generation != camera_state::reset_generation.load(std::memory_order_relaxed)) return false;
+
+  if (!published.camera_matrix_valid
+      || published.viewport_identity != reinterpret_cast<uintptr_t>(viewport)
+      || published.camera_identity != reinterpret_cast<uintptr_t>(camera)
+      || std::memcmp(projection, published.projection.data(), sizeof(published.projection)) != 0
+      || std::memcmp(viewport + 0x2C0u, published.view.data(), sizeof(published.view)) != 0) {
     return false;
   }
 
-  if (require_exact_camera
-      && (!published.camera_matrix_valid
-          || published.reset_generation != camera_state::reset_generation.load(std::memory_order_relaxed)
-          || published.viewport_identity != reinterpret_cast<uintptr_t>(viewport)
-          || published.camera_identity != reinterpret_cast<uintptr_t>(camera)
-          || std::memcmp(projection, camera_state::staged_projection.data(), 64u) != 0
-          || std::memcmp(viewport + 0x2C0u, camera_state::staged_view.data(), 64u) != 0)) {
-    return false;
-  }
-
-  jitter_uv = {
+  *jitter_uv = {
       published.jitter_uv_x * scale,
       published.jitter_uv_y * scale,
   };
@@ -454,7 +488,7 @@ inline void ApplyPublishedJitterToActiveProjection(
     return;
   }
   auto* active_projection = reinterpret_cast<float*>(static_cast<uint8_t*>(shader_manager) + 0x680u);
-  if (!GetPublishedJitterForViewport(viewport, jitter_path, jitter_uv)) return;
+  if (!GetPublishedJitterForViewportLocked(viewport, jitter_path, &jitter_uv)) return;
 
   const auto* projection = reinterpret_cast<const float*>(viewport + 0x280u);
   if (std::memcmp(projection, active_projection, 16u * sizeof(float)) != 0) {
@@ -465,7 +499,7 @@ inline void ApplyPublishedJitterToActiveProjection(
 }
 
 inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
-  void* return_address = _ReturnAddress();
+  const void* return_address = _ReturnAddress();
   const auto original = set_view_matrix_state;
   if (original == nullptr) return;
   original(view_matrix);
@@ -503,7 +537,7 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   const uint32_t width = *reinterpret_cast<const uint32_t*>(viewport + 0x5D8u);
   const uint32_t height = *reinterpret_cast<const uint32_t*>(viewport + 0x5DCu);
   const uint8_t flags = *(viewport + 0x6E2u);
-  void* camera = *reinterpret_cast<void* const*>(viewport + 0x570u);
+  const void* camera = *reinterpret_cast<void* const*>(viewport + 0x570u);
   void* shader_manager = shader_manager_global != nullptr ? *shader_manager_global : nullptr;
 
   if (!LooksLikeGameplayProjection(projection, width, height, flags, camera) || shader_manager == nullptr) {
@@ -530,6 +564,11 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   }
   if (!taa_enabled) return;
 
+  const auto owner = rendering::native_context::GetScope().owner;
+  if (owner.scene == 0u || !owner.main_view || !owner.active_member || !owner.presentation_matches
+      || owner.viewport != reinterpret_cast<uintptr_t>(viewport)
+      || owner.camera != reinterpret_cast<uintptr_t>(camera)) return;
+
   const camera_state::Matrix4d current_view_projection = camera_state::Multiply(
       camera_state::LoadColumnMajorMatrix(projection),
       camera_state::LoadColumnMajorMatrix(view_matrix));
@@ -537,7 +576,7 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   const bool current_camera_matrix_valid = camera_state::Invert(
       current_view_projection,
       current_inverse_view_projection);
-  camera_state::PublicationWriterGuard publication_guard;
+  const camera_state::PublicationWriterGuard publication_guard;
   if (!state::IsEnabled()) return;
   if (!projection_matches) {
     camera_state::InvalidateLocked();
@@ -545,7 +584,20 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   }
 
   const uint64_t frame_token = state::CurrentFrameToken();
-  const uint32_t sample_index = state::CurrentSampleIndex();
+  const auto recorded = camera_state::GetForSceneLocked();
+  if (recorded.valid) {
+    // A second projection setup for this scene must use its original sample.
+    // Another worker may already have reserved the next scene by this point.
+    if (recorded.reset_generation == camera_state::reset_generation.load(std::memory_order_relaxed)
+        && recorded.width == width && recorded.height == height
+        && std::memcmp(projection, recorded.projection.data(), 64u) == 0
+        && std::memcmp(view_matrix, recorded.view.data(), 64u) == 0) {
+      ApplyProjectionJitter(active_projection, shader_manager, recorded.jitter_uv_x, recorded.jitter_uv_y);
+    }
+    return;
+  }
+  const uint32_t sample_index = state::current_sample_index.fetch_add(1u, std::memory_order_relaxed);
+  const uint64_t reservation = ++camera_state::next_reservation;
   const auto jitter_uv = state::JitterForSample(sample_index, width, height);
   ApplyProjectionJitter(active_projection, shader_manager, jitter_uv[0], jitter_uv[1]);
   camera_state::staged_current_view_projection = current_view_projection;
@@ -582,6 +634,10 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
       .previous_jitter_uv_y = camera_state::committed_previous_jitter_uv[1],
       .device_to_view_depth = device_to_view_depth,
       .current_to_previous_clip = current_to_previous_clip,
+      .reservation = reservation,
+      .inverse_view_projection = current_inverse_view_projection,
+      .projection = camera_state::staged_projection,
+      .view = camera_state::staged_view,
   });
 }
 
@@ -595,46 +651,34 @@ inline void __fastcall HookForwardRendering(void* plugin, void* render, void* vi
       state::ProjectionJitterPath::FORWARD);
 }
 
-inline void __fastcall HookLocalLightMainExec(void* plugin, void* render, void* viewport_pointer) {
-  const auto original = local_light_main_exec;
+inline void __fastcall HookRequestLocalLightDraws(
+    void* renderer, void* packet_pointer, void* visible_lights, void* shadow_ready,
+    void* input_context, void* output_context, const void* viewport_pointer, void* jobs) {
+  const auto original = request_local_light_draws;
   if (original == nullptr) return;
 
-  auto* viewport = static_cast<uint8_t*>(viewport_pointer);
-  std::array<float, 2> jitter_uv = {};
-  if (local_light_projection_active
-      || !GetPublishedJitterForViewport(viewport, state::ProjectionJitterPath::LOCAL_LIGHT, jitter_uv)) {
-    original(plugin, render, viewport_pointer);
-    return;
+  // MainExec has finished this packet but has not published it to workers.
+  // Only this verified caller supplies the viewport as argument seven.
+  if (_ReturnAddress() == local_light_request_return_address
+      && packet_pointer != nullptr && viewport_pointer != nullptr && state::IsEnabled()) {
+    const camera_state::PublicationWriterGuard publication_guard;
+    const auto* viewport = static_cast<const uint8_t*>(viewport_pointer);
+    auto* packet = static_cast<uint8_t*>(packet_pointer);
+    std::array<float, 2> jitter_uv = {};
+    // Match the copied P/V and viewport rectangle as well as the scene's camera.
+    // A packet already carrying jitter fails this check, preventing a second offset.
+    if (GetPublishedJitterForViewportLocked(viewport, state::ProjectionJitterPath::LOCAL_LIGHT, &jitter_uv)
+        && std::memcmp(packet + 0x1A0u, viewport + 0x280u, 2u * 16u * sizeof(float)) == 0
+        && std::memcmp(packet + 0x370u, viewport + 0x5D0u, 4u * sizeof(uint32_t)) == 0) {
+      // Workers retain or copy this render P. The separate culling P/V and
+      // frustum planes stay intact, and the shared viewport remains read-only.
+      ApplyProjectionJitter(reinterpret_cast<float*>(packet + 0x1A0u), jitter_uv[0], jitter_uv[1]);
+    }
   }
 
-  while (local_light_projection_lock.test_and_set(std::memory_order_acquire)) {
-    _mm_pause();
-  }
-  local_light_projection_active = true;
-  auto* projection = reinterpret_cast<float*>(viewport + 0x280u);
-  {
-    struct ProjectionRestoreGuard {
-      float* projection;
-      std::array<float, 16> original;
-
-      explicit ProjectionRestoreGuard(float* target) : projection(target) {
-        std::memcpy(original.data(), projection, sizeof(original));
-      }
-
-      ProjectionRestoreGuard(const ProjectionRestoreGuard&) = delete;
-      ProjectionRestoreGuard& operator=(const ProjectionRestoreGuard&) = delete;
-      ProjectionRestoreGuard(ProjectionRestoreGuard&&) = delete;
-      ProjectionRestoreGuard& operator=(ProjectionRestoreGuard&&) = delete;
-
-      ~ProjectionRestoreGuard() {
-        std::memcpy(projection, original.data(), sizeof(original));
-        local_light_projection_active = false;
-        local_light_projection_lock.clear(std::memory_order_release);
-      }
-    } restore_guard(projection);
-    ApplyProjectionJitter(projection, jitter_uv[0], jitter_uv[1]);
-    original(plugin, render, viewport_pointer);
-  }
+  // Release the publication lock before the game copies packets and queues jobs.
+  original(renderer, packet_pointer, visible_lights, shadow_ready,
+           input_context, output_context, viewport_pointer, jobs);
 }
 
 #if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
@@ -642,7 +686,6 @@ using SunPass = void(__fastcall*)(void*, void*, uint32_t, uint32_t, uint8_t, uin
 using SunVolume = void(__fastcall*)(void*, const float*, const void*, const void*, void*, void*);
 using ShFallback = uint32_t(__fastcall*)(void*, uint32_t, float*, float*, float*, void*, void*);
 using TerrainProducer = void(__fastcall*)(void*, void*, void*, void*, uint64_t);
-using LightProducer = void*(__fastcall*)(void*, void*, void*, void*, uint8_t, uint8_t, uint8_t, uint64_t);
 using AttachPacket = void(__fastcall*)(void*, void*, uint64_t, uint64_t);
 using AlternateProjection = void(__fastcall*)(void*);
 using AlternateCommand = void*(__fastcall*)(void*, void*);
@@ -651,27 +694,14 @@ inline SunPass sun_pass = nullptr;
 inline SunVolume sun_volume = nullptr;
 inline ShFallback sh_fallback = nullptr;
 inline TerrainProducer terrain_producer = nullptr;
-inline LightProducer light_producer = nullptr;
 inline AttachPacket terrain_attach = nullptr;
-inline AttachPacket light_attach = nullptr;
 inline AlternateProjection alternate_projection = nullptr;
 inline AlternateCommand alternate_command = nullptr;
 inline StageMatrix stage_matrix = nullptr;
 inline uint8_t* native_base = nullptr;
 inline constexpr std::array<uint32_t, 4> SH_VERTEX_COUNTS = {8u, 6u, 18u, 8u};
 
-// Never wait on a rendering callback that already owns the execution gate.
-// A rejected admission calls native code unchanged, with no lock held.
-struct NativeCommitGuard {
-  bool acquired = !state::execution_lock.test_and_set(std::memory_order_acquire);
-  NativeCommitGuard() = default;
-  NativeCommitGuard(const NativeCommitGuard&) = delete;
-  NativeCommitGuard& operator=(const NativeCommitGuard&) = delete;
-  ~NativeCommitGuard() {
-    if (acquired) state::execution_lock.clear(std::memory_order_release);
-  }
-};
-
+// The scope constructor links to this thread-local head of its own type.
 struct NativeProjectionScope;
 inline thread_local const NativeProjectionScope* native_scope = nullptr;
 
@@ -681,8 +711,6 @@ struct NativeProjectionScope {
   const NativeProjectionScope* previous = native_scope;
   state::ProjectionJitterPath path;
   camera_state::CameraFrame frame = {};
-  uint64_t sequence = 0u;
-  uint64_t generation = 0u;
   alignas(16) std::array<float, 16> projection = {};
   alignas(16) std::array<float, 16> view = {};
   std::array<float, 2> jitter = {};
@@ -692,19 +720,19 @@ struct NativeProjectionScope {
       : path(selected) {
     native_scope = this;
     if (source == nullptr || state::GetProjectionJitterScale(path) == 0.f) return;
-    NativeCommitGuard execution_guard;
-    if (!execution_guard.acquired) return;
-    camera_state::PublicationWriterGuard publication_guard;
-    frame = camera_state::Get();
+    // Scene camera data has its own lock. GPU reconstruction can run while
+    // workers prepare these matrices without making them skip jitter.
+    const camera_state::PublicationWriterGuard publication_guard;
+    frame = camera_state::GetForSceneLocked();
     if (!frame.valid || !frame.camera_matrix_valid
         || !state::IsEnabled()
-        || frame.frame_token != state::CurrentFrameToken()
-        || frame.sample_index != state::CurrentSampleIndex()) return;
+        || frame.scene == 0u
+        || frame.reset_generation != camera_state::reset_generation.load(std::memory_order_relaxed)) return;
     const auto* bytes = static_cast<const uint8_t*>(source);
     const auto* p = reinterpret_cast<const float*>(bytes + (alternate ? 0x1C0u : 0x280u));
     const auto* v = reinterpret_cast<const float*>(bytes + (alternate ? 0x200u : 0x2C0u));
     const void* camera = *reinterpret_cast<void* const*>(bytes + (alternate ? 0x308u : 0x570u));
-    if (camera == nullptr || camera != camera_state::staged_camera) return;
+    if (camera == nullptr || reinterpret_cast<uintptr_t>(camera) != frame.camera_identity) return;
     uint32_t width = 0u;
     uint32_t height = 0u;
     if (alternate) {
@@ -713,14 +741,14 @@ struct NativeProjectionScope {
       width = *reinterpret_cast<const uint32_t*>(descriptor + 0x48u);
       height = *reinterpret_cast<const uint32_t*>(descriptor + 0x4Cu);
     } else {
-      if (source != camera_state::staged_viewport || (bytes[0x6E2u] & 1u) == 0u) return;
+      if (reinterpret_cast<uintptr_t>(source) != frame.viewport_identity || (bytes[0x6E2u] & 1u) == 0u) return;
       width = *reinterpret_cast<const uint32_t*>(bytes + 0x5D8u);
       height = *reinterpret_cast<const uint32_t*>(bytes + 0x5DCu);
     }
     if (width != frame.width || height != frame.height
         || !LooksLikeGameplayProjection(p, width, height, 1u, camera)
-        || std::memcmp(p, camera_state::staged_projection.data(), 64u) != 0
-        || std::memcmp(v, camera_state::staged_view.data(), 64u) != 0) {
+        || std::memcmp(p, frame.projection.data(), 64u) != 0
+        || std::memcmp(v, frame.view.data(), 64u) != 0) {
       return;
     }
     for (uint32_t i = 0u; i < 16u; ++i) {
@@ -730,21 +758,18 @@ struct NativeProjectionScope {
     std::memcpy(view.data(), v, 64u);
     const float scale = state::GetProjectionJitterScale(path);
     jitter = {frame.jitter_uv_x * scale, frame.jitter_uv_y * scale};
-    sequence = camera_state::published_sequence.load(std::memory_order_relaxed);
-    generation = state::frame_state.temporal_generation;
     valid = std::isfinite(jitter[0]) && std::isfinite(jitter[1]) && (jitter[0] != 0.f || jitter[1] != 0.f);
   }
   NativeProjectionScope(const NativeProjectionScope&) = delete;
   NativeProjectionScope& operator=(const NativeProjectionScope&) = delete;
   ~NativeProjectionScope() { native_scope = previous; }
 
-  bool CurrentLocked() const {
+  [[nodiscard]] bool CurrentLocked() const {
+    const auto owner = rendering::native_context::GetScope().owner;
     return valid && state::IsEnabled()
            && state::GetProjectionJitterScale(path) != 0.f
-           && sequence == camera_state::published_sequence.load(std::memory_order_relaxed)
-           && generation == state::frame_state.temporal_generation
-           && frame.frame_token == state::CurrentFrameToken()
-           && frame.sample_index == state::CurrentSampleIndex();
+           && frame.scene == owner.scene && frame.owner_generation == owner.generation
+           && frame.reset_generation == camera_state::reset_generation.load(std::memory_order_relaxed);
   }
 };
 
@@ -771,9 +796,7 @@ inline bool TranslateClip(float* values, uint32_t count, const std::array<float,
 
 inline bool CorrectNativeMatrix(float* matrix, const NativeProjectionScope& scope, bool projection_only = false) {
   if (!scope.valid || matrix == nullptr) return false;
-  NativeCommitGuard execution_guard;
-  if (!execution_guard.acquired) return false;
-  camera_state::PublicationWriterGuard publication_guard;
+  const camera_state::PublicationWriterGuard publication_guard;
   if (!scope.CurrentLocked()) return false;
   alignas(16) std::array<float, 16> expected = scope.projection;
   if (!projection_only) {
@@ -806,7 +829,7 @@ inline bool CorrectNativeMatrix(float* matrix, const NativeProjectionScope& scop
 }
 
 inline void __fastcall HookSunPass(void* renderer, void* viewport, uint32_t a, uint32_t b, uint8_t c, uint8_t d) {
-  NativeProjectionScope scope(state::ProjectionJitterPath::SUN_VOLUME, viewport);
+  const NativeProjectionScope scope(state::ProjectionJitterPath::SUN_VOLUME, viewport);
   sun_pass(renderer, viewport, a, b, c, d);
 }
 
@@ -825,29 +848,20 @@ inline void __fastcall HookSunVolume(void* context, const float* vp, const void*
 inline uint32_t __fastcall HookShFallback(void* renderer, uint32_t kind, float* output, float* min_w,
                                           float* max_w, void* shape, void* viewport) {
   const bool qualified = _ReturnAddress() == native_base + 0x1F2529u && kind < SH_VERTEX_COUNTS.size();
-  NativeProjectionScope scope(state::ProjectionJitterPath::SH_FALLBACK, qualified ? viewport : nullptr);
+  const NativeProjectionScope scope(state::ProjectionJitterPath::SH_FALLBACK, qualified ? viewport : nullptr);
   const uint32_t success = sh_fallback(renderer, kind, output, min_w, max_w, shape, viewport);
   if (success != 0u && scope.valid) {
-    NativeCommitGuard execution_guard;
-    if (execution_guard.acquired) {
-      camera_state::PublicationWriterGuard publication_guard;
-      if (scope.CurrentLocked()) {
-        TranslateClip(output, SH_VERTEX_COUNTS[kind], scope.jitter);
-      }
+    const camera_state::PublicationWriterGuard publication_guard;
+    if (scope.CurrentLocked()) {
+      TranslateClip(output, SH_VERTEX_COUNTS[kind], scope.jitter);
     }
   }
   return success;  // EAX is success, NOT a vertex count. Bounds/Z/W untouched.
 }
 
 inline void __fastcall HookTerrainProducer(void* a, void* b, void* scene, void* viewport, uint64_t e) {
-  NativeProjectionScope scope(state::ProjectionJitterPath::TERRAIN_DECAL, viewport);
+  const NativeProjectionScope scope(state::ProjectionJitterPath::TERRAIN_DECAL, viewport);
   terrain_producer(a, b, scene, viewport, e);
-}
-
-inline void* __fastcall HookLightProducer(void* a, void* output, void* c, void* viewport,
-                                          uint8_t e, uint8_t f, uint8_t g, uint64_t h) {
-  NativeProjectionScope scope(state::ProjectionJitterPath::LIGHT_PACKET, viewport);
-  return light_producer(a, output, c, viewport, e, f, g, h);
 }
 
 inline void __fastcall HookTerrainAttach(void* command, void* packet, uint64_t c, uint64_t d) {
@@ -859,21 +873,13 @@ inline void __fastcall HookTerrainAttach(void* command, void* packet, uint64_t c
   terrain_attach(command, packet, c, d);
 }
 
-inline void __fastcall HookLightAttach(void* command, void* packet, uint64_t c, uint64_t d) {
-  if (_ReturnAddress() == native_base + 0x2A5342u && packet != nullptr && native_scope != nullptr
-      && native_scope->path == state::ProjectionJitterPath::LIGHT_PACKET) {
-    CorrectNativeMatrix(reinterpret_cast<float*>(static_cast<uint8_t*>(packet) + 0x130u), *native_scope);
-  }
-  light_attach(command, packet, c, d);
-}
-
 inline void __fastcall HookAlternateProjection(void* context) {
-  NativeProjectionScope scope(state::ProjectionJitterPath::ALTERNATE_CAMERA, context, true);
+  const NativeProjectionScope scope(state::ProjectionJitterPath::ALTERNATE_CAMERA, context, true);
   alternate_projection(context);
 }
 
 inline void* __fastcall HookAlternateCommand(void* context, void* command) {
-  NativeProjectionScope scope(state::ProjectionJitterPath::ALTERNATE_CAMERA, context, true);
+  const NativeProjectionScope scope(state::ProjectionJitterPath::ALTERNATE_CAMERA, context, true);
   return alternate_command(context, command);
 }
 
@@ -970,25 +976,7 @@ inline bool InitializeNativeDiagnosticAddresses(HMODULE module) {
                                              0x81,
                                              0xEC,
                                          })
-      || !MatchesBytes(base + 0x2A4C00u, LOCAL_LIGHT_MAIN_EXEC_PROLOGUE) || !MatchesBytes(base + 0x2D18D0u, std::array<uint8_t, 16>{
-                                                                                                                0x40,
-                                                                                                                0x57,
-                                                                                                                0x48,
-                                                                                                                0x83,
-                                                                                                                0xEC,
-                                                                                                                0x30,
-                                                                                                                0x48,
-                                                                                                                0xC7,
-                                                                                                                0x44,
-                                                                                                                0x24,
-                                                                                                                0x20,
-                                                                                                                0xFE,
-                                                                                                                0xFF,
-                                                                                                                0xFF,
-                                                                                                                0xFF,
-                                                                                                                0x48,
-                                                                                                            })
-      || !MatchesBytes(base + 0x2D3380u, std::array<uint8_t, 16>{
+      || !MatchesBytes(base + 0x2D18D0u, std::array<uint8_t, 16>{
                                              0x40,
                                              0x57,
                                              0x48,
@@ -1060,7 +1048,7 @@ inline bool InitializeNativeDiagnosticAddresses(HMODULE module) {
                                              0x48,
                                              0x33,
                                          })
-      || DecodeRelativeCall(base + 0x30B078u) != base + 0x30B680u || DecodeRelativeCall(base + 0x1F2524u) != base + 0x27EF80u || DecodeRelativeCall(base + 0x2755C5u) != base + 0x2D18D0u || DecodeRelativeCall(base + 0x2A533Du) != base + 0x2D3380u || DecodeRelativeCall(base + 0x2E747Fu) != base + 0x2D7AA0u || DecodeRelativeCall(base + 0x2E4DD2u) != base + 0x2D7AA0u || std::memcmp(base + 0x21102B8u, SH_VERTEX_COUNTS.data(), sizeof(SH_VERTEX_COUNTS)) != 0) {
+      || DecodeRelativeCall(base + 0x30B078u) != base + 0x30B680u || DecodeRelativeCall(base + 0x1F2524u) != base + 0x27EF80u || DecodeRelativeCall(base + 0x2755C5u) != base + 0x2D18D0u || DecodeRelativeCall(base + 0x2E747Fu) != base + 0x2D7AA0u || DecodeRelativeCall(base + 0x2E4DD2u) != base + 0x2D7AA0u || std::memcmp(base + 0x21102B8u, SH_VERTEX_COUNTS.data(), sizeof(SH_VERTEX_COUNTS)) != 0) {
     return false;
   }
   native_base = base;
@@ -1068,9 +1056,7 @@ inline bool InitializeNativeDiagnosticAddresses(HMODULE module) {
   sun_volume = reinterpret_cast<SunVolume>(base + 0x30B680u);
   sh_fallback = reinterpret_cast<ShFallback>(base + 0x27EF80u);
   terrain_producer = reinterpret_cast<TerrainProducer>(base + 0x275280u);
-  light_producer = reinterpret_cast<LightProducer>(base + 0x2A4C00u);
   terrain_attach = reinterpret_cast<AttachPacket>(base + 0x2D18D0u);
-  light_attach = reinterpret_cast<AttachPacket>(base + 0x2D3380u);
   alternate_projection = reinterpret_cast<AlternateProjection>(base + 0x2E7330u);
   alternate_command = reinterpret_cast<AlternateCommand>(base + 0x2E4C70u);
   stage_matrix = reinterpret_cast<StageMatrix>(base + 0x2D7AA0u);
@@ -1079,7 +1065,7 @@ inline bool InitializeNativeDiagnosticAddresses(HMODULE module) {
 #endif
 
 inline bool Attach() {
-  const std::lock_guard lifecycle_guard(lifecycle_mutex);
+  const std::scoped_lock lifecycle_guard(lifecycle_mutex);
   if (installed.load(std::memory_order_acquire)) return true;
 
   camera_state::Invalidate();
@@ -1099,7 +1085,7 @@ inline bool Attach() {
     logging::Warn("failed to decode native projection hook addresses");
     set_view_matrix_state = nullptr;
     forward_rendering = nullptr;
-    local_light_main_exec = nullptr;
+    request_local_light_draws = nullptr;
     return false;
   }
 
@@ -1136,8 +1122,8 @@ inline bool Attach() {
     return false;
   }
   if (DetourAttach(
-          reinterpret_cast<void**>(&local_light_main_exec),
-          reinterpret_cast<void*>(HookLocalLightMainExec))
+          reinterpret_cast<void**>(&request_local_light_draws),
+          reinterpret_cast<void*>(HookRequestLocalLightDraws))
       != NO_ERROR) {
     DetourTransactionAbort();
     return false;
@@ -1147,9 +1133,7 @@ inline bool Attach() {
       || DetourAttach(reinterpret_cast<void**>(&sun_volume), reinterpret_cast<void*>(HookSunVolume)) != NO_ERROR
       || DetourAttach(reinterpret_cast<void**>(&sh_fallback), reinterpret_cast<void*>(HookShFallback)) != NO_ERROR
       || DetourAttach(reinterpret_cast<void**>(&terrain_producer), reinterpret_cast<void*>(HookTerrainProducer)) != NO_ERROR
-      || DetourAttach(reinterpret_cast<void**>(&light_producer), reinterpret_cast<void*>(HookLightProducer)) != NO_ERROR
       || DetourAttach(reinterpret_cast<void**>(&terrain_attach), reinterpret_cast<void*>(HookTerrainAttach)) != NO_ERROR
-      || DetourAttach(reinterpret_cast<void**>(&light_attach), reinterpret_cast<void*>(HookLightAttach)) != NO_ERROR
       || DetourAttach(reinterpret_cast<void**>(&alternate_projection), reinterpret_cast<void*>(HookAlternateProjection)) != NO_ERROR
       || DetourAttach(reinterpret_cast<void**>(&alternate_command), reinterpret_cast<void*>(HookAlternateCommand)) != NO_ERROR
       || DetourAttach(reinterpret_cast<void**>(&stage_matrix), reinterpret_cast<void*>(HookStageMatrix)) != NO_ERROR) {
@@ -1161,7 +1145,7 @@ inline bool Attach() {
     DetourTransactionAbort();
     set_view_matrix_state = nullptr;
     forward_rendering = nullptr;
-    local_light_main_exec = nullptr;
+    request_local_light_draws = nullptr;
     return false;
   }
 
@@ -1171,7 +1155,7 @@ inline bool Attach() {
                 " helper=", logging::Hex{reinterpret_cast<uintptr_t>(helper_entry_address)},
                 " return=", logging::Hex{reinterpret_cast<uintptr_t>(expected_return_address)},
                 " forward=", logging::Hex{reinterpret_cast<uintptr_t>(forward_rendering)},
-                " local_light=", logging::Hex{reinterpret_cast<uintptr_t>(local_light_main_exec)},
+                " local_light_packets=", logging::Hex{reinterpret_cast<uintptr_t>(request_local_light_draws)},
                 " shader_manager_global=", logging::Hex{reinterpret_cast<uintptr_t>(shader_manager_global)});
   return true;
 }
@@ -1187,7 +1171,7 @@ inline void StopAdmission(bool wait_for_lifecycle_owner = true, bool transition_
   if (!installed.load(std::memory_order_acquire) || set_view_matrix_state == nullptr) return;
 
   if (transition_runtime) {
-    camera_state::PublicationWriterGuard publication_guard;
+    const camera_state::PublicationWriterGuard publication_guard;
     state::SetTemporalMode(state::TemporalMode::OFF);
     camera_state::InvalidateLocked();
   }
