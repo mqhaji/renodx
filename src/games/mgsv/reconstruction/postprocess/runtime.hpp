@@ -61,6 +61,8 @@ inline constexpr uint32_t CONSTANT_BINDINGS_MASK = (1u << CONSTANT_BINDINGS.size
 // restoring a draw also restores unused slots displaced by target changes.
 inline constexpr uint32_t PIXEL_INPUT_COUNT = 16u;
 inline constexpr uint32_t PIXEL_INPUT_MASK = (1u << PIXEL_INPUT_COUNT) - 1u;
+// Native DoF sprites also read their baked color and mask through VS t0/t1.
+inline constexpr uint32_t VERTEX_INPUT_COUNT = 2u;
 // This native shader draws depth-tested flare sprites into a separate layer.
 inline constexpr uint32_t LENS_FLARE_SHADER_HASH = 0x93A0C8D8u;
 // One metadata word records the shader's actual reads: bits 0..2 identify the
@@ -97,7 +99,7 @@ struct DrawBindings {
   std::array<Microsoft::WRL::ComPtr<ID3D11RenderTargetView>, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> rtvs;
   Microsoft::WRL::ComPtr<ID3D11DepthStencilView> dsv;
   std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, PIXEL_INPUT_COUNT> srvs;
-  std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 2> vertex_srvs;
+  std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, VERTEX_INPUT_COUNT> vertex_srvs;
   uint32_t rtv_count = 0u;
   bool targets_changed = false;
   bool inputs_changed = false;
@@ -461,7 +463,7 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
     }
   }
   std::array<ID3D11ShaderResourceView*, PIXEL_INPUT_COUNT> inputs = {};
-  std::array<ID3D11ShaderResourceView*, 2> vertex_inputs = {};
+  std::array<ID3D11ShaderResourceView*, VERTEX_INPUT_COUNT> vertex_inputs = {};
   context->OMGetRenderTargets(static_cast<UINT>(targets.size()), targets.data(), &saved->dsv);
   context->PSGetShaderResources(0u, static_cast<UINT>(inputs.size()), inputs.data());
   for (size_t index = 0u; index < targets.size(); ++index) {
@@ -493,19 +495,34 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
       }
     }
   }
+  if (!qualified_flare) {
+    *saved = {};
+    return false;
+  }
+  // A draw can read one native view from several slots or shader stages.
+  // Resolve it once and retain the replacement until the bindings are set.
+  // This cache lasts only for this draw; the next draw rechecks its producer.
+  struct InputMapping {
+    ID3D11ShaderResourceView* original;  // Retained by saved PS/VS bindings.
+    MappedInput mapped;
+  };
+  std::array<InputMapping, PIXEL_INPUT_COUNT + VERTEX_INPUT_COUNT> input_mappings;
+  size_t input_mapping_count = 0u;
+  const auto map_input = [&](ID3D11ShaderResourceView* view) -> const MappedInput& {
+    for (const auto& mapping : std::span(input_mappings).first(input_mapping_count)) {
+      if (mapping.original == view) return mapping.mapped;
+    }
+    auto& mapping = input_mappings[input_mapping_count++];
+    mapping = {.original = view, .mapped = output->MapInput(view, scene_only, route.frame, route.producer.get())};
+    return mapping.mapped;
+  };
   // Follow the purpose of t0 through reductions and copies. Equal-sized native
   // textures can hold scene color, bloom, or unrelated data at different times.
   auto input_role = Surface::Role::DATA;
   if ((pixel_inputs & 1u) != 0u && inputs[0] != nullptr) {
-    Microsoft::WRL::ComPtr<ID3D11Resource> resource;
-    inputs[0]->GetResource(&resource);
-    if (output->IsSceneTarget(resource.Get())) {
-      input_role = Surface::Role::SCENE_COLOR;
-    } else {
-      output->GetSurface(resource.Get(), false, route.frame, route.producer.get(), &input_role);
-    }
+    input_role = map_input(inputs[0]).role;
   }
-  if (!qualified_flare || (pass != nullptr && pass->role == Surface::Role::BLOOM && input_role != Surface::Role::SCENE_COLOR && input_role != Surface::Role::BLOOM && input_role != Surface::Role::BLOOM_FIXED_GRID)) {
+  if (pass != nullptr && pass->role == Surface::Role::BLOOM && input_role != Surface::Role::SCENE_COLOR && input_role != Surface::Role::BLOOM && input_role != Surface::Role::BLOOM_FIXED_GRID) {
     *saved = {};
     return false;
   }
@@ -536,9 +553,10 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
     context->VSGetShaderResources(0u, static_cast<UINT>(vertex_inputs.size()), vertex_inputs.data());
     for (size_t index = 0u; index < vertex_inputs.size(); ++index) {
       saved->vertex_srvs[index].Attach(vertex_inputs[index]);
-      const auto mapped = output->MapInput(vertex_inputs[index], false, route.frame, route.producer.get());
-      if (mapped != nullptr) {
-        vertex_inputs[index] = mapped.Get();
+      if (vertex_inputs[index] == nullptr) continue;
+      const auto& mapped = map_input(vertex_inputs[index]);
+      if (mapped.view != nullptr) {
+        vertex_inputs[index] = mapped.view.Get();
         saved->vertex_inputs_changed = true;
       }
     }
@@ -552,9 +570,10 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
   for (size_t index = 0u; index < inputs.size(); ++index) {
     if ((pixel_inputs & (1u << index)) == 0u) continue;
     auto& input = inputs[index];
-    const auto mapped = output->MapInput(input, scene_only, route.frame, route.producer.get());
-    if (mapped != nullptr) {
-      input = mapped.Get();
+    if (input == nullptr) continue;
+    const auto& mapped = map_input(input);
+    if (mapped.view != nullptr) {
+      input = mapped.view.Get();
       saved->inputs_changed = true;
     }
   }
@@ -1105,7 +1124,7 @@ inline void End(reshade::api::command_list* command_list) {
   }
   std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> targets = {};
   std::array<ID3D11ShaderResourceView*, PIXEL_INPUT_COUNT> inputs = {};
-  std::array<ID3D11ShaderResourceView*, 2> vertex_inputs = {};
+  std::array<ID3D11ShaderResourceView*, VERTEX_INPUT_COUNT> vertex_inputs = {};
   if (saved->inputs_changed) {
     context->PSSetShaderResources(0u, static_cast<UINT>(inputs.size()), inputs.data());
   }

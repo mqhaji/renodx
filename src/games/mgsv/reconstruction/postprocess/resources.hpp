@@ -183,6 +183,13 @@ struct MappedTarget {
   bool has_previous_write = false;
 };
 
+// A sampled view and its qualified purpose belong to the same lookup. Keep
+// the role even when a native scene view's encoding prevents replacement.
+struct MappedInput {
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
+  Surface::Role role = Surface::Role::DATA;
+};
+
 // These objects depend on the device, not on the current render/output size.
 struct Pipelines {
   reshade::api::device* device;
@@ -736,15 +743,22 @@ struct Output {
 
   // Redirect reads only when this recording has a matching scene, depth, or
   // intermediate. A missing match leaves the caller's native binding unchanged.
-  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> MapInput(ID3D11ShaderResourceView* view, bool scene_only = false,
-                                                            uint64_t recording_frame = reconstruction::state::CurrentFrameToken(),
-                                                            const OutputProducer* producer = nullptr) {
-    if (view == nullptr) return nullptr;
+  MappedInput MapInput(ID3D11ShaderResourceView* view, bool scene_only = false,
+                       uint64_t recording_frame = reconstruction::state::CurrentFrameToken(),
+                       const OutputProducer* producer = nullptr) {
+    MappedInput result;
+    if (view == nullptr) return result;
     Microsoft::WRL::ComPtr<ID3D11Resource> original;
     view->GetResource(&original);
+    if (IsSceneTarget(original.Get())) {
+      result.role = Surface::Role::SCENE_COLOR;
+    }
     // The float scene uses explicit encoding. Leave unrelated native sRGB
     // views to the existing clone path rather than changing their transfer.
-    if (original == source) return srv;
+    if (original == source) {
+      result.view = srv;
+      return result;
+    }
     if (original == original_source) {
       D3D11_SHADER_RESOURCE_VIEW_DESC description;
       view->GetDesc(&description);
@@ -753,7 +767,8 @@ struct Output {
       // An sRGB view would decode on read, so it cannot use the same float SRV.
       if (description.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D && description.Texture2D.MostDetailedMip == 0u
           && (description.Format == DXGI_FORMAT_B8G8R8A8_UNORM || description.Format == DXGI_FORMAT_R8G8B8A8_UNORM)) {
-        return srv;
+        result.view = srv;
+        return result;
       }
     }
     // Stencil is integer mask data, not sampled geometry. Keep its view separate
@@ -761,14 +776,26 @@ struct Output {
     if (IsScaled() && original == native_depth) {
       D3D11_SHADER_RESOURCE_VIEW_DESC description;
       view->GetDesc(&description);
-      if (description.Format == DXGI_FORMAT_X24_TYPELESS_G8_UINT || description.Format == DXGI_FORMAT_X32_TYPELESS_G8X24_UINT) return output_stencil_sample;
-      if (original != geometry_depth) return output_depth_sample;
+      if (description.Format == DXGI_FORMAT_X24_TYPELESS_G8_UINT || description.Format == DXGI_FORMAT_X32_TYPELESS_G8X24_UINT) {
+        result.view = output_stencil_sample;
+        return result;
+      }
+      if (original != geometry_depth) {
+        result.view = output_depth_sample;
+        return result;
+      }
     }
-    if (IsScaled() && original == geometry_depth) return aligned_depth_view;
+    if (IsScaled() && original == geometry_depth) {
+      result.view = aligned_depth_view;
+      return result;
+    }
     auto role = Surface::Role::DATA;
     const auto surface = GetSurface(original.Get(), false, recording_frame, producer, &role);
-    if (surface == nullptr) return nullptr;
-    if (scene_only && role == Surface::Role::DATA) return nullptr;
+    if (surface == nullptr) return result;
+    if (result.role != Surface::Role::SCENE_COLOR) {
+      result.role = role;
+    }
+    if (scene_only && role == Surface::Role::DATA) return result;
     const auto find_view = [&]() -> ID3D11ShaderResourceView* {
       for (const auto& sample : surface->samples) {
         if (sample.original.Get() == view) return sample.replacement.Get();
@@ -777,21 +804,28 @@ struct Output {
     };
     {
       const std::shared_lock lock(surface_mutex);
-      if (auto* cached = find_view(); cached != nullptr) return cached;
+      if (auto* cached = find_view(); cached != nullptr) {
+        result.view = cached;
+        return result;
+      }
     }
     const std::unique_lock lock(surface_mutex);
     // Recheck after changing locks so concurrent misses share one cached view.
-    if (auto* cached = find_view(); cached != nullptr) return cached;
+    if (auto* cached = find_view(); cached != nullptr) {
+      result.view = cached;
+      return result;
+    }
     D3D11_SHADER_RESOURCE_VIEW_DESC description;
     view->GetDesc(&description);
     Surface::SampleView sample = {.original = view};
     auto* native_device = reinterpret_cast<ID3D11Device*>(device->get_native());  // NOLINT(performance-no-int-to-ptr)
     if (FAILED(native_device->CreateShaderResourceView(surface->texture.Get(), &description, &sample.replacement))) {
       resolution::Fail("post-processing sample view allocation failed");
-      return nullptr;
+      return result;
     }
     surface->samples.push_back(std::move(sample));
-    return surface->samples.back().replacement;
+    result.view = surface->samples.back().replacement;
+    return result;
   }
 
   // Mirror a qualified full-resource copy using matching output-sized storage.

@@ -34,6 +34,12 @@ Further reuse across draws requires a complete source-write record, the exact bo
 
 CPU target preparation now uses one mapping for an intermediate's resource, view, previous write status, and immutable dimensions throughout the draw. Cached target views use shared access, and role publication follows full draw validation. Local D3D11 checks cover producer changes, concurrent view creation, rejected draws, native-size storage, clear ordering, and saved-list replay. The ACC check passed with DLSS Auto, bloom, DoF, menu rendering, and Native/Auto switching. The log confirms reconstruction resumes at the requested sizes without an upscaling failure. Performance has not been measured.
 
+CPU input preparation now resolves a view and its producer-qualified role together, then shares the result across repeated PS/VS bindings within the draw. Offline checks cover all supported input slots, distinct typed views, changing producers, bloom roles, rejected draws, and native binding restoration. The user's ACC Auto/Native/Auto check passed, and the log confirms reconstruction recovered at the requested sizes. Performance measurements are pending.
+
+The next ownership checkpoint should associate native DoF with the exact plugin viewport, camera, effect instance, and scene plan. `PluginDepthOfField::MainExec` supplies that viewport before its effect draw. Current size checks remain useful as consistency checks. Backend sizing also needs a verified connection to the selected presentation before replacing its first-matching-size selection. The backend starts before view ownership is established, so startup and resize need an explicit bootstrap path.
+
+After those associations pass, trace the native constant setters and uploads for bloom and DoF. The backend's vector identifiers select a constant-buffer group and row, and the native shadow-register upload already copies CPU values into GPU buffers. Exact scene, target, range, and write-order evidence could let supported fields be prepared there and remove their later adjustment dispatches. Preserve the current execution-time adjustment wherever that evidence is incomplete. Group each implementation with diagnostics and tests for the full affected effect chain.
+
 ## SDK lifecycle and validation
 
 - Exercise lazy DLSS startup from saved and manual selection, cancellation, missing-DLL/unsupported-device explanations, model-F fallback, query boundaries, insertion fallbacks, state restoration, and callbacks crossing Present.
