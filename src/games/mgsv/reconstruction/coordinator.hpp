@@ -35,7 +35,7 @@
 #include "analytical/runtime.hpp"
 #include "camera_state.hpp"
 #include "dlss/runtime.hpp"
-#include "fsr3/runtime.hpp"
+#include "fsr/runtime.hpp"
 #include "input_capture.hpp"
 #include "logging.hpp"
 #include "postprocess/resources.hpp"
@@ -49,6 +49,9 @@ inline constexpr size_t MAX_PENDING_DISPATCHES = 64u;
 inline constexpr size_t RESERVED_LIGHTING_DISPATCHES = 8u;
 inline auto& execution_lock = state::execution_lock;
 inline reshade::api::device* runtime_device = nullptr;
+// Protected by ExecutionGuard. Failed teardown must not admit new work against
+// resources from the old device, even if a new device reuses its address.
+inline bool device_teardown_pending = false;
 
 // Admission follows native scene construction. Several scenes can be recorded
 // before Present, and a later insertion can occur on another worker.
@@ -167,7 +170,7 @@ struct ExecutionGuard {
 };
 
 inline bool BindRuntimeDevice(reshade::api::device* device) {
-  if (device == nullptr) return false;
+  if (device == nullptr || device_teardown_pending) return false;
   if (runtime_device == nullptr) {
     runtime_device = device;
   }
@@ -183,7 +186,7 @@ inline void ResetTemporalStateWithPublicationLocked(const char* reason) {
   input_capture::InvalidateCapturedFrame();
   analytical::InvalidateHistory(reason);
   dlss::InvalidateHistory();
-  fsr3::InvalidateHistory();
+  fsr::InvalidateHistory();
   camera_state::InvalidateLocked();
   camera_state::ResetMatrixHistoryLocked();
   state::ResetTemporalState();
@@ -200,32 +203,40 @@ inline void Destroy(reshade::api::device* device) {
   input_capture::Destroy(device);
   analytical::Destroy(device);
   dlss::Destroy(device);
-  fsr3::Destroy();
+  fsr::Destroy();
   dx12::Destroy();
   post_process::Reset(true);
   submission_failure_pending.store(false, std::memory_order_release);
   runtime_device = nullptr;
   lighting::temporal_inputs::Reset();
+  device_teardown_pending = false;
 }
 
-inline void ReleaseInactiveResources(
-    reshade::api::device* device,
-    state::TemporalMode mode) {
+// Called under ExecutionGuard from Present and before an immediate evaluation.
+// Either can be first after a UI change. Release private GPU allocations, but
+// keep the SDKs initialized so switching does not pass through Off or resize
+// the game while a runtime is being loaded again.
+inline void ReleaseInactiveResources(reshade::api::device* device, state::TemporalMode mode) {
   if (mode != state::TemporalMode::ANALYTICAL_TAA) {
-    analytical::Release(device);
+    analytical::Destroy(device);
   }
-  if (mode != state::TemporalMode::AMD_FSR3) {
-    fsr3::ReleaseTemporalResources(device);
+  if (mode != state::TemporalMode::AMD_FSR) {
+    fsr::ReleaseContext();
   }
   if (mode != state::TemporalMode::NVIDIA_DLSS) {
-    dlss::SuspendTemporalResources(device);
+    if (!dlss::ReleaseFeatureResources()) {
+      throw std::runtime_error("NVIDIA DLSS feature release failed");
+    }
   }
 }
 
 inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
-  if (inputs.device == nullptr) return false;
+  // A recorded scene can reach submission after device teardown has started.
+  if (inputs.device == nullptr || device_teardown_pending) return false;
   const auto destination = (inputs.output.resource.handle != 0u ? inputs.device->get_resource_desc(inputs.output.resource) : reshade::api::resource_desc{});
   if ((state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA && !inputs.HasNativeOutputSize())
+      || !IsReconstructionColorTexture(destination)
+      || destination.texture.format != inputs.output.format
       || inputs.output.width < inputs.render_width || inputs.output.height < inputs.render_height
       || destination.texture.width != inputs.output.width || destination.texture.height != inputs.output.height
       || inputs.output.resource.handle == 0u
@@ -233,6 +244,7 @@ inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
     static uint64_t last_output_failure_log = std::numeric_limits<uint64_t>::max();
     if (logging::ShouldLogFrame(state::CurrentFrameToken(), last_output_failure_log)) {
       logging::Warn("rejecting incompatible reconstruction output insertion=", inputs.insertion_name,
+                    " scene=", inputs.camera.scene, " format=", static_cast<uint32_t>(destination.texture.format),
                     " render=", inputs.render_width, "x", inputs.render_height,
                     " output=", inputs.output.width, "x", inputs.output.height);
     }
@@ -264,7 +276,7 @@ inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
   if (!inputs.camera.camera_reprojection_valid) {
     analytical::InvalidateHistory("scene history is not consecutive");
     dlss::InvalidateHistory();
-    fsr3::InvalidateHistory();
+    fsr::InvalidateHistory();
   }
   const auto previous_compute_state = mgsv::rendering::d3d11_compute_state::Capture(inputs.cmd_list);
   inputs.cmd_list->barrier(
@@ -274,11 +286,12 @@ inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
 
   bool succeeded = false;
   try {
+    ReleaseInactiveResources(inputs.device, state::GetTemporalMode());
     // Each method writes inputs.output through the shared backend. The bridge
     // queues the D3D11 wait before native post-processing can read that image.
     switch (state::GetTemporalMode()) {
       case state::TemporalMode::ANALYTICAL_TAA: succeeded = analytical::Dispatch(inputs); break;
-      case state::TemporalMode::AMD_FSR3:       succeeded = fsr3::Dispatch(inputs); break;
+      case state::TemporalMode::AMD_FSR:        succeeded = fsr::Dispatch(inputs); break;
       case state::TemporalMode::NVIDIA_DLSS:    succeeded = dlss::Dispatch(inputs); break;
       case state::TemporalMode::OFF:            break;
     }
@@ -291,6 +304,9 @@ inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
     // Recover through the existing method transition, never reuse that history.
     if (state::GetTemporalMode() == state::TemporalMode::NVIDIA_DLSS) {
       dlss::QueueFatalFailure();
+    } else if (state::GetTemporalMode() == state::TemporalMode::AMD_FSR) {
+      // The next settings transition restores Off and explains the SDK failure.
+      fsr::runtime_failed.store(true, std::memory_order_release);
     }
     succeeded = false;
   }
@@ -304,7 +320,7 @@ inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
     // failed. Its next evaluation must seed history again.
     analytical::InvalidateHistory("reconstruction output was not installed");
     dlss::InvalidateHistory();
-    fsr3::InvalidateHistory();
+    fsr::InvalidateHistory();
     return false;
   }
 
@@ -827,7 +843,7 @@ inline void MaybeRunLocked(
     return;
   }
   if (!BindRuntimeDevice(inputs.device)) {
-    logging::Warn("rejecting temporal dispatch from a second D3D11 device");
+    logging::Warn("rejecting temporal dispatch from an unavailable or different D3D11 device");
     return;
   }
 
@@ -858,6 +874,11 @@ inline void MaybeRunLocked(
     }
   }
   if (!inputs.HasNativeOutputSize() && post_output == nullptr) {
+    logging::Warn("scaled output route unavailable insertion=", insertion_name,
+                  " scene=", scope.owner.scene, " generation=", scope.owner.generation,
+                  " render=", inputs.render_width, "x", inputs.render_height,
+                  " output=", inputs.output.width, "x", inputs.output.height,
+                  " color_format=", static_cast<uint32_t>(inputs.color_format));
     resolution::Fail("scaled reconstruction has no compatible output route");
     return;
   }

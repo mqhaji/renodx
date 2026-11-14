@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <mutex>
 
 #include <intrin.h>
@@ -306,8 +307,9 @@ inline constexpr std::array TEMPORAL_MODE_OPTIONS = {
         .label = "Analytical TAA",
     },
     TemporalModeOption{
-        .mode = state::TemporalMode::AMD_FSR3,
-        .label = "AMD FSR 3.1.5",
+        .mode = state::TemporalMode::AMD_FSR,
+        .label = "FSR",
+        .unavailable_reason = fsr::UnavailableReason,
     },
     TemporalModeOption{
         .mode = state::TemporalMode::NVIDIA_DLSS,
@@ -359,15 +361,17 @@ inline void TransitionTemporalMode(
                               ? nullptr
                               : option->unavailable_reason());
   }
-  if (unavailable_reason != nullptr || activation_pending) {
-    if (!activation_pending) {
-      logging::Warn("temporal mode unavailable mode=", static_cast<uint32_t>(mode), " reason=", unavailable_reason);
-    }
+  const RuntimeTransitionGuard transition_guard;
+  // First-time DLSS initialization runs at Present. Keep the active method,
+  // its history, and its shader binding until that initialization finishes.
+  // Going through Off would make the native backend resize to the display.
+  dlss::activation_requested.store(requested_dlss && (activation_pending || unavailable_reason == nullptr), std::memory_order_release);
+  if (activation_pending) return;
+
+  if (unavailable_reason != nullptr) {
+    logging::Warn("temporal mode unavailable mode=", static_cast<uint32_t>(mode), " reason=", unavailable_reason);
     mode = state::TemporalMode::OFF;
     option = FindTemporalModeOption(mode);
-    if (activation_pending) {
-      unavailable_reason = nullptr;
-    }
   }
 
   if (unavailable_reason != nullptr && settings_state.temporal_mode_setting != nullptr) {
@@ -375,12 +379,8 @@ inline void TransitionTemporalMode(
   }
   const float jitter_pattern = settings_state.jitter_pattern;
 
-  const RuntimeTransitionGuard transition_guard;
-  // Cancellation is visible even while waiting for in-flight addon work.
-  // Pending DLSS keeps its stored value, but renders as Off until ready.
-  dlss::activation_requested.store(requested_dlss && unavailable_reason == nullptr, std::memory_order_release);
   const bool enabled = mode != state::TemporalMode::OFF;
-  const bool sdk_reconstruction = mode == state::TemporalMode::AMD_FSR3
+  const bool sdk_reconstruction = mode == state::TemporalMode::AMD_FSR
                                   || mode == state::TemporalMode::NVIDIA_DLSS;
   const uint32_t effective_jitter_pattern = (sdk_reconstruction
                                                  ? 1u
@@ -442,7 +442,7 @@ inline void TransitionJitterPattern(float value) {
 
   const uint32_t preference = static_cast<uint32_t>(std::clamp(value, 0.f, 1.f));
   const auto mode = state::GetTemporalMode();
-  const bool sdk_reconstruction = mode == state::TemporalMode::AMD_FSR3
+  const bool sdk_reconstruction = mode == state::TemporalMode::AMD_FSR
                                   || mode == state::TemporalMode::NVIDIA_DLSS;
   const uint32_t effective_pattern = (sdk_reconstruction
                                           ? 1u
@@ -596,34 +596,43 @@ inline bool attached = false;
 // supplied once at attach; its address remains valid for the module's lifetime.
 inline const settings::State* active_settings = nullptr;
 
-inline void OnDestroyDevice(reshade::api::device* device) {
-  if (device->get_api() != reshade::api::device_api::d3d11) return;
-  {
-    const coordinator::ExecutionGuard execution_guard;
-    if (coordinator::IsForeignDevice(device)) return;
-  }
-  transitions::TransitionTemporalMode(
-      *active_settings,
-      static_cast<float>(state::TemporalMode::OFF),
-      "device destroyed",
-      true,
-      false);
-  coordinator::UninstallTemporalSubmissionBridge();
-  logging::Info("destroy device");
-  // Native hooks and pinned addon code survive device recreation. No unsafe
-  // trampoline reclamation or in-flight wait occurs at device destruction.
-  projection_jitter::StopAdmission();
-  {
-    const std::unique_lock lock(resolution::sizing_state.mutex);
-    resolution::sizing_state.backend = 0u;
-    resolution::sizing_state.presentation_generation = 0u;
-    resolution::sizing_state.requested = {};
-    resolution::sizing_state.actual = {};
-    ++resolution::sizing_state.generation;
-  }
-  {
+inline void OnDestroyDevice(reshade::api::device* device) noexcept {
+  try {
+    if (device->get_api() != reshade::api::device_api::d3d11) return;
+    {
+      const coordinator::ExecutionGuard execution_guard;
+      if (coordinator::IsForeignDevice(device)) return;
+      coordinator::device_teardown_pending = true;
+    }
+    // Projection hooks remain installed across device recreation. Stop new
+    // jitter and reconstruction work before releasing their resources.
+    projection_jitter::StopAdmission();
+    transitions::TransitionTemporalMode(
+        *active_settings,
+        static_cast<float>(state::TemporalMode::OFF),
+        "device destroyed",
+        true,
+        false);
+    coordinator::UninstallTemporalSubmissionBridge();
+    logging::Info("destroy device");
+    {
+      const std::unique_lock lock(resolution::sizing_state.mutex);
+      resolution::sizing_state.backend = 0u;
+      resolution::sizing_state.presentation_generation = 0u;
+      resolution::sizing_state.requested = {};
+      resolution::sizing_state.actual = {};
+      ++resolution::sizing_state.generation;
+    }
     const coordinator::ExecutionGuard execution_guard;
     coordinator::Destroy(device);
+  } catch (const std::exception& error) {
+    // A failed GPU wait or SDK release stops cleanup with the remaining state
+    // intact. Do not free potentially live resources or throw into ReShade.
+    // Log directly so handling an allocation failure does not allocate again.
+    reshade::log::message(reshade::log::level::error, "MgsvTaa: device teardown failed; remaining resources retained and reconstruction blocked. Restart the game.");
+    reshade::log::message(reshade::log::level::error, error.what());
+  } catch (...) {
+    reshade::log::message(reshade::log::level::error, "MgsvTaa: unexpected device teardown failure; remaining resources retained and reconstruction blocked. Restart the game.");
   }
 }
 
@@ -706,6 +715,19 @@ inline void OnPresent(
   }
   const coordinator::ExecutionGuard execution_guard;
   const auto mode = state::GetTemporalMode();
+  // Initialization can finish after the user cancels or selects another method.
+  // Retire resources for the committed mode, never for a pending UI request.
+  // The replacement's GPU history is allocated at its first dispatch.
+  try {
+    coordinator::ReleaseInactiveResources(device, mode);
+  } catch (const std::exception& error) {
+    static uint64_t last_release_failure_log = std::numeric_limits<uint64_t>::max();
+    if (logging::ShouldLogFrame(state::CurrentFrameToken(), last_release_failure_log)) {
+      logging::Warn("reconstruction method teardown failed: ", error.what());
+    }
+    coordinator::submission_failure_pending.store(true, std::memory_order_release);
+    return;
+  }
   const auto display = renodx::utils::swapchain::GetBackBufferDesc(device);
   const auto previous_plan = resolution::Read();
   auto plan = resolution::MakePlan({.width = display.texture.width, .height = display.texture.height}, mode,
@@ -775,7 +797,6 @@ inline void OnPresent(
     logged_mip_bias = mip_bias;
     logging::Info("texture mip bias adjustment=", mip_bias, " jitter_phases=", jitter_phases);
   }
-  coordinator::ReleaseInactiveResources(device, mode);
   static uint32_t missed_scaled_dispatches = 0u;
   if (!plan.IsScaled() || !state::frame_state.scaled_inputs_valid
       || state::frame_state.reconstruction_scheduled || state::frame_state.reconstruction_completed) {

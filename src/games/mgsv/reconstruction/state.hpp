@@ -43,17 +43,17 @@ namespace mgsv::reconstruction::state {
 enum class TemporalMode : std::uint8_t {
   OFF = 0u,
   ANALYTICAL_TAA = 1u,
-  AMD_FSR3 = 2u,
+  AMD_FSR = 2u,
   NVIDIA_DLSS = 3u,
 };
 
-inline constexpr TemporalMode DEFAULT_TEMPORAL_MODE = TemporalMode::AMD_FSR3;
+inline constexpr TemporalMode DEFAULT_TEMPORAL_MODE = TemporalMode::AMD_FSR;
 
 inline TemporalMode NormalizeTemporalMode(float value) {
   if (value == static_cast<float>(TemporalMode::OFF)) return TemporalMode::OFF;
   if (value == static_cast<float>(TemporalMode::ANALYTICAL_TAA)) return TemporalMode::ANALYTICAL_TAA;
   if (value == static_cast<float>(TemporalMode::NVIDIA_DLSS)) return TemporalMode::NVIDIA_DLSS;
-  return TemporalMode::AMD_FSR3;
+  return TemporalMode::AMD_FSR;
 }
 
 enum class ProjectionJitterPath : std::uint8_t {

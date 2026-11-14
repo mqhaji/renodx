@@ -13,6 +13,18 @@
 
 namespace mgsv::reconstruction {
 
+// These are the scene formats the DX12 transport can read and write without
+// changing their encoding or precision. Other full-size images are not proof
+// that we have reached the reconstruction input.
+inline bool IsReconstructionColorTexture(const reshade::api::resource_desc& description) {
+  return description.type == reshade::api::resource_type::texture_2d
+         && description.texture.depth_or_layers == 1u
+         && description.texture.levels == 1u
+         && description.texture.samples == 1u
+         && (description.texture.format == reshade::api::format::r16g16b16a16_float
+             || description.texture.format == reshade::api::format::r32g32b32a32_float);
+}
+
 struct alignas(16) PrepareConstants {
   std::array<float, 2> current_jitter_uv = {};
   float velocity_projection_jitter_scale = 1.f;

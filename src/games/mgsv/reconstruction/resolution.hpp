@@ -54,7 +54,7 @@ struct Plan {
   bool operator==(const Plan&) const = default;
   [[nodiscard]] bool IsScaled() const { return render.width != 0u && output.width != 0u && render != output; }
   [[nodiscard]] float MipBias(Size actual) const {
-    if ((mode != state::TemporalMode::AMD_FSR3 && mode != state::TemporalMode::NVIDIA_DLSS)
+    if ((mode != state::TemporalMode::AMD_FSR && mode != state::TemporalMode::NVIDIA_DLSS)
         || actual.width == 0u || output.width == 0u) return 0.f;
     return std::log2(static_cast<float>(actual.width) / static_cast<float>(output.width)) - 1.f;
   }
@@ -95,7 +95,7 @@ inline Size ReadActual() {
 
 inline Plan MakePlan(Size output, state::TemporalMode mode, Quality selected) {
   Plan result = {.render = output, .output = output, .mode = mode};
-  if ((mode != state::TemporalMode::AMD_FSR3 && mode != state::TemporalMode::NVIDIA_DLSS)
+  if ((mode != state::TemporalMode::AMD_FSR && mode != state::TemporalMode::NVIDIA_DLSS)
       || selected == Quality::NATIVE_AA || output.width == 0u || output.height == 0u) return result;
   if (selected == Quality::AUTO) {
     // NVIDIA's UI guidelines choose a preset by total output pixels, not frame rate.

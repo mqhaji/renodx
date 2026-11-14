@@ -333,7 +333,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           },
           new renodx::utils::settings::Setting{
               .value_type = renodx::utils::settings::SettingValueType::TEXT,
-              .label = std::string("- Thanks to Maple for the FSR3 implementation\n"),
+              .label = std::string("- Thanks to Maple for the earlier FSR integration\n"),
               .section = "About",
           },
       });

@@ -51,7 +51,7 @@ struct __declspec(uuid("602A0ECA-31F0-4BD9-90DD-77CB84D3348D")) CommandListData 
 inline void Apply(reshade::api::command_list* command_list, CommandListData* data) {
   float bias = 0.f;
   const auto mode = state::GetTemporalMode();
-  if ((mode == state::TemporalMode::AMD_FSR3 || mode == state::TemporalMode::NVIDIA_DLSS)
+  if ((mode == state::TemporalMode::AMD_FSR || mode == state::TemporalMode::NVIDIA_DLSS)
       && !resolution::failed.load(std::memory_order_acquire)) {
     bias = resolution::mip_bias.load(std::memory_order_acquire);
   }

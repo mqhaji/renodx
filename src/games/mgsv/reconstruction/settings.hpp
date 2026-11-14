@@ -86,14 +86,15 @@ inline void AppendSettings(
             const auto* current_option = transitions::FindTemporalModeOption(current_mode);
             const char* preview = (current_option == nullptr ? "Unknown" : current_option->label);
             if (current_mode == state::TemporalMode::NVIDIA_DLSS && dlss::ActivationPending()) {
-              preview = "NVIDIA DLSS (pending; rendering Off)";
+              preview = "NVIDIA DLSS (initializing)";
             }
             const bool combo_open = ImGui::BeginCombo("Temporal Reconstruction", preview);
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
               ImGui::SetTooltip(
-                  "Selects vanilla FXAA, analytical TAA, AMD FSR 3.1.5, or NVIDIA DLSS. "
+                  "Selects vanilla FXAA, analytical TAA, FSR, or NVIDIA DLSS. FSR uses AMD's DLLs and selects the newest compatible implementation. "
                   "Changing modes resets temporal state. The first DLSS selection checks the DLL and driver "
-                  "and installs its runtime hooks; NVIDIA vendor eligibility alone does not guarantee DLSS support.");
+                  "and installs its runtime hooks. The current method stays active until DLSS is ready. "
+                  "NVIDIA vendor eligibility alone does not guarantee DLSS support.");
             }
             if (!combo_open) return false;
 
@@ -209,7 +210,7 @@ inline void AppendSettings(
           .is_visible = [] {
             const auto mode = state::GetTemporalMode();
             return resolution::installed.load(std::memory_order_acquire)
-                   && (mode == state::TemporalMode::AMD_FSR3 || mode == state::TemporalMode::NVIDIA_DLSS); },
+                   && (mode == state::TemporalMode::AMD_FSR || mode == state::TemporalMode::NVIDIA_DLSS); },
       },
       new renodx::utils::settings::Setting{
           .value_type = renodx::utils::settings::SettingValueType::CUSTOM,
@@ -225,7 +226,7 @@ inline void AppendSettings(
           .is_visible = [] {
             const auto mode = state::GetTemporalMode();
             return resolution::failed.load(std::memory_order_acquire)
-                   && (mode == state::TemporalMode::AMD_FSR3 || mode == state::TemporalMode::NVIDIA_DLSS); },
+                   && (mode == state::TemporalMode::AMD_FSR || mode == state::TemporalMode::NVIDIA_DLSS); },
       },
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
       new renodx::utils::settings::Setting{
@@ -264,7 +265,7 @@ inline void AppendSettings(
           .label = "TAA Jitter Pattern",
           .section = "Temporal Anti-Aliasing (Advanced)",
           .tooltip = "Diagnostic projection sampling pattern. Off keeps analytical TAA active with zero projection jitter. "
-                     "FSR3 and DLSS always use Halton, with more phases at lower render resolutions. Changing modes resets temporal history "
+                     "FSR and DLSS always use Halton, with more phases at lower render resolutions. Changing modes resets temporal history "
                      "and the sample sequence.",
           .labels = {"Off", "Halton (2,3)"},
           .on_change_value = [](float previous, float current) {

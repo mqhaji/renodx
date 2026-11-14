@@ -208,8 +208,6 @@ inline bool BuildValidatedFrameInputsLocked(
     }
     return false;
   }
-  state::frame_state.full_resolution_candidate_seen = true;
-
   const uint64_t frame_token = state::CurrentFrameToken();
   const uint32_t sample_index = resources.camera.sample_index;
   if (!resources.camera.valid
@@ -243,13 +241,30 @@ inline bool BuildValidatedFrameInputsLocked(
 
   const auto color_format = GetTypedViewFormat(device, color_srv);
   const auto plan = resolution::Read();
-  if (plan.IsScaled() && plan.render == resolution::Size{.width = width, .height = height}
-      && color_format == reshade::api::format::r16g16b16a16_float) {
-    state::frame_state.scaled_inputs_valid = true;
+  // Native resize and SDK activation can overlap worker recording. Wait for
+  // the selected method's plan and a compatible scene image; never turn a
+  // temporary LDR or differently typed binding into a permanent SDK failure.
+  if (plan.mode != state::GetTemporalMode()) return false;
+  if (!IsReconstructionColorTexture(color_description)
+      || color_format != color_description.texture.format
+      || (plan.IsScaled() && color_format != reshade::api::format::r16g16b16a16_float)) {
+    static uint64_t last_color_rejection_log = std::numeric_limits<uint64_t>::max();
+    if (LogEvery(last_color_rejection_log)) {
+      logging::Info("skipping incompatible reconstruction color insertion=", insertion_name,
+                    " scene=", owner.scene, " size=", width, "x", height,
+                    " resource_format=", static_cast<uint32_t>(color_description.texture.format),
+                    " view_format=", static_cast<uint32_t>(color_format));
+    }
+    return false;
   }
   if (plan.IsScaled()
       && (plan.render != resolution::Size{.width = width, .height = height}
           || (std::strcmp(insertion_name, "BeforeBloom") != 0 && std::strcmp(insertion_name, "DOF_ScatterBakeFirst") != 0))) return false;
+  // Only qualified inputs count toward the missing-dispatch watchdog.
+  state::frame_state.full_resolution_candidate_seen = true;
+  if (plan.IsScaled()) {
+    state::frame_state.scaled_inputs_valid = true;
+  }
   output = {
       .cmd_list = cmd_list,
       .device = device,

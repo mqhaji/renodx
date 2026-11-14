@@ -17,7 +17,7 @@ RenoDX for Metal Gear Solid V: The Phantom Pain adds HDR output and color gradin
 
 ## Temporal reconstruction
 
-**Temporal Reconstruction** selects Off (Vanilla FXAA), Analytical TAA, AMD FSR 3.1.5, or NVIDIA DLSS. Analytical TAA runs at native resolution. FSR and DLSS can reconstruct a lower-resolution scene at the output resolution. New profiles use FSR3 with Auto quality. DLSS requires a compatible `nvngx_dlss.dll` beside the game executable; model F is the default when supported.
+**Temporal Reconstruction** selects Off (Vanilla FXAA), Analytical TAA, FSR, or NVIDIA DLSS. Analytical TAA runs at native resolution. FSR and DLSS can reconstruct a lower-resolution scene at the output resolution. New profiles use FSR with Auto quality. FSR requires AMD's matching `amd_fidelityfx_loader_dx12.dll` and `amd_fidelityfx_upscaler_dx12.dll` beside the game executable; see [FSR installation](reconstruction/fsr/README.md). DLSS requires a compatible `nvngx_dlss.dll` beside the game executable; model F is the default when supported.
 
 All three reconstruction methods run on a shared D3D12 backend before bloom and DoF. Input preparation decodes scene color while writing shared textures; output encoding preserves the game's scene format and alpha. Native game rendering remains on D3D11.
 

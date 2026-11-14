@@ -76,7 +76,7 @@ Explicit registrations precede generated entries and win duplicate keys. `on_inj
 
 ## D3D12 bridge
 
-DLSS, FSR3, and Analytical TAA evaluate on one D3D12 device and direct queue. The game and native post-processing still run on D3D11. The BeforeBloom insertion, executed scene identity, jitter reservations, and output ownership remain unchanged.
+DLSS, FSR, and Analytical TAA evaluate on one D3D12 device and direct queue. The game and native post-processing still run on D3D11. The BeforeBloom insertion, executed scene identity, jitter reservations, and output ownership remain unchanged.
 
 | File | Responsibility |
 |---|---|
@@ -85,7 +85,7 @@ DLSS, FSR3, and Analytical TAA evaluate on one D3D12 device and direct queue. Th
 | `rendering/d3d12_compute.hpp` | Store per-slot descriptors and constants; create private textures and compute pipelines |
 | `reconstruction/d3d12.hpp` | Prepare shared inputs, record a method's evaluation and encoding, and retain resources |
 | `reconstruction/coordinator.hpp` | Admit the executed scene, preserve D3D11 state, and commit history only after successful submission |
-| `reconstruction/analytical/`, `dlss/`, `fsr3/` | Own each algorithm, its private history, and its SDK lifecycle |
+| `reconstruction/analytical/`, `dlss/`, `fsr/` | Own each algorithm, its private history, and its SDK lifecycle |
 
 ### Resource ownership
 

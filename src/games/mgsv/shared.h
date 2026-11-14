@@ -28,7 +28,7 @@ struct ShaderInjectData {
   float film_grain_random;
   float film_grain_strength;
 
-  // TemporalMode: 0 = Off, 1 = Analytical TAA, 2 = AMD FSR3, 3 = NVIDIA DLSS.
+  // TemporalMode: 0 = Off, 1 = Analytical TAA, 2 = FSR, 3 = NVIDIA DLSS.
   float reconstruction_mode;
   float unclamp_motion_vectors;
 

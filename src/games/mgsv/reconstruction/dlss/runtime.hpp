@@ -77,7 +77,6 @@ struct Resources {
   bool ngx_initialized = false;
   bool probe_complete = false;
   bool history_initialized = false;
-  bool suspended = false;
   std::chrono::steady_clock::time_point previous_dispatch_time;
 };
 
@@ -256,6 +255,7 @@ inline void QueueFatalFailure() {
 }
 
 inline bool ReleaseFeatureResources() {
+  if (resources.feature == nullptr && resources.parameters == nullptr && resources.linear_output == nullptr) return true;
   dx12::Drain();
   if (resources.feature != nullptr) {
     const NVSDK_NGX_Result result = NVSDK_NGX_D3D12_ReleaseFeature(resources.feature);
@@ -278,16 +278,20 @@ inline bool ReleaseFeatureResources() {
   resources.output_height = 0u;
   resources.feature_model = Model::DEFAULT;
   resources.history_initialized = false;
-  resources.suspended = false;
   resources.previous_dispatch_time = {};
   return true;
 }
 
-inline void Shutdown(bool reset_probe = true) {
+inline bool Shutdown(bool reset_probe = true) {
   runtime_ready.store(false, std::memory_order_release);
-  if (!ReleaseFeatureResources()) return;
+  if (!ReleaseFeatureResources()) return false;
   if (resources.ngx_initialized && resources.device != nullptr) {
-    NVSDK_NGX_D3D12_Shutdown1(resources.device.Get());
+    const NVSDK_NGX_Result result = NVSDK_NGX_D3D12_Shutdown1(resources.device.Get());
+    if (NVSDK_NGX_FAILED(result)) {
+      logging::Warn("NVIDIA DLSS shutdown failed; retaining SDK instance result=", static_cast<uint32_t>(result));
+      QueueFatalFailure();
+      return false;
+    }
   }
   resources.ngx_initialized = false;
   resources.device.Reset();
@@ -301,6 +305,7 @@ inline void Shutdown(bool reset_probe = true) {
     for (auto& rejected : rejected_models) rejected.store(0u, std::memory_order_release);
     availability.store(Availability::UNCHECKED, std::memory_order_release);
   }
+  return true;
 }
 
 inline std::wstring GetApplicationDataPath() {
@@ -463,30 +468,17 @@ inline bool ProbeDevice(reshade::api::device* device) {
 }
 
 inline void Destroy(reshade::api::device* device) {
+  if (resources.probed_device == nullptr && resources.device == nullptr
+      && resources.feature == nullptr && resources.parameters == nullptr) return;
   if (device != nullptr
       && resources.device != nullptr
       && reinterpret_cast<ID3D11Device*>(device->get_native()) != resources.probed_device.Get()) {  // NOLINT(performance-no-int-to-ptr)
     return;
   }
-  Shutdown();
-}
-
-inline void SuspendTemporalResources(reshade::api::device* device) {
-  if (device != nullptr
-      && resources.device != nullptr
-      && reinterpret_cast<ID3D11Device*>(device->get_native()) != resources.probed_device.Get()) {  // NOLINT(performance-no-int-to-ptr)
-    return;
+  if (!Shutdown()) {
+    throw std::runtime_error("NVIDIA DLSS could not release its resources; method switch postponed");
   }
-  if (resources.suspended || (resources.feature == nullptr && resources.render_width == 0u)) return;
-
-  // Present does not own all immediate-context submissions. Retain one bundle
-  // across method switches rather than waiting/releasing NGX on that thread.
-  // Recreate incompatible bundles only from immediate dispatch; destroy at
-  // device shutdown. Keep submission ownership for the eventual GPU wait.
-  resources.suspended = true;
-  resources.history_initialized = false;
-  resources.previous_dispatch_time = {};
-  logging::Info("suspended NVIDIA DLSS; retaining resources size=", resources.render_width, "x", resources.render_height);
+  logging::Info("released NVIDIA DLSS feature and output; NGX shut down");
 }
 
 inline void InvalidateHistory() {
@@ -550,6 +542,9 @@ inline bool CreateResources(
                        | NVSDK_NGX_DLSS_Feature_Flags_DepthInverted
                        | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure));
   resources.parameters->Set(NVSDK_NGX_Parameter_DLSS_Enable_Output_Subrects, 0);
+  // Free the feature's cached allocations on a method switch while keeping
+  // NGX initialized. Switching back needs a new feature, not another SDK probe.
+  resources.parameters->Set(NVSDK_NGX_Parameter_FreeMemOnReleaseFeature, 1);
   resources.parameters->Set(NVSDK_NGX_Parameter_RTXValue, 0);
   SetModelHint(resources.parameters, model);
 
@@ -610,14 +605,6 @@ inline bool EnsureResources(
       && resources.output_height == inputs.output.height
       && resources.feature_model == model
       && resources.feature_quality == resolution::Read().quality) {
-    if (resources.suspended) {
-      resources.suspended = false;
-      resources.history_initialized = false;
-      resources.previous_dispatch_time = {};
-      logging::Info("resumed NVIDIA DLSS with retained resources render=", inputs.render_width, "x", inputs.render_height,
-                    " output=", inputs.output.width, "x", inputs.output.height,
-                    " model=", FindModelOption(model)->label);
-    }
     return true;
   }
   return CreateResources(device, commands, inputs);

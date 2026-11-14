@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <utility>
@@ -65,7 +66,7 @@ inline rendering::d3d12_bridge::Bridge& GetBridge(ID3D11Device* device) {
   return *runtime.bridge;
 }
 
-// Size/model changes and teardown may wait; ordinary frames never wait on the
+// Size/model/method changes and teardown may wait; ordinary frames never wait on the
 // CPU. Do not release SDK histories until their last queued use has completed.
 inline void Drain() {
   if (runtime.bridge != nullptr && !runtime.bridge->Drain()) {
@@ -247,7 +248,14 @@ template <typename Record>
       },
       runtime.color.allocation.get(), inputs.output.shared_texture.get());
   if (!succeeded && runtime.bridge->rejection != nullptr) {
-    throw std::runtime_error(runtime.bridge->rejection);
+    // Rejected bindings never reach the SDK callback. They invalidate this
+    // scene's history, not the installed SDK. A partial GPU submission is fatal.
+    if (runtime.bridge->failed) throw std::runtime_error(runtime.bridge->rejection);
+    static uint64_t last_rejection_log = std::numeric_limits<uint64_t>::max();
+    if (logging::ShouldLogFrame(state::CurrentFrameToken(), last_rejection_log)) {
+      logging::Warn("reconstruction submission rejected insertion=", inputs.insertion_name,
+                    " scene=", inputs.camera.scene, " reason=", runtime.bridge->rejection);
+    }
   }
   return succeeded;
 }

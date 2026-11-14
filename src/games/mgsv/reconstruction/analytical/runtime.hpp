@@ -48,13 +48,8 @@ inline void InvalidateHistory(const char* /*reason*/) {
   resources.initialized = false;
 }
 
-inline void Release(reshade::api::device* /*device*/) {
-  // Retain the last allocation across method switches. Its next use is reset,
-  // and no Present-thread wait is needed to free an in-flight history.
-  resources.initialized = false;
-}
-
 inline void Destroy(reshade::api::device* /*device*/) {
+  if (resources.pipeline.state == nullptr && resources.history[0] == nullptr && resources.history[1] == nullptr) return;
   dx12::Drain();
   resources = {};
 }

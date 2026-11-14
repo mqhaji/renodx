@@ -45,7 +45,7 @@ Further CPU work can trace the native constant setters and uploads for bloom and
 ## SDK lifecycle and validation
 
 - Exercise lazy DLSS startup from saved and manual selection, cancellation, missing-DLL/unsupported-device explanations, model-F fallback, query boundaries, insertion fallbacks, state restoration, and callbacks crossing Present.
-- Validate suspension/resume across DLSS, FSR, Analytical, and Off, then test model/size recreation and device teardown separately. One successful switch does not prove the earlier crash is resolved.
+- Validate feature release/recreation across DLSS, FSR, Analytical, and Off, then test model/size recreation and device teardown separately. One successful switch does not prove the earlier crash is resolved.
 - Compare methods on the same verified inputs: motion direction/scale, reverse-Z depth, current alpha, and downstream scene/UI output. Keep automatic exposure until a suitable MGSV exposure resource is proven.
 - Shared indirect lighting has its own submitted producer/history ledger and controlled replay coverage. Do not treat the older AA-Off motion compatibility concern as the current implementation or assume scene-reconstruction history proves lighting history. See the [lighting guide](../lighting/indirect/README.md).
 
@@ -66,9 +66,9 @@ The [bridge guide](../docs/ARCHITECTURE.md#d3d12-bridge) owns the current resour
 
 ### D3D12 reconstruction checkpoint
 
-DLSS, FSR3, and Analytical TAA now share one D3D12 backend while retaining BeforeBloom insertion, scene-owned jitter, history advancement, and the native post-processing route. Input preparation combines gamma decoding and motion conversion with writes into shared storage. TAA combines resolve and output encoding; DLSS and FSR use one encoder immediately after evaluation. The old bridge diagnostic pass is removed.
+DLSS, FSR, and Analytical TAA now share one D3D12 backend while retaining BeforeBloom insertion, scene-owned jitter, history advancement, and the native post-processing route. Input preparation combines gamma decoding and motion conversion with writes into shared storage. TAA combines resolve and output encoding; DLSS and FSR use one encoder immediately after evaluation. The old bridge diagnostic pass is removed.
 
-FSR still uses the bundled 3.1.5 host and unchanged SM5/FP32 shader permutations on D3D12. Moving to AMD's signed SDK DLL is the next SDK integration. TAA uses linear history, cooperative neighborhood loading, and Catmull-Rom reconstruction without repeated gamma decoding. Its single SM6.0 target covers the features it uses.
+FSR now uses AMD's signed loader and upscaler DLLs with automatic provider selection and default algorithm tuning. The bundled host, custom FSR backend, and shader permutations are removed. TAA uses linear history, cooperative neighborhood loading, and Catmull-Rom reconstruction without repeated gamma decoding. Its single SM6.0 target covers the features it uses.
 
 Saved DLSS Auto startup, Native/Auto changes in DLSS and FSR, TAA, Off, and returning to DLSS passed the ACC check on November 14, 2026. The log confirms the intended dimensions and reuse of the retained DLSS feature without backend failures. Still check DLSS model switches, canceled scenes, cached-list replay, loading screens, resize, and resource retirement during broader gameplay. Compare preparation, evaluation, encoding, and complete frame time at the same camera with matching probe settings. No speedup is claimed until measured in game.
 
