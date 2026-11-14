@@ -42,6 +42,7 @@
 #include "../../../../utils/resource.hpp"
 #include "../../../../utils/resource_upgrade.hpp"
 #include "../../rendering/native_context.hpp"
+#include "../../rendering/shared_texture.hpp"
 #include "../frame_inputs.hpp"
 #include "../resolution.hpp"
 #include "../state.hpp"
@@ -365,6 +366,9 @@ struct Output {
         .SampleDesc = {.Count = 1u, .Quality = 0u},
         .Usage = D3D11_USAGE_DEFAULT,
         .BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+        // D3D12 can write this addon-owned scene directly. Native post-processing
+        // continues to use its existing D3D11 views after the shared fence wait.
+        .MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE,
     };
     if (FAILED(native_device->CreateTexture2D(&description, nullptr, &color))
         || FAILED(native_device->CreateShaderResourceView(color.Get(), nullptr, &srv))
@@ -376,7 +380,9 @@ struct Output {
         .width = description.Width,
         .height = description.Height,
         .format = reshade::api::format::r16g16b16a16_float,
+        .shared_texture = rendering::ExportTexture(color.Get()),
     };
+    if (target.shared_texture == nullptr) throw std::runtime_error("MGSV shared scene output export failed");
     if (!IsScaled()) return;
     if (pipelines == nullptr || pipelines->device != device) {
       pipelines = std::make_shared<Pipelines>(device);
@@ -402,6 +408,7 @@ struct Output {
     auto depth_description = description;
     depth_description.Format = DXGI_FORMAT_R32_FLOAT;
     depth_description.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+    depth_description.MiscFlags = 0u;
     if (FAILED(native_device->CreateTexture2D(&depth_description, nullptr, &aligned_depth))
         || FAILED(native_device->CreateShaderResourceView(aligned_depth.Get(), nullptr, &aligned_depth_view))
         || FAILED(native_device->CreateUnorderedAccessView(aligned_depth.Get(), nullptr, &aligned_depth_uav))) {

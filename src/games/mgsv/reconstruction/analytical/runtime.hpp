@@ -5,10 +5,12 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <memory>
 
 #include <embed/shaders.h>
 #include <include/reshade.hpp>
 
+#include "../../rendering/shared_texture.hpp"
 #include "../frame_inputs.hpp"
 #include "../logging.hpp"
 #include "../state.hpp"
@@ -19,6 +21,7 @@ struct HistoryTexture {
   reshade::api::resource resource = {0};
   reshade::api::resource_view srv = {0};
   reshade::api::resource_view uav = {0};
+  std::shared_ptr<rendering::SharedTexture> shared_texture;
 };
 
 struct Resources {
@@ -311,7 +314,8 @@ inline bool EnsureHistory(const ValidatedFrameInputs& inputs, bool& history_seed
                       | reshade::api::resource_usage::unordered_access
                       | reshade::api::resource_usage::copy_source
                       | reshade::api::resource_usage::copy_dest;
-  description.flags = reshade::api::resource_flags::none;
+  // Each ping-pong output can also be read by D3D12 after the TAA dispatch.
+  description.flags = reshade::api::resource_flags::shared | reshade::api::resource_flags::shared_nt_handle;
   const auto view_description = reshade::api::resource_view_desc(
       reshade::api::resource_view_type::texture_2d,
       view_format,
@@ -321,11 +325,15 @@ inline bool EnsureHistory(const ValidatedFrameInputs& inputs, bool& history_seed
       1);
 
   for (auto& item : resources.history) {
-    if (!device->create_resource(
-            description,
-            nullptr,
-            reshade::api::resource_usage::shader_resource,
-            &item.resource)
+    HANDLE shared_handle = nullptr;
+    const bool created = device->create_resource(
+        description,
+        nullptr,
+        reshade::api::resource_usage::shader_resource,
+        &item.resource,
+        &shared_handle);
+    item.shared_texture = rendering::OwnSharedHandle(shared_handle);
+    if (!created
         || !device->create_resource_view(
             item.resource,
             reshade::api::resource_usage::shader_resource,
@@ -471,6 +479,7 @@ inline bool Dispatch(const ValidatedFrameInputs& inputs, ColorTarget* output) {
       .height = resources.height,
       .format = resources.view_format,
       .usage = reshade::api::resource_usage::shader_resource,
+      .shared_texture = resources.history[current].shared_texture,
   };
   return true;
 }

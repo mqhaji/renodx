@@ -17,6 +17,7 @@
 #include <functional>
 #include <mutex>
 #include <shared_mutex>
+#include <span>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -447,6 +448,8 @@ void OnPresent(
 }
 
 void OnDestroyDevice(reshade::api::device* device) {
+  // The bridge owns its D3D12 device and may release it during D3D11 teardown.
+  if (device->get_api() != reshade::api::device_api::d3d11) return;
   const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
   if (!mgsv::inputs::IsSelectedDevice(device)) return;
   mgsv::rendering::native_context::Shutdown();
@@ -495,6 +498,10 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
             [] { mgsv::reconstruction::transitions::ApplySettingsSnapshot(reconstruction_settings); });
 
         renodx::mods::shader::expected_constant_buffer_index = 13;
+        // Only the game's D3D11 shaders use the injected MGSV settings buffer.
+        renodx::mods::shader::on_create_pipeline_layout = [](reshade::api::device* device, std::span<reshade::api::pipeline_layout_param>) {
+          return device->get_api() == reshade::api::device_api::d3d11;
+        };
         renodx::mods::shader::minimum_constant_buffer_stages =
             reshade::api::shader_stage::vertex
             | reshade::api::shader_stage::pixel

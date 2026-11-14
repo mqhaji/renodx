@@ -258,6 +258,7 @@ struct State {
   renodx::utils::settings::Setting* upscaling_quality_setting = nullptr;
   // Float-backed CPU preferences adapt Setting::binding's float*; runtime normalizes enum choices.
   float dlss_model = static_cast<float>(dlss::DEFAULT_MODEL);
+  float d3d12_bridge_test = 0.f;
   float jitter_pattern = static_cast<float>(state::DEFAULT_JITTER_PATTERN);
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
   float diagnostic_view = state::DEFAULT_DIAGNOSTIC_VIEW;
@@ -597,6 +598,7 @@ inline bool attached = false;
 inline const settings::State* active_settings = nullptr;
 
 inline void OnDestroyDevice(reshade::api::device* device) {
+  if (device->get_api() != reshade::api::device_api::d3d11) return;
   {
     const coordinator::ExecutionGuard execution_guard;
     if (coordinator::IsForeignDevice(device)) return;

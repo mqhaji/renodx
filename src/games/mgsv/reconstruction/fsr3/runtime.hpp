@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -25,6 +26,7 @@
 #include <embed/fsr3_prepare_game_inputs.h>
 #include <include/reshade.hpp>
 
+#include "../../rendering/shared_texture.hpp"
 #include "../camera_state.hpp"
 #include "../frame_inputs.hpp"
 #include "../logging.hpp"
@@ -51,6 +53,7 @@ struct Texture {
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
   Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
   FfxApiResourceDescription description = {};
+  std::shared_ptr<rendering::SharedTexture> shared_texture;
 };
 
 struct Resources {
@@ -116,7 +119,8 @@ inline bool CreateTexture(
     ID3D11Device* device,
     Texture& output,
     const FfxApiResourceDescription& ffx_description,
-    LocalView local_view) {
+    LocalView local_view,
+    UINT misc_flags = 0u) {
   if (device == nullptr || ffx_description.width == 0u || ffx_description.height == 0u) return false;
   const DXGI_FORMAT format = ToDxgiFormat(static_cast<FfxApiSurfaceFormat>(ffx_description.format));
   if (format == DXGI_FORMAT_UNKNOWN) return false;
@@ -130,6 +134,7 @@ inline bool CreateTexture(
   description.SampleDesc.Count = 1u;
   description.Usage = D3D11_USAGE_DEFAULT;
   description.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+  description.MiscFlags = misc_flags;
   if (FAILED(device->CreateTexture2D(&description, nullptr, &output.texture))) return false;
   output.description = ffx_description;
   output.description.mipCount = 1u;
@@ -141,6 +146,10 @@ inline bool CreateTexture(
   if (local_view == LocalView::UAV
       && FAILED(device->CreateUnorderedAccessView(output.texture.Get(), nullptr, &output.uav))) {
     return false;
+  }
+  if ((misc_flags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) != 0u) {
+    output.shared_texture = rendering::ExportTexture(output.texture.Get());
+    return output.shared_texture != nullptr;
   }
   return true;
 }
@@ -303,7 +312,8 @@ inline bool CreateResources(ID3D11Device* device, const ValidatedFrameInputs& in
           device,
           resources.encoded_output,
           MakeDescription(FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT, inputs.output.width, inputs.output.height, sampled_uav),
-          LocalView::UAV)) {
+          // Share only the final encoder output with the D3D12 consumer.
+          LocalView::UAV, D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE)) {
     Destroy();
     return false;
   }
@@ -558,6 +568,7 @@ inline bool Dispatch(const ValidatedFrameInputs& inputs, ColorTarget* output) {
       .height = resources.output_height,
       .format = reshade::api::format::r16g16b16a16_float,
       .usage = reshade::api::resource_usage::unordered_access,
+      .shared_texture = resources.encoded_output.shared_texture,
   };
   return true;
 }

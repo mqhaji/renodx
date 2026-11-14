@@ -12,6 +12,7 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <memory>
 #include <span>
 #include <string>
 #include <system_error>
@@ -28,6 +29,7 @@
 #include <embed/dlss_prepare_game_inputs.h>
 #include <include/reshade.hpp>
 
+#include "../../rendering/shared_texture.hpp"
 #include "../camera_state.hpp"
 #include "../frame_inputs.hpp"
 #include "../logging.hpp"
@@ -66,6 +68,7 @@ struct Texture {
   Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
   Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
+  std::shared_ptr<rendering::SharedTexture> shared_texture;
 };
 
 struct Resources {
@@ -550,7 +553,7 @@ inline void InvalidateHistory() {
   resources.history_initialized = false;
 }
 
-inline bool CreateTexture(ID3D11Device* device, DXGI_FORMAT format, uint32_t width, uint32_t height, Texture& output) {
+inline bool CreateTexture(ID3D11Device* device, DXGI_FORMAT format, uint32_t width, uint32_t height, Texture& output, UINT misc_flags = 0u) {
   D3D11_TEXTURE2D_DESC description = {};
   description.Width = width;
   description.Height = height;
@@ -560,9 +563,15 @@ inline bool CreateTexture(ID3D11Device* device, DXGI_FORMAT format, uint32_t wid
   description.SampleDesc.Count = 1u;
   description.Usage = D3D11_USAGE_DEFAULT;
   description.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-  return SUCCEEDED(device->CreateTexture2D(&description, nullptr, &output.texture))
-         && SUCCEEDED(device->CreateShaderResourceView(output.texture.Get(), nullptr, &output.srv))
-         && SUCCEEDED(device->CreateUnorderedAccessView(output.texture.Get(), nullptr, &output.uav));
+  description.MiscFlags = misc_flags;
+  if (FAILED(device->CreateTexture2D(&description, nullptr, &output.texture))
+      || FAILED(device->CreateShaderResourceView(output.texture.Get(), nullptr, &output.srv))
+      || FAILED(device->CreateUnorderedAccessView(output.texture.Get(), nullptr, &output.uav))) return false;
+  if ((misc_flags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) != 0u) {
+    output.shared_texture = rendering::ExportTexture(output.texture.Get());
+    return output.shared_texture != nullptr;
+  }
+  return true;
 }
 
 inline bool CreateComputeShader(
@@ -618,7 +627,9 @@ inline bool CreateResources(
       || !CreateTexture(native_device, DXGI_FORMAT_R16G16_FLOAT, width, height, resources.motion_input)
       || !CreateTexture(native_device, DXGI_FORMAT_R32_FLOAT, width, height, resources.depth_input)
       || !CreateTexture(native_device, DXGI_FORMAT_R16G16B16A16_FLOAT, inputs.output.width, inputs.output.height, resources.linear_output)
-      || !CreateTexture(native_device, DXGI_FORMAT_R16G16B16A16_FLOAT, inputs.output.width, inputs.output.height, resources.encoded_output)) {
+      // The bridge can read the encoder's actual output without an input copy.
+      || !CreateTexture(native_device, DXGI_FORMAT_R16G16B16A16_FLOAT, inputs.output.width, inputs.output.height, resources.encoded_output,
+                        D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE)) {
     ReleaseFeatureResources();
     return false;
   }
@@ -891,6 +902,7 @@ inline bool Dispatch(const ValidatedFrameInputs& inputs, ColorTarget* output) {
       .height = resources.output_height,
       .format = reshade::api::format::r16g16b16a16_float,
       .usage = reshade::api::resource_usage::unordered_access,
+      .shared_texture = resources.encoded_output.shared_texture,
   };
   return true;
 }

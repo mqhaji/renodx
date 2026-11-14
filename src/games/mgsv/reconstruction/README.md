@@ -20,6 +20,7 @@ The Temporal Anti-Aliasing section contains the method, DLSS model, and quality 
 | Unclamp Motion Vectors | Diagnostic, default Off; also changes native motion blur |
 | Projection Jitter Path sliders | Nine Analytical scales from `-2x` to `2x`, default/reset `1x`. Alternate Stream stays disabled |
 | TAA Diagnostic View / Velocity View Range / Object Motion Source | Temporal Resolve, `8 px`, and Auto-Corrected Native Object Velocity |
+| D3D12 Bridge Test | Off by default; Copy, Verify, and Profile test shared color output without moving reconstruction to D3D12 |
 
 Auto follows NVIDIA's [UI guidelines](https://github.com/NVIDIA/DLSS/blob/main/doc/RTX%20UI%20Developer%20Guidelines.pdf) by total output pixels: Native below 1920x1080, Quality through 2560x1440, Performance through 3840x2160, and Ultra Performance above that. This includes ultrawide displays. Auto does not measure frame rate or run dynamic resolution; manual choices override it, and DLSS queries its SDK for the selected mode's supported input size.
 
@@ -196,3 +197,4 @@ Follow the [addon deployment instructions](../README.md#build-and-deploy), resta
 5. Compare FSR Performance and Native, then DLSS qualities. Check render/output dimensions, depth edges, near/far DoF, flare-layer clearing, bloom crop, motion blur, contact-shadow/GI reach, and the reported ACC/Mother Base/sortie problems.
 6. Test experimental path scales and rejected/nested/foreign-camera cases separately. Verify a stable settled waveform with Analytical/FSR/DLSS; keep Preset M rail flicker separate from Alternate Stream behavior. Do not repeat inconclusive Auto/Direct sweeps as evidence of a fix.
 7. Read the fresh log for allocation/input/query/state/NGX failures and repeated history resets. `insertion=BeforeBloom` identifies the preferred point; fallback names identify later opportunities. Render/output sizes match at Native and differ under upscaling. A recorded dispatch does not prove GPU completion or visual correctness.
+8. For bridge changes, use Verify to compare the returned pixels, then check Copy and Off at the same camera with identical probe settings. Close the overlay and avoid alt-tabbing during timing comparisons. The [bridge guide](../docs/ARCHITECTURE.md#diagnostics-and-validation) explains the counters, bounded profiler, and current test coverage.

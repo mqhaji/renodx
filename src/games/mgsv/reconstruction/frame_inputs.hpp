@@ -4,9 +4,11 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 
 #include <include/reshade.hpp>
 
+#include "../rendering/shared_texture.hpp"
 #include "camera_state.hpp"
 
 namespace mgsv::reconstruction {
@@ -28,6 +30,8 @@ struct ColorTarget {
   uint32_t height = 0u;
   reshade::api::format format = reshade::api::format::unknown;
   reshade::api::resource_usage usage = reshade::api::resource_usage::shader_resource;
+  // Optional shared allocation and its cached D3D12 import.
+  std::shared_ptr<rendering::SharedTexture> shared_texture;
 };
 
 struct ValidatedFrameInputs {

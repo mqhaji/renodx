@@ -29,6 +29,7 @@
 #include <wrl/implements.h>
 
 #include "../rendering/d3d11_state.hpp"
+#include "../rendering/d3d12_bridge_test.hpp"
 #include "../rendering/inputs.hpp"
 #include "../rendering/native_context.hpp"
 #include "../rendering/producer_records.hpp"
@@ -196,6 +197,7 @@ inline void ResetTemporalState(const char* reason) {
 
 inline void Destroy(reshade::api::device* device) {
   if (runtime_device != nullptr && device != runtime_device) return;
+  rendering::d3d12_bridge_test::Reset();
   input_capture::Destroy(device);
   analytical::Destroy(device);
   dlss::Destroy(device);
@@ -297,7 +299,20 @@ inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
         inputs.output.resource,
         inputs.output.usage,
         reshade::api::resource_usage::copy_dest);
-    inputs.cmd_list->copy_resource(output.resource, inputs.output.resource);
+    // Run at execution time after the native prefix and SDK evaluation. The
+    // bridge returns the same scene before its post-processing remainder runs.
+    // ReShade exposes native D3D11 pointers through integer handles.
+    // NOLINTBEGIN(performance-no-int-to-ptr)
+    const bool bridged = rendering::d3d12_bridge_test::Run(
+        reinterpret_cast<ID3D11DeviceContext*>(inputs.cmd_list->get_native()),
+        reinterpret_cast<ID3D11Resource*>(output.resource.handle),
+        reinterpret_cast<ID3D11Resource*>(inputs.output.resource.handle),
+        {.id = inputs.camera.scene, .generation = inputs.camera.owner_generation},
+        output.shared_texture.get(), inputs.output.shared_texture.get());
+    // NOLINTEND(performance-no-int-to-ptr)
+    if (!bridged) {
+      inputs.cmd_list->copy_resource(output.resource, inputs.output.resource);
+    }
     inputs.cmd_list->barrier(
         inputs.output.resource,
         reshade::api::resource_usage::copy_dest,
