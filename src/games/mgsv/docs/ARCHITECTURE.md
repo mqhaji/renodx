@@ -76,52 +76,38 @@ Explicit registrations precede generated entries and win duplicate keys. `on_inj
 
 ## D3D12 bridge
 
-The game, DLSS, FSR3, and Analytical TAA still render through D3D11. The optional bridge sends the completed reconstruction output through a D3D12 copy shader before native post-processing continues. It preserves color encoding and alpha. Moving reconstruction itself is the [next checkpoint](../reconstruction/ROADMAP.md#next-d3d12-reconstruction-checkpoint).
+DLSS, FSR3, and Analytical TAA evaluate on one D3D12 device and direct queue. The game and native post-processing still run on D3D11. The BeforeBloom insertion, executed scene identity, jitter reservations, and output ownership remain unchanged.
 
 | File | Responsibility |
 |---|---|
-| `rendering/shared_texture.hpp` | Own the exported texture handle and cache its D3D12 import |
-| `rendering/d3d12_bridge.hpp` | Create the same-adapter device and queue; share images, record commands, synchronize the APIs, and reuse completed work storage |
-| `rendering/d3d12_bridge_test.hpp` | Record the copy pass, compare returned pixels, and collect bounded timing samples |
-| `rendering/bridge_copy.cs_5_0.hlsl` | Copy every color and alpha channel without conversion |
-| `reconstruction/coordinator.hpp` | Call the diagnostic at the executed scene boundary; keep the ordinary D3D11 copy when it is disabled or rejected |
+| `rendering/shared_texture.hpp` | Own each exported texture handle and cache its D3D12 import |
+| `rendering/d3d12_bridge.hpp` | Create the same-adapter device and queue, synchronize the APIs, and retire command slots |
+| `rendering/d3d12_compute.hpp` | Store per-slot descriptors and constants; create private textures and compute pipelines |
+| `reconstruction/d3d12.hpp` | Prepare shared inputs, record a method's evaluation and encoding, and retain resources |
+| `reconstruction/coordinator.hpp` | Admit the executed scene, preserve D3D11 state, and commit history only after successful submission |
+| `reconstruction/analytical/`, `dlss/`, `fsr3/` | Own each algorithm, its private history, and its SDK lifecycle |
 
 ### Resource ownership
 
-Producers export one NT handle per shared allocation and carry it with `ColorTarget`. The allocation caches its D3D12 import, while each command slot retains the images it uses. Rotating scene outputs therefore does not reopen textures or depend on the command pool's size. Reconstruction's encoder outputs, Analytical TAA history, and the scaled scene destination are shareable; private SDK intermediates remain D3D11-only.
+One D3D11 preparation dispatch decodes scene RGB and writes shared RGBA16F color, RG16F motion, and R32F reverse-Z depth. TAA also requests a shared texture for native motion diagnostics. These allocations are reused across methods at the same input size. The preparation pass retains current scene alpha for DoF. It combines the necessary conversion with the write into shared storage, so there is no additional raw-input transfer copy.
 
-The bridge accepts separate, equally sized, single-sample, single-mip RGBA16F or RGBA32F images. A compatible shared input or destination is used directly. An unshared native image needs a shared intermediate and a copy at that boundary. Sharing exposes an allocation to both APIs; it does not copy, convert, resize, or synchronize its contents.
+Private SDK scratch, linear output, and TAA history remain D3D12-only. TAA writes its linear history and encoded scene in the same resolve. DLSS and FSR evaluate into private linear output, then one encoder writes the shared scene destination directly. An unshared native destination needs one return copy. Alpha uses the existing current-jitter resampling at scaled sizes; it is not accumulated or gamma-corrected.
 
-Device checks resolve ReShade's proxy and native D3D11 interfaces to the same COM identity. The bridge creates D3D12 on the game's adapter and retains the returned device. It uses the downstream interface only when the outer device is confirmed to be ReShade's published proxy, keeping private commands out of game callbacks. Other wrappers remain intact. MGSV settings injection applies only to D3D11 shader layouts.
+Each shared allocation owns one NT handle and caches its D3D12 import. Each in-flight command slot retains its images. The bridge accepts separate single-sample, single-mip RGBA16F or RGBA32F color images with independent input and output dimensions. Additional motion and depth images belong to reconstruction's input bundle. Sharing exposes the same allocation to both APIs; it does not convert or synchronize its contents.
+
+Device checks resolve ReShade's proxy and native D3D11 interfaces to the same COM identity. The bridge creates D3D12 on the game's adapter. It bypasses only a confirmed ReShade D3D12 proxy for its private commands; other wrappers remain intact. MGSV settings injection applies only to D3D11 shader layouts.
 
 ### Submission order
 
-The coordinator serializes the bridge with the D3D11 immediate context. The executed scene ID and presentation generation accompany each dispatch. Deferred contexts, foreign devices, missing scene identity, and incompatible images are rejected before submission.
+1. Prepare the accepted scene's inputs on the immediate D3D11 context. Select a bridge slot whose previous D3D11 and D3D12 uses have completed. There are at most four slots; a busy pool rejects evaluation without a CPU wait or history commit.
+2. Record the complete D3D12 evaluation and encoding before submitting it. Descriptors and constant uploads belong to the selected slot and remain unchanged until it retires. Shared resources enter and leave D3D12 in `COMMON` state.
+3. Signal the D3D11 fence after preparation. Queue a D3D12 wait, then execute the recorded list.
+4. Signal the D3D12 fence after encoding. Queue a D3D11 wait before native post-processing reads the result. An unshared destination also receives its return copy and a D3D11 completion signal protecting that intermediate.
+5. Commit the method's history and the scene's camera only after successful submission. A discarded FSR recording recreates its context before retrying because SDK bookkeeping may already have advanced. A failed GPU handoff retains its resources and rejects further work.
 
-1. Select a slot whose previous D3D11 and D3D12 uses have completed. Create or update its images and descriptors as needed. The pool holds at most four slots; if all are busy, keep the ordinary D3D11 copy instead of waiting.
-2. Record and close the complete D3D12 command list before submitting work. The callback borrows its objects only for recording, returns shared images to `COMMON`, and keeps any additional resources alive through execution. A recording failure creates no queue dependency.
-3. Copy an unshared source into its shared intermediate if needed, then signal the D3D11 fence. Queue a D3D12 wait before executing the recorded commands.
-4. Signal the D3D12 fence after execution. Queue a D3D11 wait before native post-processing reads the result. With a shared destination, the result is already in place. Otherwise, copy it back and signal the D3D11 fence again to protect the intermediate until that copy finishes.
-5. Reuse commands, descriptors, and image storage only after their completion values have passed. A partial submission failure disables the diagnostic and retains potentially active resources.
+Each API signals its own timeline through RenoDX's [GPU fence helper](../../../utils/gpu_fence.hpp). Ordinary frames use GPU waits and nonblocking completion checks, without a CPU wait or explicit flush. Size/model replacement and teardown drain prior work before releasing resources. Method switches retain one bounded resource set per method and reset its history when resumed. The game submits its D3D11 stream; standalone tests must submit it before waiting on the CPU.
 
-Each API signals its own timeline through RenoDX's [GPU fence helper](../../../utils/gpu_fence.hpp). Normal rendering uses GPU waits and nonblocking completion checks, without a CPU wait or extra flush. The game submits its D3D11 stream; standalone callers must submit it before waiting for completion. Explicit teardown may flush and wait outside `DllMain`.
-
-### Diagnostics and validation
-
-**D3D12 Bridge Test** is in Temporal Anti-Aliasing (Advanced), default Off.
-
-| Mode | Behavior |
-|---|---|
-| Off | Return before locking, polling queries, or creating a D3D12 device. Existing bridge resources remain alive until teardown. |
-| Copy | Run the identity shader with the same color and alpha. |
-| Verify | Also compare source and returned pixels after GPU completion, once per output size or presentation generation and when re-enabled. |
-| Profile | Warm up for 32 successful submissions, measure 64 samples, log the result, then continue copying without new measurements. |
-
-The status and log report command slots, imports, transfer copies, busy skips, image checks, timings, and failures. Profile separates CPU preparation, recording, and queue calls from GPU dispatch and total handoff time. These intervals overlap and must not be added together as frame cost. Readbacks and query results are consumed without blocking normal rendering.
-
-Local real-API tests cover direct sharing, copy fallbacks, changing sizes, overlapping submissions, pool limits, replay, rejected inputs, and teardown. Live ACC checks returned identical 4K pixels with no transfer copies on the shared route. This establishes the tested color round trip, not a reconstruction speedup or complete gameplay coverage.
-
-For a frame-time comparison, use the same camera, quality settings, and probe state; close the overlay and compare Off / Copy / Off without alt-tabbing. Keep builds, captures, reloads, and profiling idle. The diagnostic still adds a measured handoff cost. Future passes should share one submission where dependencies allow it and return before the next native consumer. The [roadmap](../reconstruction/ROADMAP.md#d3d12-rendering-and-frame-generation) owns those migration plans.
+The copy-only diagnostic slider and identity pass have been removed. Reconstruction now performs useful work in that same handoff. Local GPU tests check color, alpha, descriptor/state validity, distinct dimensions, shared output, and native copy fallback. The ACC check passed with all three methods and Native/Auto switches; see the [validation status](../reconstruction/README.md#known-limitations-and-validation-status). Broader gameplay and a controlled frame-time comparison remain separate checks.
 
 ## Verification limits
 

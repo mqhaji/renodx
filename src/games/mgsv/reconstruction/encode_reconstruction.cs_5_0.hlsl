@@ -1,7 +1,8 @@
+#include "../shared.h"
 #include "prepare_constants.hlsli"
 
-Texture2D<float4> MGSV_LINEAR_OUTPUT : register(t0);
-Texture2D<float4> encoded_scene_input : register(t1);
+Texture2D<float4> linear_reconstruction : register(t0);
+Texture2D<float4> scene_alpha_input : register(t1);
 RWTexture2D<float4> encoded_scene_output : register(u0);
 
 [numthreads(8, 8, 1)] void main(uint3 dispatch_thread_id : SV_DispatchThreadID) {
@@ -11,13 +12,13 @@ RWTexture2D<float4> encoded_scene_output : register(u0);
   if (dispatch_thread_id.x >= width || dispatch_thread_id.y >= height) return;
 
   const uint2 pixel = dispatch_thread_id.xy;
-  const float3 linear_color = MGSV_LINEAR_OUTPUT.Load(int3(pixel, 0)).rgb;
+  const float3 linear_color = linear_reconstruction.Load(int3(pixel, 0)).rgb;
   uint input_width;
   uint input_height;
-  encoded_scene_input.GetDimensions(input_width, input_height);
+  scene_alpha_input.GetDimensions(input_width, input_height);
   float scene_alpha;
   if (input_width == width && input_height == height) {
-    scene_alpha = encoded_scene_input.Load(int3(pixel, 0)).a;
+    scene_alpha = scene_alpha_input.Load(int3(pixel, 0)).a;
   } else {
     // DoF uses this current-frame highlight value. Interpolate on the input
     // grid, clamping each tap so the last row and column retain their energy.
@@ -25,10 +26,10 @@ RWTexture2D<float4> encoded_scene_output : register(u0);
     const int2 base_pixel = int2(floor(input_position));
     const float2 fraction = frac(input_position);
     const int2 last_pixel = int2(input_width, input_height) - 1;
-    const float a00 = encoded_scene_input.Load(int3(clamp(base_pixel, 0, last_pixel), 0)).a;
-    const float a10 = encoded_scene_input.Load(int3(clamp(base_pixel + int2(1, 0), 0, last_pixel), 0)).a;
-    const float a01 = encoded_scene_input.Load(int3(clamp(base_pixel + int2(0, 1), 0, last_pixel), 0)).a;
-    const float a11 = encoded_scene_input.Load(int3(clamp(base_pixel + int2(1, 1), 0, last_pixel), 0)).a;
+    const float a00 = scene_alpha_input.Load(int3(clamp(base_pixel, 0, last_pixel), 0)).a;
+    const float a10 = scene_alpha_input.Load(int3(clamp(base_pixel + int2(1, 0), 0, last_pixel), 0)).a;
+    const float a01 = scene_alpha_input.Load(int3(clamp(base_pixel + int2(0, 1), 0, last_pixel), 0)).a;
+    const float a11 = scene_alpha_input.Load(int3(clamp(base_pixel + int2(1, 1), 0, last_pixel), 0)).a;
     scene_alpha = lerp(lerp(a00, a10, fraction.x), lerp(a01, a11, fraction.x), fraction.y);
   }
   encoded_scene_output[pixel] = float4(

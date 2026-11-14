@@ -227,42 +227,6 @@ inline void AppendSettings(
             return resolution::failed.load(std::memory_order_acquire)
                    && (mode == state::TemporalMode::AMD_FSR3 || mode == state::TemporalMode::NVIDIA_DLSS); },
       },
-      new renodx::utils::settings::Setting{
-          .key = "FxD3D12BridgeTest",
-          .binding = &settings_state->d3d12_bridge_test,
-          .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-          .default_value = 0.f,
-          .label = "D3D12 Bridge Test",
-          .section = "Temporal Anti-Aliasing (Advanced)",
-          .tooltip = "Tests sharing the reconstructed image with D3D12. Copy returns the image unchanged. Verify also checks the returned pixels. Profile measures CPU and GPU time briefly, then continues copying. Close the overlay while profiling.",
-          .labels = {"Off", "Copy", "Verify", "Profile"},
-          .max = 3.f,
-          .parse = [](float value) {
-            const auto selected = static_cast<rendering::d3d12_bridge_test::Mode>(static_cast<uint32_t>(std::clamp(value, 0.f, 3.f)));
-            rendering::d3d12_bridge_test::SetMode(selected);
-            return static_cast<float>(selected);
-          },
-      },
-      new renodx::utils::settings::Setting{
-          .value_type = renodx::utils::settings::SettingValueType::CUSTOM,
-          .can_reset = false,
-          .label = "D3D12 Bridge Status",
-          .section = "Temporal Anti-Aliasing (Advanced)",
-          .on_draw = [] {
-            const auto status = rendering::d3d12_bridge_test::GetStatus();
-            ImGui::Text("D3D12 bridge: %llu passes, %u slots, %llu busy skips", status.statistics.submitted, status.slots, status.statistics.busy);
-            ImGui::Text("Transfer copies: %llu input, %llu output", status.statistics.input_copies, status.statistics.output_copies);
-            ImGui::Text("Image checks: %llu, different bytes: %llu%s", status.verified, status.mismatched_bytes, status.pending ? " (pending)" : "");
-            if (status.timed_samples != 0u) {
-              ImGui::Text("%u samples: CPU %.3f ms, GPU %.3f ms, dispatch %.3f ms",
-                          status.timed_samples, status.submission_us * .001, status.total_us * .001, status.compute_us * .001);
-            }
-            if (!status.error.empty()) {
-              ImGui::TextColored(ImVec4(1.f, 0.2f, 0.2f, 1.f), "%s", status.error.c_str());
-            }
-            return false; },
-          .is_visible = [] { return rendering::d3d12_bridge_test::mode.load(std::memory_order_relaxed) != rendering::d3d12_bridge_test::Mode::OFF; },
-      },
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
       new renodx::utils::settings::Setting{
           .key = "FxTaaDiagnosticView",

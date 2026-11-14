@@ -1,31 +1,23 @@
 #include "../../shared.h"
 
-// MGSV temporal resolve.
-//
-// Inputs (read live off the bindings of the insertion pixel-shader draw):
-//   t0 - current scene color (RGBA16F clone, already sRGB-encoded by MGSV)
-//   t1 - previous history (RGBA16F, stored sRGB-encoded like the scene color)
-//   t2 - camera velocity (RGBA16F preferred, BGRA8 fallback; encoded in .ba)
-//   t3 - depth (selects silhouette velocity from center + diagonal taps)
-//   t4 - object velocity (RGBA16F clone; .r marks pixels with object motion)
-//   s0 - point sampler (current color, velocity, depth, object mask)
-//   b0 - resolve diagnostic and tuning controls
-//
-// Output:
-//   u0 - current history (RGBA16F, sRGB-encoded RGB plus current scene alpha), copied back into scene color
-//        after dispatch
+// Resolve in linear light. Shared input preparation already removed gamma and
+// decoded motion. History stays private to D3D12; this pass also encodes the
+// completed scene directly into the shared game destination.
 
 Texture2D<float4> current_color_texture : register(t0);
 Texture2D<float4> previous_history_texture : register(t1);
-Texture2D<float4> velocity_texture : register(t2);
+Texture2D<float2> velocity_texture : register(t2);
 Texture2D<float4> depth_texture : register(t3);
-Texture2D<float4> object_velocity_texture : register(t4);
+Texture2D<float4> motion_debug_texture : register(t4);
 
 SamplerState point_sampler : register(s0);
 
-RWTexture2D<float4> current_history_output : register(u0);
+groupshared float3 current_tile[100];
 
-cbuffer TaaResolveConstants : register(b0) {
+RWTexture2D<float4> current_history_output : register(u0);
+RWTexture2D<float4> encoded_scene_output : register(u1);
+
+cbuffer TaaResolveConstants : register(b1) {
   float diagnostic_view;
   float velocity_visualization_range;
   float camera_reprojection_valid;
@@ -61,16 +53,12 @@ struct VelocitySelection {
   float depth;
 };
 
-float3 DecodeSceneColor(float3 color) {
-  return renodx::color::srgb::Decode(max(0.f.xxx, color));
-}
-
 float3 EncodeSceneColor(float3 color) {
   return renodx::color::srgb::Encode(max(0.f.xxx, color));
 }
 
 // Filters the current frame and builds broad/tight color bounds for history clipping.
-Neighborhood BuildCurrentNeighborhood(float2 uv, float2 inv_screen_size, float3 center_color) {
+Neighborhood BuildCurrentNeighborhood(uint2 group_thread, float3 center_color) {
   static const float CURRENT_FILTER_EXPONENT = 2.29f;
   static const float CURRENT_DIAGONAL_WEIGHT = exp(-CURRENT_FILTER_EXPONENT * 2.f);
   static const float CURRENT_CARDINAL_WEIGHT = exp(-CURRENT_FILTER_EXPONENT);
@@ -89,15 +77,15 @@ Neighborhood BuildCurrentNeighborhood(float2 uv, float2 inv_screen_size, float3 
   //  d e f
   //    h
   static const CurrentTap CURRENT_TAPS[9] = {
-    { float2(-1.f, -1.f), CURRENT_DIAGONAL_WEIGHT, false },
-    { float2(0.f, -1.f), CURRENT_CARDINAL_WEIGHT, true },
-    { float2(1.f, -1.f), CURRENT_DIAGONAL_WEIGHT, false },
-    { float2(-1.f, 0.f), CURRENT_CARDINAL_WEIGHT, true },
-    { float2(0.f, 0.f), CURRENT_CENTER_WEIGHT, true },
-    { float2(1.f, 0.f), CURRENT_CARDINAL_WEIGHT, true },
-    { float2(-1.f, 1.f), CURRENT_DIAGONAL_WEIGHT, false },
-    { float2(0.f, 1.f), CURRENT_CARDINAL_WEIGHT, true },
-    { float2(1.f, 1.f), CURRENT_DIAGONAL_WEIGHT, false },
+      {float2(-1.f, -1.f), CURRENT_DIAGONAL_WEIGHT, false},
+      {float2(0.f, -1.f), CURRENT_CARDINAL_WEIGHT, true},
+      {float2(1.f, -1.f), CURRENT_DIAGONAL_WEIGHT, false},
+      {float2(-1.f, 0.f), CURRENT_CARDINAL_WEIGHT, true},
+      {float2(0.f, 0.f), CURRENT_CENTER_WEIGHT, true},
+      {float2(1.f, 0.f), CURRENT_CARDINAL_WEIGHT, true},
+      {float2(-1.f, 1.f), CURRENT_DIAGONAL_WEIGHT, false},
+      {float2(0.f, 1.f), CURRENT_CARDINAL_WEIGHT, true},
+      {float2(1.f, 1.f), CURRENT_DIAGONAL_WEIGHT, false},
   };
 
   float3 filtered_sum = 0.f.xxx;
@@ -106,13 +94,12 @@ Neighborhood BuildCurrentNeighborhood(float2 uv, float2 inv_screen_size, float3 
   float3 tight_min = INITIAL_BOUNDS_MIN.xxx;
   float3 tight_max = INITIAL_BOUNDS_MAX.xxx;
 
-  [unroll]
-  for (uint i = 0u; i < 9u; ++i) {
+  [unroll] for (uint i = 0u; i < 9u; ++i) {
     const CurrentTap tap = CURRENT_TAPS[i];
     const float3 sample_color =
         i == 4u
             ? center_color
-            : DecodeSceneColor(current_color_texture.SampleLevel(point_sampler, uv + tap.offset * inv_screen_size, 0).xyz);
+            : current_tile[(group_thread.y + 1 + int(tap.offset.y)) * 10 + group_thread.x + 1 + int(tap.offset.x)];
 
     filtered_sum += sample_color * tap.weight;
     broad_min = min(sample_color, broad_min);
@@ -131,22 +118,9 @@ Neighborhood BuildCurrentNeighborhood(float2 uv, float2 inv_screen_size, float3 
   return neighborhood;
 }
 
-// Decodes MGSV's camera-velocity buffer (.ba = encoded velocity) into
-// a current-minus-previous UV delta. Object contributions can contain current
-// projection jitter; the object-source selection below removes that separately.
-//
-// MGSV's MotionBlurCameraVelocity_ps writes:
-//   o0.b = 0.5 + 0.5 * (vNDC.x * m_renderInfo.x / 128)
-//   o0.a = 0.5 + 0.5 * (-vNDC.y * m_renderInfo.y / 128)
-//
-// Decoding to UV space inverts the * (size / 128) scale and the NDC→UV /2
-// factor, giving (encoded * 2 - 1) * 64 / screen_size. The shader's Y sign
-// flip is canceled by UV.y being inverted relative to NDC.y; do not negate again.
-//
-float2 DecodeVelocity(float2 uv, float2 screen_size) {
-  const float4 raw = velocity_texture.SampleLevel(point_sampler, uv, 0);
-  const float2 encoded = raw.ba;
-  return (encoded * 2.f - 1.f) * 64.f / screen_size;
+// The optional diagnostic input preserves native UV motion and object coverage.
+float2 DecodeVelocity(float2 uv) {
+  return motion_debug_texture.SampleLevel(point_sampler, uv, 0).rg;
 }
 
 // MGSV uses positive reverse-Z here, so the largest raw depth identifies the
@@ -155,19 +129,18 @@ float2 DecodeVelocity(float2 uv, float2 screen_size) {
 VelocitySelection SelectNearestVelocity(
     float2 uv,
     float2 inv_screen_size,
-    float2 screen_size,
     float2 center_velocity) {
   static const float2 VELOCITY_OFFSETS[5] = {
-    float2(0.f, 0.f),
-    float2(1.f, 1.f),
-    float2(-1.f, 1.f),
-    float2(1.f, -1.f),
-    float2(-1.f, -1.f),
+      float2(0.f, 0.f),
+      float2(1.f, 1.f),
+      float2(-1.f, 1.f),
+      float2(1.f, -1.f),
+      float2(-1.f, -1.f),
   };
 
   VelocitySelection selection;
   selection.velocity = center_velocity;
-  selection.object_mask = object_velocity_texture.SampleLevel(point_sampler, uv, 0).r;
+  selection.object_mask = motion_debug_texture.SampleLevel(point_sampler, uv, 0).b;
   selection.uv = uv;
   selection.depth = depth_texture.SampleLevel(point_sampler, uv, 0).x;
 
@@ -175,14 +148,13 @@ VelocitySelection SelectNearestVelocity(
   // but take its velocity, mask and camera depth/UV from the output pixel.
   if (object_motion_mode >= 6.5f) return selection;
 
-  [unroll]
-  for (uint i = 1u; i < 5u; ++i) {
+  [unroll] for (uint i = 1u; i < 5u; ++i) {
     const float2 candidate_uv = uv + VELOCITY_OFFSETS[i] * inv_screen_size;
     const float candidate_depth = depth_texture.SampleLevel(point_sampler, candidate_uv, 0).x;
 
     if (candidate_depth >= selection.depth) {
-      selection.velocity = DecodeVelocity(candidate_uv, screen_size);
-      selection.object_mask = object_velocity_texture.SampleLevel(point_sampler, candidate_uv, 0).r;
+      selection.velocity = DecodeVelocity(candidate_uv);
+      selection.object_mask = motion_debug_texture.SampleLevel(point_sampler, candidate_uv, 0).b;
       selection.uv = candidate_uv;
       selection.depth = candidate_depth;
     }
@@ -201,31 +173,26 @@ float4 CatmullRomWeights(float fraction) {
       0.5f * (fraction_cubed - fraction_squared));
 }
 
-// History is stored in MGSV's encoded scene domain. Decode every texel before
-// Catmull-Rom interpolation so reconstruction happens in linear light; decoding
-// after hardware interpolation visibly damaged thin-detail stability.
-float3 SampleHistoryDecodedCatmullRom(float2 uv, float2 screen_size) {
-  const float2 texel_position = uv * screen_size - 0.5f.xx;
-  const int2 base_pixel = int2(floor(texel_position));
-  const float2 fraction = frac(texel_position);
-  const int2 maximum_pixel = int2(screen_size) - 1;
-  const int4 sample_x = clamp(base_pixel.x + int4(-1, 0, 1, 2), 0, maximum_pixel.x);
-  const int4 sample_y = clamp(base_pixel.y + int4(-1, 0, 1, 2), 0, maximum_pixel.y);
-  const float4 weight_x = CatmullRomWeights(fraction.x);
-  const float4 weight_y = CatmullRomWeights(fraction.y);
-  float3 history_color = 0.f.xxx;
+// Interpolate linear history directly. Keep point reads for the sixteen taps:
+// hardware bilinear weights can move a sample across a narrow clipping bound.
+// The signed outer lobes preserve detail without decoding each history tap.
+float3 SampleHistoryCatmullRom(float2 uv, float2 screen_size) {
+  const float2 position = uv * screen_size - 0.5f;
+  const int2 base = int2(floor(position));
+  const float2 fraction = frac(position);
+  const float4 wx = CatmullRomWeights(fraction.x);
+  const float4 wy = CatmullRomWeights(fraction.y);
+  float3 color = 0.f;
   float weight_sum = 0.f;
-  [unroll]
-  for (int y = 0; y < 4; ++y) {
-    [unroll]
-    for (int x = 0; x < 4; ++x) {
-      const float weight = weight_x[x] * weight_y[y];
-      const int2 pixel = int2(sample_x[x], sample_y[y]);
-      history_color += DecodeSceneColor(previous_history_texture.Load(int3(pixel, 0)).xyz) * weight;
+  [unroll] for (int y = 0; y < 4; ++y) {
+    [unroll] for (int x = 0; x < 4; ++x) {
+      const float weight = wx[x] * wy[y];
+      const int2 pixel = clamp(base + int2(x - 1, y - 1), 0, int2(screen_size) - 1);
+      color += previous_history_texture.Load(int3(pixel, 0)).rgb * weight;
       weight_sum += weight;
     }
   }
-  return renodx::math::DivideSafe(history_color, weight_sum, 0.f.xxx);
+  return renodx::math::DivideSafe(color, weight_sum, 0.f.xxx);
 }
 
 // Rebuilds camera motion from MGSV's native no-jitter projection/view state.
@@ -286,61 +253,43 @@ float ComputeHistoryBlend(float3 history_color, float3 clip_min, float3 clip_max
   return saturate(current_frame_blend * luma_edge_factor * (1.f + subpixel_weight.x + subpixel_weight.y));
 }
 
-[numthreads(8, 8, 1)]
-void main(uint3 dispatch_thread_id: SV_DispatchThreadID) {
+[numthreads(8, 8, 1)] void main(uint3 dispatch_thread_id : SV_DispatchThreadID, uint3 group_thread_id : SV_GroupThreadID, uint3 group_id : SV_GroupID) {
   uint screen_width, screen_height;
   current_color_texture.GetDimensions(screen_width, screen_height);
+  // Load the 8x8 block and its one-pixel border cooperatively. Edge lanes must
+  // reach the barrier even when the image dimensions are not multiples of eight.
+  for (uint index = group_thread_id.y * 8u + group_thread_id.x; index < 100u; index += 64u) {
+    const int2 pixel = clamp(int2(group_id.xy * 8u) + int2(index % 10u, index / 10u) - 1, 0, int2(screen_width, screen_height) - 1);
+    current_tile[index] = current_color_texture.Load(int3(pixel, 0)).rgb;
+  }
+  GroupMemoryBarrierWithGroupSync();
   if (dispatch_thread_id.x >= screen_width || dispatch_thread_id.y >= screen_height) return;
 
   const float2 screen_size = float2(screen_width, screen_height);
   const float2 inv_screen_size = 1.f.xx / screen_size;
   const float2 uv = (float2(dispatch_thread_id.xy) + 0.5f.xx) * inv_screen_size;
   const float4 raw_current = current_color_texture.SampleLevel(point_sampler, uv, 0);
-  const float3 current_center = DecodeSceneColor(raw_current.xyz);
+  const float3 current_center = raw_current.xyz;
 
-  const float2 raw_velocity = DecodeVelocity(uv, screen_size);
-  const float raw_object_mask = object_velocity_texture.SampleLevel(point_sampler, uv, 0).r;
-  const Neighborhood neighborhood = BuildCurrentNeighborhood(uv, inv_screen_size, current_center);
+  const float2 raw_velocity = DecodeVelocity(uv);
+  const float raw_object_mask = motion_debug_texture.SampleLevel(point_sampler, uv, 0).b;
+  const Neighborhood neighborhood = BuildCurrentNeighborhood(group_thread_id.xy, current_center);
   const VelocitySelection velocity_selection =
-      SelectNearestVelocity(uv, inv_screen_size, screen_size, raw_velocity);
+      SelectNearestVelocity(uv, inv_screen_size, raw_velocity);
   const float2 native_velocity = velocity_selection.velocity;
   float2 matrix_camera_velocity = native_velocity;
   if (camera_reprojection_valid > 0.f) {
     ComputeMatrixCameraVelocity(velocity_selection.uv, velocity_selection.depth, matrix_camera_velocity);
   }
 
-  float2 object_velocity = native_velocity;
-  if (object_motion_mode >= 6.5f) {
-    object_velocity -= current_jitter_uv * velocity_projection_jitter_scale;
-  } else if (object_motion_mode >= 5.5f) {
-    // Same selected texel/mask/depth as Auto, but before A13321B6's linear
-    // sampling and fractional-mask camera blend. Native radial clamp remains.
-    const float2 encoded = object_velocity_texture.SampleLevel(point_sampler, velocity_selection.uv, 0).ba;
-    object_velocity = (encoded * 2.f - 1.f) * 64.f / screen_size;
-    object_velocity -= current_jitter_uv * velocity_projection_jitter_scale;
-  } else if (object_motion_mode < 0.5f) {
-    object_velocity -= current_jitter_uv * velocity_projection_jitter_scale;
-  } else if (object_motion_mode >= 1.5f && object_motion_mode < 2.5f) {
-    object_velocity -= current_jitter_uv;
-  } else if (object_motion_mode >= 2.5f && object_motion_mode < 3.5f) {
-    object_velocity += current_jitter_uv;
-  } else if (object_motion_mode >= 3.5f && object_motion_mode < 4.5f) {
-    object_velocity -= current_jitter_uv - previous_jitter_uv;
-  } else if (object_motion_mode >= 4.5f) {
-    object_velocity += current_jitter_uv - previous_jitter_uv;
-  }
-
-  float2 velocity = velocity_selection.object_mask > 0.5f ? object_velocity : matrix_camera_velocity;
-  if (object_motion_mode >= 0.5f && object_motion_mode < 1.5f) {
-    velocity = matrix_camera_velocity;
-  }
+  const float2 velocity = -velocity_texture.SampleLevel(point_sampler, velocity_selection.uv, 0).xy;
   // Do not add previous-current jitter here. That follows the current jittered
   // scene sample instead of accumulating the selected jitter phases at a fixed output
   // pixel, which makes the projection pattern visible as whole-screen shake.
   const float2 history_uv = uv - velocity;
 
   const float3 history_color = IsInsideScreen(history_uv)
-                                   ? SampleHistoryDecodedCatmullRom(history_uv, screen_size)
+                                   ? SampleHistoryCatmullRom(history_uv, screen_size)
                                    : neighborhood.filtered_color;
   const float3 clipped_history = lerp(
       history_color,
@@ -391,7 +340,7 @@ void main(uint3 dispatch_thread_id: SV_DispatchThreadID) {
                        : 0.f.xxx;
   }
 
-  current_history_output[dispatch_thread_id.xy] = exact_raw_current
-                                                      ? raw_current
-                                                      : float4(EncodeSceneColor(output_color), raw_current.a);
+  const float3 linear_output = exact_raw_current ? raw_current.rgb : output_color;
+  current_history_output[dispatch_thread_id.xy] = float4(max(0.f.xxx, linear_output), raw_current.a);
+  encoded_scene_output[dispatch_thread_id.xy] = float4(EncodeSceneColor(linear_output), raw_current.a);
 }

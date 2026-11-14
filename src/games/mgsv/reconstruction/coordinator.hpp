@@ -29,7 +29,6 @@
 #include <wrl/implements.h>
 
 #include "../rendering/d3d11_state.hpp"
-#include "../rendering/d3d12_bridge_test.hpp"
 #include "../rendering/inputs.hpp"
 #include "../rendering/native_context.hpp"
 #include "../rendering/producer_records.hpp"
@@ -197,11 +196,12 @@ inline void ResetTemporalState(const char* reason) {
 
 inline void Destroy(reshade::api::device* device) {
   if (runtime_device != nullptr && device != runtime_device) return;
-  rendering::d3d12_bridge_test::Reset();
+  dx12::Drain();
   input_capture::Destroy(device);
   analytical::Destroy(device);
   dlss::Destroy(device);
   fsr3::Destroy();
+  dx12::Destroy();
   post_process::Reset(true);
   submission_failure_pending.store(false, std::memory_order_release);
   runtime_device = nullptr;
@@ -272,53 +272,26 @@ inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
       reshade::api::resource_usage::render_target,
       reshade::api::resource_usage::shader_resource);
 
-  ColorTarget output = {};
   bool succeeded = false;
-  switch (state::GetTemporalMode()) {
-    case state::TemporalMode::ANALYTICAL_TAA:
-      succeeded = analytical::Dispatch(inputs, &output);
-      break;
-    case state::TemporalMode::AMD_FSR3:
-      succeeded = fsr3::Dispatch(inputs, &output);
-      break;
-    case state::TemporalMode::NVIDIA_DLSS:
-      succeeded = dlss::Dispatch(inputs, &output);
-      break;
-    case state::TemporalMode::OFF:
-      break;
-  }
-  if (succeeded && output.resource.handle != 0u
-      && output.resource.handle != inputs.output.resource.handle
-      && output.width == inputs.output.width && output.height == inputs.output.height
-      && output.format == inputs.output.format) {
-    inputs.cmd_list->barrier(
-        output.resource,
-        reshade::api::resource_usage::unordered_access,
-        reshade::api::resource_usage::copy_source);
-    inputs.cmd_list->barrier(
-        inputs.output.resource,
-        inputs.output.usage,
-        reshade::api::resource_usage::copy_dest);
-    // Run at execution time after the native prefix and SDK evaluation. The
-    // bridge returns the same scene before its post-processing remainder runs.
-    // ReShade exposes native D3D11 pointers through integer handles.
-    // NOLINTBEGIN(performance-no-int-to-ptr)
-    const bool bridged = rendering::d3d12_bridge_test::Run(
-        reinterpret_cast<ID3D11DeviceContext*>(inputs.cmd_list->get_native()),
-        reinterpret_cast<ID3D11Resource*>(output.resource.handle),
-        reinterpret_cast<ID3D11Resource*>(inputs.output.resource.handle),
-        {.id = inputs.camera.scene, .generation = inputs.camera.owner_generation},
-        output.shared_texture.get(), inputs.output.shared_texture.get());
-    // NOLINTEND(performance-no-int-to-ptr)
-    if (!bridged) {
-      inputs.cmd_list->copy_resource(output.resource, inputs.output.resource);
+  try {
+    // Each method writes inputs.output through the shared backend. The bridge
+    // queues the D3D11 wait before native post-processing can read that image.
+    switch (state::GetTemporalMode()) {
+      case state::TemporalMode::ANALYTICAL_TAA: succeeded = analytical::Dispatch(inputs); break;
+      case state::TemporalMode::AMD_FSR3:       succeeded = fsr3::Dispatch(inputs); break;
+      case state::TemporalMode::NVIDIA_DLSS:    succeeded = dlss::Dispatch(inputs); break;
+      case state::TemporalMode::OFF:            break;
     }
-    inputs.cmd_list->barrier(
-        inputs.output.resource,
-        reshade::api::resource_usage::copy_dest,
-        inputs.output.usage);
-    inputs.cmd_list->barrier(output.resource, reshade::api::resource_usage::copy_source, output.usage);
-  } else {
+  } catch (const std::exception& error) {
+    static uint64_t last_backend_failure = std::numeric_limits<uint64_t>::max();
+    if (logging::ShouldLogFrame(state::CurrentFrameToken(), last_backend_failure)) {
+      logging::Warn("D3D12 reconstruction failed: ", error.what());
+    }
+    // SDKs may have advanced internal state while recording a discarded list.
+    // Recover through the existing method transition, never reuse that history.
+    if (state::GetTemporalMode() == state::TemporalMode::NVIDIA_DLSS) {
+      dlss::QueueFatalFailure();
+    }
     succeeded = false;
   }
   inputs.cmd_list->barrier(

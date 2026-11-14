@@ -1,6 +1,6 @@
 #pragma once
 
-/* NVIDIA DLSS discovery, capability probing, model selection, and D3D11 dispatch. */
+/* NVIDIA DLSS discovery, capability probing, model selection, and D3D12 dispatch. */
 
 #include <windows.h>
 
@@ -9,28 +9,25 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <cstring>
 #include <filesystem>
 #include <limits>
-#include <memory>
-#include <span>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <vector>
 
 #include <d3d11.h>
+#include <d3d12.h>
 #include <dxgi.h>
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_helpers.h>
 #include <winver.h>
 #include <wrl/client.h>
 
-#include <embed/dlss_encode_game_output.h>
-#include <embed/dlss_prepare_game_inputs.h>
 #include <include/reshade.hpp>
 
-#include "../../rendering/shared_texture.hpp"
 #include "../camera_state.hpp"
+#include "../d3d12.hpp"
 #include "../frame_inputs.hpp"
 #include "../logging.hpp"
 #include "../resolution.hpp"
@@ -51,7 +48,6 @@ namespace mgsv::reconstruction::dlss {
 inline constexpr char PROJECT_ID[] = "98dbfc11-0026-4cd1-b573-168ceb4c7bb5";
 inline constexpr char ENGINE_VERSION[] = "MGSV-RenoDX-1";
 inline constexpr uint32_t NVIDIA_VENDOR_ID = 0x10DEu;
-inline constexpr uint32_t THREAD_GROUP_SIZE = 8u;
 
 enum class Availability : uint8_t {
   UNCHECKED,
@@ -64,29 +60,14 @@ enum class Availability : uint8_t {
   INITIALIZATION_FAILED,
 };
 
-struct Texture {
-  Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
-  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
-  Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
-  std::shared_ptr<rendering::SharedTexture> shared_texture;
-};
-
 struct Resources {
   // Non-owning identity, cleared at device destruction; guarded by the coordinator.
   reshade::api::device* adapter_device = nullptr;
-  Microsoft::WRL::ComPtr<ID3D11Device> device;
+  Microsoft::WRL::ComPtr<ID3D12Device> device;
   Microsoft::WRL::ComPtr<ID3D11Device> probed_device;
-  Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
   NVSDK_NGX_Parameter* parameters = nullptr;
   NVSDK_NGX_Handle* feature = nullptr;
-  Microsoft::WRL::ComPtr<ID3D11ComputeShader> prepare_shader;
-  Microsoft::WRL::ComPtr<ID3D11ComputeShader> encode_shader;
-  Microsoft::WRL::ComPtr<ID3D11Buffer> prepare_constant_buffer;
-  Texture linear_input;
-  Texture motion_input;
-  Texture depth_input;
-  Texture linear_output;
-  Texture encoded_output;
+  Microsoft::WRL::ComPtr<ID3D12Resource> linear_output;
   uint32_t render_width = 0u;
   uint32_t render_height = 0u;
   uint32_t output_width = 0u;
@@ -95,7 +76,6 @@ struct Resources {
   resolution::Quality feature_quality = resolution::Quality::NATIVE_AA;
   bool ngx_initialized = false;
   bool probe_complete = false;
-  bool work_submitted = false;
   bool history_initialized = false;
   bool suspended = false;
   std::chrono::steady_clock::time_point previous_dispatch_time;
@@ -275,41 +255,10 @@ inline void QueueFatalFailure() {
   fatal_failure_pending.store(true, std::memory_order_release);
 }
 
-inline HRESULT WaitForGpu() {
-  if (!resources.work_submitted) return S_OK;
-  if (resources.device == nullptr || resources.context == nullptr
-      || resources.context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) {
-    return E_UNEXPECTED;
-  }
-  D3D11_QUERY_DESC description = {.Query = D3D11_QUERY_EVENT};
-  Microsoft::WRL::ComPtr<ID3D11Query> query;
-  const HRESULT query_result = resources.device->CreateQuery(&description, &query);
-  if (FAILED(query_result)) return query_result;
-  resources.context->End(query.Get());
-  resources.context->Flush();
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-  for (;;) {
-    BOOL complete = FALSE;
-    const HRESULT result = resources.context->GetData(
-        query.Get(), &complete, sizeof(complete), D3D11_ASYNC_GETDATA_DONOTFLUSH);
-    if (result == S_OK && complete != FALSE) return S_OK;
-    if (FAILED(result)) return result;
-    if (std::chrono::steady_clock::now() >= deadline) return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
-    SwitchToThread();
-  }
-}
-
 inline bool ReleaseFeatureResources() {
-  const HRESULT wait_result = WaitForGpu();
-  if (FAILED(wait_result)) {
-    logging::Warn("NVIDIA DLSS GPU completion not proven; retaining resources result=", static_cast<uint32_t>(wait_result),
-                  " device_status=", static_cast<uint32_t>(resources.device != nullptr ? resources.device->GetDeviceRemovedReason() : E_UNEXPECTED));
-    availability.store(Availability::INITIALIZATION_FAILED, std::memory_order_release);
-    QueueFatalFailure();
-    return false;
-  }
+  dx12::Drain();
   if (resources.feature != nullptr) {
-    const NVSDK_NGX_Result result = NVSDK_NGX_D3D11_ReleaseFeature(resources.feature);
+    const NVSDK_NGX_Result result = NVSDK_NGX_D3D12_ReleaseFeature(resources.feature);
     if (NVSDK_NGX_FAILED(result)) {
       logging::Warn("NVIDIA DLSS feature release failed; retaining resources result=", static_cast<uint32_t>(result));
       availability.store(Availability::INITIALIZATION_FAILED, std::memory_order_release);
@@ -319,30 +268,15 @@ inline bool ReleaseFeatureResources() {
     resources.feature = nullptr;
   }
   if (resources.parameters != nullptr) {
-    NVSDK_NGX_D3D11_DestroyParameters(resources.parameters);
+    NVSDK_NGX_D3D12_DestroyParameters(resources.parameters);
     resources.parameters = nullptr;
   }
-  resources.prepare_shader.Reset();
-  resources.encode_shader.Reset();
-  resources.prepare_constant_buffer.Reset();
-  resources.context.Reset();
-  for (Texture* texture : std::array{
-           &resources.linear_input,
-           &resources.motion_input,
-           &resources.depth_input,
-           &resources.linear_output,
-           &resources.encoded_output,
-       }) {
-    texture->texture.Reset();
-    texture->srv.Reset();
-    texture->uav.Reset();
-  }
+  resources.linear_output.Reset();
   resources.render_width = 0u;
   resources.render_height = 0u;
   resources.output_width = 0u;
   resources.output_height = 0u;
   resources.feature_model = Model::DEFAULT;
-  resources.work_submitted = false;
   resources.history_initialized = false;
   resources.suspended = false;
   resources.previous_dispatch_time = {};
@@ -353,7 +287,7 @@ inline void Shutdown(bool reset_probe = true) {
   runtime_ready.store(false, std::memory_order_release);
   if (!ReleaseFeatureResources()) return;
   if (resources.ngx_initialized && resources.device != nullptr) {
-    NVSDK_NGX_D3D11_Shutdown1(resources.device.Get());
+    NVSDK_NGX_D3D12_Shutdown1(resources.device.Get());
   }
   resources.ngx_initialized = false;
   resources.device.Reset();
@@ -449,7 +383,7 @@ inline bool ProbeDevice(reshade::api::device* device) {
       .FeatureInfo = &feature_info,
   };
   NVSDK_NGX_FeatureRequirement requirement = {};
-  const NVSDK_NGX_Result requirement_result = NVSDK_NGX_D3D11_GetFeatureRequirements(
+  const NVSDK_NGX_Result requirement_result = NVSDK_NGX_D3D12_GetFeatureRequirements(
       adapter.Get(),
       &discovery,
       &requirement);
@@ -465,12 +399,19 @@ inline bool ProbeDevice(reshade::api::device* device) {
       return false;
     }
   }
-  const NVSDK_NGX_Result init_result = NVSDK_NGX_D3D11_Init_with_ProjectID(
+  try {
+    resources.device = dx12::GetBridge(native_device).device12;
+  } catch (const std::exception& error) {
+    logging::Warn("NVIDIA DLSS backend initialization failed: ", error.what());
+    availability.store(Availability::INITIALIZATION_FAILED, std::memory_order_release);
+    return false;
+  }
+  const NVSDK_NGX_Result init_result = NVSDK_NGX_D3D12_Init_with_ProjectID(
       PROJECT_ID,
       NVSDK_NGX_ENGINE_TYPE_CUSTOM,
       ENGINE_VERSION,
       data_path.c_str(),
-      native_device,
+      resources.device.Get(),
       &feature_info);
   if (NVSDK_NGX_FAILED(init_result)) {
     Availability failure = Availability::INITIALIZATION_FAILED;
@@ -480,14 +421,13 @@ inline bool ProbeDevice(reshade::api::device* device) {
       failure = Availability::GPU_UNSUPPORTED;
     }
     availability.store(failure, std::memory_order_release);
-    if (LogEvery(1u)) logging::Warn("NVIDIA NGX D3D11 initialization failed result=", static_cast<uint32_t>(init_result));
+    if (LogEvery(1u)) logging::Warn("NVIDIA NGX D3D12 initialization failed result=", static_cast<uint32_t>(init_result));
     return false;
   }
 
-  resources.device = native_device;
   resources.ngx_initialized = true;
   NVSDK_NGX_Parameter* capability_parameters = nullptr;
-  const NVSDK_NGX_Result capability_result = NVSDK_NGX_D3D11_GetCapabilityParameters(&capability_parameters);
+  const NVSDK_NGX_Result capability_result = NVSDK_NGX_D3D12_GetCapabilityParameters(&capability_parameters);
   int available = 0;
   int needs_updated_driver = 0;
   NVSDK_NGX_Result available_result = NVSDK_NGX_Result_FAIL_InvalidParameter;
@@ -497,7 +437,7 @@ inline bool ProbeDevice(reshade::api::device* device) {
     driver_result = capability_parameters->Get(
         NVSDK_NGX_Parameter_SuperSampling_NeedsUpdatedDriver,
         &needs_updated_driver);
-    NVSDK_NGX_D3D11_DestroyParameters(capability_parameters);
+    NVSDK_NGX_D3D12_DestroyParameters(capability_parameters);
   }
   if (NVSDK_NGX_FAILED(capability_result)
       || NVSDK_NGX_FAILED(available_result)
@@ -525,7 +465,7 @@ inline bool ProbeDevice(reshade::api::device* device) {
 inline void Destroy(reshade::api::device* device) {
   if (device != nullptr
       && resources.device != nullptr
-      && reinterpret_cast<ID3D11Device*>(device->get_native()) != resources.device.Get()) {  // NOLINT(performance-no-int-to-ptr)
+      && reinterpret_cast<ID3D11Device*>(device->get_native()) != resources.probed_device.Get()) {  // NOLINT(performance-no-int-to-ptr)
     return;
   }
   Shutdown();
@@ -534,7 +474,7 @@ inline void Destroy(reshade::api::device* device) {
 inline void SuspendTemporalResources(reshade::api::device* device) {
   if (device != nullptr
       && resources.device != nullptr
-      && reinterpret_cast<ID3D11Device*>(device->get_native()) != resources.device.Get()) {  // NOLINT(performance-no-int-to-ptr)
+      && reinterpret_cast<ID3D11Device*>(device->get_native()) != resources.probed_device.Get()) {  // NOLINT(performance-no-int-to-ptr)
     return;
   }
   if (resources.suspended || (resources.feature == nullptr && resources.render_width == 0u)) return;
@@ -551,34 +491,6 @@ inline void SuspendTemporalResources(reshade::api::device* device) {
 
 inline void InvalidateHistory() {
   resources.history_initialized = false;
-}
-
-inline bool CreateTexture(ID3D11Device* device, DXGI_FORMAT format, uint32_t width, uint32_t height, Texture& output, UINT misc_flags = 0u) {
-  D3D11_TEXTURE2D_DESC description = {};
-  description.Width = width;
-  description.Height = height;
-  description.MipLevels = 1u;
-  description.ArraySize = 1u;
-  description.Format = format;
-  description.SampleDesc.Count = 1u;
-  description.Usage = D3D11_USAGE_DEFAULT;
-  description.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-  description.MiscFlags = misc_flags;
-  if (FAILED(device->CreateTexture2D(&description, nullptr, &output.texture))
-      || FAILED(device->CreateShaderResourceView(output.texture.Get(), nullptr, &output.srv))
-      || FAILED(device->CreateUnorderedAccessView(output.texture.Get(), nullptr, &output.uav))) return false;
-  if ((misc_flags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) != 0u) {
-    output.shared_texture = rendering::ExportTexture(output.texture.Get());
-    return output.shared_texture != nullptr;
-  }
-  return true;
-}
-
-inline bool CreateComputeShader(
-    ID3D11Device* device,
-    std::span<const uint8_t> code,
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader>& output) {
-  return SUCCEEDED(device->CreateComputeShader(code.data(), code.size(), nullptr, &output));
 }
 
 inline NVSDK_NGX_PerfQuality_Value GetPerformanceQuality(resolution::Quality selected) {
@@ -606,7 +518,7 @@ inline void SetModelHint(NVSDK_NGX_Parameter* parameters, Model model) {
 
 inline bool CreateResources(
     reshade::api::device* device,
-    ID3D11DeviceContext* context,
+    ID3D12GraphicsCommandList* commands,
     const ValidatedFrameInputs& inputs) {
   if (inputs.render_width == 0u || inputs.render_height == 0u
       || inputs.output.width < inputs.render_width || inputs.output.height < inputs.render_height) return false;
@@ -614,40 +526,14 @@ inline bool CreateResources(
   const uint32_t height = inputs.render_height;
   if (!runtime_ready.load(std::memory_order_acquire) || !resources.ngx_initialized
       || device != resources.adapter_device
-      || context == nullptr || context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) return false;
+      || commands == nullptr) return false;
   if (!ReleaseFeatureResources()) return false;
 
-  ID3D11Device* native_device = resources.device.Get();
-  resources.context = context;
   const Model model = NormalizeModel(static_cast<float>(GetModel()));
   SetModel(model);
-  if (!CreateComputeShader(native_device, __dlss_prepare_game_inputs, resources.prepare_shader)
-      || !CreateComputeShader(native_device, __dlss_encode_game_output, resources.encode_shader)
-      || !CreateTexture(native_device, DXGI_FORMAT_R16G16B16A16_FLOAT, width, height, resources.linear_input)
-      || !CreateTexture(native_device, DXGI_FORMAT_R16G16_FLOAT, width, height, resources.motion_input)
-      || !CreateTexture(native_device, DXGI_FORMAT_R32_FLOAT, width, height, resources.depth_input)
-      || !CreateTexture(native_device, DXGI_FORMAT_R16G16B16A16_FLOAT, inputs.output.width, inputs.output.height, resources.linear_output)
-      // The bridge can read the encoder's actual output without an input copy.
-      || !CreateTexture(native_device, DXGI_FORMAT_R16G16B16A16_FLOAT, inputs.output.width, inputs.output.height, resources.encoded_output,
-                        D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE)) {
-    ReleaseFeatureResources();
-    return false;
-  }
+  resources.linear_output = dx12::compute::CreateTexture(resources.device.Get(), inputs.output.width, inputs.output.height, DXGI_FORMAT_R16G16B16A16_FLOAT);
 
-  D3D11_BUFFER_DESC constant_buffer_description = {};
-  constant_buffer_description.ByteWidth = sizeof(PrepareConstants);
-  constant_buffer_description.Usage = D3D11_USAGE_DYNAMIC;
-  constant_buffer_description.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-  constant_buffer_description.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-  if (FAILED(native_device->CreateBuffer(
-          &constant_buffer_description,
-          nullptr,
-          &resources.prepare_constant_buffer))) {
-    ReleaseFeatureResources();
-    return false;
-  }
-
-  const NVSDK_NGX_Result parameter_result = NVSDK_NGX_D3D11_AllocateParameters(&resources.parameters);
+  const NVSDK_NGX_Result parameter_result = NVSDK_NGX_D3D12_AllocateParameters(&resources.parameters);
   if (NVSDK_NGX_FAILED(parameter_result) || resources.parameters == nullptr) {
     ReleaseFeatureResources();
     return false;
@@ -668,18 +554,18 @@ inline bool CreateResources(
   SetModelHint(resources.parameters, model);
 
   Model effective_model = model;
-  // NGX creation can submit work, even before our first input-preparation pass.
-  resources.work_submitted = true;
-  NVSDK_NGX_Result create_result = NVSDK_NGX_D3D11_CreateFeature(
-      context,
+  // Creation and evaluation record into the same list. The bridge submits it
+  // only after every step, including output encoding, has been accepted.
+  NVSDK_NGX_Result create_result = NVSDK_NGX_D3D12_CreateFeature(
+      commands,
       NVSDK_NGX_Feature_SuperSampling,
       resources.parameters,
       &resources.feature);
   if (NVSDK_NGX_FAILED(create_result) && model != Model::DEFAULT) {
     rejected_models[static_cast<size_t>(resolution::Read().quality)].fetch_or(1u << static_cast<uint32_t>(model), std::memory_order_acq_rel);
     SetModelHint(resources.parameters, Model::DEFAULT);
-    create_result = NVSDK_NGX_D3D11_CreateFeature(
-        context,
+    create_result = NVSDK_NGX_D3D12_CreateFeature(
+        commands,
         NVSDK_NGX_Feature_SuperSampling,
         resources.parameters,
         &resources.feature);
@@ -710,15 +596,14 @@ inline bool CreateResources(
 
 inline bool EnsureResources(
     reshade::api::device* device,
-    ID3D11DeviceContext* context,
+    ID3D12GraphicsCommandList* commands,
     const ValidatedFrameInputs& inputs) {
   if (!runtime_ready.load(std::memory_order_acquire)) return false;
   const Model model = NormalizeModel(static_cast<float>(GetModel()));
   if (resources.feature != nullptr
       && availability.load(std::memory_order_acquire) == Availability::AVAILABLE
       && device != nullptr
-      && reinterpret_cast<ID3D11Device*>(device->get_native()) == resources.device.Get()  // NOLINT(performance-no-int-to-ptr)
-      && context == resources.context.Get()
+      && reinterpret_cast<ID3D11Device*>(device->get_native()) == resources.probed_device.Get()  // NOLINT(performance-no-int-to-ptr)
       && resources.render_width == inputs.render_width
       && resources.render_height == inputs.render_height
       && resources.output_width == inputs.output.width
@@ -735,78 +620,7 @@ inline bool EnsureResources(
     }
     return true;
   }
-  return CreateResources(device, context, inputs);
-}
-
-inline void UnbindComputeResources(ID3D11DeviceContext* context) {
-  static const std::array<ID3D11ShaderResourceView*, 16> NULL_SRVS = {};
-  static const std::array<ID3D11UnorderedAccessView*, 8> NULL_UAVS = {};
-  context->CSSetShaderResources(0u, static_cast<uint32_t>(NULL_SRVS.size()), NULL_SRVS.data());
-  context->CSSetUnorderedAccessViews(0u, static_cast<uint32_t>(NULL_UAVS.size()), NULL_UAVS.data(), nullptr);
-}
-
-inline bool PrepareGameInputs(ID3D11DeviceContext* context, const ValidatedFrameInputs& inputs, bool reset) {
-  const std::array<ID3D11ShaderResourceView*, 4> srvs = {
-      reinterpret_cast<ID3D11ShaderResourceView*>(inputs.color_srv.handle),            // NOLINT(performance-no-int-to-ptr)
-      reinterpret_cast<ID3D11ShaderResourceView*>(inputs.velocity_srv.handle),         // NOLINT(performance-no-int-to-ptr)
-      reinterpret_cast<ID3D11ShaderResourceView*>(inputs.depth_srv.handle),            // NOLINT(performance-no-int-to-ptr)
-      reinterpret_cast<ID3D11ShaderResourceView*>(inputs.object_velocity_srv.handle),  // NOLINT(performance-no-int-to-ptr)
-  };
-  const std::array<ID3D11UnorderedAccessView*, 3> uavs = {
-      resources.linear_input.uav.Get(),
-      resources.motion_input.uav.Get(),
-      resources.depth_input.uav.Get(),
-  };
-  const PrepareConstants constants = {
-      .current_jitter_uv = {inputs.camera.jitter_uv_x, inputs.camera.jitter_uv_y},
-      .velocity_projection_jitter_scale = state::GetProjectionJitterScale(state::ProjectionJitterPath::VELOCITY),
-      .camera_reprojection_valid = !reset && inputs.camera.camera_reprojection_valid ? 1.f : 0.f,
-      .render_size = {resources.render_width, resources.render_height},
-      .reciprocal_render_size = {
-          1.f / static_cast<float>(resources.render_width),
-          1.f / static_cast<float>(resources.render_height),
-      },
-      .current_to_previous_clip = inputs.camera.current_to_previous_clip,
-  };
-
-  D3D11_MAPPED_SUBRESOURCE mapped = {};
-  if (FAILED(context->Map(resources.prepare_constant_buffer.Get(), 0u, D3D11_MAP_WRITE_DISCARD, 0u, &mapped))) {
-    return false;
-  }
-  std::memcpy(mapped.pData, &constants, sizeof(constants));
-  context->Unmap(resources.prepare_constant_buffer.Get(), 0u);
-
-  UnbindComputeResources(context);
-  context->CSSetShaderResources(0u, static_cast<uint32_t>(srvs.size()), srvs.data());
-  context->CSSetUnorderedAccessViews(0u, static_cast<uint32_t>(uavs.size()), uavs.data(), nullptr);
-  ID3D11Buffer* constant_buffer = resources.prepare_constant_buffer.Get();
-  context->CSSetConstantBuffers(0u, 1u, &constant_buffer);
-  context->CSSetShader(resources.prepare_shader.Get(), nullptr, 0u);
-  context->Dispatch(
-      (resources.render_width + THREAD_GROUP_SIZE - 1u) / THREAD_GROUP_SIZE,
-      (resources.render_height + THREAD_GROUP_SIZE - 1u) / THREAD_GROUP_SIZE,
-      1u);
-  resources.work_submitted = true;
-  UnbindComputeResources(context);
-  return true;
-}
-
-inline void EncodeGameOutput(ID3D11DeviceContext* context, reshade::api::resource_view encoded_scene_srv) {
-  const std::array<ID3D11ShaderResourceView*, 2> srvs = {
-      resources.linear_output.srv.Get(),
-      reinterpret_cast<ID3D11ShaderResourceView*>(encoded_scene_srv.handle),  // NOLINT(performance-no-int-to-ptr)
-  };
-  ID3D11UnorderedAccessView* output = resources.encoded_output.uav.Get();
-  UnbindComputeResources(context);
-  context->CSSetShaderResources(0u, static_cast<uint32_t>(srvs.size()), srvs.data());
-  context->CSSetUnorderedAccessViews(0u, 1u, &output, nullptr);
-  context->CSSetShader(resources.encode_shader.Get(), nullptr, 0u);
-  context->CSSetConstantBuffers(0u, 1u, resources.prepare_constant_buffer.GetAddressOf());
-  context->Dispatch(
-      (resources.output_width + THREAD_GROUP_SIZE - 1u) / THREAD_GROUP_SIZE,
-      (resources.output_height + THREAD_GROUP_SIZE - 1u) / THREAD_GROUP_SIZE,
-      1u);
-  UnbindComputeResources(context);
+  return CreateResources(device, commands, inputs);
 }
 
 inline float FrameDeltaMilliseconds(bool reset) {
@@ -819,92 +633,45 @@ inline float FrameDeltaMilliseconds(bool reset) {
   return std::clamp(milliseconds, 1.f, 1000.f);
 }
 
-inline bool Dispatch(const ValidatedFrameInputs& inputs, ColorTarget* output) {
-  if (inputs.device == nullptr || inputs.device->get_api() != reshade::api::device_api::d3d11) {
-    QueueFatalFailure();
-    return false;
-  }
-
-  const bool compatible = inputs.color_format == reshade::api::format::r16g16b16a16_float
-                          && (inputs.depth_format == reshade::api::format::r32_float
-                              || inputs.depth_format == reshade::api::format::r32_float_x8_uint);
-  if (!compatible) {
-    if (LogEvery(30u)) {
-      logging::Warn("rejecting Nvidia DLSS dispatch with incompatible resources insertion=", inputs.insertion_name,
-                    " color_format=", static_cast<uint32_t>(inputs.color_format),
-                    " depth_format=", static_cast<uint32_t>(inputs.depth_format));
+// The coordinator owns one bridge submission. NGX records into that same list;
+// the encoder immediately follows evaluation and writes the shared destination.
+inline bool Dispatch(const ValidatedFrameInputs& inputs) {
+  const bool succeeded = dx12::Execute(inputs, !resources.history_initialized, [&](const dx12::Evaluation& evaluation) {
+    if (!EnsureResources(inputs.device, evaluation.commands, inputs)) throw std::runtime_error("Cannot create D3D12 DLSS feature");
+    const bool reset = !resources.history_initialized;
+    dx12::compute::Transition(evaluation.commands, resources.linear_output.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    resources.parameters->Set(NVSDK_NGX_Parameter_Color, evaluation.color);
+    resources.parameters->Set(NVSDK_NGX_Parameter_Output, resources.linear_output.Get());
+    resources.parameters->Set(NVSDK_NGX_Parameter_Depth, evaluation.depth);
+    resources.parameters->Set(NVSDK_NGX_Parameter_MotionVectors, evaluation.motion);
+    resources.parameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, inputs.camera.jitter_uv_x * static_cast<float>(inputs.render_width));
+    resources.parameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, inputs.camera.jitter_uv_y * static_cast<float>(inputs.render_height));
+    resources.parameters->Set(NVSDK_NGX_Parameter_Reset, reset ? 1 : 0);
+    resources.parameters->Set(NVSDK_NGX_Parameter_MV_Scale_X, static_cast<float>(inputs.render_width));
+    resources.parameters->Set(NVSDK_NGX_Parameter_MV_Scale_Y, static_cast<float>(inputs.render_height));
+    resources.parameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, inputs.render_width);
+    resources.parameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, inputs.render_height);
+    resources.parameters->Set(NVSDK_NGX_Parameter_DLSS_Pre_Exposure, 1.f);
+    resources.parameters->Set(NVSDK_NGX_Parameter_DLSS_Exposure_Scale, 1.f);
+    resources.parameters->Set(NVSDK_NGX_Parameter_Sharpness, 0.f);
+    resources.parameters->Set(NVSDK_NGX_Parameter_FrameTimeDeltaInMsec, FrameDeltaMilliseconds(reset));
+    const auto result = NVSDK_NGX_D3D12_EvaluateFeature_C(evaluation.commands, resources.feature, resources.parameters, nullptr);
+    if (NVSDK_NGX_FAILED(result)) {
+      QueueFatalFailure();
+      throw std::runtime_error("D3D12 DLSS evaluation failed: " + std::to_string(static_cast<uint32_t>(result)));
     }
-    return false;
+    dx12::compute::Transition(evaluation.commands, resources.linear_output.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    dx12::Encode(evaluation, resources.linear_output.Get());
+    dx12::compute::Transition(evaluation.commands, resources.linear_output.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+  });
+  if (succeeded) {
+    if (!resources.history_initialized) {
+      logging::Info("D3D12 DLSS accumulation started render=", inputs.render_width, "x", inputs.render_height,
+                    " output=", inputs.output.width, "x", inputs.output.height);
+    }
+    resources.history_initialized = true;
   }
-
-  auto* context = reinterpret_cast<ID3D11DeviceContext*>(inputs.cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
-  if (context == nullptr || context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) {
-    if (LogEvery(1u)) logging::Warn("NVIDIA DLSS requires an immediate D3D11 context");
-    QueueFatalFailure();
-    return false;
-  }
-  if (!EnsureResources(inputs.device, context, inputs)) {
-    QueueFatalFailure();
-    return false;
-  }
-
-  const bool reset = !resources.history_initialized;
-  if (!PrepareGameInputs(context, inputs, reset)) {
-    QueueFatalFailure();
-    return false;
-  }
-
-  resources.parameters->Set(NVSDK_NGX_Parameter_Color, resources.linear_input.texture.Get());
-  resources.parameters->Set(NVSDK_NGX_Parameter_Output, resources.linear_output.texture.Get());
-  resources.parameters->Set(NVSDK_NGX_Parameter_Depth, resources.depth_input.texture.Get());
-  resources.parameters->Set(NVSDK_NGX_Parameter_MotionVectors, resources.motion_input.texture.Get());
-  resources.parameters->Set(
-      NVSDK_NGX_Parameter_Jitter_Offset_X,
-      inputs.camera.jitter_uv_x * static_cast<float>(resources.render_width));
-  resources.parameters->Set(
-      NVSDK_NGX_Parameter_Jitter_Offset_Y,
-      inputs.camera.jitter_uv_y * static_cast<float>(resources.render_height));
-  resources.parameters->Set(NVSDK_NGX_Parameter_Reset, reset ? 1 : 0);
-  resources.parameters->Set(NVSDK_NGX_Parameter_MV_Scale_X, static_cast<float>(resources.render_width));
-  resources.parameters->Set(NVSDK_NGX_Parameter_MV_Scale_Y, static_cast<float>(resources.render_height));
-  resources.parameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, resources.render_width);
-  resources.parameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, resources.render_height);
-  resources.parameters->Set(NVSDK_NGX_Parameter_DLSS_Pre_Exposure, 1.f);
-  resources.parameters->Set(NVSDK_NGX_Parameter_DLSS_Exposure_Scale, 1.f);
-  resources.parameters->Set(NVSDK_NGX_Parameter_Sharpness, 0.f);
-  resources.parameters->Set(NVSDK_NGX_Parameter_FrameTimeDeltaInMsec, FrameDeltaMilliseconds(reset));
-
-  const NVSDK_NGX_Result result = NVSDK_NGX_D3D11_EvaluateFeature_C(
-      context,
-      resources.feature,
-      resources.parameters,
-      nullptr);
-  if (NVSDK_NGX_FAILED(result)) {
-    resources.history_initialized = false;
-    if (LogEvery(30u)) logging::Warn("NVIDIA DLSS evaluation failed result=", static_cast<uint32_t>(result));
-    QueueFatalFailure();
-    return false;
-  }
-
-  EncodeGameOutput(context, inputs.color_srv);
-  if (reset) {
-    logging::Info("NVIDIA DLSS accumulation started insertion=", inputs.insertion_name,
-                  " frame=", inputs.frame_token,
-                  " sample=", inputs.sample_index,
-                  " render=", resources.render_width, "x", resources.render_height,
-                  " output=", resources.output_width, "x", resources.output_height,
-                  " model=", FindModelOption(resources.feature_model)->label);
-  }
-  resources.history_initialized = true;
-  *output = {
-      .resource = reshade::api::resource{reinterpret_cast<uint64_t>(resources.encoded_output.texture.Get())},
-      .width = resources.output_width,
-      .height = resources.output_height,
-      .format = reshade::api::format::r16g16b16a16_float,
-      .usage = reshade::api::resource_usage::unordered_access,
-      .shared_texture = resources.encoded_output.shared_texture,
-  };
-  return true;
+  return succeeded;
 }
 
 }  // namespace mgsv::reconstruction::dlss

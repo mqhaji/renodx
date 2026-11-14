@@ -258,7 +258,6 @@ struct State {
   renodx::utils::settings::Setting* upscaling_quality_setting = nullptr;
   // Float-backed CPU preferences adapt Setting::binding's float*; runtime normalizes enum choices.
   float dlss_model = static_cast<float>(dlss::DEFAULT_MODEL);
-  float d3d12_bridge_test = 0.f;
   float jitter_pattern = static_cast<float>(state::DEFAULT_JITTER_PATTERN);
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
   float diagnostic_view = state::DEFAULT_DIAGNOSTIC_VIEW;
@@ -724,14 +723,14 @@ inline void OnPresent(
       uint32_t maximum_width = 0u;
       uint32_t maximum_height = 0u;
       float sharpness = 0.f;
-      const bool queried = NVSDK_NGX_SUCCEED(NVSDK_NGX_D3D11_GetCapabilityParameters(&capabilities))
+      const bool queried = NVSDK_NGX_SUCCEED(NVSDK_NGX_D3D12_GetCapabilityParameters(&capabilities))
                            && capabilities != nullptr
                            && NVSDK_NGX_SUCCEED(NGX_DLSS_GET_OPTIMAL_SETTINGS(
                                capabilities, plan.output.width, plan.output.height, dlss::GetPerformanceQuality(plan.quality),
                                &plan.render.width, &plan.render.height, &maximum_width, &maximum_height,
                                &minimum_width, &minimum_height, &sharpness));
       if (capabilities != nullptr) {
-        NVSDK_NGX_D3D11_DestroyParameters(capabilities);
+        NVSDK_NGX_D3D12_DestroyParameters(capabilities);
       }
       plan.render.width = std::min((plan.render.width + 1u) & ~1u, maximum_width & ~1u);
       plan.render.height = std::min((plan.render.height + 1u) & ~1u, maximum_height & ~1u);

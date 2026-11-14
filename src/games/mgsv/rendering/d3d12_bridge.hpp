@@ -1,6 +1,7 @@
 #ifndef RENODX_GAMES_MGSV_RENDERING_D3D12_BRIDGE_HPP_
 #define RENODX_GAMES_MGSV_RENDERING_D3D12_BRIDGE_HPP_
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -105,12 +106,8 @@ struct Dispatch {
   ID3D12GraphicsCommandList* commands = nullptr;
   ID3D12Resource* input = nullptr;
   ID3D12Resource* output = nullptr;
-  ID3D12DescriptorHeap* descriptors = nullptr;
-  // One descriptor table: input SRV followed by output UAV.
-  D3D12_GPU_DESCRIPTOR_HANDLE input_view = {};
-  uint32_t width = 0u;
-  uint32_t height = 0u;
-  Scene scene;
+  // Pass-owned descriptor and constant storage follows this slot's retirement.
+  size_t slot_index = 0u;
 };
 
 struct Statistics {
@@ -153,8 +150,8 @@ class Bridge {
     SharedImage output;
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commands;
-    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> descriptors;
     D3D11_TEXTURE2D_DESC description = {};
+    D3D11_TEXTURE2D_DESC target_description = {};
     // D3D11 must finish any mirror copies; D3D12 must finish this command list.
     uint64_t d3d11_completion = 0u;
     uint64_t d3d12_completion = 0u;
@@ -266,10 +263,10 @@ class Bridge {
     source->GetDesc(&description);
     destination->GetDesc(&target);
     if (source == destination) return reject("Input and output must be separate images");
-    if (description.Width != target.Width || description.Height != target.Height || description.Format != target.Format
-        || description.MipLevels != 1u || target.MipLevels != 1u || description.ArraySize != 1u || target.ArraySize != 1u
+    if (description.MipLevels != 1u || target.MipLevels != 1u || description.ArraySize != 1u || target.ArraySize != 1u
         || description.SampleDesc.Count != 1u || target.SampleDesc.Count != 1u
-        || (description.Format != DXGI_FORMAT_R16G16B16A16_FLOAT && description.Format != DXGI_FORMAT_R32G32B32A32_FLOAT)) return reject("Unsupported color texture layout or format");
+        || (description.Format != DXGI_FORMAT_R16G16B16A16_FLOAT && description.Format != DXGI_FORMAT_R32G32B32A32_FLOAT)
+        || (target.Format != DXGI_FORMAT_R16G16B16A16_FLOAT && target.Format != DXGI_FORMAT_R32G32B32A32_FLOAT)) return reject("Unsupported color texture layout or format");
     if (DeviceRemoved()) throw std::runtime_error("D3D12 bridge device removed");
 
     // Prefer the same imported images. Copied native images only need matching
@@ -277,6 +274,8 @@ class Bridge {
     const auto matches = [&](const Slot& slot) {
       return slot.description.Width == description.Width && slot.description.Height == description.Height
              && slot.description.Format == description.Format
+             && slot.target_description.Width == target.Width && slot.target_description.Height == target.Height
+             && slot.target_description.Format == target.Format
              && slot.input.direct == (shared_source != nullptr && SharedImage::CanImport(description, D3D11_BIND_SHADER_RESOURCE))
              && slot.output.direct == (shared_destination != nullptr && SharedImage::CanImport(target, D3D11_BIND_UNORDERED_ACCESS))
              && (!slot.input.direct || slot.input.texture.Get() == source)
@@ -310,25 +309,20 @@ class Bridge {
       Check(device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&replacement.allocator)), "Create bridge command allocator");
       Check(device12->CreateCommandList(0u, D3D12_COMMAND_LIST_TYPE_DIRECT, replacement.allocator.Get(), nullptr, IID_PPV_ARGS(&replacement.commands)), "Create bridge command list");
       Check(replacement.commands->Close(), "Close initial bridge command list");
-      const D3D12_DESCRIPTOR_HEAP_DESC heap = {.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, .NumDescriptors = 2u, .Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE};
-      Check(device12->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&replacement.descriptors)), "Create bridge descriptors");
       *selected = std::move(replacement);
       ++statistics.allocations;
     } else {
       ++statistics.reused;
     }
     if (!matches(*selected)) {
-      // Only retired slots reach this point. Their descriptors can now refer to
-      // different images without changing a command list still using them.
+      // Only retired slots reach this point. Replace their images after both
+      // APIs have finished using the previous pair.
       auto input = SharedImage(device11.Get(), device12.Get(), source, description, D3D11_BIND_SHADER_RESOURCE, shared_source, &statistics.image_imports);
       auto output = SharedImage(device11.Get(), device12.Get(), destination, target, D3D11_BIND_UNORDERED_ACCESS, shared_destination, &statistics.image_imports);
-      auto view = selected->descriptors->GetCPUDescriptorHandleForHeapStart();
-      device12->CreateShaderResourceView(input.resource.Get(), nullptr, view);
-      view.ptr += device12->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-      device12->CreateUnorderedAccessView(output.resource.Get(), nullptr, nullptr, view);
       selected->input = std::move(input);
       selected->output = std::move(output);
       selected->description = description;
+      selected->target_description = target;
     }
 
     // Finish recording before submitting anything. A rejected recording leaves
@@ -341,11 +335,7 @@ class Bridge {
           .commands = selected->commands.Get(),
           .input = selected->input.resource.Get(),
           .output = selected->output.resource.Get(),
-          .descriptors = selected->descriptors.Get(),
-          .input_view = selected->descriptors->GetGPUDescriptorHandleForHeapStart(),
-          .width = description.Width,
-          .height = description.Height,
-          .scene = scene,
+          .slot_index = static_cast<size_t>(std::find_if(slots.begin(), slots.end(), [selected](const auto& slot) { return slot.get() == selected; }) - slots.begin()),
       });
     } catch (...) {
       selected->commands->Close();

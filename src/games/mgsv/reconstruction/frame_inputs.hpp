@@ -20,9 +20,12 @@ struct alignas(16) PrepareConstants {
   std::array<uint32_t, 2> render_size = {};
   std::array<float, 2> reciprocal_render_size = {};
   std::array<float, 16> current_to_previous_clip = {};
+  std::array<float, 2> previous_jitter_uv = {};
+  float object_motion_mode = 0.f;
+  float analytical_taa = 0.f;
 };
 
-static_assert(sizeof(PrepareConstants) == 96u, "MGSV SDK input constants must occupy 24 dwords");
+static_assert(sizeof(PrepareConstants) == 112u, "Reconstruction input constants must occupy 28 dwords");
 
 struct ColorTarget {
   reshade::api::resource resource = {0};
