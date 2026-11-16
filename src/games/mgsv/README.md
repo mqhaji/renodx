@@ -8,8 +8,9 @@ RenoDX for Metal Gear Solid V: The Phantom Pain adds HDR output and color gradin
 |---|---|
 | [Render map](docs/render-map.html) | Portable frame diagram, native shader chains, CPU/GPU dependencies, resource sizes, and current validation |
 | [Temporal reconstruction](reconstruction/README.md) | Reconstruction methods, upscaling quality, controls, compatibility, and testing |
-| [Indirect lighting](lighting/indirect/README.md) | AO, diffuse and specular GI, native reflections, diagnostics, and limitations |
-| [Enhanced Shadows](lighting/shadows/README.md) | Shadow-map filtering, contact shadows, controls, and testing |
+| [Indirect lighting](lighting/indirect/README.md) | Diffuse AO/GI, diagnostics, and limitations |
+| [Reflections](lighting/reflections/README.md) | DX12 stochastic SSR, environment replacement, and native-pass bypass |
+| [Direct lighting](lighting/shadows/README.md) | Shadow-map filtering, contact shadows, controls, and testing |
 | [Bloom](postprocess/bloom/README.md) | Vanilla and Enhanced bloom, color handling, and testing |
 | [Rendering architecture](docs/ARCHITECTURE.md) | File ownership, frame order, shared layouts, and submission rules |
 | [Reconstruction roadmap](reconstruction/ROADMAP.md) | Open investigations and future work |
@@ -25,13 +26,13 @@ Reconstruction stays independent of RenoDX presets. Off restores the original ca
 
 ## Indirect lighting
 
-**Screen-Space Lighting** selects Off or GT-VBGI, enabled by default. It shares tracing and filtering across ambient occlusion (AO), diffuse GI, specular GI, and specular occlusion, with separate strengths for each. AO darkens only supported native ambient diffuse; direct light keeps its own shadows, and GI is added without another AO multiplier. Lighting is applied before both native skin-scattering passes.
+**Diffuse Lighting** and **Reflections** each select Vanilla or Enhanced, with Enhanced selected by default. GT-VBGI supplies diffuse AO/GI on D3D11 before skin scattering. The DX12 reflection chain runs at the native late reflection compositor, after deferred composition and intervening sky/forward draws. AO affects supported ambient diffuse; direct light keeps its own shadows.
 
-Screen reflections replace overlapping material-cube and environment contributions before fog. Native SSR remains active to preserve detail the custom estimate can miss. Missing material or specular inputs retain native reflections. The [lighting guide](lighting/indirect/README.md) owns sampling defaults, debug views, native AO compatibility, and transport limits.
+Screen reflections replace the saved native environment term in linear light while preserving receiver fog transmission. General surfaces and the sortie floor use one GGX estimator with NRD specular denoising on the shared DX12 backend. Enhanced skips the corresponding native traces and their dependent filters/copies. Missing inputs retain environment light. Diffuse occlusion, diffuse GI, reflection and specular occlusion strengths remain separate under Indirect Lighting (Advanced). Install the matching NRD.dll beside the game executable; see the [reflection guide](lighting/reflections/README.md) for inputs, dependency packing, debug views and limitations.
 
-## Shadows
+## Direct lighting
 
-**Enhanced Shadows**, enabled by default, combines contact-hardening shadow-map filtering with Bend screen-space contact shadows. It affects direct diffuse and specular lighting while preserving native environment reflections, masks, fades, and alpha. **Shadow Softness** controls the shared source size. Contact reach, the spotlight budget, and diagnostics are under Shadows (Advanced); see the [shadow guide](lighting/shadows/README.md).
+**Shadows** selects Vanilla or Enhanced under Direct Lighting, with Enhanced selected by default. Enhanced combines contact-hardening shadow-map filtering with Bend screen-space contact shadows. It affects direct diffuse and specular lighting while preserving native environment reflections, masks, fades, and alpha. **Shadow Softness** controls the shared source size. Softness, contact reach, the spotlight budget, and diagnostics are under Direct Lighting (Advanced). See the [shadow guide](lighting/shadows/README.md).
 
 ## Bloom
 
@@ -41,7 +42,9 @@ Screen reflections replace overlapping material-cube and environment contributio
 
 Precision upgrades work independently of HDR output and reconstruction. Selected scene color, DoF, motion-blur, velocity, and color-grading LUT textures use RGBA16F replacements. MGSV reuses shaders and textures for unrelated work, so redirects require an identified resource role rather than a matching size or shader name. Float storage can still contain encoded color.
 
-Preset Off disables custom screen-space lighting and Enhanced Shadows but leaves reconstruction selected. Reset All restores defaults. Vanilla/0 tonemapping is not full Preset Off; other selected effects and grading controls can remain active.
+Preset Off selects Vanilla for Shadows, Diffuse Lighting, and Reflections but leaves reconstruction selected. Reset All restores defaults. Vanilla/0 tonemapping is not full Preset Off; other selected effects and grading controls can remain active.
+
+**UI Visibility**, under Output, selects Hide or Show for native menus, text, and HUD. This is a session control: it is not saved and starts at Show each launch. The RenoDX overlay remains available, and the game still handles menu input while hidden. Reset All and Preset Off select Show again.
 
 ## Build and deploy
 

@@ -34,9 +34,8 @@
 #include "../../rendering/inputs.hpp"
 #include "../../rendering/producer_records.hpp"
 #include "../../shared.h"
+#include "../environment_specular.hpp"
 #include "ambient_diffuse.hpp"
-#include "compose/specular_result.hpp"
-#include "environment_specular.hpp"
 #include "source_preparation.hpp"
 
 // The scatter hook at the end of this file validates native inputs and schedules
@@ -80,7 +79,7 @@ struct LightPass {
 
 // Every lighting stage binds this complete range so an unused slot cannot
 // retain an SRV from a preceding pass. Individual shaders assign their roles.
-inline constexpr uint32_t LIGHT_INPUT_COUNT = 20u;
+inline constexpr uint32_t LIGHT_INPUT_COUNT = 14u;
 
 struct LightTarget {
   reshade::api::resource resource = {0};
@@ -243,12 +242,12 @@ inline bool EnsureLightPassLayout(reshade::api::device* device) {
 
   std::array<reshade::api::pipeline_layout_param, 3> params = {};
   params[0].type = reshade::api::pipeline_layout_param_type::push_descriptors;
-  params[0].push_descriptors.count = LIGHT_INPUT_COUNT;  // t0-t19
+  params[0].push_descriptors.count = LIGHT_INPUT_COUNT;  // t0-t13
   params[0].push_descriptors.type = reshade::api::descriptor_type::texture_shader_resource_view;
   params[0].push_descriptors.dx_register_index = 0u;
   params[0].push_descriptors.dx_register_space = 0u;
   params[1].type = reshade::api::pipeline_layout_param_type::push_descriptors;
-  params[1].push_descriptors.count = 7u;  // u0-u6; independent signal histories share one dispatch
+  params[1].push_descriptors.count = 3u;  // lighting, geometry or scattering copy, and diagnostics
   params[1].push_descriptors.type = reshade::api::descriptor_type::texture_unordered_access_view;
   params[1].push_descriptors.dx_register_index = 0u;
   params[1].push_descriptors.dx_register_space = 0u;
@@ -326,8 +325,8 @@ inline void DestroyLightPassLayout(reshade::api::device* device) {
 // output slot, so binding a placeholder cannot unbind another input or output.
 inline reshade::api::resource fallback_srv_resource = {0};
 inline reshade::api::resource_view fallback_srv = {0};
-inline std::array<reshade::api::resource, 6> fallback_uav_resources = {};
-inline std::array<reshade::api::resource_view, 6> fallback_uavs = {};
+inline std::array<reshade::api::resource, 2> fallback_uav_resources = {};
+inline std::array<reshade::api::resource_view, 2> fallback_uavs = {};
 inline Microsoft::WRL::ComPtr<ID3D11SamplerState> fallback_point_wrap;
 
 inline void DestroyFallbackViews(reshade::api::device* device) {
@@ -421,10 +420,6 @@ inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* p
                               reshade::api::resource_view target,
                               reshade::api::resource_view second_target,
                               reshade::api::resource_view third_target,
-                              reshade::api::resource_view fourth_target,
-                              reshade::api::resource_view fifth_target,
-                              reshade::api::resource_view sixth_target,
-                              reshade::api::resource_view seventh_target,
                               uint32_t width, uint32_t height) {
   cmd_list->bind_pipeline(reshade::api::pipeline_stage::all_compute, pass->pipeline);
   const auto bind_sources = [cmd_list](const std::array<reshade::api::resource_view, LIGHT_INPUT_COUNT>& inputs) {
@@ -442,14 +437,10 @@ inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* p
   // Retire prior reads before reusing ping-pong textures as writable outputs.
   // The surrounding game state is restored once after the complete chain.
   bind_sources({});
-  const std::array<reshade::api::resource_view, 7> targets = {
+  const std::array<reshade::api::resource_view, 3> targets = {
       target,  // u0
       second_target,
       third_target,
-      fourth_target,
-      fifth_target,
-      sixth_target,
-      seventh_target,
   };
   cmd_list->push_descriptors(
       reshade::api::shader_stage::all_compute, light_pass_layout, 1u,
@@ -470,7 +461,7 @@ inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* p
 
 }  // namespace mgsv::lighting
 
-// Optional shared depth reductions and the specular visibility targets.
+// Optional depth reductions for the diffuse geometry search.
 // AO itself travels in the alpha channel of il's diffuse-lighting targets.
 namespace mgsv::ao {
 
@@ -485,9 +476,6 @@ using lighting::LightTarget;
 using lighting::LogLight;
 using lighting::LogLightOnce;
 
-inline LightTarget specular_visibility_target;
-inline std::array<LightTarget, 2> specular_temporal_targets;
-inline std::array<LightTarget, 2> specular_filter_targets;
 inline uint32_t temporal_status = UINT32_MAX;
 inline uint32_t temporal_status_reports = 0u;
 
@@ -697,13 +685,7 @@ inline void Destroy(reshade::api::device* device) {
     device->destroy_pipeline_layout(depth_mip_chain.layout);
     depth_mip_chain.layout = {0};
   }
-  DestroyLightTarget(device, &specular_visibility_target);
-  for (auto& target : specular_temporal_targets) {
-    DestroyLightTarget(device, &target);
-  }
-  for (auto& target : specular_filter_targets) {
-    DestroyLightTarget(device, &target);
-  }
+
   temporal_status = UINT32_MAX;
   temporal_status_reports = 0u;
 }
@@ -727,22 +709,6 @@ inline LightPass gather_pass;
 inline LightPass add_pass;
 inline LightPass temporal_pass;
 inline LightPass filter_pass;
-inline constexpr uint32_t BRDF_TABLE_SIZE = 128u;
-inline LightPass brdf_pass;
-inline LightTarget brdf_target;
-inline bool brdf_ready = false;
-
-// A transport packet has two inseparable halves: screen radiance and the
-// remaining environment response. Every filter uses the same weights for both.
-struct SpecularTransport {
-  LightTarget radiance;
-  LightTarget response;
-};
-inline SpecularTransport specular_transport;
-inline std::array<SpecularTransport, 2> specular_transport_history;
-inline std::array<SpecularTransport, 2> specular_transport_filters;
-inline std::array<LightTarget, 2> specular_material_history;
-
 // RGB is diffuse GI; alpha is ambient visibility. Each keeps its own validity.
 inline LightTarget indirect_diffuse_target;
 inline LightTarget diagnostic_target;
@@ -755,9 +721,8 @@ inline std::array<lighting::temporal_inputs::Scene, 2> history_scenes;
 // invalidate each signal independently when its trace settings change. The slot
 // identifies temporal output before spatial blur, never a filtered image.
 struct History {
-  std::array<float, 11> parameters = {};
-  std::array<float, 11> ao_parameters = {};
-  std::array<float, 10> specular_parameters = {};
+  std::array<float, 10> parameters = {};
+  std::array<float, 10> ao_parameters = {};
   std::array<float, 2> jitter_uv = {};
   uint64_t generation = 0u;
   uint64_t submission = 0u;
@@ -770,8 +735,6 @@ struct History {
   uint32_t slot = 0u;
   bool valid = false;
   bool ao_valid = false;
-  bool specular_valid = false;
-  bool specular_gi_valid = false;
 };
 inline History history;
 inline uint32_t temporal_status = UINT32_MAX;
@@ -782,23 +745,6 @@ inline void Destroy(reshade::api::device* device) {
   DestroyLightPass(device, &add_pass);
   DestroyLightPass(device, &temporal_pass);
   DestroyLightPass(device, &filter_pass);
-  DestroyLightPass(device, &brdf_pass);
-  DestroyLightTarget(device, &brdf_target);
-  brdf_ready = false;
-  const auto destroy_transport = [device](SpecularTransport* packet) {
-    DestroyLightTarget(device, &packet->radiance);
-    DestroyLightTarget(device, &packet->response);
-  };
-  destroy_transport(&specular_transport);
-  for (auto& packet : specular_transport_history) {
-    destroy_transport(&packet);
-  }
-  for (auto& packet : specular_transport_filters) {
-    destroy_transport(&packet);
-  }
-  for (auto& target : specular_material_history) {
-    DestroyLightTarget(device, &target);
-  }
   DestroyLightTarget(device, &indirect_diffuse_target);
   DestroyLightTarget(device, &diagnostic_target);
   for (auto& target : temporal_targets) {
@@ -823,106 +769,129 @@ namespace mgsv::lighting {
 // Settings keep pointers into this storage, so it must outlive the registry.
 inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderInjectData* shader_injection) {
   if (std::ranges::any_of(*registry, [](const auto* setting) {
-        return setting->key == "FxIndirectLightingEnabled";
+        return setting->key == "IndirectLightingDiffuseMode";
       })) return;
   const auto is_temporal_visible = [shader_injection] {
-    return shader_injection->indirect_lighting_enabled >= 0.5f && shader_injection->lighting_temporal_enabled >= 0.5f;
+    return shader_injection->diffuse_lighting_mode >= 0.5f && shader_injection->lighting_temporal_enabled >= 0.5f;
   };
   const auto is_spatial_visible = [shader_injection] {
-    return shader_injection->indirect_lighting_enabled >= 0.5f && shader_injection->lighting_spatial_enabled >= 0.5f;
+    return shader_injection->diffuse_lighting_mode >= 0.5f && shader_injection->lighting_spatial_enabled >= 0.5f;
   };
   renodx::utils::settings::Settings additions = {
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingEnabled",
-          .binding = &shader_injection->indirect_lighting_enabled,
+          .key = "IndirectLightingDiffuseMode",
+          .binding = &shader_injection->diffuse_lighting_mode,
           .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
           .default_value = 1.f,
-          .label = "Screen-Space Lighting",
+          .label = "Diffuse Lighting",
           .section = "Indirect Lighting",
-          .tooltip = "Adds ambient occlusion and diffuse and specular light bounced from visible surfaces. Replaces overlapping native reflections where inputs are valid. Off restores native lighting.",
-          .labels = {"Off", "GT-VBGI"},
+          .tooltip = "Adds ambient occlusion and diffuse light bounced from visible surfaces. Reflections have a separate control and reuse the same material capture.",
+          .labels = {"Vanilla", "Enhanced"},
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingAOStrength",
-          .binding = &shader_injection->ao_strength,
-          .default_value = 100.f,
-          .label = "Ambient Occlusion Strength",
-          .section = "Indirect Lighting",
-          .tooltip = "Controls how strongly nearby geometry blocks ambient diffuse light. Direct light keeps its own shadows, and added GI is not darkened again.",
-          .max = 100.f,
-          .parse = [](float value) { return value * 0.01f; },
-          .is_visible = [shader_injection] { return shader_injection->indirect_lighting_enabled >= 0.5f; },
-      },
-      new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingDiffuseGIStrength",
-          .binding = &shader_injection->diffuse_gi_strength,
-          .default_value = 100.f,
-          .label = "Diffuse GI Strength",
-          .section = "Indirect Lighting",
-          .tooltip = "Controls diffuse light bounced from visible surfaces. Ambient occlusion remains active at 0%.",
-          .max = 100.f,
-          .parse = [](float value) { return value * 0.01f; },
-          .is_visible = [shader_injection] { return shader_injection->indirect_lighting_enabled >= 0.5f; },
-      },
-      new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingSpecularGIStrength",
-          .binding = &shader_injection->specular_gi_strength,
-          .default_value = 100.f,
-          .label = "Specular GI Strength",
-          .section = "Indirect Lighting",
-          .tooltip = "Controls GT-VBGI's added reflected light. Specular occlusion and the native reflection blend keep their own strength. 0% removes this added light. Compare with Lighting Debug View set to Off.",
-          .max = 100.f,
-          .parse = [](float value) { return value * 0.01f; },
-          .is_visible = [shader_injection] { return shader_injection->indirect_lighting_enabled >= 0.5f; },
-      },
-      new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingSpecularOcclusionStrength",
-          .binding = &shader_injection->specular_occlusion_strength,
-          .default_value = 100.f,
-          .label = "Specular Occlusion Strength",
-          .section = "Indirect Lighting",
-          .tooltip = "Controls how much visible geometry replaces environment reflections. 100% uses the full replacement; 0% retains the environment as well as added reflected light. Unsupported pixels retain native occlusion. Direct highlights keep their own shadows.",
-          .max = 100.f,
-          .parse = [](float value) { return value * 0.01f; },
-          .is_visible = [shader_injection] { return shader_injection->indirect_lighting_enabled >= 0.5f; },
-      },
-      new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingResolution",
+          .key = "IndirectLightingDiffuseResolution",
           .binding = &shader_injection->lighting_resolution,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
           .default_value = 1.f,
-          .label = "Lighting Resolution",
+          .label = "Diffuse Lighting Resolution",
           .section = "Indirect Lighting",
           .tooltip = "Fraction of the full-resolution pixel count used by the shared lighting trace. 1/4 halves each axis; 1/16 divides each axis by 4; 1/64 divides each axis by 8. Lower resolutions can lose thin geometry and contact detail. Search radii stay in full-resolution pixels.",
           .labels = {"Full", "1/4", "1/16", "1/64"},
-          .is_visible = [shader_injection] { return shader_injection->indirect_lighting_enabled >= 0.5f; },
+          .is_visible = [shader_injection] { return shader_injection->diffuse_lighting_mode >= 0.5f; },
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingSearchRadiusPixels",
+          .key = "IndirectLightingReflectionsMode",
+          .binding = &shader_injection->reflections_mode,
+          .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+          .default_value = 1.f,
+          .label = "Reflections",
+          .section = "Indirect Lighting",
+          .tooltip = "Replaces native reflections with stochastic screen-space reflections. Uses the scene after sky, fog, and forward lighting. Screen misses retain environment lighting. Requires RenoDX tone mapping for linear scene color.",
+          .labels = {"Vanilla", "Enhanced"},
+      },
+      new renodx::utils::settings::Setting{
+          .key = "IndirectLightingReflectionRaysPerPixel",
+          .binding = &shader_injection->reflection_rays_per_pixel,
+          .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+          .default_value = 1.f,
+          .label = "Rays per Pixel",
+          .section = "Indirect Lighting",
+          .tooltip = "Reflection samples per input pixel. Lower values reduce tracing cost but add noise and can reduce stability in motion. Higher values do more tracing; reflection strength and material roughness stay the same.",
+          .min = 1.f,
+          .max = static_cast<float>(MGSV_REFLECTION_MAX_RAYS_PER_PIXEL),
+          .format = "%d",
+          .is_visible = [shader_injection] { return shader_injection->reflections_mode >= 0.5f; },
+      },
+      new renodx::utils::settings::Setting{
+          .key = "IndirectLightingDiffuseOcclusionStrength",
+          .binding = &shader_injection->ao_strength,
+          .default_value = 100.f,
+          .label = "Diffuse Occlusion Strength",
+          .section = "Indirect Lighting (Advanced)",
+          .tooltip = "Controls how strongly nearby geometry blocks ambient diffuse light. Direct light keeps its own shadows, and added GI is not darkened again.",
+          .max = 100.f,
+          .parse = [](float value) { return value * 0.01f; },
+          .is_visible = [shader_injection] { return shader_injection->diffuse_lighting_mode >= 0.5f; },
+      },
+      new renodx::utils::settings::Setting{
+          .key = "IndirectLightingDiffuseGIStrength",
+          .binding = &shader_injection->diffuse_gi_strength,
+          .default_value = 100.f,
+          .label = "Diffuse GI Strength",
+          .section = "Indirect Lighting (Advanced)",
+          .tooltip = "Controls diffuse light bounced from visible surfaces. Ambient occlusion remains active at 0%.",
+          .max = 100.f,
+          .parse = [](float value) { return value * 0.01f; },
+          .is_visible = [shader_injection] { return shader_injection->diffuse_lighting_mode >= 0.5f; },
+      },
+      new renodx::utils::settings::Setting{
+          .key = "IndirectLightingReflectionStrength",
+          .binding = &shader_injection->reflection_strength,
+          .default_value = 100.f,
+          .label = "Reflection Strength",
+          .section = "Indirect Lighting (Advanced)",
+          .tooltip = "Blends screen-space reflections with environment lighting. Added reflected light and removed environment change together. Zero retains environment lighting without running the original SSR chain.",
+          .max = 100.f,
+          .parse = [](float value) { return value * 0.01f; },
+          .is_visible = [shader_injection] { return shader_injection->reflections_mode >= 0.5f; },
+      },
+      new renodx::utils::settings::Setting{
+          .key = "IndirectLightingSpecularOcclusionStrength",
+          .binding = &shader_injection->specular_occlusion_strength,
+          .default_value = 100.f,
+          .label = "Specular Occlusion Strength",
+          .section = "Indirect Lighting (Advanced)",
+          .tooltip = "Blocks environment light when a reflection ray hits nearby geometry, including hits whose screen color is unavailable. Does not darken accepted screen reflections again. Off-screen misses retain the environment. Changes image strength, not tracing cost.",
+          .max = 100.f,
+          .parse = [](float value) { return value * 0.01f; },
+          .is_visible = [shader_injection] { return shader_injection->reflections_mode >= 0.5f; },
+      },
+      new renodx::utils::settings::Setting{
+          .key = "IndirectLightingDiffuseSearchRadiusPixels",
           .binding = &shader_injection->lighting_search_radius_pixels,
           .default_value = 2000.f,
           .label = "Search Radius",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Search distance in output pixels for AO, GI, and specular occlusion. Converted to the current render size when upscaling. Larger values reach farther surfaces but spread samples farther apart.",
+          .tooltip = "Search distance in output pixels for AO and diffuse GI. Converted to the current render size when upscaling. Larger values reach farther surfaces but spread samples farther apart.",
           .min = 1.f,
           .max = 4096.f,
           .format = "%.0f px",
-          .is_visible = [shader_injection] { return shader_injection->indirect_lighting_enabled >= 0.5f; },
+          .is_visible = [shader_injection] { return shader_injection->diffuse_lighting_mode >= 0.5f; },
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingSurfaceThickness",
+          .key = "IndirectLightingDiffuseSurfaceThickness",
           .binding = &shader_injection->lighting_surface_thickness,
           .default_value = 0.15f,
           .label = "Surface Thickness",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Depth assigned behind each visible surface for AO, GI, and specular occlusion. Higher values block more directions and can make thin surfaces look too solid. Uses the game's depth units.",
+          .tooltip = "Depth assigned behind each visible surface for AO and diffuse GI. Higher values block more directions and can make thin surfaces look too solid. Uses the game's depth units.",
           .min = 0.f,
           .max = 0.5f,
           .format = "%.4f",
-          .is_visible = [shader_injection] { return shader_injection->indirect_lighting_enabled >= 0.5f; },
+          .is_visible = [shader_injection] { return shader_injection->diffuse_lighting_mode >= 0.5f; },
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingSurfaceOffset",
+          .key = "IndirectLightingDiffuseSurfaceOffset",
           .binding = &shader_injection->lighting_surface_offset,
           .default_value = 0.0009765625f,
           .label = "Surface Offset",
@@ -931,95 +900,95 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .min = 0.f,
           .max = 0.01f,
           .format = "%.6f",
-          .is_visible = [shader_injection] { return shader_injection->indirect_lighting_enabled >= 0.5f; },
+          .is_visible = [shader_injection] { return shader_injection->diffuse_lighting_mode >= 0.5f; },
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingSamplingDirections",
+          .key = "IndirectLightingDiffuseSamplingDirections",
           .binding = &shader_injection->lighting_slice_count,
           .default_value = 3.f,
           .label = "Sampling Directions",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Search lines through each pixel, sampled on both sides for AO, GI, and specular occlusion. More directions improve coverage but cost more GPU time.",
+          .tooltip = "Search lines through each pixel, sampled on both sides for AO and diffuse GI. More directions improve coverage but cost more GPU time.",
           .min = 1.f,
           .max = 8.f,
-          .is_visible = [shader_injection] { return shader_injection->indirect_lighting_enabled >= 0.5f; },
+          .is_visible = [shader_injection] { return shader_injection->diffuse_lighting_mode >= 0.5f; },
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingSamplesPerSide",
+          .key = "IndirectLightingDiffuseSamplesPerSide",
           .binding = &shader_injection->lighting_samples_per_side,
           .default_value = 40.f,
           .label = "Samples per Side",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Depth samples on each side of every search line, shared by AO, diffuse GI, specular GI, and specular occlusion. More samples find smaller surfaces but cost more GPU time.",
+          .tooltip = "Depth samples on each side of every search line, shared by AO and diffuse GI. More samples find smaller surfaces but cost more GPU time.",
           .min = 1.f,
           .max = 64.f,
-          .is_visible = [shader_injection] { return shader_injection->indirect_lighting_enabled >= 0.5f; },
+          .is_visible = [shader_injection] { return shader_injection->diffuse_lighting_mode >= 0.5f; },
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingDepthMipsEnabled",
+          .key = "IndirectLightingDiffuseDepthMipsEnabled",
           .binding = &shader_injection->lighting_depth_mips_enabled,
           .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
           .default_value = 0.f,
           .label = "Coarse Depth Sampling",
           .section = "Indirect Lighting (Advanced)",
           .tooltip = "Uses smaller depth images for distant samples to catch surfaces between steps. GI finds the matching full-resolution pixel before reading its light. Off reads full-resolution depth throughout.",
-          .is_visible = [shader_injection] { return shader_injection->indirect_lighting_enabled >= 0.5f; },
+          .is_visible = [shader_injection] { return shader_injection->diffuse_lighting_mode >= 0.5f; },
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingGIBackfaceRejectionEnabled",
+          .key = "IndirectLightingDiffuseGIBackfaceRejectionEnabled",
           .binding = &shader_injection->gi_reject_backfaces,
           .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
           .default_value = 0.f,
           .label = "Reject Backfacing GI Sources",
           .section = "Indirect Lighting (Advanced)",
           .tooltip = "Rejects bounced light from surfaces facing away from the receiver. These surfaces still block light and reflections.",
-          .is_visible = [shader_injection] { return shader_injection->indirect_lighting_enabled >= 0.5f; },
+          .is_visible = [shader_injection] { return shader_injection->diffuse_lighting_mode >= 0.5f; },
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingTemporalAccumulationEnabled",
+          .key = "IndirectLightingDiffuseTemporalAccumulationEnabled",
           .binding = &shader_injection->lighting_temporal_enabled,
           .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
           .default_value = 1.f,
           .label = "Temporal Accumulation",
           .section = "Indirect Lighting (Advanced)",
           .tooltip = "Combines matching samples from earlier frames before spatial filtering. Missing camera, motion, or submission data uses the current sample.",
-          .is_visible = [shader_injection] { return shader_injection->indirect_lighting_enabled >= 0.5f; },
+          .is_visible = [shader_injection] { return shader_injection->diffuse_lighting_mode >= 0.5f; },
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingOcclusionHistoryWeight",
+          .key = "IndirectLightingDiffuseOcclusionHistoryWeight",
           .binding = &shader_injection->occlusion_history_weight,
           .default_value = 90.f,
           .label = "Occlusion History Weight",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Applies to AO and specular visibility. Maximum percentage of accepted history. Higher values reduce noise but can retain changes longer. Zero uses only the current sample.",
+          .tooltip = "Applies to AO. Maximum percentage of accepted history. Higher values reduce noise but can retain changes longer. Zero uses only the current sample.",
           .max = 99.f,
           .parse = [](float value) { return value * 0.01f; },
           .is_visible = is_temporal_visible,
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingOcclusionDepthRejection",
+          .key = "IndirectLightingDiffuseOcclusionDepthRejection",
           .binding = &shader_injection->occlusion_depth_rejection,
           .default_value = 20.f,
           .label = "Occlusion Depth Rejection",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Applies to AO and specular visibility. Allowed history depth difference as a percentage of the expected previous depth. Lower values reject mismatched surfaces more strongly.",
+          .tooltip = "Applies to AO. Allowed history depth difference as a percentage of the expected previous depth. Lower values reject mismatched surfaces more strongly.",
           .max = 20.f,
           .parse = [](float value) { return value * 0.01f; },
           .is_visible = is_temporal_visible,
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingOcclusionNormalRejection",
+          .key = "IndirectLightingDiffuseOcclusionNormalRejection",
           .binding = &shader_injection->occlusion_normal_rejection,
           .default_value = 0.f,
           .label = "Occlusion Normal Rejection",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Applies to AO and specular visibility. Surface-direction agreement required for full history weight. The weight fades to zero over a 0.4-wide range below this value. Specular history also checks roughness and reflected direction.",
+          .tooltip = "Applies to AO. Surface-direction agreement required for full history weight. The weight fades to zero over a 0.4-wide range below this value.",
           .max = 1.f,
           .format = "%.2f",
           .is_visible = is_temporal_visible,
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingAOHistoryClamp",
+          .key = "IndirectLightingDiffuseAOHistoryClamp",
           .binding = &shader_injection->ao_history_clamp,
           .default_value = 0.1f,
           .label = "AO History Clamp",
@@ -1030,18 +999,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .is_visible = is_temporal_visible,
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingSpecularOcclusionHistoryClamp",
-          .binding = &shader_injection->specular_occlusion_history_clamp,
-          .default_value = 2.f,
-          .label = "Specular History Clamp",
-          .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Limits specular history using nearby current visibility, measured in standard deviations. Lower values react faster; zero disables clamping. Surface and motion checks still apply.",
-          .max = 4.f,
-          .format = "%.2f",
-          .is_visible = is_temporal_visible,
-      },
-      new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingGIHistoryWeight",
+          .key = "IndirectLightingDiffuseGIHistoryWeight",
           .binding = &shader_injection->gi_history_weight,
           .default_value = 90.f,
           .label = "GI History Weight",
@@ -1052,7 +1010,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .is_visible = is_temporal_visible,
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingGIDepthRejection",
+          .key = "IndirectLightingDiffuseGIDepthRejection",
           .binding = &shader_injection->gi_depth_rejection,
           .default_value = 5.f,
           .label = "GI Depth Rejection",
@@ -1063,7 +1021,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .is_visible = is_temporal_visible,
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingGINormalRejection",
+          .key = "IndirectLightingDiffuseGINormalRejection",
           .binding = &shader_injection->gi_normal_rejection,
           .default_value = 0.9f,
           .label = "GI Normal Rejection",
@@ -1074,7 +1032,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .is_visible = is_temporal_visible,
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingGIHistoryClamp",
+          .key = "IndirectLightingDiffuseGIHistoryClamp",
           .binding = &shader_injection->gi_history_clamp,
           .default_value = 1.f,
           .label = "GI History Clamp",
@@ -1085,17 +1043,17 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .is_visible = is_temporal_visible,
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingSpatialFilteringEnabled",
+          .key = "IndirectLightingDiffuseSpatialFilteringEnabled",
           .binding = &shader_injection->lighting_spatial_enabled,
           .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
           .default_value = 1.f,
           .label = "Spatial Filtering",
           .section = "Indirect Lighting (Advanced)",
           .tooltip = "Smooths the result after temporal accumulation while preserving depth and surface-direction boundaries. Off passes the temporal result through the same shader.",
-          .is_visible = [shader_injection] { return shader_injection->indirect_lighting_enabled >= 0.5f; },
+          .is_visible = [shader_injection] { return shader_injection->diffuse_lighting_mode >= 0.5f; },
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingFilterRadius",
+          .key = "IndirectLightingDiffuseFilterRadius",
           .binding = &shader_injection->lighting_filter_radius,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
           .default_value = 8.f,
@@ -1109,7 +1067,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .is_visible = is_spatial_visible,
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingFilterPasses",
+          .key = "IndirectLightingDiffuseFilterPasses",
           .binding = &shader_injection->lighting_filter_passes,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
           .default_value = 3.f,
@@ -1122,7 +1080,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .is_visible = is_spatial_visible,
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingFilterWidth",
+          .key = "IndirectLightingDiffuseFilterWidth",
           .binding = &shader_injection->lighting_filter_width,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
           .default_value = 5.f,
@@ -1135,25 +1093,26 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .is_visible = is_spatial_visible,
       },
       new renodx::utils::settings::Setting{
-          .key = "FxIndirectLightingDebugView",
+          .key = "IndirectLightingDebugView",
           .binding = &shader_injection->lighting_debug_view,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
           .default_value = 0.f,
           .label = "Lighting Debug View",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Replaces diffuse lighting for inspection; surface color, specular, fog, and later processing still apply. Specular GI replaces overlapping native reflections in normal lighting. Cyan in specular visibility means no sampled slice crossed the reflection cone; magenta means missing inputs.",
-          .labels = {"Off", "GI Lighting", "Geometry Coverage", "Accepted Source Coverage", "Valid / Invalid Results", "Source Lighting", "Temporal GI", "Accepted GI History", "Raw AO", "Temporal AO", "Filtered AO", "Accepted AO History", "Native Roughness", "Environment Specular", "Raw Specular Visibility", "Temporal Specular Visibility", "Filtered Specular Visibility", "Accepted Specular History", "Specular Confidence", "Ambient Diffuse", "Direct Diffuse", "Corrected Diffuse", "Ambient Input Validity", "Material F0", "Mapped Specular Roughness", "Raw Specular GI", "Temporal Specular GI", "Filtered Specular GI", "Remaining Environment Response", "Integrated Specular Response", "Specular GI Support", "Accepted Specular GI History", "Clean Material Color", "Removed Material Reflection", "Material Input Coverage", "Resolved Specular Light", "Resolved Environment Response", "Specular Input Coverage"},
+          .tooltip = "Diffuse views inspect the AO/GI stages. Reflection views compare denoised and raw light, environment weights, input coverage, saved environment, specular visibility, and NRD validation. Sampling weights can exceed one. Reflection Coverage shows qualified inputs, not ray hits. Magenta marks unavailable inputs.",
+          .labels = {"Off", "GI Lighting", "Geometry Coverage", "Accepted Source Coverage", "Valid / Invalid Results", "Source Lighting", "Temporal GI", "Accepted GI History", "Raw AO", "Temporal AO", "Filtered AO", "Accepted AO History", "Ambient Diffuse", "Direct Diffuse", "Corrected Diffuse", "Ambient Input Validity", "Reflected Light", "Environment Weight", "Reflection Coverage", "Environment Specular", "Specular Visibility", "Raw Reflections", "NRD Validation"},
           .is_visible = [shader_injection] {
-            return shader_injection->indirect_lighting_enabled >= 0.5f;
+            return shader_injection->diffuse_lighting_mode >= 0.5f || shader_injection->reflections_mode >= 0.5f;
           },
       },
   };
   for (auto* setting : additions) {
     if (setting->value_type != renodx::utils::settings::SettingValueType::BOOLEAN) continue;
     setting->on_change_value = [setting](float, float current) {
-      const char* state = "Off";
-      if (current >= 0.5f) {
-        state = (setting->key == "FxIndirectLightingEnabled" ? "GT-VBGI" : "On");
+      const bool enabled = current >= 0.5f;
+      const char* state = (enabled ? "On" : "Off");
+      if (setting->labels.size() == 2u) {
+        state = setting->labels[enabled ? 1u : 0u].c_str();
       }
       LogLight(reshade::log::level::info, setting->label, " = ", state, " (", setting->key, ")");
     };
@@ -1232,8 +1191,7 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
              " trace=", width, "x", height, " axis_divisor=", scale);
   }
 
-  const bool diagnostic_requested = (constants.lighting_debug_view >= 2.f && constants.lighting_debug_view <= 11.f)
-                                    || constants.lighting_debug_view == 17.f || constants.lighting_debug_view == 31.f;
+  const bool diagnostic_requested = (constants.lighting_debug_view >= 2.f && constants.lighting_debug_view <= 11.f);
   const bool diagnostic_ready = diagnostic_requested && EnsureLightTarget(device, &il::diagnostic_target, width, height);
   if (diagnostic_requested && !diagnostic_ready) {
     constants.lighting_debug_view = 0.f;
@@ -1243,8 +1201,7 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   }
 
   // 2. Match the environment capture to this specular/depth pair. Its material
-  // input supplies roughness. Missing specular data disables only that signal;
-  // the diffuse trace can still run with the already qualified native inputs.
+  // input identifies the matching material guide for clean diffuse radiance.
   Microsoft::WRL::ComPtr<ID3D11Resource> specular_resource;
   Microsoft::WRL::ComPtr<ID3D11Resource> depth_resource;
   reinterpret_cast<ID3D11ShaderResourceView*>(frame.specular.handle)->GetResource(&specular_resource);  // NOLINT(performance-no-int-to-ptr)
@@ -1252,31 +1209,6 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   auto environment = lighting::environment_specular::Read(device, specular_resource.Get());
   if (environment != nullptr && environment->depth.Get() != depth_resource.Get()) {
     environment.reset();
-  }
-  constants.specular_occlusion_active = 0.f;
-  if (environment != nullptr
-      && environment->material != nullptr && environment->srv != nullptr) {
-    D3D11_SHADER_RESOURCE_VIEW_DESC view = {};
-    environment->material->GetDesc(&view);
-    Microsoft::WRL::ComPtr<ID3D11Resource> resource;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
-    environment->material->GetResource(&resource);
-    if (view.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D && view.Texture2D.MostDetailedMip == 0u
-        && SUCCEEDED(resource.As(&texture))) {
-      D3D11_TEXTURE2D_DESC description = {};
-      texture->GetDesc(&description);
-      if (description.Width == frame.width && description.Height == frame.height
-          && description.ArraySize == 1u && description.SampleDesc.Count == 1u
-          && (view.Format == DXGI_FORMAT_R8G8B8A8_UNORM || view.Format == DXGI_FORMAT_B8G8R8A8_UNORM
-              || view.Format == DXGI_FORMAT_R16G16B16A16_FLOAT || view.Format == DXGI_FORMAT_R32G32B32A32_FLOAT)
-          && EnsureLightTarget(device, &specular_visibility_target, width, height)) {
-        constants.specular_occlusion_active = 1.f;
-      }
-    }
-  }
-  if (constants.specular_occlusion_active < 0.5f) {
-    static std::atomic_flag failed = {};
-    LogLightOnce(&failed, reshade::log::level::warning, "Bitmask specular inputs or output unavailable; keeping native specular occlusion");
   }
   const bool depth_mips_requested = constants.lighting_depth_mips_enabled != 0.f;
   const bool depth_mips_ready = BuildDepthMips(cmd_list, frame.depth, depth_mips_requested);
@@ -1295,81 +1227,11 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   const auto clean_owner = (clean_material != nullptr
                                 ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(clean_material->owner_srv.Get())}
                                 : reshade::api::resource_view{0u});
-  Microsoft::WRL::ComPtr<ID3D11Resource> native_material_resource;
-  if (environment != nullptr && environment->material != nullptr) {
-    environment->material->GetResource(&native_material_resource);
-  }
-  const auto transport_result = lighting::specular_result::Read(device, native_material_resource.Get());
-  // One paired estimate feeds both broad and focused reflections. Allocate it
-  // only after clean material color and its native environment are qualified.
-  constants.specular_gi_active = 0.f;
-  constants.specular_gi_history_valid = 0.f;
-  std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 2> material_tables;
-  const auto ensure_transport = [device, width, height](il::SpecularTransport* packet) {
-    return EnsureLightTarget(device, &packet->radiance, width, height)
-           && EnsureLightTarget(device, &packet->response, width, height);
-  };
-  if (immediate && constants.specular_occlusion_active >= 0.5f
-      && clean_material != nullptr && transport_result != nullptr) {
-    // The submitted environment producer selects tables on the specular
-    // allocation. Material guides alone do not identify that producer.
-    uint64_t table_generation = 0u;
-    UINT bytes = sizeof(table_generation);
-    if (SUCCEEDED(specular_resource->GetPrivateData(lighting::temporal_inputs::MATERIAL_TABLE_GENERATION_GUID, &bytes, &table_generation))
-        && bytes == sizeof(table_generation) && table_generation == environment->generation) {
-      for (size_t index = 0u; index < material_tables.size(); ++index) {
-        bytes = sizeof(ID3D11ShaderResourceView*);
-        specular_resource->GetPrivateData(lighting::temporal_inputs::MATERIAL_TABLE_GUIDS[index], &bytes, material_tables[index].GetAddressOf());
-      }
-    }
-    if (material_tables[0] != nullptr && material_tables[1] != nullptr
-        && ensure_transport(&il::specular_transport)
-        && EnsureLightTarget(device, &il::brdf_target, il::BRDF_TABLE_SIZE, il::BRDF_TABLE_SIZE)
-        && EnsureLightPass(device, &il::brdf_pass, "mgsv: specular BRDF integration created", __gtvbgi_brdf)) {
-      if (!il::brdf_ready) {
-        // Publish readiness only on the serialized immediate command stream.
-        // Deferred CPU recording alone would not prove that the table ran.
-        std::array<reshade::api::resource_view, lighting::LIGHT_INPUT_COUNT> empty;
-        empty.fill(fallback_input);
-        DispatchLightPass(cmd_list, &il::brdf_pass, constants, empty,
-                          il::brdf_target.uav, fallback_outputs[0], fallback_outputs[1],
-                          fallback_outputs[2], fallback_outputs[3], fallback_outputs[4], fallback_outputs[5], il::BRDF_TABLE_SIZE, il::BRDF_TABLE_SIZE);
-        il::brdf_ready = true;
-      }
-      constants.specular_gi_active = 1.f;
-    }
-  }
-  static uint32_t transport_status = UINT32_MAX;
-  const uint32_t status = (immediate ? 0u : 1u)
-                          | (constants.specular_occlusion_active >= 0.5f ? 0u : 2u)
-                          | (clean_material != nullptr ? 0u : 4u)
-                          | (transport_result != nullptr ? 0u : 8u)
-                          | (material_tables[0] != nullptr && material_tables[1] != nullptr ? 0u : 16u)
-                          | (constants.specular_gi_active >= 0.5f ? 0u : 32u);
-  if (transport_status != status) {
-    transport_status = status;
-    if (status == 0u) {
-      LogLight(reshade::log::level::info, "Specular transport: active; shared broad/focused estimate and native reflection replacement");
-    } else {
-      LogLight(reshade::log::level::info, "Specular transport: retaining native reflections; immediate=", immediate,
-               " environment=", constants.specular_occlusion_active >= 0.5f,
-               " material=", clean_material != nullptr, " result=", transport_result != nullptr,
-               " tables=", material_tables[0] != nullptr && material_tables[1] != nullptr,
-               " setup=", constants.specular_gi_active >= 0.5f);
-    }
-  }
-  const auto palette = (constants.specular_gi_active >= 0.5f
-                            ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(material_tables[0].Get())}
-                            : fallback_input);
-  const auto fresnel = (constants.specular_gi_active >= 0.5f
-                            ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(material_tables[1].Get())}
-                            : fallback_input);
-  const auto brdf = (constants.specular_gi_active >= 0.5f ? il::brdf_target.view : fallback_input);
   // 3. Qualify history before reading it. A matching size alone is insufficient:
   // require the same camera, viewport, depth allocation, and device generation.
-  // AO strength belongs in its signature because the trace applies it; GI and
-  // specular strengths are applied later and do not change their stored samples.
-  const std::array<float, 11> parameters = {
+  // AO strength belongs in its signature because the trace applies it. Diffuse
+  // GI strength is applied later and does not change stored samples.
+  const std::array<float, 10> parameters = {
       constants.lighting_search_radius_pixels,
       constants.lighting_surface_thickness,
       constants.lighting_surface_offset,
@@ -1380,9 +1242,8 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
       constants.lighting_resolution,
       constants.lighting_temporal_enabled,
       constants.reconstruction_mode,
-      constants.unclamp_motion_vectors,
   };
-  const std::array<float, 11> ao_parameters = {
+  const std::array<float, 10> ao_parameters = {
       constants.lighting_search_radius_pixels,
       constants.lighting_surface_thickness,
       constants.lighting_surface_offset,
@@ -1393,19 +1254,6 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
       constants.ao_strength,
       constants.lighting_temporal_enabled,
       constants.reconstruction_mode,
-      constants.unclamp_motion_vectors,
-  };
-  const std::array<float, 10> specular_parameters = {
-      constants.lighting_search_radius_pixels,
-      constants.lighting_surface_thickness,
-      constants.lighting_surface_offset,
-      constants.lighting_slice_count,
-      constants.lighting_samples_per_side,
-      constants.lighting_depth_mips_enabled,
-      constants.lighting_resolution,
-      constants.lighting_temporal_enabled,
-      constants.reconstruction_mode,
-      constants.unclamp_motion_vectors,
   };
   const bool same_camera = il::history_scenes[il::history.slot].camera_generation == temporal.scene.camera_generation
                            && il::history_scenes[il::history.slot].camera_identity == temporal.scene.camera_identity
@@ -1419,12 +1267,6 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   if (immediate && (geometry_changed || il::history.ao_parameters != ao_parameters)) {
     il::history.ao_valid = false;
   }
-  if (immediate && (geometry_changed || il::history.specular_parameters != specular_parameters || constants.specular_occlusion_active < 0.5f)) {
-    il::history.specular_valid = false;
-  }
-  if (immediate && (geometry_changed || il::history.parameters != parameters || constants.specular_gi_active < 0.5f)) {
-    il::history.specular_gi_valid = false;
-  }
   // Alternate two history slots so no dispatch reads its own output. Camera
   // copies follow those slots and preserve the native constant-buffer range.
   const uint32_t write_slot = 1u - il::history.slot;
@@ -1434,23 +1276,6 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
     temporal_ready = EnsureLightTarget(device, &il::temporal_targets[index], width, height)
                      && EnsureLightTarget(device, &il::geometry_targets[index], width, height,
                                           reshade::api::format::r32g32_uint);
-  }
-  bool specular_temporal_ready = temporal_ready && constants.specular_occlusion_active >= 0.5f;
-  for (uint32_t index = 0u; index < 2u && specular_temporal_ready; ++index) {
-    specular_temporal_ready = EnsureLightTarget(device, &specular_temporal_targets[index], width, height);
-  }
-  if (temporal_ready && constants.specular_occlusion_active >= 0.5f && !specular_temporal_ready) {
-    static std::atomic_flag failed = {};
-    LogLightOnce(&failed, reshade::log::level::warning, "Bitmask specular history allocation failed; using current masses");
-  }
-  bool transport_temporal_ready = temporal_ready && constants.specular_gi_active >= 0.5f;
-  for (uint32_t index = 0u; index < 2u && transport_temporal_ready; ++index) {
-    transport_temporal_ready = ensure_transport(&il::specular_transport_history[index])
-                               && EnsureLightTarget(device, &il::specular_material_history[index], width, height);
-  }
-  if (constants.specular_gi_active >= 0.5f && temporal_ready && !transport_temporal_ready) {
-    static std::atomic_flag failed = {};
-    LogLightOnce(&failed, reshade::log::level::warning, "Specular GI history allocation failed; using current transport");
   }
   if (!temporal_ready) {
     constants.gi_temporal_active = 0.f;
@@ -1502,16 +1327,6 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
                                         && il::history_scenes[il::history.slot].buffer != nullptr
                                     ? 1.f
                                     : 0.f);
-  constants.specular_occlusion_history_valid = (specular_temporal_ready && constants.ao_temporal_active >= 0.5f
-                                                        && il::history.specular_valid && consecutive_sample
-                                                        && il::history_scenes[il::history.slot].buffer != nullptr
-                                                    ? 1.f
-                                                    : 0.f);
-  constants.specular_gi_history_valid = (transport_temporal_ready && constants.gi_temporal_active >= 0.5f
-                                                 && il::history.specular_gi_valid && consecutive_sample
-                                                 && il::history_scenes[il::history.slot].buffer != nullptr
-                                             ? 1.f
-                                             : 0.f);
   for (const bool ambient_occlusion : {true, false}) {
     uint32_t status = 0u;
     const bool requested = (ambient_occlusion
@@ -1555,67 +1370,34 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   for (uint32_t index = 0u; index < 2u && filter_ready; ++index) {
     filter_ready = EnsureLightTarget(device, &il::filter_targets[index], width, height);
   }
-  bool specular_filter_ready = filter_ready && constants.specular_occlusion_active >= 0.5f;
-  for (uint32_t index = 0u; index < 2u && specular_filter_ready; ++index) {
-    specular_filter_ready = EnsureLightTarget(device, &specular_filter_targets[index], width, height);
-  }
-  if (filter_ready && constants.specular_occlusion_active >= 0.5f && !specular_filter_ready) {
-    static std::atomic_flag failed = {};
-    LogLightOnce(&failed, reshade::log::level::warning, "Bitmask specular spatial allocation failed; using unfiltered masses");
-  }
   if (!filter_ready) {
     static std::atomic_flag failed = {};
     LogLightOnce(&failed, reshade::log::level::warning, "Lighting spatial setup failed; using unfiltered AO and GI");
   }
-  bool transport_filter_ready = filter_ready && constants.specular_gi_active >= 0.5f;
-  for (uint32_t index = 0u; index < 2u && transport_filter_ready; ++index) {
-    transport_filter_ready = ensure_transport(&il::specular_transport_filters[index]);
-  }
-  if (constants.specular_gi_active >= 0.5f && filter_ready && !transport_filter_ready) {
-    static std::atomic_flag failed = {};
-    LogLightOnce(&failed, reshade::log::level::warning, "Specular GI filter allocation failed; using unfiltered transport");
-  }
-  // 4. Trace geometry once for AO, GI, and specular visibility. Diffuse RGB and
-  // AO alpha share u1. Unused slots keep distinct placeholders in the common
-  // layout; they must never alias the real inputs or writable destinations.
+  // 4. Trace AO and diffuse GI together. Specular tracing runs separately,
+  // after skin scattering, and does not allocate work in this chain.
   const std::array<reshade::api::resource_view, lighting::LIGHT_INPUT_COUNT> sources = {
       frame.depth,
       frame.normal,
-      (depth_mip_chain.ready ? depth_mip_chain.view : fallback_input),
+      depth_mip_chain.ready ? depth_mip_chain.view : fallback_input,
       frame.light_source,
       frame.albedo,
-      palette,
-      reshade::api::resource_view{reinterpret_cast<uintptr_t>(noise.Get())},
-      constants.specular_occlusion_active >= 0.5f ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->material.Get())} : fallback_input,
-      constants.specular_occlusion_active >= 0.5f ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->srv.Get())} : fallback_input,
-      brdf,
-      fresnel,
+      fallback_input,
+      {reinterpret_cast<uintptr_t>(noise.Get())},
+      environment != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->material.Get())} : fallback_input,
+      fallback_input,
+      fallback_input,
+      fallback_input,
       clean_color,
       clean_owner,
       frame.prepared_source,
-      fallback_input,
-      fallback_input,
-      fallback_input,
   };
   DispatchLightPass(cmd_list, &il::gather_pass, constants, sources,
-                    constants.specular_gi_active >= 0.5f ? il::specular_transport.radiance.uav : fallback_outputs[0], il::indirect_diffuse_target.uav,
+                    fallback_outputs[0], il::indirect_diffuse_target.uav,
                     diagnostic_ready ? il::diagnostic_target.uav : fallback_outputs[1],
-                    constants.specular_occlusion_active >= 0.5f ? specular_visibility_target.uav : fallback_outputs[2],
-                    constants.specular_gi_active >= 0.5f ? il::specular_transport.response.uav : fallback_outputs[3],
-                    transport_temporal_ready ? il::specular_material_history[write_slot].uav : fallback_outputs[4], fallback_outputs[5], width, height);
-  if (constants.specular_occlusion_active >= 0.5f) {
-    static std::atomic_flag recorded = {};
-    LogLightOnce(&recorded, reshade::log::level::info, "Bitmask specular commands recorded; effect=", width, "x", height,
-                 "; shared temporal and spatial passes, native fallback; inspect Accepted Specular History for per-pixel acceptance");
-  }
+                    width, height);
 
   auto lighting_source = il::indirect_diffuse_target.view;
-  auto specular_source = (constants.specular_occlusion_active >= 0.5f ? specular_visibility_target.view : fallback_input);
-  auto specular_temporal_source = specular_source;
-  auto transport_source = (constants.specular_gi_active >= 0.5f ? il::specular_transport.radiance.view : fallback_input);
-  auto response_source = (constants.specular_gi_active >= 0.5f ? il::specular_transport.response.view : fallback_input);
-  auto transport_debug_source = transport_source;
-  auto response_debug_source = response_source;
   // 5. Accumulate all signals in one dispatch. The shader copies current values
   // when history is cold or disabled. Save this result before spatial filtering
   // so blur cannot grow by feeding the filtered image back every frame.
@@ -1650,46 +1432,12 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
             : fallback_input,
         il::temporal_targets[il::history.slot].view,
         il::geometry_targets[il::history.slot].view,
-        transport_source,
-        transport_temporal_ready ? il::specular_transport_history[il::history.slot].radiance.view : fallback_input,
-        specular_source,
-        specular_temporal_ready ? specular_temporal_targets[il::history.slot].view : fallback_input,
-        response_source,
-        transport_temporal_ready ? il::specular_transport_history[il::history.slot].response.view : fallback_input,
-        constants.specular_occlusion_active >= 0.5f ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->material.Get())} : fallback_input,
-        transport_temporal_ready ? il::specular_material_history[il::history.slot].view : fallback_input,
-        palette,
-        fresnel,
-        transport_temporal_ready ? il::specular_material_history[write_slot].view : reshade::api::resource_view{0u},
     };
-    auto temporal_constants = constants;
-    if (!specular_temporal_ready) {
-      temporal_constants.specular_occlusion_active = 0.f;
-    }
-    if (!transport_temporal_ready) {
-      temporal_constants.specular_gi_active = 0.f;
-    }
-    DispatchLightPass(cmd_list, &il::temporal_pass, temporal_constants, temporal_sources,
+    DispatchLightPass(cmd_list, &il::temporal_pass, constants, temporal_sources,
                       il::temporal_targets[write_slot].uav, il::geometry_targets[write_slot].uav,
-                      diagnostic_ready ? il::diagnostic_target.uav : fallback_outputs[1],
-                      transport_temporal_ready ? il::specular_transport_history[write_slot].radiance.uav : fallback_outputs[2],
-                      specular_temporal_ready ? specular_temporal_targets[write_slot].uav : fallback_outputs[3],
-                      transport_temporal_ready ? il::specular_transport_history[write_slot].response.uav : fallback_outputs[4],
-                      fallback_outputs[5],
-                      width, height);
-    if (transport_temporal_ready) {
-      transport_source = il::specular_transport_history[write_slot].radiance.view;
-      response_source = il::specular_transport_history[write_slot].response.view;
-      if (constants.lighting_debug_view != 25.f) {
-        transport_debug_source = transport_source;
-        response_debug_source = response_source;
-      }
-    }
+                      diagnostic_ready ? il::diagnostic_target.uav : fallback_outputs[1], width, height);
     lighting_source = il::temporal_targets[write_slot].view;
-    if (specular_temporal_ready) {
-      specular_source = specular_temporal_targets[write_slot].view;
-      specular_temporal_source = specular_source;
-    }
+
     if (new_submission) {
       if (constants.gi_temporal_active >= 0.5f || constants.ao_temporal_active >= 0.5f) {
         // Retain the camera paired with both newly written histories after
@@ -1702,7 +1450,6 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
       il::history = {
           .parameters = parameters,
           .ao_parameters = ao_parameters,
-          .specular_parameters = specular_parameters,
           .jitter_uv = temporal.current_jitter_uv,
           .generation = temporal.generation,
           .submission = temporal.submission,
@@ -1715,8 +1462,6 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
           .slot = write_slot,
           .valid = constants.gi_temporal_active >= 0.5f,
           .ao_valid = constants.ao_temporal_active >= 0.5f,
-          .specular_valid = specular_temporal_ready && constants.ao_temporal_active >= 0.5f,
-          .specular_gi_valid = transport_temporal_ready && constants.gi_temporal_active >= 0.5f,
       };
     }
   }
@@ -1736,48 +1481,14 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
           lighting_source,
           frame.depth,
           frame.normal,
-          transport_source,
-          specular_source,
-          reshade::api::resource_view{reinterpret_cast<uintptr_t>(noise.Get())},
-          response_source,
-          constants.specular_occlusion_active >= 0.5f ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->material.Get())} : fallback_input,
-          palette,
-          fresnel,
-          // Trace writes the current material guide once. Temporal rejection and
-          // every filter reuse it; an absent guide retains native lookups.
-          transport_temporal_ready ? il::specular_material_history[write_slot].view : reshade::api::resource_view{0u},
           fallback_input,
           fallback_input,
-          fallback_input,
-          fallback_input,
-          fallback_input,
-          fallback_input,
+          {reinterpret_cast<uintptr_t>(noise.Get())},
       };
-      auto filter_constants = constants;
-      if (!specular_filter_ready) {
-        filter_constants.specular_occlusion_active = 0.f;
-      }
-      if (!transport_filter_ready) {
-        filter_constants.specular_gi_active = 0.f;
-      }
-      DispatchLightPass(cmd_list, &il::filter_pass, filter_constants, filter_sources,
-                        il::filter_targets[index & 1u].uav, transport_filter_ready ? il::specular_transport_filters[index & 1u].radiance.uav : fallback_outputs[0],
-                        constants.lighting_debug_view == 10.f ? il::diagnostic_target.uav : fallback_outputs[1],
-                        specular_filter_ready ? specular_filter_targets[index & 1u].uav : fallback_outputs[2],
-                        transport_filter_ready ? il::specular_transport_filters[index & 1u].response.uav : fallback_outputs[3],
-                        fallback_outputs[4], fallback_outputs[5], width, height);
-      if (transport_filter_ready) {
-        transport_source = il::specular_transport_filters[index & 1u].radiance.view;
-        response_source = il::specular_transport_filters[index & 1u].response.view;
-        if (constants.lighting_debug_view != 25.f && constants.lighting_debug_view != 26.f) {
-          transport_debug_source = transport_source;
-          response_debug_source = response_source;
-        }
-      }
+      DispatchLightPass(cmd_list, &il::filter_pass, constants, filter_sources,
+                        il::filter_targets[index & 1u].uav, fallback_outputs[0],
+                        constants.lighting_debug_view == 10.f ? il::diagnostic_target.uav : fallback_outputs[1], width, height);
       lighting_source = il::filter_targets[index & 1u].view;
-      if (specular_filter_ready) {
-        specular_source = specular_filter_targets[index & 1u].view;
-      }
     }
   }
   // 7. Reconstruct the captured native ambient separately from our lighting.
@@ -1791,7 +1502,7 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   }
   if (ambient == nullptr) {
     static std::atomic_flag reported = {};
-    LogLightOnce(&reported, reshade::log::level::warning, "ambient diffuse unavailable; diffuse AO is skipped while GI and specular visibility continue");
+    LogLightOnce(&reported, reshade::log::level::warning, "ambient diffuse unavailable; diffuse AO is skipped while GI continues");
   }
   auto* const ambient_constants = (ambient != nullptr ? ambient->constants.Get() : nullptr);
   auto* const ambient_sampler = (ambient != nullptr ? ambient->sampler.Get() : lighting::fallback_point_wrap.Get());
@@ -1806,35 +1517,19 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
       lighting_source,
       frame.depth,
       diagnostic_ready ? il::diagnostic_target.view : fallback_input,
-      transport_debug_source,
-      frame.normal,
-      environment != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->srv.Get())} : fallback_input,
-      environment != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->material.Get())} : fallback_input,
-      constants.specular_occlusion_active >= 0.5f ? specular_visibility_target.view : fallback_input,
-      specular_temporal_source,
-      specular_source,
+      fallback_input,
+      fallback_input,
+      fallback_input,
+      fallback_input,
+      fallback_input,
+      fallback_input,
+      fallback_input,
       ambient != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(ambient->view.Get())} : fallback_input,
       ambient != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(ambient->weight_view.Get())} : fallback_input,
-      palette,
-      brdf,
-      response_debug_source,
-      fresnel,
-      clean_color,
-      clean_owner,
-      frame.albedo,
-      // Reuse the guide already produced for temporal rejection and filtering.
-      transport_temporal_ready ? il::specular_material_history[write_slot].view : reshade::api::resource_view{0u},
   };
-  // Full-resolution application writes native diffuse and eligible skin-copy
-  // RGB, preserving each alpha. It also resolves specular visibility/confidence
-  // for deferred composition; it does not darken total specular here.
-  DispatchLightPass(cmd_list, &il::add_pass, constants, apply_sources, frame.light,
-                    environment != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->visibility_uav.Get())} : fallback_outputs[0],
-                    frame.scattering_copy.handle != 0u ? frame.scattering_copy : fallback_outputs[1],
-                    transport_result != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(transport_result->images[0].uav.Get())} : fallback_outputs[2],
-                    transport_result != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(transport_result->images[1].uav.Get())} : fallback_outputs[3],
-                    transport_result != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(transport_result->ready.uav.Get())} : fallback_outputs[4],
-                    fallback_outputs[5], frame.width, frame.height);
+  // Update native diffuse and the eligible scattering copy, preserving their alpha.
+  DispatchLightPass(cmd_list, &il::add_pass, constants, apply_sources, frame.light, fallback_outputs[0],
+                    frame.scattering_copy.handle != 0u ? frame.scattering_copy : fallback_outputs[1], frame.width, frame.height);
   static std::atomic_flag recorded = {};
   LogLightOnce(&recorded, reshade::log::level::info,
                "GT-VBGI commands recorded; effect=", width, "x", height,
@@ -1878,11 +1573,11 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
   {
     const std::shared_lock lock(renodx::utils::mutex::global_mutex);
     constants = shader_injection;
-    constants.lighting_debug_view = std::clamp(constants.lighting_debug_view, 0.f, 37.f);
+    constants.lighting_debug_view = std::clamp(constants.lighting_debug_view, 0.f, 19.f);
   }
-  if (constants.indirect_lighting_enabled < 0.5f) {
+  if (constants.diffuse_lighting_mode < 0.5f) {
     static std::atomic_flag reported = {};
-    mgsv::lighting::LogLightOnce(&reported, reshade::log::level::info, "scatter hook reached; Screen-Space Lighting is Off");
+    mgsv::lighting::LogLightOnce(&reported, reshade::log::level::info, "scatter hook reached; Diffuse Lighting is Off");
     return;
   }
 
@@ -2164,7 +1859,7 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
     }
     if (prepared != nullptr) {
       static std::atomic_flag reported = {};
-      LogLightOnce(&reported, reshade::log::level::info, "Shared source radiance: submitted native copy matched; FP32 source reused by diffuse and specular GI");
+      LogLightOnce(&reported, reshade::log::level::info, "Shared source radiance: submitted native copy matched; FP32 source reused by diffuse GI");
     } else {
       static std::atomic_flag reported = {};
       LogLightOnce(&reported, reshade::log::level::info, "Shared source radiance unavailable for this copy; using trace source loads");

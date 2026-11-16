@@ -3,6 +3,12 @@
 
 #define FIX_UNORM_SRGB 1
 
+// Stored as bytes in the R8 readiness image; shader loads divide by 255.
+// Both APIs use these values to select the result from the submitted scene.
+static const int MGSV_REFLECTION_UNAVAILABLE = 0;
+static const int MGSV_REFLECTION_ENHANCED = 255;
+static const int MGSV_REFLECTION_MAX_RAYS_PER_PIXEL = 4;
+
 struct ShaderInjectData {
   float tone_map_type;
   float peak_white_nits;
@@ -30,24 +36,22 @@ struct ShaderInjectData {
 
   // TemporalMode: 0 = Off, 1 = Analytical TAA, 2 = FSR, 3 = NVIDIA DLSS.
   float reconstruction_mode;
-  float unclamp_motion_vectors;
 
   float swap_chain_output_preset;
   float motion_blur_strength;
 
-  // One switch controls PCSS and contact shadows for every supported light.
-  float enhanced_shadows_enabled;
+  // 0 = Vanilla, 1 = Enhanced shadow maps and contact shadows.
+  float shadows_mode;
 
   float shadow_softness;              // Multiplies tuned source sizes; 1 keeps the default softness.
   float contact_shadow_reach_pixels;  // Contact-shadow search length in output pixels; effect-local copies convert to render pixels.
   float shadow_map_debug_view;
 
-  // Indirect Lighting controls, in GUI order.
-  float indirect_lighting_enabled;  // 0 = Off, 1 = GT-VBGI.
+  // Indirect Lighting controls. Keep their storage order stable across passes.
+  float diffuse_lighting_mode;  // 0 = Vanilla, 1 = Enhanced diffuse AO/GI.
   float ao_strength;
   float diffuse_gi_strength;
-  float specular_gi_strength;
-  float specular_occlusion_strength;
+  float reflection_strength;  // Blends the complete screen/environment reflection replacement.
   float lighting_resolution;  // Pixel count: 0 = full, 1 = 1/4, 2 = 1/16, 3 = 1/64.
   float lighting_search_radius_pixels;
   float lighting_surface_thickness;  // Native view-depth units.
@@ -57,12 +61,11 @@ struct ShaderInjectData {
   float lighting_depth_mips_enabled;  // User choice; each dispatch copy records whether the mips are ready.
   float gi_reject_backfaces;
   float lighting_temporal_enabled;
-  // AO and specular visibility share these history checks, with separate clamps.
+  // Ambient visibility history is independent of diffuse radiance history.
   float occlusion_history_weight;
   float occlusion_depth_rejection;
   float occlusion_normal_rejection;
   float ao_history_clamp;
-  float specular_occlusion_history_clamp;
   float gi_history_weight;
   float gi_depth_rejection;
   float gi_normal_rejection;
@@ -86,8 +89,6 @@ struct ShaderInjectData {
   float lighting_velocity_jitter_scale;
   float ao_history_valid;
   float ao_temporal_active;
-  float specular_occlusion_active;  // Dispatch-local input/output availability.
-  float specular_occlusion_history_valid;
 
   // Bend contact-shadow controls and values copied for this light draw.
   float contact_shadow_debug_view;
@@ -100,11 +101,10 @@ struct ShaderInjectData {
   // Shared IS-FAST frame phase.
   float shadow_noise_frame;
 
-  float bloom_type;  // 0 = Vanilla, 1 = Enhanced.
-
-  // Dispatch-local specular transport availability and history.
-  float specular_gi_active;
-  float specular_gi_history_valid;
+  float bloom_type;                   // 0 = Vanilla, 1 = Enhanced.
+  float reflections_mode;             // 0 = Vanilla, 1 = Enhanced; shares material capture with diffuse AO/GI.
+  float specular_occlusion_strength;  // Blocks environment fallback along confirmed geometry hits.
+  float reflection_rays_per_pixel;    // GGX samples per receiver; controls trace cost rather than strength.
 };
 
 #ifndef __cplusplus
@@ -139,10 +139,9 @@ cbuffer RenoDXSettings : register(b13) {
 #define CUSTOM_FILM_GRAIN_STRENGTH          shader_injection.film_grain_strength
 #define CUSTOM_MOTION_BLUR_STRENGTH         shader_injection.motion_blur_strength
 
-#define CUSTOM_RECONSTRUCTION_MODE    shader_injection.reconstruction_mode
-#define CUSTOM_UNCLAMP_MOTION_VECTORS shader_injection.unclamp_motion_vectors
+#define CUSTOM_RECONSTRUCTION_MODE shader_injection.reconstruction_mode
 
-#define CUSTOM_ENHANCED_SHADOWS_ENABLED (shader_injection.enhanced_shadows_enabled >= 0.5)
+#define CUSTOM_MGSV_ENHANCED_SHADOWS (shader_injection.shadows_mode >= 0.5)
 
 #define CUSTOM_SHADOW_SOFTNESS             shader_injection.shadow_softness
 #define CUSTOM_CONTACT_SHADOW_REACH_PIXELS shader_injection.contact_shadow_reach_pixels
@@ -155,48 +154,45 @@ cbuffer RenoDXSettings : register(b13) {
 
 #define CUSTOM_SPOT_CONTACT_SHADOW_BUDGET shader_injection.spot_contact_shadow_budget
 
-#define CUSTOM_MGSV_LIGHTING_ENABLED                 (shader_injection.indirect_lighting_enabled >= 0.5)
-#define CUSTOM_MGSV_AO_STRENGTH                      shader_injection.ao_strength
-#define CUSTOM_MGSV_DIFFUSE_GI_STRENGTH              shader_injection.diffuse_gi_strength
-#define CUSTOM_MGSV_SPECULAR_GI_STRENGTH             shader_injection.specular_gi_strength
-#define CUSTOM_MGSV_SPECULAR_OCCLUSION_STRENGTH      shader_injection.specular_occlusion_strength
-#define CUSTOM_MGSV_LIGHTING_SEARCH_RADIUS_PIXELS    shader_injection.lighting_search_radius_pixels
-#define CUSTOM_MGSV_LIGHTING_SURFACE_THICKNESS       shader_injection.lighting_surface_thickness
-#define CUSTOM_MGSV_LIGHTING_SURFACE_OFFSET          shader_injection.lighting_surface_offset
-#define CUSTOM_MGSV_LIGHTING_SLICE_COUNT             shader_injection.lighting_slice_count
-#define CUSTOM_MGSV_LIGHTING_SAMPLES_PER_SIDE        shader_injection.lighting_samples_per_side
-#define CUSTOM_MGSV_LIGHTING_DEPTH_MIPS_ENABLED      shader_injection.lighting_depth_mips_enabled
-#define CUSTOM_MGSV_GI_REJECT_BACKFACES              shader_injection.gi_reject_backfaces
-#define CUSTOM_MGSV_LIGHTING_TEMPORAL_ENABLED        shader_injection.lighting_temporal_enabled
-#define CUSTOM_MGSV_OCCLUSION_HISTORY_WEIGHT         shader_injection.occlusion_history_weight
-#define CUSTOM_MGSV_OCCLUSION_DEPTH_REJECTION        shader_injection.occlusion_depth_rejection
-#define CUSTOM_MGSV_OCCLUSION_NORMAL_REJECTION       shader_injection.occlusion_normal_rejection
-#define CUSTOM_MGSV_AO_HISTORY_CLAMP                 shader_injection.ao_history_clamp
-#define CUSTOM_MGSV_SPECULAR_OCCLUSION_HISTORY_CLAMP shader_injection.specular_occlusion_history_clamp
-#define CUSTOM_MGSV_GI_HISTORY_WEIGHT                shader_injection.gi_history_weight
-#define CUSTOM_MGSV_GI_DEPTH_REJECTION               shader_injection.gi_depth_rejection
-#define CUSTOM_MGSV_GI_NORMAL_REJECTION              shader_injection.gi_normal_rejection
-#define CUSTOM_MGSV_GI_HISTORY_CLAMP                 shader_injection.gi_history_clamp
-#define CUSTOM_MGSV_LIGHTING_SPATIAL_ENABLED         shader_injection.lighting_spatial_enabled
-#define CUSTOM_MGSV_LIGHTING_FILTER_WIDTH            shader_injection.lighting_filter_width
-#define CUSTOM_MGSV_LIGHTING_DEBUG_VIEW              shader_injection.lighting_debug_view
+#define CUSTOM_MGSV_ENHANCED_REFLECTIONS          (shader_injection.reflections_mode >= 0.5)
+#define CUSTOM_MGSV_ENHANCED_DIFFUSE_LIGHTING     (shader_injection.diffuse_lighting_mode >= 0.5)
+#define CUSTOM_MGSV_AO_STRENGTH                   shader_injection.ao_strength
+#define CUSTOM_MGSV_DIFFUSE_GI_STRENGTH           shader_injection.diffuse_gi_strength
+#define CUSTOM_MGSV_REFLECTION_STRENGTH           shader_injection.reflection_strength
+#define CUSTOM_MGSV_REFLECTION_RAYS_PER_PIXEL     shader_injection.reflection_rays_per_pixel
+#define CUSTOM_MGSV_SPECULAR_OCCLUSION_STRENGTH   shader_injection.specular_occlusion_strength
+#define CUSTOM_MGSV_LIGHTING_SEARCH_RADIUS_PIXELS shader_injection.lighting_search_radius_pixels
+#define CUSTOM_MGSV_LIGHTING_SURFACE_THICKNESS    shader_injection.lighting_surface_thickness
+#define CUSTOM_MGSV_LIGHTING_SURFACE_OFFSET       shader_injection.lighting_surface_offset
+#define CUSTOM_MGSV_LIGHTING_SLICE_COUNT          shader_injection.lighting_slice_count
+#define CUSTOM_MGSV_LIGHTING_SAMPLES_PER_SIDE     shader_injection.lighting_samples_per_side
+#define CUSTOM_MGSV_LIGHTING_DEPTH_MIPS_ENABLED   shader_injection.lighting_depth_mips_enabled
+#define CUSTOM_MGSV_GI_REJECT_BACKFACES           shader_injection.gi_reject_backfaces
+#define CUSTOM_MGSV_LIGHTING_TEMPORAL_ENABLED     shader_injection.lighting_temporal_enabled
+#define CUSTOM_MGSV_OCCLUSION_HISTORY_WEIGHT      shader_injection.occlusion_history_weight
+#define CUSTOM_MGSV_OCCLUSION_DEPTH_REJECTION     shader_injection.occlusion_depth_rejection
+#define CUSTOM_MGSV_OCCLUSION_NORMAL_REJECTION    shader_injection.occlusion_normal_rejection
+#define CUSTOM_MGSV_AO_HISTORY_CLAMP              shader_injection.ao_history_clamp
+#define CUSTOM_MGSV_GI_HISTORY_WEIGHT             shader_injection.gi_history_weight
+#define CUSTOM_MGSV_GI_DEPTH_REJECTION            shader_injection.gi_depth_rejection
+#define CUSTOM_MGSV_GI_NORMAL_REJECTION           shader_injection.gi_normal_rejection
+#define CUSTOM_MGSV_GI_HISTORY_CLAMP              shader_injection.gi_history_clamp
+#define CUSTOM_MGSV_LIGHTING_SPATIAL_ENABLED      shader_injection.lighting_spatial_enabled
+#define CUSTOM_MGSV_LIGHTING_FILTER_WIDTH         shader_injection.lighting_filter_width
+#define CUSTOM_MGSV_LIGHTING_DEBUG_VIEW           shader_injection.lighting_debug_view
 
-#define CUSTOM_MGSV_LIGHTING_RESOLUTION_DIVISOR      shader_injection.lighting_resolution_divisor
-#define CUSTOM_MGSV_LIGHTING_NOISE_FRAME             shader_injection.lighting_noise_frame
-#define CUSTOM_MGSV_GI_HISTORY_VALID                 shader_injection.gi_history_valid
-#define CUSTOM_MGSV_GI_TEMPORAL_ACTIVE               shader_injection.gi_temporal_active
-#define CUSTOM_MGSV_LIGHTING_FILTER_STEP             shader_injection.lighting_filter_step
-#define CUSTOM_MGSV_LIGHTING_CURRENT_JITTER_UV_X     shader_injection.lighting_current_jitter_uv_x
-#define CUSTOM_MGSV_LIGHTING_CURRENT_JITTER_UV_Y     shader_injection.lighting_current_jitter_uv_y
-#define CUSTOM_MGSV_LIGHTING_PREVIOUS_JITTER_UV_X    shader_injection.lighting_previous_jitter_uv_x
-#define CUSTOM_MGSV_LIGHTING_PREVIOUS_JITTER_UV_Y    shader_injection.lighting_previous_jitter_uv_y
-#define CUSTOM_MGSV_LIGHTING_VELOCITY_JITTER_SCALE   shader_injection.lighting_velocity_jitter_scale
-#define CUSTOM_MGSV_AO_HISTORY_VALID                 shader_injection.ao_history_valid
-#define CUSTOM_MGSV_AO_TEMPORAL_ACTIVE               shader_injection.ao_temporal_active
-#define CUSTOM_MGSV_SPECULAR_OCCLUSION_ACTIVE        shader_injection.specular_occlusion_active
-#define CUSTOM_MGSV_SPECULAR_OCCLUSION_HISTORY_VALID shader_injection.specular_occlusion_history_valid
-#define CUSTOM_MGSV_SPECULAR_GI_ACTIVE               shader_injection.specular_gi_active
-#define CUSTOM_MGSV_SPECULAR_GI_HISTORY_VALID        shader_injection.specular_gi_history_valid
+#define CUSTOM_MGSV_LIGHTING_RESOLUTION_DIVISOR    shader_injection.lighting_resolution_divisor
+#define CUSTOM_MGSV_LIGHTING_NOISE_FRAME           shader_injection.lighting_noise_frame
+#define CUSTOM_MGSV_GI_HISTORY_VALID               shader_injection.gi_history_valid
+#define CUSTOM_MGSV_GI_TEMPORAL_ACTIVE             shader_injection.gi_temporal_active
+#define CUSTOM_MGSV_LIGHTING_FILTER_STEP           shader_injection.lighting_filter_step
+#define CUSTOM_MGSV_LIGHTING_CURRENT_JITTER_UV_X   shader_injection.lighting_current_jitter_uv_x
+#define CUSTOM_MGSV_LIGHTING_CURRENT_JITTER_UV_Y   shader_injection.lighting_current_jitter_uv_y
+#define CUSTOM_MGSV_LIGHTING_PREVIOUS_JITTER_UV_X  shader_injection.lighting_previous_jitter_uv_x
+#define CUSTOM_MGSV_LIGHTING_PREVIOUS_JITTER_UV_Y  shader_injection.lighting_previous_jitter_uv_y
+#define CUSTOM_MGSV_LIGHTING_VELOCITY_JITTER_SCALE shader_injection.lighting_velocity_jitter_scale
+#define CUSTOM_MGSV_AO_HISTORY_VALID               shader_injection.ao_history_valid
+#define CUSTOM_MGSV_AO_TEMPORAL_ACTIVE             shader_injection.ao_temporal_active
 
 #include "../../shaders/renodx.hlsl"
 

@@ -78,8 +78,7 @@ void main(
 #ifdef MGSV_CAPTURE_ENVIRONMENT_SPECULAR
     ,
     out float4 o2 : SV_Target2,
-    out float4 specular_reset : SV_Target3,
-    out float4 composition_reset : SV_Target4
+    out float4 specular_reset : SV_Target3
 #endif
 ) {
   float4 r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15;
@@ -250,7 +249,7 @@ void main(
   r8.zw = r9.xy + r8.zw;
   r4.yz = r8.zw + r8.xy;
   const BendShadow contact_shadow = ReadBendShadow(v0.xy, 0u, g_DepthTexture);
-  const bool map_debug = CUSTOM_ENHANCED_SHADOWS_ENABLED && CUSTOM_SHADOW_MAP_DEBUG_VIEW >= 0.5
+  const bool map_debug = CUSTOM_MGSV_ENHANCED_SHADOWS && CUSTOM_SHADOW_MAP_DEBUG_VIEW >= 0.5
                          && uint(CUSTOM_SHADOW_DEBUG_LIGHT) == 0u;
   const bool shadow_required = contact_shadow.visibility > 0.0 || contact_shadow.diagnostic
                                || map_debug;
@@ -259,7 +258,7 @@ void main(
   [branch]
   if (shadow_required) {
     [branch]
-    if (CUSTOM_ENHANCED_SHADOWS_ENABLED) {
+    if (CUSTOM_MGSV_ENHANCED_SHADOWS) {
       sun_pcss = FilterSunShadow(g_ShadowTexture, g_samplerComparisonLess_Linear_Clmap_s,
                                  shadow_projected,
                                  mul(float4(receiver_dx, 0.0), g_psScene.m_shadowProjection).xyz,
@@ -466,7 +465,6 @@ void main(
 #endif
 #ifdef MGSV_CAPTURE_ENVIRONMENT_SPECULAR
   specular_reset = 0.0;
-  composition_reset = 0.0;
 #endif
   return;
 }

@@ -1,6 +1,6 @@
-# Enhanced Shadows
+# Direct lighting
 
-Enhanced Shadows combines PCSS filtering of native shadow maps with Bend screen-space contact shadows. Both affect direct diffuse and specular lighting inside the game's light draws, before GT-VBGI, skin scattering, and deferred composition. Environment reflections, native material masks, distance fades, and output alpha retain their original roles. Off restores native shadows.
+Shadows selects Vanilla or Enhanced. Enhanced combines PCSS filtering of native shadow maps with Bend screen-space contact shadows. Both affect direct diffuse and specular lighting inside the game's light draws, before GT-VBGI, skin scattering, and deferred composition. Environment reflections, native material masks, distance fades, and output alpha retain their original roles. Vanilla restores native shadows.
 
 ## Files
 
@@ -16,7 +16,7 @@ Enhanced Shadows combines PCSS filtering of native shadow maps with Bend screen-
 
 The [shader registry](../../shaders.hpp) covers all 29 direct-light variants identified in the local dump: five sun/moon variants, 16 spotlight variants, and eight point-light variants. This includes projected masks, diffuse-only lighting, both distance-falloff families, and lights without shadow maps. Shadowed lights use PCSS and Bend; unshadowed lights use Bend alone. The largest-cascade sun shader retains its separate world-shadow mask. Shaders absent from the dump have not been qualified.
 
-The ambient skylight shader, `SSLighting2_SH_SkyLight_Encode_ps` (`0x4FBDBB39`), has a separate role. It samples directional sky illumination and blends it with native diffuse accumulation, then applies the native SH mask. It has no direct-light shadow map or single source direction for PCSS or Bend. Its existing callback identifies ambient inputs for GT-VBGI's diffuse AO; Enhanced Shadows does not darken this contribution again.
+The ambient skylight shader, `SSLighting2_SH_SkyLight_Encode_ps` (`0x4FBDBB39`), has a separate role. It samples directional sky illumination and blends it with native diffuse accumulation, then applies the native SH mask. It has no direct-light shadow map or single source direction for PCSS or Bend. Its existing callback identifies ambient inputs for GT-VBGI's diffuse AO; Enhanced shadows do not darken this contribution again.
 
 The [host](screen_space_shadows.hpp) runs [setup](contact/bend_setup.cs_5_0.hlsl), a bounded [clear](contact/bend_clear.cs_5_0.hlsl), and a depth [trace](contact/bend_trace.cs_5_0.hlsl). Compatible local lights share these dispatches; the remaining lights run them individually. Each native light draw then [combines](screen_space_shadows.hlsli) contact visibility with its shadow-map result before coloring the light. Missing contact inputs leave shadow-map lighting available. Unsupported replacement bindings retain the original shader.
 
@@ -60,12 +60,12 @@ Fixed trace settings are contrast 4, 0.5% relative nonlinear-depth thickness, a 
 
 | Control | Default | Effect |
 |---|---:|---|
-| Enhanced Shadows | On | Enables shadow-map filtering and contact shadows together |
+| Shadows | Enhanced | Selects native shadows or enhanced shadow-map filtering and contact shadows together |
 | Shadow Softness | 100% | Scales the shared source sizes; 0% keeps native map filtering and sharp contact detail |
 | Contact Shadow Reach | 60 px | Shared search length, from 16 to 256 output pixels, converted to render pixels with a minimum of 16 render pixels |
 | Spot Contact Shadow Budget | 34 | Limits spotlight contact evaluations between lighting-buffer clears; 0 is unlimited |
 
-Reach, budget, and diagnostics are in Shadows (Advanced), collapsed by default. At DLSS Performance, the minimum trace length corresponds to about 32 output pixels. Reach changes search distance, not softness. Skipped spotlight contacts retain shadow-map filtering. Preset Off disables Enhanced Shadows; Reset All restores defaults.
+Softness, reach, budget, and diagnostics are in Direct Lighting (Advanced), collapsed by default. At DLSS Performance, the minimum trace length corresponds to about 32 output pixels. Reach changes search distance, not softness. Skipped spotlight contacts retain shadow-map filtering. Preset Off selects Vanilla for Shadows; Reset All restores defaults.
 
 ## Diagnostics and verification
 
@@ -76,11 +76,11 @@ Both debug controls use Debug Light to select Sun / Moon, Spot, or Point. Diagno
 
 Follow the [addon build and deployment checks](../../README.md#build-and-deploy). Turn diagnostics Off for appearance and performance comparisons.
 
-1. Compare Off/On at a fixed camera, then move the camera and characters. Check contact edges, broad shadows, foliage, fences, slopes, cascades, spotlight rims, and point-light seams.
+1. Compare Vanilla/Enhanced at a fixed camera, then move the camera and characters. Check contact edges, broad shadows, foliage, fences, slopes, cascades, spotlight rims, and point-light seams.
 2. Compare softness at 0%, 50%, and 100%, including the ACC menu. Check different reconstruction resolutions, startup, resize, odd dimensions, and native shadow-quality settings. Thin beard geometry can still show instability.
 3. At Mother Base at night, compare spotlight budgets 13 and 0. Confirm omitted contacts retain map shadows. Check daylight and moonlight separately, using Toward Light to identify the source when needed.
 
-Local GPU fixtures check shadow masks, dispatch records, budgets, packed mask bounds, and command-list replay against the per-light path. Native collection fixtures check context identity, constant copies, nested groups, and resource lifetime. In-game checks covered the main menu and Mother Base at night, including a 241-record spotlight batch and its native lighting draw. The outdoor guardrail/moon direction comparison remains unverified. Use a fixed-camera On / Off / On comparison for performance, with debug views and capture copies disabled.
+Local GPU fixtures check shadow masks, dispatch records, budgets, packed mask bounds, and command-list replay against the per-light path. Native collection fixtures check context identity, constant copies, nested groups, and resource lifetime. In-game checks covered the main menu and Mother Base at night, including a 241-record spotlight batch and its native lighting draw. The outdoor guardrail/moon direction comparison remains unverified. Use a fixed-camera Enhanced / Vanilla / Enhanced comparison for performance, with debug views and capture copies disabled.
 
 ## References and licenses
 

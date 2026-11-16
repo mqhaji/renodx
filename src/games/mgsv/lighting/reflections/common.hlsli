@@ -1,0 +1,61 @@
+// SPDX-License-Identifier: MIT
+#ifndef MGSV_REFLECTIONS_COMMON_HLSLI_
+#define MGSV_REFLECTIONS_COMMON_HLSLI_
+
+#include "../../materials/brdf.hlsli"
+#include "../../third_party/nrd/NRD.hlsli"
+
+// Native scene data is copied on the GPU at the deferred composition boundary.
+// It is not the current CPU camera, which may already belong to another worker.
+struct ReflectionScene {
+  float4x4 projection_view;
+  float4x4 projection;
+  row_major float4x4 view_to_world;
+  float4x4 shadow_projection;
+  float4x4 shadow_projection2;
+  float4 eye_position;
+  float4 projection_parameters;
+  float4 viewport_size;
+  float4 exposure;
+  float4 fog_parameters[3];
+  float4 fog_color;
+  float4 camera_center_offset;
+  float4 shadow_map_resolutions;
+};
+
+cbuffer ReflectionConstants : register(b0) {
+  uint2 reflection_size;
+  uint reflection_sample;
+  uint maximum_mip;
+  float2 current_jitter;
+  float environment_occlusion_strength;
+  uint reflection_flags;
+  row_major float4x4 current_to_previous_clip;
+  float3 hit_distance_parameters;
+  float velocity_projection_jitter_scale;
+  uint reflection_rays_per_pixel;
+};
+cbuffer CurrentReflectionScene : register(b1) { ReflectionScene current_scene; }
+
+float GetReflectionDepth(float depth) {
+  return current_scene.projection_parameters.z / max(depth - current_scene.projection_parameters.w, 1e-7);
+}
+
+float3 GetReflectionPosition(float2 pixel, float depth) {
+  // The saved native center includes projection jitter. Subtracting that
+  // center recovers the physical camera ray directly from the depth grid.
+  const float2 ndc = (pixel / float2(reflection_size) * 2.0 - 1.0) * float2(1.0, -1.0);
+  const float z = GetReflectionDepth(depth);
+  return float3((ndc - current_scene.camera_center_offset.xy) * current_scene.projection_parameters.xy * z, z);
+}
+
+float3 DecodeReflectionNormal(float3 encoded) {
+  float3 normal;
+  normal.z = encoded.z * encoded.z * 2.0 - 1.0;
+  const float radius_squared = saturate(1.0 - normal.z * normal.z);
+  const float2 xy = encoded.xy * 2.0 - 1.0;
+  normal.xy = xy * (radius_squared * rsqrt(radius_squared * dot(xy, xy) + 1e-7));
+  return normalize(normal);
+}
+
+#endif

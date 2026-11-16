@@ -45,6 +45,10 @@
 
 namespace mgsv::reconstruction::post_process {
 
+// Settings publish this independent flag to native UI recording workers.
+// Hiding draws does not disable menu input or the RenoDX overlay.
+static std::atomic_bool ui_visible = true;
+
 // Native constant buffers that contain dimensions or sampling offsets we adjust.
 // These are the game's draw parameters, separate from injected user settings.
 struct ConstantBinding {
@@ -1323,6 +1327,12 @@ inline constexpr auto DRAW_CALLBACK = [](auto& command) {
   auto* draw = command.cmd_list->template get_private_data<DrawState>();
   if (pass.shader_hash == 0u && (draw == nullptr || !draw->draw_2d || draw->flare_sprite)) return renodx::utils::command_action::CallbackResult<Context>{};
   if (pass.shader_hash == 0u && resolution::active_dof.IsScaled()) return renodx::utils::command_action::CallbackResult<Context>{};
+  if (pass.shader_hash == 0u && draw->ui_draw && !ui_visible.load(std::memory_order_relaxed)) {
+    // Reuse the native UI shader classification already needed for output
+    // routing. DoF and flare sprites were excluded above; the ReShade overlay
+    // does not use these game shaders. Cancel before changing native bindings.
+    return renodx::utils::command_action::CallbackResult<Context>{.bypass = true};
+  }
   if (pass.dof_pass && draw != nullptr) {
     Recording route;
     const auto output = GetActive(command.cmd_list, &route);

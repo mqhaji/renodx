@@ -1,4 +1,4 @@
-#include "../indirect/compose/specular_composition.hlsli"
+#include "specular_composition.hlsli"
 #include "../../tonemap/tonemap.hlsli"
 
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:26 2026
@@ -59,8 +59,7 @@ Texture2D<float4> inMesh : register(t15);
 void main(
     float4 v0 : SV_Position0,
     float2 v1 : TEXCOORD0,
-    out float4 o0 : SV_Target0,
-    out float4 reflection_mask : SV_Target1) {
+    out float4 o0 : SV_Target0, out float4 reflection_environment : SV_Target1) {
   float4 r0, r1, r2, r3, r4, r5, r6;
   uint4 bitmask, uiDest;
   float4 fDest;
@@ -106,17 +105,17 @@ void main(
   r3.xyz = r3.xyz;
   const float2 specular_uv = r0.zw;
   r0.z = inOcclusion.Sample(g_samplerLinear_Wrap_s, r0.zw).x;
-  const float3 specular_correction = GetEnvironmentSpecularCorrection(specular_uv, r0.z, r1.yzw, r3.xyz, r2.xyz);
+  const float3 specular_correction = GetEnvironmentSpecularCorrection(specular_uv, r0.z, r1.yzw, r3.xyz, r2.xyz, reflection_environment);
   r4.xyz = r0.zzz;
   r2.xyz = r3.xyz * r2.xyz;
   // Diffuse already has ambient-only AO; the correction separates specular below.
-  if (CUSTOM_MGSV_LIGHTING_ENABLED != 0.f) {
+  if (CUSTOM_MGSV_ENHANCED_DIFFUSE_LIGHTING != 0.f) {
     r1.yzw = r2.xyz + r1.yzw * r4.xyz;
   } else {
     r1.yzw = r2.xyz + r1.yzw;
     r1.yzw = r1.yzw * r4.xyz;
   }
-  if (CUSTOM_MGSV_LIGHTING_ENABLED != 0.0) {
+  if (CUSTOM_MGSV_ENHANCED_REFLECTIONS) {
     r1.yzw += specular_correction;
   }
   r1.yzw = r1.yzw;
@@ -165,6 +164,7 @@ void main(
   r2.w = r2.w;
   r2.xyzw = r2.xyzw;
   r2.xyzw = r2.xyzw;
+  if (reflection_environment.a >= 0.0) reflection_environment *= saturate(r2.w);
   r1.xyz = r2.www * r1.yzw;
   r1.xyz = r1.xyz + r2.xyz;
   r1.xyz = r1.xyz;
@@ -193,6 +193,7 @@ void main(
   o0.rgb = renodx::color::srgb::Encode(max(0, o0.rgb));
 #endif
 
-  reflection_mask = specular_replacement_applied ? 1.0 : 0.0;
+  // A clipped vanilla tone curve is not recoverable linear radiance.
+  if (RENODX_TONE_MAP_TYPE == 0.0) reflection_environment.a = -1.0;
   return;
 }

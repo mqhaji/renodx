@@ -1,4 +1,4 @@
-#include "../indirect/compose/specular_composition.hlsli"
+#include "specular_composition.hlsli"
 #include "../../tonemap/tonemap.hlsli"
 
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:32 2026
@@ -63,8 +63,7 @@ Texture2D<float4> inOcclusion : register(t13);
 void main(
     float4 v0 : SV_Position0,
     float4 v1 : TEXCOORD0,
-    out float4 o0 : SV_Target0,
-    out float4 reflection_mask : SV_Target1) {
+    out float4 o0 : SV_Target0, out float4 reflection_environment : SV_Target1) {
   float4 r0, r1, r2, r3, r4, r5;
   uint4 bitmask, uiDest;
   float4 fDest;
@@ -270,16 +269,17 @@ void main(
   r3.xyz = r3.xyz;
   r0.xyz = inAlbedo.Sample(g_samplerLinear_Wrap_s, r0.xy).xyz;
   r0.xyz = r0.xyz;
-  const float3 specular_correction = GetEnvironmentSpecularCorrection(specular_uv, r2.x, r3.xyz, r0.xyz, r4.xyz);
+  // The wet cubemap is added below; include it in the environment replacement.
+  const float3 specular_correction = GetEnvironmentSpecularCorrection(specular_uv, r2.x, r3.xyz, r0.xyz, r4.xyz, reflection_environment, r1.xyw);
   r0.xyz = r0.xyz * r4.xyz;
   // Diffuse already has ambient-only AO; the correction separates specular below.
-  if (CUSTOM_MGSV_LIGHTING_ENABLED != 0.f) {
+  if (CUSTOM_MGSV_ENHANCED_DIFFUSE_LIGHTING != 0.f) {
     r0.xyz = r0.xyz + r3.xyz * r2.xyz;
   } else {
     r0.xyz = r0.xyz + r3.xyz;
     r0.xyz = r0.xyz * r2.xyz;
   }
-  if (CUSTOM_MGSV_LIGHTING_ENABLED != 0.0) {
+  if (CUSTOM_MGSV_ENHANCED_REFLECTIONS) {
     r0.xyz += specular_correction;
   }
   r0.xyz = r0.xyz;
@@ -332,6 +332,7 @@ void main(
   r1.w = r1.w;
   r1.xyzw = r1.xyzw;
   r1.xyzw = r1.xyzw;
+  if (reflection_environment.a >= 0.0) reflection_environment *= saturate(r1.w);
   r0.xyz = r1.www * r0.xyz;
   r0.xyz = r0.xyz + r1.xyz;
   r0.xyz = r0.xyz;
@@ -354,6 +355,7 @@ void main(
 #if FIX_UNORM_SRGB
   o0.rgb = renodx::color::srgb::Encode(max(0, o0.rgb));
 #endif
-  reflection_mask = specular_replacement_applied ? 1.0 : 0.0;
+  // A clipped vanilla tone curve is not recoverable linear radiance.
+  if (RENODX_TONE_MAP_TYPE == 0.0) reflection_environment.a = -1.0;
   return;
 }

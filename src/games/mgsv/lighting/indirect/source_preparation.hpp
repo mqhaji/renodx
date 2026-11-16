@@ -19,7 +19,7 @@
 #include "../../../../utils/data.hpp"
 #include "../../materials/capture.hpp"
 #include "../../rendering/inputs.hpp"
-#include "environment_specular.hpp"
+#include "../environment_specular.hpp"
 
 namespace mgsv::lighting::source_preparation {
 

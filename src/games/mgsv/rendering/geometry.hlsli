@@ -25,6 +25,7 @@ float LinearZ(float depth) {
 // Native scatter2 (0xB2601810) divides those coordinates by the buffer size without
 // adding a half pixel. Flip screen Y before subtracting the camera-center offset;
 // keep the signed projection factors, including the native negative X scale.
+// The native upload hook includes this scene's projection jitter in the center.
 float3 ViewPos(float2 pixel, float z) {
   const float2 ndc = pixel / float2(buffer_width, buffer_height) * 2.0 - 1.0;
   return float3((float2(ndc.x, -ndc.y) - camera_center_offset.xy)

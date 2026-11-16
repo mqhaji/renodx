@@ -253,12 +253,12 @@ void main(
   r8.z = r9.w;
   r1.yzw = r8.xyz / float3(1, 1, 1);
   const BendShadow contact_shadow = ReadBendShadow(v0.xy, 2u, g_DepthTexture);
-  const bool map_debug = CUSTOM_ENHANCED_SHADOWS_ENABLED && CUSTOM_SHADOW_MAP_DEBUG_VIEW >= 0.5
+  const bool map_debug = CUSTOM_MGSV_ENHANCED_SHADOWS && CUSTOM_SHADOW_MAP_DEBUG_VIEW >= 0.5
                          && uint(CUSTOM_SHADOW_DEBUG_LIGHT) == 2u;
   const bool shadow_required = contact_shadow.visibility > 0.0 || contact_shadow.diagnostic || map_debug;
   PcssResult filtered_shadow = (PcssResult)0;
   [branch]
-  if (CUSTOM_ENHANCED_SHADOWS_ENABLED && shadow_required) {
+  if (CUSTOM_MGSV_ENHANCED_SHADOWS && shadow_required) {
     filtered_shadow = FilterPointShadow(g_ShadowTexture, g_samplerComparisonLess_Linear_Clmap_s,
                                         shadow_projected, shadow_projected_dx, shadow_projected_dy,
                                         g_psLight.m_lightParams[7].z, PcssNoise(v0.xy));

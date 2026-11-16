@@ -136,17 +136,21 @@ struct Pipeline {
   Microsoft::WRL::ComPtr<ID3D12RootSignature> root;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> state;
 
-  void Create(ID3D12Device* device, std::span<const uint8_t> shader, UINT srvs, UINT uavs, UINT cbvs = 1u) {
+  void Create(ID3D12Device* device, std::span<const uint8_t> shader, UINT srvs, UINT uavs, UINT cbvs = 1u,
+              UINT resource_space = 0u, UINT constant_space = 0u) {
     const std::array<D3D12_DESCRIPTOR_RANGE, 2> ranges = {{
-        {.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV, .NumDescriptors = srvs, .BaseShaderRegister = 0u, .OffsetInDescriptorsFromTableStart = 0u},
-        {.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV, .NumDescriptors = uavs, .BaseShaderRegister = 0u, .OffsetInDescriptorsFromTableStart = srvs},
+        {.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV, .NumDescriptors = srvs, .BaseShaderRegister = 0u, .RegisterSpace = resource_space, .OffsetInDescriptorsFromTableStart = 0u},
+        {.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV, .NumDescriptors = uavs, .BaseShaderRegister = 0u, .RegisterSpace = resource_space, .OffsetInDescriptorsFromTableStart = srvs},
     }};
     std::vector<D3D12_ROOT_PARAMETER> parameters(cbvs + 1u);
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    parameters[0].DescriptorTable = {.NumDescriptorRanges = static_cast<UINT>(ranges.size()), .pDescriptorRanges = ranges.data()};
+    // A table may contain only outputs, as with an integration lookup texture.
+    // Empty descriptor ranges are invalid in a D3D12 root signature.
+    parameters[0].DescriptorTable = {.NumDescriptorRanges = srvs != 0u && uavs != 0u ? 2u : 1u,
+                                     .pDescriptorRanges = ranges.data() + (srvs == 0u ? 1u : 0u)};
     for (UINT index = 0u; index < cbvs; ++index) {
       parameters[index + 1u].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-      parameters[index + 1u].Descriptor = {.ShaderRegister = index};
+      parameters[index + 1u].Descriptor = {.ShaderRegister = index, .RegisterSpace = constant_space};
     }
     std::array<D3D12_STATIC_SAMPLER_DESC, 2> samplers = {};
     for (UINT index = 0u; index < samplers.size(); ++index) {
@@ -159,6 +163,7 @@ struct Pipeline {
           .ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER,
           .MaxLOD = D3D12_FLOAT32_MAX,
           .ShaderRegister = index,
+          .RegisterSpace = constant_space,
       };
     }
     const D3D12_ROOT_SIGNATURE_DESC description = {

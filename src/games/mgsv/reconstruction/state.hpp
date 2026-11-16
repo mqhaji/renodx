@@ -6,7 +6,7 @@
  * Owns:
  *  - The availability-validated effective temporal mode.
  *  - Presentation diagnostics and the next jitter sample to reserve.
- *  - Diagnostic Off and Halton (2,3) jitter in render-space UV coordinates.
+ *  - Halton (2,3) jitter in render-space UV coordinates.
  *    The pattern starts at eight phases and grows with the upscaling ratio.
  *
  * The native projection hook and ReShade callbacks can execute on different
@@ -24,16 +24,8 @@
 #define ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS 1
 #endif
 
-#ifndef ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
-#define ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS 1
-#endif
-
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS != 0 && ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS != 1
 #error ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS must be 0 or 1
-#endif
-
-#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS != 0 && ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS != 1
-#error ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS must be 0 or 1
 #endif
 
 namespace mgsv::reconstruction::state {
@@ -56,30 +48,11 @@ inline TemporalMode NormalizeTemporalMode(float value) {
   return TemporalMode::AMD_FSR;
 }
 
-enum class ProjectionJitterPath : std::uint8_t {
-  VELOCITY,
-  FORWARD,
-  MODEL,
-  ALPHA_MODEL,
-  OVERLAY_MODEL,
-  LOCAL_LIGHT,
-  SUN_VOLUME,
-  SH_LIGHTING,
-  TERRAIN_DECAL,
-  ALTERNATE_CAMERA,
-  THERMOGRAPHY,
-  SKY,
-  COUNT,
-};
-
-// Alternate Stream is disabled; Thermography always follows scene jitter.
-inline constexpr std::size_t PROJECTION_JITTER_SLIDER_COUNT = static_cast<std::size_t>(ProjectionJitterPath::ALTERNATE_CAMERA);
 inline constexpr float DEFAULT_DIAGNOSTIC_VIEW = 0.f;
 inline constexpr float DEFAULT_VELOCITY_VISUALIZATION_RANGE = 8.f;
-inline constexpr uint32_t DEFAULT_OBJECT_MOTION_MODE = 0u;
-inline constexpr float DEFAULT_PROJECTION_JITTER_SCALE = 1.f;
+
 inline std::atomic_flag execution_lock = ATOMIC_FLAG_INIT;
-inline constexpr uint32_t DEFAULT_JITTER_PATTERN = 1u;
+
 inline constexpr float DEFAULT_CLIP_TIGHTNESS = 0.5f;
 inline constexpr float DEFAULT_HISTORY_CLIP_STRENGTH = 1.f;
 inline constexpr float DEFAULT_CURRENT_FRAME_BLEND = 0.15f;
@@ -103,40 +76,12 @@ struct FrameState {
   bool mb_tile_prep_fired = false;
 };
 
-#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
-inline constexpr std::array DEFAULT_PROJECTION_JITTER_SCALES = {
-    DEFAULT_PROJECTION_JITTER_SCALE,
-    DEFAULT_PROJECTION_JITTER_SCALE,
-    DEFAULT_PROJECTION_JITTER_SCALE,
-    DEFAULT_PROJECTION_JITTER_SCALE,
-    DEFAULT_PROJECTION_JITTER_SCALE,
-    DEFAULT_PROJECTION_JITTER_SCALE,
-    DEFAULT_PROJECTION_JITTER_SCALE,
-    DEFAULT_PROJECTION_JITTER_SCALE,
-    DEFAULT_PROJECTION_JITTER_SCALE,
-};
-static_assert(DEFAULT_PROJECTION_JITTER_SCALES.size() == PROJECTION_JITTER_SLIDER_COUNT);
-#endif
 inline std::atomic<TemporalMode> runtime_temporal_mode = TemporalMode::OFF;
-inline std::atomic<uint32_t> runtime_jitter_pattern = DEFAULT_JITTER_PATTERN;
+
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
 inline std::atomic<float> runtime_diagnostic_view = DEFAULT_DIAGNOSTIC_VIEW;
 inline std::atomic<float> runtime_velocity_visualization_range = DEFAULT_VELOCITY_VISUALIZATION_RANGE;
-inline std::atomic<uint32_t> runtime_object_motion_mode = DEFAULT_OBJECT_MOTION_MODE;
-#endif
-#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
-inline std::array<std::atomic<float>, PROJECTION_JITTER_SLIDER_COUNT> runtime_projection_jitter_scales = {
-    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
-    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
-    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
-    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
-    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
-    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
-    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
-    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
-    std::atomic<float>{DEFAULT_PROJECTION_JITTER_SCALE},
-};
-static_assert(PROJECTION_JITTER_SLIDER_COUNT == 9u, "Initialize every runtime jitter scale when adding slider paths");
+
 #endif
 inline std::atomic<float> runtime_clip_tightness = DEFAULT_CLIP_TIGHTNESS;
 inline std::atomic<float> runtime_history_clip_strength = DEFAULT_HISTORY_CLIP_STRENGTH;
@@ -158,14 +103,6 @@ inline TemporalMode GetTemporalMode() {
 
 inline bool IsEnabled() {
   return GetTemporalMode() != TemporalMode::OFF;
-}
-
-inline void SetJitterPattern(uint32_t pattern) {
-  runtime_jitter_pattern.store(std::min(pattern, 1u), std::memory_order_release);
-}
-
-inline uint32_t GetJitterPattern() {
-  return runtime_jitter_pattern.load(std::memory_order_acquire);
 }
 
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
@@ -195,21 +132,6 @@ inline float GetVelocityVisualizationRange() {
   return runtime_velocity_visualization_range.load(std::memory_order_acquire);
 #else
   return DEFAULT_VELOCITY_VISUALIZATION_RANGE;
-#endif
-}
-
-#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
-inline void SetObjectMotionMode(float value) {
-  const uint32_t mode = static_cast<uint32_t>(std::clamp(value, 0.f, 7.f));
-  runtime_object_motion_mode.store(mode, std::memory_order_release);
-}
-#endif
-
-inline uint32_t GetObjectMotionMode() {
-#if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
-  return runtime_object_motion_mode.load(std::memory_order_acquire);
-#else
-  return DEFAULT_OBJECT_MOTION_MODE;
 #endif
 }
 
@@ -244,30 +166,6 @@ inline float GetCurrentFrameBlend() {
   return runtime_current_frame_blend.load(std::memory_order_acquire);
 }
 
-#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
-inline void SetProjectionJitterScale(ProjectionJitterPath path, float value) {
-  const std::size_t index = static_cast<std::size_t>(path);
-  if (index >= PROJECTION_JITTER_SLIDER_COUNT) return;
-  value = std::clamp(value, -2.f, 2.f);
-  runtime_projection_jitter_scales[index].store(value, std::memory_order_release);
-}
-#endif
-
-inline float GetProjectionJitterScale(ProjectionJitterPath path) {
-  // Alternate Stream jitter reproducibly destabilizes the waveform; keep native staging unchanged in every mode.
-  if (path == ProjectionJitterPath::ALTERNATE_CAMERA) return 0.f;
-  // Thermography and sky rays follow the scene's sample directly.
-  if (static_cast<std::size_t>(path) >= PROJECTION_JITTER_SLIDER_COUNT) return DEFAULT_PROJECTION_JITTER_SCALE;
-#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
-  if (GetTemporalMode() == TemporalMode::ANALYTICAL_TAA) {
-    return runtime_projection_jitter_scales[static_cast<std::size_t>(path)].load(std::memory_order_acquire);
-  }
-  return DEFAULT_PROJECTION_JITTER_SCALE;
-#else
-  return DEFAULT_PROJECTION_JITTER_SCALE;
-#endif
-}
-
 inline uint64_t CurrentFrameToken() {
   return current_frame_token.load(std::memory_order_acquire);
 }
@@ -278,34 +176,29 @@ inline uint32_t CurrentSampleIndex() {
 
 inline std::array<float, 2> JitterForSample(uint32_t sample_index, uint32_t width, uint32_t height) {
   if (width == 0u || height == 0u) return {0.f, 0.f};
-  switch (GetJitterPattern()) {
-    case 0u:
-      return {0.f, 0.f};
-    default: {
-      const auto halton_sample = [](uint32_t index, uint32_t base) {
-        const float inverse_base = 1.f / static_cast<float>(base);
-        float fraction = inverse_base;
-        float result = 0.f;
-        while (index != 0u) {
-          result += static_cast<float>(index % base) * fraction;
-          index /= base;
-          fraction *= inverse_base;
-        }
-        return result;
-      };
-      // Native-resolution TAA uses ceil(8 * 1^2) = 8 phases. Skip Halton index
-      // zero because it is the unit-square origin rather than a distributed tap.
-      const uint32_t halton_index = (sample_index % runtime_jitter_phases.load(std::memory_order_acquire)) + 1u;
-      std::array<float, 2> result = {
-          halton_sample(halton_index, 2u) - 0.5f,
-          halton_sample(halton_index, 3u) - 0.5f,
-      };
-      // Matrix patching converts UV jitter to projection space by multiplying by two.
-      result[0] /= static_cast<float>(width);
-      result[1] /= static_cast<float>(height);
-      return result;
+
+  const auto halton_sample = [](uint32_t index, uint32_t base) {
+    const float inverse_base = 1.f / static_cast<float>(base);
+    float fraction = inverse_base;
+    float result = 0.f;
+    while (index != 0u) {
+      result += static_cast<float>(index % base) * fraction;
+      index /= base;
+      fraction *= inverse_base;
     }
-  }
+    return result;
+  };
+  // Native-resolution TAA uses ceil(8 * 1^2) = 8 phases. Skip Halton index
+  // zero because it is the unit-square origin rather than a distributed tap.
+  const uint32_t halton_index = (sample_index % runtime_jitter_phases.load(std::memory_order_acquire)) + 1u;
+  std::array<float, 2> result = {
+      halton_sample(halton_index, 2u) - 0.5f,
+      halton_sample(halton_index, 3u) - 0.5f,
+  };
+  // Matrix patching converts UV jitter to projection space by multiplying by two.
+  result[0] /= static_cast<float>(width);
+  result[1] /= static_cast<float>(height);
+  return result;
 }
 
 inline void ResetTemporalState() {

@@ -18,10 +18,12 @@
 
 #include "../../mods/shader.hpp"
 #include "../../utils/mutex.hpp"
+#include "lighting/environment_specular.hpp"
 #include "lighting/indirect/ambient_diffuse.hpp"
-#include "lighting/indirect/environment_specular.hpp"
 #include "lighting/indirect/runtime.hpp"
 #include "lighting/indirect/source_preparation.hpp"
+#include "lighting/reflections/native_chain.hpp"
+#include "lighting/reflections/runtime.hpp"
 #include "lighting/shadows/screen_space_shadows.hpp"
 #include "materials/capture.hpp"
 #include "materials/native/material_shaders.h"
@@ -71,6 +73,7 @@ namespace mgsv::game {
             mgsv::rendering::resource_upgrades::UpgradeDeferredSceneColorTarget(cmd_list);                     \
             mgsv::inputs::CaptureCompositeInputs(cmd_list);                                                    \
             mgsv::lighting::environment_specular::BeginComposite(cmd_list);                                    \
+            mgsv::lighting::reflections::Capture(cmd_list, *mgsv::lighting::material_inputs::controls);       \
             return true; },                               \
           .on_drawn = &mgsv::lighting::environment_specular::EndComposite, \
       },                                                                   \
@@ -98,7 +101,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
     ShaderInjectData constants = {};
     {
       const std::shared_lock lock(renodx::utils::mutex::global_mutex);
-      if (shader_injection->enhanced_shadows_enabled < 0.5f) return;
+      if (shader_injection->shadows_mode < 0.5f) return;
       constants = *shader_injection;
     }
     mgsv::shadows::screen_space::Begin(cmd_list, constants, light_type);
@@ -118,7 +121,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
     bool lighting_enabled = false;
     {
       const std::shared_lock lock(renodx::utils::mutex::global_mutex);
-      lighting_enabled = shader_injection->indirect_lighting_enabled >= 0.5f;
+      lighting_enabled = shader_injection->reflections_mode >= 0.5f;
     }
     mgsv::lighting::environment_specular::BeginCapture(cmd_list, lighting_enabled);
     return true;
@@ -139,7 +142,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
     bool lighting_enabled = false;
     {
       const std::shared_lock lock(renodx::utils::mutex::global_mutex);
-      lighting_enabled = shader_injection->indirect_lighting_enabled >= 0.5f;
+      lighting_enabled = shader_injection->reflections_mode >= 0.5f;
     }
     mgsv::lighting::temporal_inputs::CaptureScene(cmd_list);
     mgsv::lighting::environment_specular::BeginCapture(cmd_list, lighting_enabled);
@@ -188,7 +191,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
                 bool enabled;
                 {
                   const std::shared_lock lock(renodx::utils::mutex::global_mutex);
-                  enabled = shader_injection->indirect_lighting_enabled >= 0.5f;
+                  enabled = shader_injection->diffuse_lighting_mode >= 0.5f;
                 }
                 if (enabled) {
                   mgsv::lighting::ambient_diffuse::Capture(cmd_list);
@@ -206,7 +209,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
               .on_draw = [shader_injection](auto* cmd_list) {
                 {
                   const std::shared_lock lock(renodx::utils::mutex::global_mutex);
-                  if (shader_injection->indirect_lighting_enabled < 0.5f) return true;
+                  if (shader_injection->diffuse_lighting_mode < 0.5f) return true;
                 }
                 return mgsv::lighting::source_preparation::Begin(cmd_list); },
               .on_drawn = [shader_injection](auto* cmd_list) {
@@ -214,7 +217,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
                 bool enabled;
                 {
                   const std::shared_lock lock(renodx::utils::mutex::global_mutex);
-                  enabled = shader_injection->indirect_lighting_enabled >= 0.5f;
+                  enabled = shader_injection->diffuse_lighting_mode >= 0.5f;
                 }
                 if (enabled) {
                   mgsv::lighting::ambient_diffuse::OnDiffuseCopied(cmd_list, std::move(prepared));
@@ -373,14 +376,19 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
       {0xE82F8D58, local_shadow_shader(0xE82F8D58, __0xE82F8D58, 3u, false)},
       {0xFB8F891F, directional_shadow_shader(0xFB8F891F, __0xFB8F891F, true)},
 
-      {0xD6714838, {.crc32 = 0xD6714838, .code = __0xD6714838}},
-      {0xDC3A84C3, {.crc32 = 0xDC3A84C3, .code = __0xDC3A84C3, .on_draw = &mgsv::lighting::material_inputs::OnReflectionComposite, .on_drawn = &mgsv::lighting::material_inputs::EndReflections}},
-      // Correct ambient lighting and add GI before either scatter consumes it.
+      {0xD6714838, {.crc32 = 0xD6714838, .code = __0xD6714838, .on_draw = &mgsv::lighting::reflections::native_chain::OnTrace}},
+      {0xDC3A84C3, {.crc32 = 0xDC3A84C3, .code = __0xDC3A84C3, .on_draw = &mgsv::lighting::reflections::BeginComposite, .on_drawn = [](auto* cmd_list) { mgsv::lighting::reflections::EndComposite(cmd_list); mgsv::lighting::reflections::native_chain::OnResetCommandList(cmd_list); }}},
+      // Keep native motion packing and alpha tests. The recording callback
+      // upgrades velocity storage; the CPU upload fixes previous-position math.
+      {0x9815404F, {.crc32 = 0x9815404F, .on_inject = [](auto*) { return false; }}},
+      {0x58C10658, {.crc32 = 0x58C10658, .on_inject = [](auto*) { return false; }}},
+      {0xA13321B6, {.crc32 = 0xA13321B6, .on_inject = [](auto*) { return false; }}},
+      // Correct ambient lighting before native skin scattering. Keep the original
+      // scatter shader: the old horizontal port changes its normal and angle math.
       {
           0x6DAF0C4A,
           {
               .crc32 = 0x6DAF0C4A,
-              .code = __0x6DAF0C4A,
               .on_inject = [](auto*) { return false; },
               .on_draw = [shader_injection](auto* cmd_list) {
                 mgsv::lighting::ApplyLightPasses(cmd_list, *shader_injection);
@@ -408,18 +416,24 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
                                        .on_drawn = &mgsv::lighting::material_inputs::EndCapture,
                                    });
   }
-  // Retain these native variants and report their use once. The sortie floor
-  // trace uses the shared SSR fallback; the other color paths still need captures.
+  // Enhanced replaces both general and sortie-floor reflection traces. Shared
+  // filters are skipped only when they follow a canceled trace.
+  shaders.emplace(0xA621C684u, renodx::mods::shader::CustomShader{.crc32 = 0xA621C684u, .code = __0xA621C684, .on_inject = [](auto*) { return false; }, .on_draw = &mgsv::lighting::reflections::native_chain::OnTrace});
+  for (const uint32_t hash : {0xBC4665A3u, 0xB301C16Du}) {
+    shaders.emplace(hash, renodx::mods::shader::CustomShader{.crc32 = hash, .on_inject = [](auto*) { return false; }, .on_draw = &mgsv::lighting::reflections::native_chain::OnTrace});
+  }
+  for (const uint32_t hash : {0x7B69DE2Bu, 0xE135BBD1u, 0x051711F2u, 0xA8529A23u}) {
+    shaders.emplace(hash, renodx::mods::shader::CustomShader{.crc32 = hash, .on_inject = [](auto*) { return false; }, .on_draw = &mgsv::lighting::reflections::native_chain::OnFilter});
+  }
+  // Leave the native mask intact: it can precede selection of the planar path.
+  shaders.emplace(0x93B69040u, renodx::mods::shader::CustomShader{.crc32 = 0x93B69040u, .code = __0x93B69040, .on_draw = &mgsv::lighting::reflections::BeginComposite, .on_drawn = [](auto* cmd_list) { mgsv::lighting::reflections::EndComposite(cmd_list); mgsv::lighting::reflections::native_chain::OnResetCommandList(cmd_list); }});
+  // Unported composition programs report their use once for investigation.
   struct NativeVariant {
     uint32_t hash;
     const char* message;
     reshade::log::level level = reshade::log::level::warning;
   };
   static constexpr auto NATIVE_VARIANTS = std::to_array<NativeVariant>({
-      {.hash = 0xA621C684, .message = "MgsvLighting: LocalReflectionTPP 0xA621C684 observed; native floor reflections retained through shared SSR composition", .level = reshade::log::level::info},
-      {.hash = 0xBC4665A3, .message = "MgsvLighting: LocalReflectionTPPA1 0xBC4665A3 observed; native shader retained, color path unverified"},
-      {.hash = 0xB301C16D, .message = "MgsvLighting: LocalReflectionTPPA2 0xB301C16D observed; native shader retained, color path unverified"},
-      {.hash = 0x93B69040, .message = "MgsvLighting: LocalReflectionComposite 0x93B69040 observed; native shader retained, color path unverified"},
       {.hash = 0xEF64DAEB, .message = "MgsvLighting: DeferredRendering 0xEF64DAEB observed; native shader retained, color path unverified"},
       {.hash = 0xCAE40369, .message = "MgsvLighting: DeferredRendering_VolFog 0xCAE40369 observed; native shader retained, color path unverified"},
       {.hash = 0x4B10100E, .message = "MgsvLighting: DeferredRenderingTone 0x4B10100E observed; native shader retained, color path unverified"},

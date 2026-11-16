@@ -1,4 +1,4 @@
-#include "../indirect/compose/specular_composition.hlsli"
+#include "specular_composition.hlsli"
 #include "../../tonemap/tonemap.hlsli"
 
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:24 2026
@@ -59,8 +59,7 @@ Texture2D<float4> inOcclusion : register(t13);
 void main(
     float4 v0 : SV_Position0,
     float2 v1 : TEXCOORD0,
-    out float4 o0 : SV_Target0,
-    out float4 reflection_mask : SV_Target1) {
+    out float4 o0 : SV_Target0, out float4 reflection_environment : SV_Target1) {
   float4 r0, r1, r2, r3, r4, r5;
   uint4 bitmask, uiDest;
   float4 fDest;
@@ -106,17 +105,17 @@ void main(
   r3.xyz = r3.xyz;
   const float2 specular_uv = r0.xy;
   r0.x = inOcclusion.Sample(g_samplerLinear_Wrap_s, r0.xy).x;
-  const float3 specular_correction = GetEnvironmentSpecularCorrection(specular_uv, r0.x, r1.xyz, r3.xyz, r2.xyz);
+  const float3 specular_correction = GetEnvironmentSpecularCorrection(specular_uv, r0.x, r1.xyz, r3.xyz, r2.xyz, reflection_environment);
   r0.xyw = r0.xxx;
   r2.xyz = r3.xyz * r2.xyz;
   // Diffuse already has ambient-only AO; the correction separates specular below.
-  if (CUSTOM_MGSV_LIGHTING_ENABLED != 0.f) {
+  if (CUSTOM_MGSV_ENHANCED_DIFFUSE_LIGHTING != 0.f) {
     r0.xyw = r2.xyz + r1.xyz * r0.xyw;
   } else {
     r1.xyz = r2.xyz + r1.xyz;
     r0.xyw = r1.xyz * r0.xyw;
   }
-  if (CUSTOM_MGSV_LIGHTING_ENABLED != 0.0) {
+  if (CUSTOM_MGSV_ENHANCED_REFLECTIONS) {
     r0.xyw += specular_correction;
   }
   r0.xyw = r0.xyw;
@@ -128,6 +127,7 @@ void main(
   r0.z = g_psScene.m_fogParam[0].y + r0.z;
   r0.z = max(g_psScene.m_fogParam[0].z, r0.z);
   r1.xyz = min(g_psScene.m_fogParam[0].www, r0.zzz);
+  if (reflection_environment.a >= 0.0) reflection_environment *= 1.0 - saturate(r1.x);
   r2.xyz = -r0.xyw;
   r2.xyz = g_psScene.m_fogColor.xyz + r2.xyz;
   r1.xyz = r2.xyz * r1.xyz;
@@ -146,7 +146,8 @@ void main(
 
   float A = g_psObject.m_localParam[1].x, B = g_psObject.m_localParam[1].y, C = g_psObject.m_localParam[1].z, D = g_psObject.m_localParam[1].w;
   float E = g_psObject.m_localParam[2].x, F = g_psObject.m_localParam[2].y, W = g_psObject.m_localParam[2].z;
-  r1.rgb = ApplyUnchartedFilmicTonemap(r0.rgb, A, B, C, D, E, F, W);
+  // Lighting stays linear in RenoDX mode, independently of reflection settings.
+  r1.rgb = RENODX_TONE_MAP_TYPE != 0.0 ? r0.rgb : ApplyUnchartedFilmicTonemap(r0.rgb, A, B, C, D, E, F, W);
 
   r1.w = r1.w;
   o0.xyzw = r1.xyzw;
@@ -154,6 +155,7 @@ void main(
 #if FIX_UNORM_SRGB
   o0.rgb = renodx::color::srgb::Encode(max(0, o0.rgb));
 #endif
-  reflection_mask = specular_replacement_applied ? 1.0 : 0.0;
+  // A clipped vanilla tone curve is not recoverable linear radiance.
+  if (RENODX_TONE_MAP_TYPE == 0.0) reflection_environment.a = -1.0;
   return;
 }

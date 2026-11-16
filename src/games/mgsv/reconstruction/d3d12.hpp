@@ -6,11 +6,16 @@
 // Evaluation and output encoding then run together on the bridge's D3D12 queue.
 
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
+#include <shared_mutex>
+#include <span>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 #include <d3d11.h>
 #include <d3d12.h>
@@ -22,6 +27,7 @@
 #include "../rendering/d3d12_compute.hpp"
 #include "frame_inputs.hpp"
 #include "logging.hpp"
+#include "probe_api.hpp"
 #include "state.hpp"
 
 namespace mgsv::reconstruction::dx12 {
@@ -37,7 +43,7 @@ struct InputTexture {
 };
 
 struct Runtime {
-  std::unique_ptr<rendering::d3d12_bridge::Bridge> bridge;
+  rendering::d3d12_bridge::Bridge* bridge = nullptr;
   Microsoft::WRL::ComPtr<ID3D11ComputeShader> prepare;
   Microsoft::WRL::ComPtr<ID3D11Buffer> constants;
   InputTexture color;
@@ -55,23 +61,78 @@ struct Runtime {
 // the next input preparation from overwriting images D3D12 is still reading.
 static Runtime runtime;
 
+struct ProbeUpdate {
+  std::vector<uint8_t> code;
+  uint64_t revision = 0u;
+  bool restore = false;
+};
+struct ProbeState {
+  std::shared_mutex mutex;
+  ProbeUpdate pending;
+  probe::Status status;
+  // Only the rendering thread changes active bytes. Backend recreation can
+  // rebuild the selected shader without retaining an old graphics device.
+  std::vector<uint8_t> active_code;
+  bool report_submission = false;
+};
+static ProbeState probe_state;
+static std::atomic<bool> probe_pending = false;
+
+inline bool QueueProbeReload(const probe::Request* request, probe::Status* status) {
+  if (request == nullptr || status == nullptr
+      || (!request->restore && (request->code == nullptr || request->size == 0u || request->size > 16u * 1024u * 1024u))) return false;
+  try {
+    const std::unique_lock lock(probe_state.mutex);
+    if (request->expected_revision != probe_state.status.revision) return false;
+    std::vector<uint8_t> code;
+    if (!request->restore) {
+      code.assign(request->code, request->code + request->size);
+    }
+    probe_state.pending.code = std::move(code);
+    probe_state.pending.restore = request->restore;
+    probe_state.pending.revision = ++probe_state.status.revision;
+    probe_state.status.pending = true;
+    probe_state.status.error = {};
+    *status = probe_state.status;
+    probe_pending.store(true, std::memory_order_release);
+    return true;
+  } catch (...) {
+    return false;  // Never unwind an allocation failure through another DLL.
+  }
+}
+
+inline void ReadProbeStatus(probe::Status* status) {
+  if (status == nullptr) return;
+  const std::shared_lock lock(probe_state.mutex);
+  *status = probe_state.status;
+}
+
+inline void UseProbe(bool attach) {
+  if (attach) {
+    probe::shared.RegisterModule();
+    if (probe::shared.data == nullptr) return;
+    const std::unique_lock lock(probe::shared.data->mutex);
+    probe::shared.data->request = QueueProbeReload;
+    probe::shared.data->read = ReadProbeStatus;
+  } else if (probe::shared.data != nullptr) {
+    {
+      const std::unique_lock lock(probe::shared.data->mutex);
+      probe::shared.data->request = nullptr;
+      probe::shared.data->read = nullptr;
+    }
+    probe::shared.UnregisterModule();
+  }
+}
+
 inline rendering::d3d12_bridge::Bridge& GetBridge(ID3D11Device* device) {
-  if (runtime.bridge == nullptr) {
-    runtime.bridge = std::make_unique<rendering::d3d12_bridge::Bridge>(device);
-    logging::Info("created shared D3D12 reconstruction backend");
-  }
-  if (runtime.bridge->device_identity != rendering::d3d12_bridge::GetDeviceIdentity(device)) {
-    throw std::runtime_error("Reconstruction device changed without teardown");
-  }
+  runtime.bridge = &rendering::d3d12_bridge::Get(device);
   return *runtime.bridge;
 }
 
 // Size/model/method changes and teardown may wait; ordinary frames never wait on the
 // CPU. Do not release SDK histories until their last queued use has completed.
 inline void Drain() {
-  if (runtime.bridge != nullptr && !runtime.bridge->Drain()) {
-    throw std::runtime_error("D3D12 reconstruction is still in use; retaining resources");
-  }
+  rendering::d3d12_bridge::Drain();
 }
 
 inline void Destroy() {
@@ -141,7 +202,8 @@ template <typename Record>
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> prepare;
     Microsoft::WRL::ComPtr<ID3D11Buffer> constants;
     compute::Pipeline encode;
-    Check(device->CreateComputeShader(__prepare_reconstruction.data(), __prepare_reconstruction.size(), nullptr, &prepare), "Create reconstruction preparation shader");
+    const std::span<const uint8_t> code = (probe_state.active_code.empty() ? std::span<const uint8_t>(__prepare_reconstruction) : std::span<const uint8_t>(probe_state.active_code));
+    Check(device->CreateComputeShader(code.data(), code.size(), nullptr, &prepare), "Create reconstruction preparation shader");
     const D3D11_BUFFER_DESC description = {
         .ByteWidth = sizeof(PrepareConstants),
         .Usage = D3D11_USAGE_DYNAMIC,
@@ -174,14 +236,11 @@ template <typename Record>
 
   const PrepareConstants constants = {
       .current_jitter_uv = {inputs.camera.jitter_uv_x, inputs.camera.jitter_uv_y},
-      .velocity_projection_jitter_scale = state::GetProjectionJitterScale(state::ProjectionJitterPath::VELOCITY),
       .camera_reprojection_valid = !reset && inputs.camera.camera_reprojection_valid ? 1.f : 0.f,
+      .analytical_taa = (analytical ? 1.f : 0.f),
       .render_size = {inputs.render_width, inputs.render_height},
       .reciprocal_render_size = {1.f / static_cast<float>(inputs.render_width), 1.f / static_cast<float>(inputs.render_height)},
       .current_to_previous_clip = inputs.camera.current_to_previous_clip,
-      .previous_jitter_uv = {inputs.camera.previous_jitter_uv_x, inputs.camera.previous_jitter_uv_y},
-      .object_motion_mode = static_cast<float>(state::GetObjectMotionMode()),
-      .analytical_taa = (analytical ? 1.f : 0.f),
   };
   // Decode and prepare directly into shared textures, without a transfer copy.
   D3D11_MAPPED_SUBRESOURCE mapped = {};

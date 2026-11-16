@@ -18,18 +18,19 @@ The [render map](render-map.html) follows these owners through the native frame,
 | `rendering/resource_upgrades.hpp` | Shared precision upgrades, resource roles, clone activation, and scoped copies |
 | `rendering/d3d11_state.hpp`, `rendering/geometry.hlsli` | D3D11 state preservation and native geometry reconstruction |
 | `materials/capture.hpp`, `materials/native/` | Clean material/owner capture, native ports, and material registration inventory |
-| `materials/brdf.hlsli`, `materials/gtvbgi_brdf.cs_5_0.hlsl` | Native material decoding, GGX response, and one-time integration table |
+| `materials/brdf.hlsli`, `lighting/reflections/sssr_brdf.cs_6_6.hlsl` | Native material decoding, reciprocal GGX response, and one-time integration table; [material contracts](../materials/README.md) describe producers, palette fields, and conversion limits |
 | `lighting/native/` | Native direct/environment light ports |
 | `lighting/shadows/` | PCSS, Bend kernels, per-light state, batch atlas, native light-group hooks, and controls |
 | `lighting/indirect/runtime.hpp` | Combined resources, controls, input checks, scheduling, and dispatches |
 | `lighting/indirect/ambient_diffuse.hpp` | Native ambient snapshots and diffuse-copy observation |
 | `lighting/indirect/source_preparation.hpp`, `source_radiance.hlsli` | Shared outgoing diffuse radiance beside the native diffuse copy |
-| `lighting/indirect/environment_specular.hpp` | Environment capture, material lookup tables, and scoped composition inputs |
-| `lighting/indirect/trace/`, `denoise/`, `compose/` | Shared estimators, temporal/spatial filtering, diffuse application, specular results, and reflection handoff |
+| `lighting/environment_specular.hpp` | Shared environment capture, material lookup tables, and scoped composition inputs |
+| `lighting/indirect/trace/`, `denoise/`, `compose/` | Diffuse estimators, temporal/spatial filtering, and application; shared specular composition contracts |
+| `lighting/reflections/` | GGX screen/environment estimation, NRD history and native reflection-chain bypass |
 | `lighting/compose/` | Native deferred lighting/fog composition ports, including their early tone curves |
 | `sky/native/`, `water/native/`, `effects/` | Existing sky/cloud, ocean, and wormhole/sand-wind ports, not new rendering models |
-| `subsurface/`, `motion/`, `copy/` | Native skin scattering, velocity, and copy shaders |
-| `reconstruction/` | Methods, camera/sizing, backend lifecycle, submission, and output-sized post-processing support |
+| `copy/` | Native image-copy shader edits |
+| `reconstruction/` | Methods, native camera and motion precision, sizing, backend lifecycle, submission, and output-sized post-processing support |
 | `postprocess/`, `postprocess/bloom/` | Native DoF/motion-blur ports and bloom |
 | `tonemap/` | Two named late Tonemap/1DLUT shaders and shared curve/grading helpers |
 | `output/`, `UI/` | Display state, SDR/HDR encoding, and native UI compatibility |
@@ -44,17 +45,17 @@ Ownership tracking runs throughout the selected device's lifetime. One pinned ad
 
 Camera and motion capture, submitted lighting input pairs, reconstruction jobs, and post-processing routes carry the native scene ID and presentation generation. A worker serving a 512×512 rain capture cannot acquire the main view's enlarged output even when both use the same pooled scene texture. Immediate reconstruction and indirect-lighting dispatches restore the scope copied into their recorded job. UI without a scene can still use compatible presentation storage after its actual resource bindings are checked.
 
-The main path is camera/jitter setup and resource upgrades, native geometry/material data and motion, native AO, ambient/direct lighting, diffuse copy and source preparation, custom indirect lighting, both native skin scatters, deferred composition/fog, sky/forward effects, native reflections, ocean/remaining effects, exposure preparation, reconstruction, bloom/DoF/motion blur, late grading, FXAA, UI, and output encoding. Some phases are interleaved or conditional; this is not one fixed list of contiguous passes for every scene.
+The main path is camera/jitter setup and resource upgrades, native geometry/material data and motion, native AO, ambient/direct lighting, diffuse copy and source preparation, diffuse AO/GI, both native skin scatters, deferred composition/fog, sky/forward effects, reflections and their native composition, ocean/remaining effects, exposure preparation, reconstruction, bloom/DoF/motion blur, late grading, FXAA, UI, and output encoding. Some phases are interleaved or conditional; this is not one fixed list of contiguous passes for every scene.
 
-Custom indirect lighting runs after native diffuse copy `0xD71E843E` and before horizontal skin scatter `0x6DAF0C4A`. The horizontal replacement and original vertical shader `0xB2601810` each run once. Updating native diffuse before these consumers also keeps later brightness measurements consistent. The [lighting guide](../lighting/indirect/README.md#native-inputs-and-placement) describes the individual producer bindings and application equations.
+Custom indirect lighting runs after native diffuse copy `0xD71E843E` and before horizontal skin scatter `0x6DAF0C4A`. Both scatter stages use original game bytecode and run once; the horizontal callback supplies the insertion point without replacing that shader. The former horizontal port changed normal decoding and angle calculations. Updating native diffuse before these consumers also keeps later brightness measurements consistent. The [lighting guide](../lighting/indirect/README.md#native-inputs-and-placement) describes the individual producer bindings and application equations.
 
-Enhanced Shadows changes direct lighting inside native light draws, before indirect lighting. Deferred composition applies the screen/environment reflection split before fog and the early tone curve. Native SSR then preserves its contributing detail. A tone curve inside a sky, ocean, or material shader does not make that shader a late post-processing pass.
+Enhanced shadows change direct lighting inside native light draws, before indirect lighting. Deferred composition exports the replaceable environment and receiver fog transmission. DX12 reflections sample the late scene before native reflection composition, including visible sky and forward lighting. General and sortie-floor paths share one GGX estimator and NRD specular denoiser. The late compositor replaces environment light once in linear light. Enhanced skips redundant native traces and their dependent filters/copies; unavailable inputs retain environment. Vanilla restores native SSR. A tone curve inside a sky, ocean or material shader does not make that shader a late post-processing pass.
 
-Reconstruction's preferred insertion is before bloom preparation `0x72C1D157`. Geometry, lighting, and native SSR use render dimensions; later scene-color processing and UI use output dimensions. Routing checks the actual producer/resource role, not every use of a shared copy shader or every Draw2D shader. Native hardware depth/stencil and sampled geometry depth are separate consumers. See the [reconstruction contracts](../reconstruction/README.md#frame-and-resource-contracts).
+Reconstruction's preferred insertion is before bloom preparation `0x72C1D157`. Geometry, lighting, and reflections use render dimensions; later scene-color processing and UI use output dimensions. Routing checks the actual producer/resource role, not every use of a shared copy shader or every Draw2D shader. Native hardware depth/stencil and sampled geometry depth are separate consumers. See the [reconstruction contracts](../reconstruction/README.md#frame-and-resource-contracts).
 
 ## Shared layouts and color
 
-- `ShaderInjectData` contains 79 floats: 316 CPU bytes and 320 bytes after GPU alignment at `b13`. Shader controls use its defines in `shared.h`. Effect-local copies carry scale, history flags, filter spacing, and light type without modifying user settings.
+- `ShaderInjectData` contains 73 floats: 292 CPU bytes and 304 bytes after GPU alignment at `b13`. Shader controls use its defines in `shared.h`. Effect-local copies carry scale, history flags, filter spacing, and light type without modifying user settings.
 - Lighting reuses the native scatter pass's 64-byte geometry buffer at compute `b0`. Pixel `b0` has a different meaning. Temporal lighting uses current/previous native scene buffers at `b1/b2`; the reflected scene layout is 480 bytes. Preserve actual D3D11.1 buffer ranges when copying and restoring them.
 - FSR/DLSS share a 96-byte preparation layout. Post-processing copy helpers use their own 32-byte layout, not a second settings buffer.
 - Native albedo's sRGB view decodes color once. Diffuse/specular lighting and prepared outgoing diffuse are linear and pre-exposed. Later floating-point scene color may be encoded. Depth, normals, visibility, motion, ownership codes, and masks are data, not color.
@@ -68,7 +69,7 @@ Retained COM objects protect lifetime, not pixels. Native producers may overwrit
 
 The coordinator preserves native prefixes and remainders around custom work. Lighting consumes a diffuse-copy association once to avoid repeated application or history advancement on cached-list replay. Bend batches intentionally recompute masks on every replay from that execution's depth. Reconstruction cancellation fills the selected output from current native scene data before continuing the remainder. These different replay rules are deliberate.
 
-Immutable material lookup views may be reused directly. Mutable palette/Fresnel inputs require ordered GPU snapshots on each producer/replay. Their metadata belongs to the native specular accumulation allocation. Readiness and actual-composition masks remain separate: preparing a result does not prove a deferred pixel used it. Native surface writes and clears reset them in GPU order.
+Immutable palettes may be reused directly. Mutable palettes require ordered GPU snapshots on each producer/replay. The custom GGX path does not copy the native Fresnel lookup. Palette metadata belongs to the native specular accumulation allocation. A one-byte readiness image gates the paired reflection result. Native surface writes and clears reset readiness in GPU order. The old actual-composition mask is gone because native SSR no longer blends over custom output.
 
 Every feature restores displaced graphics/compute state, including empty bindings, shader class instances, render targets, depth/stencil, and D3D11.1 constant-buffer ranges. Release replaced views outside shared-map locks so destruction callbacks cannot reenter a held lock.
 
@@ -76,13 +77,14 @@ Explicit registrations precede generated entries and win duplicate keys. `on_inj
 
 ## D3D12 bridge
 
-DLSS, FSR, and Analytical TAA evaluate on one D3D12 device and direct queue. The game and native post-processing still run on D3D11. The BeforeBloom insertion, executed scene identity, jitter reservations, and output ownership remain unchanged.
+DLSS, FSR, Analytical TAA and stochastic reflections use one D3D12 device and direct queue. Each consumer owns a bounded command pool and descriptors. Reflection history uses scene-owned camera reservations and the native motion producer. `rendering/nrd.hpp` records the pinned SDK on that backend without NRI or another interop layer. Method switches preserve the shared backend. The game and native post-processing remain on D3D11; reconstruction insertion, executed scene identity and output ownership are unchanged.
 
 | File | Responsibility |
 |---|---|
 | `rendering/shared_texture.hpp` | Own each exported texture handle and cache its D3D12 import |
 | `rendering/d3d12_bridge.hpp` | Create the same-adapter device and queue, synchronize the APIs, and retire command slots |
 | `rendering/d3d12_compute.hpp` | Store per-slot descriptors and constants; create private textures and compute pipelines |
+| `lighting/reflections/runtime.hpp` | Prepare shared native inputs, record the complete reflection chain, and publish paired shared results |
 | `reconstruction/d3d12.hpp` | Prepare shared inputs, record a method's evaluation and encoding, and retain resources |
 | `reconstruction/coordinator.hpp` | Admit the executed scene, preserve D3D11 state, and commit history only after successful submission |
 | `reconstruction/analytical/`, `dlss/`, `fsr/` | Own each algorithm, its private history, and its SDK lifecycle |

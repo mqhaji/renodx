@@ -162,7 +162,7 @@ inline bool OnClearRenderTarget(reshade::api::command_list* cmd_list, reshade::a
 inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& settings, uint32_t light_type) {
   if (cmd_list == nullptr || light_type >= 5u || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return;
   const uint32_t light_group = (light_type >= 3u ? light_type - 2u : light_type);
-  if (settings.enhanced_shadows_enabled < 0.5f) return;
+  if (settings.shadows_mode < 0.5f) return;
   auto* state = cmd_list->get_private_data<DrawState>();
   auto* device_state = cmd_list->get_device()->get_private_data<DeviceState>();
   if (state == nullptr || state->active) return;

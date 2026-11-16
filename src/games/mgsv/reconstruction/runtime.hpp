@@ -146,7 +146,7 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list, [[maybe_unused]] co
                                                                              ? std::array<float, 2>{camera.jitter_uv_x, camera.jitter_uv_y}
                                                                              : std::array<float, 2>{}),
                                                     .velocity_projection_jitter_scale = (reconstruction_enabled
-                                                                                             ? runtime::state::GetProjectionJitterScale(runtime::state::ProjectionJitterPath::VELOCITY)
+                                                                                             ? 1.f
                                                                                              : 0.f),
                                                     .camera_publication = (reconstruction_enabled ? camera.publication_sequence : 0u),
                                                     .camera_generation = (reconstruction_enabled ? camera.reset_generation : 0u),
@@ -259,14 +259,11 @@ struct State {
   renodx::utils::settings::Setting* upscaling_quality_setting = nullptr;
   // Float-backed CPU preferences adapt Setting::binding's float*; runtime normalizes enum choices.
   float dlss_model = static_cast<float>(dlss::DEFAULT_MODEL);
-  float jitter_pattern = static_cast<float>(state::DEFAULT_JITTER_PATTERN);
+
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
   float diagnostic_view = state::DEFAULT_DIAGNOSTIC_VIEW;
   float velocity_visualization_range = state::DEFAULT_VELOCITY_VISUALIZATION_RANGE;
-  float object_motion_mode = static_cast<float>(state::DEFAULT_OBJECT_MOTION_MODE);
-#endif
-#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
-  std::array<float, state::PROJECTION_JITTER_SLIDER_COUNT> projection_jitter_scales = state::DEFAULT_PROJECTION_JITTER_SCALES;
+
 #endif
   float clip_tightness = state::DEFAULT_CLIP_TIGHTNESS;
   float history_clip_strength = state::DEFAULT_HISTORY_CLIP_STRENGTH;
@@ -377,18 +374,11 @@ inline void TransitionTemporalMode(
   if (unavailable_reason != nullptr && settings_state.temporal_mode_setting != nullptr) {
     settings_state.temporal_mode_setting->Set(static_cast<float>(state::TemporalMode::OFF))->Write();
   }
-  const float jitter_pattern = settings_state.jitter_pattern;
 
   const bool enabled = mode != state::TemporalMode::OFF;
-  const bool sdk_reconstruction = mode == state::TemporalMode::AMD_FSR
-                                  || mode == state::TemporalMode::NVIDIA_DLSS;
-  const uint32_t effective_jitter_pattern = (sdk_reconstruction
-                                                 ? 1u
-                                                 : static_cast<uint32_t>(std::clamp(jitter_pattern, 0.f, 1.f)));
   const auto previous_mode = state::GetTemporalMode();
   const bool was_enabled = previous_mode != state::TemporalMode::OFF;
   if (previous_mode == mode
-      && (!enabled || effective_jitter_pattern == state::GetJitterPattern())
       && !force_reset) {
     return;
   }
@@ -413,9 +403,6 @@ inline void TransitionTemporalMode(
   const coordinator::ExecutionGuard execution_guard;
   if (mode == state::TemporalMode::NVIDIA_DLSS && !dlss::runtime_ready.load(std::memory_order_acquire)) return;
   const camera_state::PublicationWriterGuard publication_guard;
-  if (enabled) {
-    state::SetJitterPattern(effective_jitter_pattern);
-  }
   coordinator::ResetTemporalStateWithPublicationLocked(reason);
   if (enabled) {
     projection_jitter::CancelProductionRestorationCheck();
@@ -429,35 +416,12 @@ inline void TransitionTemporalMode(
     logging::Info("temporal reconstruction selected mode=", option->label,
                   " reason=", reason,
                   " frame=", transition_frame,
-                  " jitter_pattern=", effective_jitter_pattern == 0u ? "off" : "halton_8");
+                  " jitter_pattern=halton_2_3");
   } else {
     logging::Info("temporal reconstruction disabled reason=", reason,
                   " frame=", transition_frame,
                   " reserved_samples=", reserved_samples);
   }
-}
-
-inline void TransitionJitterPattern(float value) {
-  const RuntimeTransitionGuard transition_guard;
-
-  const uint32_t preference = static_cast<uint32_t>(std::clamp(value, 0.f, 1.f));
-  const auto mode = state::GetTemporalMode();
-  const bool sdk_reconstruction = mode == state::TemporalMode::AMD_FSR
-                                  || mode == state::TemporalMode::NVIDIA_DLSS;
-  const uint32_t effective_pattern = (sdk_reconstruction
-                                          ? 1u
-                                          : preference);
-  if (effective_pattern == state::GetJitterPattern()) return;
-
-  // Resolve already uses execution -> publication ordering when committing
-  // matrix history. Preserve that order so the hook cannot publish a sample
-  // from the previous pattern while history/sample state is being reset.
-  const coordinator::ExecutionGuard execution_guard;
-  const camera_state::PublicationWriterGuard publication_guard;
-  state::SetJitterPattern(effective_pattern);
-  coordinator::ResetTemporalStateWithPublicationLocked("jitter pattern changed");
-
-  logging::Info("TAA jitter pattern changed pattern=", effective_pattern);
 }
 
 inline void TransitionDlssModel(float value, const char* reason) {
@@ -479,37 +443,18 @@ inline void InvalidateHistoryForSetting(const char* reason) {
   coordinator::ResetTemporalState(reason);
 }
 
-#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
-inline void SetProjectionJitterScale(
-    state::ProjectionJitterPath path,
-    float value,
-    const char* reason) {
-  if (static_cast<std::size_t>(path) >= state::PROJECTION_JITTER_SLIDER_COUNT) return;
-  const RuntimeTransitionGuard transition_guard;
-  const coordinator::ExecutionGuard execution_guard;
-  const camera_state::PublicationWriterGuard publication_guard;
-  if (state::runtime_projection_jitter_scales[static_cast<std::size_t>(path)].load(std::memory_order_acquire)
-      == std::clamp(value, -2.f, 2.f)) return;
-  state::SetProjectionJitterScale(path, value);
-  coordinator::ResetTemporalStateWithPublicationLocked(reason);
-}
-#endif
-
 inline void ApplySettingsSnapshot(const settings::State& settings_state) {
   struct BindingSnapshot {
     float temporal_mode = 0.f;
     float dlss_model = 0.f;
-    float jitter_pattern = 0.f;
+
     float clip_tightness = 0.f;
     float history_clip_strength = 0.f;
     float current_frame_blend = 0.f;
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
     float diagnostic_view = 0.f;
     float velocity_visualization_range = 0.f;
-    float object_motion_mode = 0.f;
-#endif
-#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
-    std::array<float, state::PROJECTION_JITTER_SLIDER_COUNT> projection_jitter_scales = {};
+
 #endif
   };
 
@@ -520,26 +465,22 @@ inline void ApplySettingsSnapshot(const settings::State& settings_state) {
                                   ? static_cast<float>(state::TemporalMode::OFF)
                                   : settings_state.temporal_mode_setting->GetValue());
     snapshot.dlss_model = settings_state.dlss_model;
-    snapshot.jitter_pattern = settings_state.jitter_pattern;
+
     snapshot.clip_tightness = settings_state.clip_tightness;
     snapshot.history_clip_strength = settings_state.history_clip_strength;
     snapshot.current_frame_blend = settings_state.current_frame_blend;
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
     snapshot.diagnostic_view = settings_state.diagnostic_view;
     snapshot.velocity_visualization_range = settings_state.velocity_visualization_range;
-    snapshot.object_motion_mode = settings_state.object_motion_mode;
+
 #endif
   }
 
   TransitionDlssModel(snapshot.dlss_model, "DLSS model synchronized");
   TransitionTemporalMode(settings_state, snapshot.temporal_mode, "temporal mode synchronized");
-  TransitionJitterPattern(snapshot.jitter_pattern);
-  // Re-read projection preferences while holding the settings lock: a callback
-  // may have superseded the earlier snapshot during the mode transitions.
+
+  // Keep settings callbacks and temporal resets in their established lock order.
   const std::unique_lock settings_lock(renodx::utils::mutex::global_mutex);
-#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
-  snapshot.projection_jitter_scales = settings_state.projection_jitter_scales;
-#endif
   const RuntimeTransitionGuard transition_guard;
   const coordinator::ExecutionGuard execution_guard;
   const camera_state::PublicationWriterGuard publication_guard;
@@ -552,20 +493,7 @@ inline void ApplySettingsSnapshot(const settings::State& settings_state) {
   history_settings_changed = history_settings_changed
                              || state::GetDiagnosticView()
                                     != static_cast<float>(static_cast<uint32_t>(
-                                        std::clamp(snapshot.diagnostic_view, 0.f, 10.f)))
-                             || state::GetObjectMotionMode()
-                                    != static_cast<uint32_t>(
-                                        std::clamp(snapshot.object_motion_mode, 0.f, 7.f));
-#endif
-#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
-  if (state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA) {
-    for (std::size_t index = 0u; index < snapshot.projection_jitter_scales.size(); ++index) {
-      history_settings_changed = history_settings_changed
-                                 || state::GetProjectionJitterScale(
-                                        static_cast<state::ProjectionJitterPath>(index))
-                                        != std::clamp(snapshot.projection_jitter_scales[index], -2.f, 2.f);
-    }
-  }
+                                        std::clamp(snapshot.diagnostic_view, 0.f, 10.f)));
 #endif
   state::SetClipTightness(snapshot.clip_tightness);
   state::SetHistoryClipStrength(snapshot.history_clip_strength);
@@ -573,14 +501,7 @@ inline void ApplySettingsSnapshot(const settings::State& settings_state) {
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
   state::SetDiagnosticView(snapshot.diagnostic_view);
   state::SetVelocityVisualizationRange(snapshot.velocity_visualization_range);
-  state::SetObjectMotionMode(snapshot.object_motion_mode);
-#endif
-#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
-  for (std::size_t index = 0u; index < snapshot.projection_jitter_scales.size(); ++index) {
-    state::SetProjectionJitterScale(
-        static_cast<state::ProjectionJitterPath>(index),
-        snapshot.projection_jitter_scales[index]);
-  }
+
 #endif
   if (history_settings_changed) {
     coordinator::ResetTemporalStateWithPublicationLocked("settings synchronized");
@@ -832,7 +753,7 @@ inline void Use(DWORD fdw_reason, const settings::State& settings_state) {
       const auto* option = transitions::FindTemporalModeOption(state::GetTemporalMode());
       logging::Info("initial temporal state enabled=", logging::Bool{state::IsEnabled()},
                     " mode=", option == nullptr ? "unknown" : option->label,
-                    " jitter_pattern=", state::GetJitterPattern() == 0u ? "off" : "halton_2_3");
+                    " jitter_pattern=halton_2_3");
       logging::Info("DLSS startup=vendor-only; DLL inspection, NGX and hooks are selection-driven");
       projection_jitter::Use(fdw_reason);
       resolution::Use(fdw_reason);

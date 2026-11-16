@@ -18,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <span>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -205,6 +206,7 @@ inline void Destroy(reshade::api::device* device) {
   dlss::Destroy(device);
   fsr::Destroy();
   dx12::Destroy();
+  rendering::d3d12_bridge::Destroy();
   post_process::Reset(true);
   submission_failure_pending.store(false, std::memory_order_release);
   runtime_device = nullptr;
@@ -273,6 +275,56 @@ inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
                                                  previous.current_view_projection, camera.inverse_view_projection))
                                            : std::array<float, 16>{});
   }
+  if (dx12::probe_pending.load(std::memory_order_acquire)) {
+    dx12::ProbeUpdate update;
+    {
+      const std::unique_lock lock(dx12::probe_state.mutex);
+      update = std::move(dx12::probe_state.pending);
+      dx12::probe_state.pending = {};
+      dx12::probe_pending.store(false, std::memory_order_release);
+    }
+    try {
+      const std::span<const uint8_t> code = (update.restore ? std::span<const uint8_t>(__prepare_reconstruction) : std::span<const uint8_t>(update.code));
+      Microsoft::WRL::ComPtr<ID3D11ComputeShader> replacement;
+      auto* native = reinterpret_cast<ID3D11Device*>(inputs.device->get_native());  // NOLINT(performance-no-int-to-ptr)
+      dx12::Check(native->CreateComputeShader(code.data(), code.size(), nullptr, &replacement), "Create live reconstruction preparation");
+      // D3D11 retains the shader in already recorded/queued commands. This
+      // replaces one preparation dispatch, without changing DX12 resources.
+      if (dx12::runtime.prepare != nullptr) {
+        dx12::runtime.prepare = std::move(replacement);
+      }
+      dx12::probe_state.active_code = std::move(update.code);
+      // Input changes seed new SDK history without resetting the native scene,
+      // camera sample, or resource pool. The first changed frame is transient.
+      analytical::InvalidateHistory("probe reconstruction inputs changed");
+      dlss::InvalidateHistory();
+      fsr::InvalidateHistory();
+      {
+        const std::unique_lock lock(dx12::probe_state.mutex);
+        auto& status = dx12::probe_state.status;
+        status.active_revision = update.revision;
+        status.live = !dx12::probe_state.active_code.empty();
+        status.pending = dx12::probe_pending.load(std::memory_order_acquire);
+        if (status.revision == update.revision) {
+          status.error = {};
+        }
+      }
+      dx12::probe_state.report_submission = true;
+      logging::Info("probe reconstruction inputs changed; SDK history restarted");
+    } catch (const std::exception& error) {
+      {
+        const std::unique_lock lock(dx12::probe_state.mutex);
+        auto& status = dx12::probe_state.status;
+        if (status.revision == update.revision) {
+          const size_t message_size = std::min(std::strlen(error.what()), status.error.size() - 1u);
+          std::copy_n(error.what(), message_size, status.error.data());
+          status.error[message_size] = '\0';
+        }
+        status.pending = dx12::probe_pending.load(std::memory_order_acquire);
+      }
+      logging::Warn("probe reconstruction update rejected: ", error.what());
+    }
+  }
   if (!inputs.camera.camera_reprojection_valid) {
     analytical::InvalidateHistory("scene history is not consecutive");
     dlss::InvalidateHistory();
@@ -324,6 +376,11 @@ inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
     return false;
   }
 
+  if (dx12::probe_state.report_submission) {
+    const std::unique_lock lock(dx12::probe_state.mutex);
+    dx12::probe_state.status.submitted_revision = dx12::probe_state.status.active_revision;
+    dx12::probe_state.report_submission = false;
+  }
   if (!camera_state::Commit(inputs.camera)) {
     ResetTemporalState("native camera matrix commit failed");
     logging::Warn("temporal native camera matrix commit failed");

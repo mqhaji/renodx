@@ -47,16 +47,19 @@
 #include "../../utils/shader.hpp"
 #include "../../utils/state.hpp"
 #include "../../utils/swapchain.hpp"
+#include "lighting/environment_specular.hpp"
 #include "lighting/indirect/ambient_diffuse.hpp"
-#include "lighting/indirect/environment_specular.hpp"
 #include "lighting/indirect/runtime.hpp"
 #include "lighting/indirect/source_preparation.hpp"
+#include "lighting/reflections/native_chain.hpp"
+#include "lighting/reflections/runtime.hpp"
 #include "lighting/shadows/screen_space_shadows.hpp"
 #include "lighting/shadows/settings.hpp"
 #include "materials/capture.hpp"
 #include "output/output.hpp"
 #include "postprocess/bloom/bloom.hpp"
 #include "reconstruction/coordinator.hpp"
+#include "reconstruction/d3d12.hpp"
 #include "reconstruction/input_capture.hpp"
 #include "reconstruction/logging.hpp"
 #include "reconstruction/postprocess/resources.hpp"
@@ -83,6 +86,15 @@ renodx::mods::shader::CustomShaders custom_shaders = mgsv::game::CreateShaders(&
 
 constexpr auto ADDON_SETTINGS = [](reshade::api::effect_runtime* /*runtime*/) {
   if (!ImGui::TreeNode("Third-Party Licenses")) return;
+  if (ImGui::TreeNode("NVIDIA Real-Time Denoisers (NRD)")) {
+    ImGui::PushTextWrapPos();
+    ImGui::TextUnformatted(
+        "NRD 4.18.0. Copyright (c) 2022 NVIDIA CORPORATION.\n"
+        "Distributed under the NVIDIA RTX SDK license. See NRD_LICENSE.txt supplied with NRD.dll.\n"
+        "https://github.com/NVIDIA-RTX/NRD/blob/v4.18.0/LICENSE.txt");
+    ImGui::PopTextWrapPos();
+    ImGui::TreePop();
+  }
   if (ImGui::TreeNode("EA FAST Noise (BSD-3-Clause)")) {
     ImGui::PushTextWrapPos();
     ImGui::TextUnformatted(R"license(Copyright (c) 2023 Electronic Arts Inc. All rights reserved.
@@ -401,8 +413,9 @@ void OnPresent(
   uint32_t shadow_noise_frame = 0u;
   {
     const std::shared_lock settings_lock(renodx::utils::mutex::global_mutex);
-    lighting_enabled = shader_injection.indirect_lighting_enabled >= 0.5f;
-    temporal_lighting_enabled = lighting_enabled && shader_injection.lighting_temporal_enabled >= 0.5f;
+    lighting_enabled = shader_injection.diffuse_lighting_mode >= 0.5f || shader_injection.reflections_mode >= 0.5f;
+    temporal_lighting_enabled = shader_injection.reflections_mode >= 0.5f
+                                || (shader_injection.diffuse_lighting_mode >= 0.5f && shader_injection.lighting_temporal_enabled >= 0.5f);
   }
   {
     const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
@@ -453,6 +466,7 @@ void OnDestroyDevice(reshade::api::device* device) {
   const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
   if (!mgsv::inputs::IsSelectedDevice(device)) return;
   mgsv::rendering::native_context::Shutdown();
+  mgsv::lighting::reflections::Destroy();
   mgsv::inputs::OnDestroyDevice(device);
   mgsv::lighting::environment_specular::Reset();
   mgsv::lighting::material_inputs::Reset();
@@ -522,7 +536,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
             "Tone Mapping",
             "Color Grading",
             "Effects",
-            "Shadows",
+            "Direct Lighting",
             "Indirect Lighting",
             "Options",
             "Links",
@@ -565,6 +579,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   renodx::utils::shader::Use(fdw_reason);
   renodx::utils::state::Use(fdw_reason);
   if (fdw_reason == DLL_PROCESS_ATTACH) {
+    mgsv::lighting::reflections::UseProbe(true);
+    mgsv::reconstruction::dx12::UseProbe(true);
     reshade::register_event<reshade::addon_event::init_device>(mgsv::shadows::screen_space::OnInitDevice);
     reshade::register_event<reshade::addon_event::destroy_device>(mgsv::shadows::screen_space::OnDestroyDevice);
     reshade::register_event<reshade::addon_event::init_command_list>(mgsv::shadows::screen_space::OnInitCommandList);
@@ -582,6 +598,14 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     reshade::register_event<reshade::addon_event::reset_command_list>(mgsv::lighting::environment_specular::OnResetCommandList);
     reshade::register_event<reshade::addon_event::reset_command_list>(mgsv::lighting::material_inputs::OnResetCommandList);
     reshade::register_event<reshade::addon_event::reset_command_list>(mgsv::lighting::source_preparation::OnResetCommandList);
+    reshade::register_event<reshade::addon_event::init_command_list>(mgsv::lighting::reflections::native_chain::OnInitCommandList);
+    reshade::register_event<reshade::addon_event::init_command_list>(mgsv::lighting::reflections::OnInitCommandList);
+    reshade::register_event<reshade::addon_event::destroy_command_list>(mgsv::lighting::reflections::native_chain::OnDestroyCommandList);
+    reshade::register_event<reshade::addon_event::destroy_command_list>(mgsv::lighting::reflections::OnDestroyCommandList);
+    reshade::register_event<reshade::addon_event::reset_command_list>(mgsv::lighting::reflections::native_chain::OnResetCommandList);
+    reshade::register_event<reshade::addon_event::reset_command_list>(mgsv::lighting::reflections::OnResetCommandList);
+    reshade::register_event<reshade::addon_event::copy_resource>(mgsv::lighting::reflections::native_chain::OnCopyResource);
+    reshade::register_event<reshade::addon_event::copy_texture_region>(mgsv::lighting::reflections::native_chain::OnCopyTexture);
     reshade::register_event<reshade::addon_event::destroy_command_list>(mgsv::lighting::environment_specular::OnDestroyCommandList);
     reshade::register_event<reshade::addon_event::destroy_command_list>(mgsv::lighting::material_inputs::OnDestroyCommandList);
     reshade::register_event<reshade::addon_event::destroy_command_list>(mgsv::lighting::source_preparation::OnDestroyCommandList);
@@ -599,6 +623,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     reshade::register_event<reshade::addon_event::reset_command_list>(mgsv::rendering::resource_upgrades::OnResetBloomCommandList);
     reshade::register_event<reshade::addon_event::push_descriptors>(mgsv::inputs::descriptor_tracker::OnPushDescriptors);
   } else if (fdw_reason == DLL_PROCESS_DETACH) {
+    mgsv::lighting::reflections::UseProbe(false);
+    mgsv::reconstruction::dx12::UseProbe(false);
     reshade::unregister_event<reshade::addon_event::init_device>(mgsv::shadows::screen_space::OnInitDevice);
     reshade::unregister_event<reshade::addon_event::destroy_device>(mgsv::shadows::screen_space::OnDestroyDevice);
     reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::shadows::screen_space::OnInitCommandList);
@@ -616,6 +642,14 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     reshade::unregister_event<reshade::addon_event::reset_command_list>(mgsv::lighting::environment_specular::OnResetCommandList);
     reshade::unregister_event<reshade::addon_event::reset_command_list>(mgsv::lighting::material_inputs::OnResetCommandList);
     reshade::unregister_event<reshade::addon_event::reset_command_list>(mgsv::lighting::source_preparation::OnResetCommandList);
+    reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::lighting::reflections::native_chain::OnInitCommandList);
+    reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::lighting::reflections::OnInitCommandList);
+    reshade::unregister_event<reshade::addon_event::destroy_command_list>(mgsv::lighting::reflections::native_chain::OnDestroyCommandList);
+    reshade::unregister_event<reshade::addon_event::destroy_command_list>(mgsv::lighting::reflections::OnDestroyCommandList);
+    reshade::unregister_event<reshade::addon_event::reset_command_list>(mgsv::lighting::reflections::native_chain::OnResetCommandList);
+    reshade::unregister_event<reshade::addon_event::reset_command_list>(mgsv::lighting::reflections::OnResetCommandList);
+    reshade::unregister_event<reshade::addon_event::copy_resource>(mgsv::lighting::reflections::native_chain::OnCopyResource);
+    reshade::unregister_event<reshade::addon_event::copy_texture_region>(mgsv::lighting::reflections::native_chain::OnCopyTexture);
     reshade::unregister_event<reshade::addon_event::destroy_command_list>(mgsv::lighting::environment_specular::OnDestroyCommandList);
     reshade::unregister_event<reshade::addon_event::destroy_command_list>(mgsv::lighting::material_inputs::OnDestroyCommandList);
     reshade::unregister_event<reshade::addon_event::destroy_command_list>(mgsv::lighting::source_preparation::OnDestroyCommandList);

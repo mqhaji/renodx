@@ -20,7 +20,7 @@
 
 #include "../../../utils/data.hpp"
 #include "../../../utils/mutex.hpp"
-#include "../lighting/indirect/compose/specular_result.hpp"
+#include "../lighting/reflections/result.hpp"
 #include "../rendering/inputs.hpp"
 #include "../shared.h"
 
@@ -82,8 +82,6 @@ struct __declspec(uuid("48FB7998-7A69-4399-98F5-429824095270")) DrawState {
   std::array<float, 4> blend_factor = {};
   UINT sample_mask = UINT32_MAX;
   bool active = false;
-  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> reflection_input;
-  bool reflection_active = false;
 };
 
 inline std::shared_ptr<Target> Read(reshade::api::device* device, ID3D11Resource* albedo) {
@@ -148,7 +146,7 @@ inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
   if (controls == nullptr || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return true;
   {
     const std::shared_lock lock(renodx::utils::mutex::global_mutex);
-    if (controls->indirect_lighting_enabled < 0.5f) return true;
+    if (controls->diffuse_lighting_mode < 0.5f && controls->reflections_mode < 0.5f) return true;
   }
   const auto selected = inputs::ReadSelection(cmd_list->get_device());
   auto* saved = cmd_list->get_private_data<DrawState>();
@@ -275,7 +273,7 @@ inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
       return entry.BlendEnable == FALSE && entry.RenderTargetWriteMask == D3D11_COLOR_WRITE_ENABLE_ALL;
     });
     description.IndependentBlendEnable = TRUE;
-    for (size_t index = native_count; index < native_count + 4u; ++index) {
+    for (size_t index = native_count; index < native_count + 3u; ++index) {
       description.RenderTarget[index] = {.BlendEnable = FALSE, .SrcBlend = D3D11_BLEND_ONE, .DestBlend = D3D11_BLEND_ZERO, .BlendOp = D3D11_BLEND_OP_ADD, .SrcBlendAlpha = D3D11_BLEND_ONE, .DestBlendAlpha = D3D11_BLEND_ZERO, .BlendOpAlpha = D3D11_BLEND_OP_ADD, .RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL};
     }
     if (FAILED(device->CreateBlendState(&description, &blend.capture))) return true;
@@ -355,6 +353,7 @@ inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
         .SampleDesc = {.Count = 1u},
         .Usage = D3D11_USAGE_DEFAULT,
         .BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+        .MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE,
     };
     const std::array<float, 4> empty = {};
     for (auto& image : created->images) {
@@ -364,9 +363,28 @@ inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
         report_failure();
         return true;
       }
+      image.shared = rendering::ExportTexture(image.texture.Get());
+      if (image.shared == nullptr) {
+        report_failure();
+        return true;
+      }
     }
-    description.Format = DXGI_FORMAT_R8_UNORM;
     description.BindFlags |= D3D11_BIND_RENDER_TARGET;
+    if (FAILED(device->CreateTexture2D(&description, nullptr, &created->environment.texture))
+        || FAILED(device->CreateRenderTargetView(created->environment.texture.Get(), nullptr, &created->environment.rtv))
+        || FAILED(device->CreateShaderResourceView(created->environment.texture.Get(), nullptr, &created->environment.srv))) {
+      report_failure();
+      return true;
+    }
+    created->environment.shared = rendering::ExportTexture(created->environment.texture.Get());
+    if (created->environment.shared == nullptr) {
+      report_failure();
+      return true;
+    }
+    const std::array<float, 4> unavailable = {0.f, 0.f, 0.f, -1.f};
+    context->ClearRenderTargetView(created->environment.rtv.Get(), unavailable.data());
+    description.MiscFlags = 0u;
+    description.Format = DXGI_FORMAT_R8_UNORM;
     if (FAILED(device->CreateTexture2D(&description, nullptr, &created->ready.texture))
         || FAILED(device->CreateRenderTargetView(created->ready.texture.Get(), nullptr, &created->ready.rtv))
         || FAILED(device->CreateShaderResourceView(created->ready.texture.Get(), nullptr, &created->ready.srv))
@@ -375,14 +393,6 @@ inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
       return true;
     }
     context->ClearRenderTargetView(created->ready.rtv.Get(), empty.data());
-    description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(device->CreateTexture2D(&description, nullptr, &created->composed.texture))
-        || FAILED(device->CreateRenderTargetView(created->composed.texture.Get(), nullptr, &created->composed.rtv))
-        || FAILED(device->CreateShaderResourceView(created->composed.texture.Get(), nullptr, &created->composed.srv))) {
-      report_failure();
-      return true;
-    }
-    context->ClearRenderTargetView(created->composed.rtv.Get(), empty.data());
     std::shared_ptr<specular_result::Target> retired;
     specular_result::targets.lazy_emplace_l(resources[native_count - 1u], [&](auto& entry) {
       auto& [native_material, capture] = entry;
@@ -411,10 +421,9 @@ inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
   bound[native_count] = target->color_rtv.Get();
   bound[native_count + 1u] = target->owner_rtv.Get();
   bound[native_count + 2u] = result->ready.rtv.Get();
-  bound[native_count + 3u] = result->composed.rtv.Get();
   // Reset one byte of readiness instead of overwriting HDR reflection RGB.
-  // GPU ordering still keeps native reflections when the lighting chain fails.
-  context->OMSetRenderTargets(native_count + 4u, bound.data(), saved->depth.Get());
+  // GPU ordering keeps old reflection pixels from surviving a failed dispatch.
+  context->OMSetRenderTargets(native_count + 3u, bound.data(), saved->depth.Get());
   context->OMSetBlendState(blend.capture.Get(), saved->blend_factor.data(), saved->sample_mask);
   const std::array<ID3D11ShaderResourceView*, 3> inputs = {
       rain ? rain_source->color_srv.Get() : nullptr,
@@ -455,45 +464,17 @@ inline void EndCapture(reshade::api::command_list* cmd_list) {
   *saved = {};
 }
 
-inline bool OnReflectionComposite(reshade::api::command_list* cmd_list) {
-  auto* saved = cmd_list->get_private_data<DrawState>();
-  if (saved == nullptr || saved->reflection_active) return true;
-  auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
-  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> material;
-  Microsoft::WRL::ComPtr<ID3D11Resource> resource;
-  context->PSGetShaderResources(2u, 1u, &material);
-  if (material != nullptr) {
-    material->GetResource(&resource);
-  }
-  const auto result = specular_result::Read(cmd_list->get_device(), resource.Get());
-  auto* view = (result != nullptr ? result->composed.srv.Get() : nullptr);
-  context->PSGetShaderResources(20u, 1u, &saved->reflection_input);
-  context->PSSetShaderResources(20u, 1u, &view);
-  saved->reflection_active = true;
-  return true;
-}
-
-inline void EndReflections(reshade::api::command_list* cmd_list) {
-  auto* saved = cmd_list->get_private_data<DrawState>();
-  if (saved == nullptr || !saved->reflection_active) return;
-  auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
-  context->PSSetShaderResources(20u, 1u, saved->reflection_input.GetAddressOf());
-  saved->reflection_input.Reset();
-  saved->reflection_active = false;
-}
-
 inline bool OnClearRenderTarget(reshade::api::command_list* cmd_list, reshade::api::resource_view rtv,
                                 const float* color, uint32_t rect_count, const reshade::api::rect* rects) {
   if (rtv.handle == 0u || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return false;
   Microsoft::WRL::ComPtr<ID3D11Resource> resource;
   reinterpret_cast<ID3D11RenderTargetView*>(rtv.handle)->GetResource(&resource);  // NOLINT(performance-no-int-to-ptr)
-  // Material clears retire prepared and composed reflection readiness beside
+  // Material clears retire reflection readiness beside
   // the native command. Albedo clears independently invalidate clean color.
   if (const auto result = specular_result::Read(cmd_list->get_device(), resource.Get())) {
     const std::array<float, 4> empty = {};
     auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
     context->ClearRenderTargetView(result->ready.rtv.Get(), empty.data());
-    context->ClearRenderTargetView(result->composed.rtv.Get(), empty.data());
   }
   const auto target = Read(cmd_list->get_device(), resource.Get());
   if (target != nullptr) {

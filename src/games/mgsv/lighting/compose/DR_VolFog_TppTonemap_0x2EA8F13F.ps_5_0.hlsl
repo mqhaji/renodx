@@ -1,4 +1,4 @@
-#include "../indirect/compose/specular_composition.hlsli"
+#include "specular_composition.hlsli"
 #include "../../tonemap/tonemap.hlsli"
 
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:23 2026
@@ -58,8 +58,7 @@ Texture2D<float4> inOcclusion : register(t13);
 void main(
     float4 v0 : SV_Position0,
     float2 v1 : TEXCOORD0,
-    out float4 o0 : SV_Target0,
-    out float4 reflection_mask : SV_Target1) {
+    out float4 o0 : SV_Target0, out float4 reflection_environment : SV_Target1) {
   float4 r0, r1, r2, r3, r4, r5;
   uint4 bitmask, uiDest;
   float4 fDest;
@@ -114,17 +113,17 @@ void main(
   r3.xyz = r3.xyz;
   const float2 specular_uv = r0.xy;
   r0.x = inOcclusion.Sample(g_samplerLinear_Wrap_s, r0.xy).x;
-  const float3 specular_correction = GetEnvironmentSpecularCorrection(specular_uv, r0.x, r1.xyz, r3.xyz, r2.xyz);
+  const float3 specular_correction = GetEnvironmentSpecularCorrection(specular_uv, r0.x, r1.xyz, r3.xyz, r2.xyz, reflection_environment);
   r0.xyw = r0.xxx;
   r2.xyz = r3.xyz * r2.xyz;
   // Diffuse already has ambient-only AO; the correction separates specular below.
-  if (CUSTOM_MGSV_LIGHTING_ENABLED != 0.f) {
+  if (CUSTOM_MGSV_ENHANCED_DIFFUSE_LIGHTING != 0.f) {
     r0.xyw = r2.xyz + r1.xyz * r0.xyw;
   } else {
     r1.xyz = r2.xyz + r1.xyz;
     r0.xyw = r1.xyz * r0.xyw;
   }
-  if (CUSTOM_MGSV_LIGHTING_ENABLED != 0.0) {
+  if (CUSTOM_MGSV_ENHANCED_REFLECTIONS) {
     r0.xyw += specular_correction;
   }
   r0.xyw = r0.xyw;
@@ -183,6 +182,7 @@ void main(
   r1.xyzw = r1.xyzw;
 
   // NApplyVolFog: apply volumetric fog to the resolved scene color.
+  if (reflection_environment.a >= 0.0) reflection_environment *= saturate(r1.w);
   r0.xyz = r1.www * r0.xyw;
   r0.xyz = r0.xyz + r1.xyz;
   r0.xyz = r0.xyz;
@@ -206,6 +206,7 @@ void main(
   o0.rgb = renodx::color::srgb::Encode(max(0, o0.rgb));
 #endif
 
-  reflection_mask = specular_replacement_applied ? 1.0 : 0.0;
+  // A clipped vanilla tone curve is not recoverable linear radiance.
+  if (RENODX_TONE_MAP_TYPE == 0.0) reflection_environment.a = -1.0;
   return;
 }

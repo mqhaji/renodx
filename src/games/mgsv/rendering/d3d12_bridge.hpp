@@ -70,8 +70,8 @@ struct SharedImage {
     const D3D11_TEXTURE2D_DESC shared_description = {
         .Width = description.Width,
         .Height = description.Height,
-        .MipLevels = 1u,
-        .ArraySize = 1u,
+        .MipLevels = description.MipLevels,
+        .ArraySize = description.ArraySize,
         .Format = description.Format,
         .SampleDesc = {.Count = 1u},
         .Usage = D3D11_USAGE_DEFAULT,
@@ -229,6 +229,119 @@ class Bridge {
     return true;
   }
 
+  // Both reconstruction and lighting use these same queue dependencies. Their
+  // adapters provide any required D3D11 transfers around the private work.
+  template <typename Prepare, typename Complete>
+  void Submit(ID3D11DeviceContext* context, Slot* slot, const Scene& scene,
+              Prepare prepare, Complete complete, bool copied_input, bool copied_output,
+              SubmissionTiming* timing = nullptr) {
+    // Preparation may reject native inputs before either queue is linked.
+    // Only a partial queue submission needs to stop subsequent bridge work.
+    const auto transfer_started = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
+    prepare();
+    failed = true;
+    const auto copied = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
+    const auto ready = renodx::utils::gpu_fence::QueueSignal(context, d3d11_fence.get());
+    const auto signaled11 = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
+    if (ready == renodx::utils::gpu_fence::NO_SIGNAL) throw std::runtime_error("D3D11 bridge signal rejected");
+    if (timing != nullptr) {
+      timing->input_copy_us = (!copied_input ? 0. : std::chrono::duration<double, std::micro>(copied - transfer_started).count());
+      timing->signal11_us = std::chrono::duration<double, std::micro>(signaled11 - copied).count();
+    }
+    const auto waiting12 = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
+    // Leave explicit flushing to the game's normal submission path. The runtime
+    // may also submit internally. Standalone callers must submit the D3D11
+    // stream before waiting for CPU-visible completion.
+    if (!renodx::utils::gpu_fence::QueueWait(queue12.Get(), d3d11_fence.get(), ready)) throw std::runtime_error("D3D12 bridge wait rejected");
+    const auto waited12 = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
+    const std::array<ID3D12CommandList*, 1> commands = {slot->commands.Get()};
+    queue12->ExecuteCommandLists(static_cast<UINT>(commands.size()), commands.data());
+    const auto executed12 = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
+    slot->d3d12_completion = renodx::utils::gpu_fence::QueueSignal(queue12.Get(), d3d12_fence.get());
+    if (slot->d3d12_completion == renodx::utils::gpu_fence::NO_SIGNAL) throw std::runtime_error("D3D12 bridge signal rejected");
+    const auto signaled12 = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
+    if (!renodx::utils::gpu_fence::QueueWait(context, d3d12_fence.get(), slot->d3d12_completion)) throw std::runtime_error("D3D11 bridge wait rejected");
+    const auto waited11 = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
+    slot->d3d11_completion = ready;
+    complete();
+    if (copied_output) {
+      slot->d3d11_completion = renodx::utils::gpu_fence::QueueSignal(context, d3d11_fence.get());
+      if (slot->d3d11_completion == renodx::utils::gpu_fence::NO_SIGNAL) throw std::runtime_error("D3D11 return signal rejected");
+    }
+    // Direct output has no return copy. Its D3D12 completion already covers
+    // this slot's last image access, so it needs no additional D3D11 signal.
+    failed = false;
+    ++statistics.submitted;
+    statistics.d3d11_completion = slot->d3d11_completion;
+    statistics.d3d12_completion = slot->d3d12_completion;
+    statistics.last_scene = scene;
+    if (timing != nullptr) {
+      const auto finished = std::chrono::steady_clock::now();
+      timing->wait12_us = std::chrono::duration<double, std::micro>(waited12 - waiting12).count();
+      timing->execute12_us = std::chrono::duration<double, std::micro>(executed12 - waited12).count();
+      timing->signal12_us = std::chrono::duration<double, std::micro>(signaled12 - executed12).count();
+      timing->wait11_us = std::chrono::duration<double, std::micro>(waited11 - signaled12).count();
+      timing->return_copy_us = std::chrono::duration<double, std::micro>(finished - waited11).count();
+      timing->queue_us = timing->input_copy_us + timing->signal11_us + timing->wait12_us
+                         + timing->execute12_us + timing->signal12_us + timing->wait11_us + timing->return_copy_us;
+    }
+  }
+
+  // Each consumer owns its command pool. Lighting cannot exhaust the four
+  // reconstruction slots, and both still submit on the same queue and fences.
+  using WorkPool = std::vector<std::unique_ptr<Slot>>;
+
+  template <typename Record, typename Prepare, typename Complete>
+  [[nodiscard]] bool ExecuteWork(ID3D11DeviceContext* context, const Scene& scene, WorkPool* pool,
+                                 Record record, Prepare prepare, Complete complete, bool copied_output) {
+    rejection = nullptr;
+    if (failed || context == nullptr || context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE
+        || scene.id == 0u || scene.generation == 0u) {
+      rejection = "Compute work requires a healthy bridge and an executed scene";
+      return false;
+    }
+    Microsoft::WRL::ComPtr<ID3D11Device> owner;
+    context->GetDevice(&owner);
+    if (GetDeviceIdentity(owner.Get()) != device_identity) throw std::runtime_error("Compute context belongs to another device");
+    if (DeviceRemoved()) throw std::runtime_error("D3D12 compute device removed");
+    const auto completed11 = d3d11_fence->GetCompletedValue();
+    const auto completed12 = d3d12_fence->GetCompletedValue();
+    size_t index = 0u;
+    for (; index < pool->size(); ++index) {
+      if ((*pool)[index]->d3d11_completion <= completed11 && (*pool)[index]->d3d12_completion <= completed12) break;
+    }
+    if (index == pool->size()) {
+      if (pool->size() == MAX_IN_FLIGHT) {
+        rejection = "Compute command slots are still in use";
+        ++statistics.busy;
+        return false;
+      }
+      auto slot = std::make_unique<Slot>();
+      Check(device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&slot->allocator)), "Create compute command allocator");
+      Check(device12->CreateCommandList(0u, D3D12_COMMAND_LIST_TYPE_DIRECT, slot->allocator.Get(), nullptr, IID_PPV_ARGS(&slot->commands)), "Create compute command list");
+      Check(slot->commands->Close(), "Close initial compute list");
+      pool->push_back(std::move(slot));
+      ++statistics.allocations;
+    } else {
+      ++statistics.reused;
+    }
+    auto* slot = (*pool)[index].get();
+    Check(slot->allocator->Reset(), "Reset compute allocator");
+    Check(slot->commands->Reset(slot->allocator.Get(), nullptr), "Reset compute list");
+    try {
+      if (!record(Dispatch{.commands = slot->commands.Get(), .slot_index = index})) {
+        Check(slot->commands->Close(), "Close canceled compute list");
+        return false;
+      }
+    } catch (...) {
+      slot->commands->Close();
+      throw;
+    }
+    Check(slot->commands->Close(), "Close compute list");
+    Submit(context, slot, scene, prepare, complete, true, copied_output);
+    return true;
+  }
+
   // Returns false before changing the destination when no retired slot is
   // available. Each API owns its fence timeline. A copied output also needs
   // its D3D11 return copy to finish before D3D12 can overwrite that mirror.
@@ -344,63 +457,53 @@ class Bridge {
     Check(selected->commands->Close(), "Close recorded bridge command list");
     const auto recorded = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
 
-    // A partial submission retains its slot until explicit recovery.
-    failed = true;
-    if (!selected->input.direct) {
-      context->CopyResource(selected->input.texture.Get(), source);
-      ++statistics.input_copies;
-    }
-    const auto copied = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
-    const auto ready = renodx::utils::gpu_fence::QueueSignal(context, d3d11_fence.get());
-    const auto signaled11 = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
-    if (ready == renodx::utils::gpu_fence::NO_SIGNAL) throw std::runtime_error("D3D11 bridge signal rejected");
     if (timing != nullptr) {
-      timing->input_copy_us = (selected->input.direct ? 0. : std::chrono::duration<double, std::micro>(copied - recorded).count());
-      timing->signal11_us = std::chrono::duration<double, std::micro>(signaled11 - copied).count();
-    }
-    const auto waiting12 = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
-    // Leave explicit flushing to the game's normal submission path. The runtime
-    // may also submit internally. Standalone callers must submit the D3D11
-    // stream before waiting for CPU-visible completion.
-    if (!renodx::utils::gpu_fence::QueueWait(queue12.Get(), d3d11_fence.get(), ready)) throw std::runtime_error("D3D12 bridge wait rejected");
-    const auto waited12 = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
-    const std::array<ID3D12CommandList*, 1> commands = {selected->commands.Get()};
-    queue12->ExecuteCommandLists(static_cast<UINT>(commands.size()), commands.data());
-    const auto executed12 = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
-    selected->d3d12_completion = renodx::utils::gpu_fence::QueueSignal(queue12.Get(), d3d12_fence.get());
-    if (selected->d3d12_completion == renodx::utils::gpu_fence::NO_SIGNAL) throw std::runtime_error("D3D12 bridge signal rejected");
-    const auto signaled12 = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
-    if (!renodx::utils::gpu_fence::QueueWait(context, d3d12_fence.get(), selected->d3d12_completion)) throw std::runtime_error("D3D11 bridge wait rejected");
-    const auto waited11 = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
-    selected->d3d11_completion = ready;
-    if (!selected->output.direct) {
-      context->CopyResource(destination, selected->output.texture.Get());
-      ++statistics.output_copies;
-      selected->d3d11_completion = renodx::utils::gpu_fence::QueueSignal(context, d3d11_fence.get());
-      if (selected->d3d11_completion == renodx::utils::gpu_fence::NO_SIGNAL) throw std::runtime_error("D3D11 return signal rejected");
-    }
-    // Direct output has no return copy. Its D3D12 completion already covers
-    // this slot's last image access, so it needs no additional D3D11 signal.
-    failed = false;
-    ++statistics.submitted;
-    statistics.d3d11_completion = selected->d3d11_completion;
-    statistics.d3d12_completion = selected->d3d12_completion;
-    statistics.last_scene = scene;
-    if (timing != nullptr) {
-      const auto finished = std::chrono::steady_clock::now();
       timing->preparation_us = std::chrono::duration<double, std::micro>(prepared - started).count();
       timing->recording_us = std::chrono::duration<double, std::micro>(recorded - prepared).count();
-      timing->wait12_us = std::chrono::duration<double, std::micro>(waited12 - waiting12).count();
-      timing->execute12_us = std::chrono::duration<double, std::micro>(executed12 - waited12).count();
-      timing->signal12_us = std::chrono::duration<double, std::micro>(signaled12 - executed12).count();
-      timing->wait11_us = std::chrono::duration<double, std::micro>(waited11 - signaled12).count();
-      timing->return_copy_us = std::chrono::duration<double, std::micro>(finished - waited11).count();
-      timing->queue_us = timing->input_copy_us + timing->signal11_us + timing->wait12_us
-                         + timing->execute12_us + timing->signal12_us + timing->wait11_us + timing->return_copy_us;
     }
+    Submit(
+        context, selected, scene,
+        [&]() {
+          if (!selected->input.direct) {
+            context->CopyResource(selected->input.texture.Get(), source);
+            ++statistics.input_copies;
+          }
+        },
+        [&]() {
+          if (!selected->output.direct) {
+            context->CopyResource(destination, selected->output.texture.Get());
+            ++statistics.output_copies;
+          }
+        },
+        !selected->input.direct, !selected->output.direct, timing);
     return true;
   }
 };
+
+// The coordinator serializes all users, including native lighting callbacks.
+// Method changes release reconstruction state without replacing this device.
+static std::unique_ptr<Bridge> backend;
+
+inline Bridge& Get(ID3D11Device* device) {
+  if (backend == nullptr) {
+    backend = std::make_unique<Bridge>(device);
+  }
+  if (backend->device_identity != GetDeviceIdentity(device)) {
+    throw std::runtime_error("Rendering device changed without teardown");
+  }
+  return *backend;
+}
+
+inline void Drain() {
+  if (backend != nullptr && !backend->Drain()) {
+    throw std::runtime_error("D3D12 rendering is still in use; retaining resources");
+  }
+}
+
+inline void Destroy() {
+  Drain();
+  backend.reset();
+}
 
 }  // namespace mgsv::rendering::d3d12_bridge
 

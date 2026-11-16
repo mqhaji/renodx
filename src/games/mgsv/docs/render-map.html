@@ -111,7 +111,7 @@
         </article>
         <article class="added">
           <h3>Lighting →</h3>
-          <p>Local and directional lights with Enhanced Shadows → diffuse copy and source preparation → shared indirect lighting → both skin scatters → deferred composition and fog.</p>
+          <p>Local and directional lights with enhanced shadows → diffuse copy and source preparation → shared indirect lighting → both skin scatters → deferred composition and fog.</p>
         </article>
         <article>
           <h3>Remaining scene →</h3>
@@ -147,29 +147,29 @@
         </li>
         <li>
           <strong>Prepare shared radiance in the existing diffuse copy.</strong>
-          <p><code>CopyBuffer 0xD71E843E</code> reads original diffuse at t0 and material at t1. Target 0 retains the native diffuse and skin-mask alpha. Added inputs t18–t22 qualify albedo, normal, depth, clean color, and owner guides. Target 1 writes FP32 outgoing diffuse radiance for both diffuse and specular searches. A valid black source still blocks light.</p>
-          <p>Supported sun/environment draws separately capture environment RGB at target 2 and retain the matching palette t10 and Fresnel t9. Immutable lookup tables are reused. Mutable tables are copied in their native command stream.</p>
-          <p><a href="../lighting/indirect/source_preparation.hpp">Source preparation</a> · <a href="../lighting/indirect/environment_specular.hpp">Environment and table capture</a></p>
+          <p><code>CopyBuffer 0xD71E843E</code> reads original diffuse at t0 and material at t1. Target 0 retains the native diffuse and skin-mask alpha. Added inputs t18–t22 qualify albedo, normal, depth, clean color, and owner guides. Target 1 writes FP32 outgoing diffuse radiance for the diffuse AO/GI search. A valid black source still blocks light.</p>
+          <p>Supported sun/environment draws separately capture environment RGB at target 2 and retain the matching palette at t10. The native shaders still use Fresnel at t9, but GGX does not capture it. Immutable palettes are reused. Mutable palettes are copied in their native command stream.</p>
+          <p><a href="../lighting/indirect/source_preparation.hpp">Source preparation</a> · <a href="../lighting/environment_specular.hpp">Environment and table capture</a></p>
         </li>
         <li>
-          <strong>Trace and filter shared indirect light before skin scattering.</strong>
-          <p>The first scatter, compute <code>0x6DAF0C4A</code>, supplies copied diffuse t0, depth t1, normals t2, and 64-byte geometry b0. After submitting the native prefix, one trace shares depth samples between AO, diffuse GI, bitmask specular visibility, and broad reflected light. A focused GGX ray covers narrower lobes. The trace also writes the current material guide.</p>
-          <p>One temporal pass shares geometry and reprojection setup while accepting each signal independently. Paired reflected light and remaining environment use matching weights. Three default A-Trous passes retain the center and sample one quarter of the neighbor pattern. The final full-resolution application makes six default dispatches in total. Coarse depth sampling adds four optional reductions. The BRDF table is initialized once when needed.</p>
+          <strong>Trace and filter diffuse indirect light before skin scattering.</strong>
+          <p>The first scatter, compute <code>0x6DAF0C4A</code>, supplies copied diffuse t0, depth t1, normals t2, and 64-byte geometry b0. After submitting the native prefix, one trace shares depth samples between diffuse AO and GI. Specular rays, cone integration, and specular histories are no longer part of this pass.</p>
+          <p>One temporal pass shares geometry and reprojection setup while accepting AO and diffuse radiance independently. Three default A-Trous passes retain the center and sample one quarter of the neighbor pattern. The final full-resolution application makes six default dispatches in total. Coarse depth sampling adds four optional reductions.</p>
           <p>The default lighting grid contains one quarter of the render pixels, with each axis divided by two and rounded up. Search radius is expressed in output pixels. Lighting noise uses the scene-reserved jitter sample when reconstruction is enabled. Lighting maintains its own submitted history and replay rules.</p>
           <p><a href="../lighting/indirect/README.md">Full algorithm and signal rules</a> · <a href="../lighting/indirect/runtime.hpp">Input checks and scheduling</a> · <a href="../lighting/indirect/trace/gtvbgi.cs_5_0.hlsl">Trace</a> · <a href="../lighting/indirect/denoise/gtvbgi_temporal.cs_5_0.hlsl">Temporal accumulation</a> · <a href="../lighting/indirect/denoise/gtvbgi_filter.cs_5_0.hlsl">Spatial filter</a></p>
         </li>
         <li>
-          <strong>Apply diffuse and resolve the reflection pair.</strong>
+          <strong>Apply diffuse, scatter skin, then export the environment.</strong>
           <p>Diffuse becomes <code>direct + ambient × AO + diffuse GI</code>. Missing ambient capture skips custom diffuse AO. With the feature enabled, the six supported deferred shaders bypass native diffuse AO even if custom dispatch fails, so that failure case currently has no diffuse AO.</p>
-          <p>Both native skin-scattering passes still run once, with the original vertical bytecode for <code>0xB2601810</code>. The application resolves reflected color and remaining environment to two full-resolution images. Readiness marks produced pixels. Deferred composition marks actual use only after consuming them.</p>
-          <p><a href="../lighting/indirect/compose/specular_result.hpp">Reflection outputs and masks</a> · <a href="../shaders.hpp">Registration and scatter callbacks</a></p>
+          <p>Both native skin-scattering passes still run once, with the original vertical bytecode for <code>0xB2601810</code>. Deferred composition exports its exact environment term and receiver fog transmission to an extra RGBA16F attachment. CPU submission records retain its matching material and scene inputs for the later reflection stage.</p>
+          <p><a href="../lighting/reflections/result.hpp">Reflection outputs and readiness</a> · <a href="../shaders.hpp">Registration and scatter callbacks</a></p>
         </li>
         <li>
-          <strong>Compose before fog, then retain native SSR detail.</strong>
-          <p>Six supported deferred variants preserve direct highlights and replace qualified overlapping material-cube and environment response with screen light plus remaining environment. Their added t16–t21 inputs carry captured environment, visibility, reflected color, remaining environment, clean material, and readiness. Native fog, rain, and early color treatment follow within those draws.</p>
-          <p>Native SSR remains later in the scene. Its mask, trace, reduction, and Gaussian chain feed the original complementary scene blend. The compositor retains custom lighting where a native hit contributes nothing. The sortie floor keeps native planar tracing. The older separate enhanced-SSR compute experiment is parked.</p>
-          <p>Screen-light GGX and the game's integrated Blinn-Phong environment form the current approximation. Screen-visible diffuse source radiance also limits which reflection content the custom search can recover. Wider material, off-screen, and directional transport work remains ahead.</p>
-          <p><a href="../lighting/indirect/compose/specular_composition.hlsli">Deferred specular composition</a> · <a href="../lighting/indirect/compose/reflection_ownership.hlsli">Native SSR handoff</a> · <a href="../materials/brdf.hlsli">Material response</a></p>
+          <strong>Trace and compose at the native late reflection stage.</strong>
+          <p>Six supported deferred variants preserve direct highlights and export the replaceable environment, including qualified material-cube and wet-ground contributions. Pixel t16 supplies captured environment and t20 supplies clean material color. An added RGBA16F output carries the shaded environment and receiver fog transmission. RenoDX mode keeps lighting linear independently of the reflection toggle.</p>
+          <p>Enhanced replaces general and sortie-floor native reflection traces with one GGX estimator. Preparation decodes the late extended-sRGB scene and writes NRD motion, world normal/roughness and view depth in the same dispatch. DX12 builds nearest-depth mips, traces the selected number of stratified GGX rays per input pixel (one by default) through screen light and unresolved environment, denoises their complete demodulated estimate with NRD REBLUR_SPECULAR, and restores material response. All stages share the existing device, queue, fences and one bridge handoff. The native compositor reads light at t18, diagnostic weights at t19, saved environment at t20 and readiness at t21, replacing environment once in linear light with receiver fog transmission. Cached replay does not advance history twice. Dependent native filters/copies are skipped; Vanilla restores native SSR. Missing inputs retain environment. NRD cannot recover hidden geometry or a directional sky from the integrated native fallback.</p>
+          <p>Screen-light GGX and the game's integrated Blinn-Phong environment form the current approximation. Screen-visible source radiance still cannot supply hidden geometry or reevaluate directional lighting and fog along the reflected path. Wider material, off-screen, and directional transport work remains ahead.</p>
+          <p><a href="../lighting/compose/specular_composition.hlsli">Deferred specular composition</a> · <a href="../lighting/reflections/README.md">DX12 reflections and native-chain bypass</a> · <a href="../materials/brdf.hlsli">Material response</a></p>
         </li>
       </ol>
     </section>
@@ -253,8 +253,8 @@
         <tbody>
           <tr><td>Native albedo</td><td>sRGB views decode base color once.</td><td>Source radiance and deferred material response use the decoded value.</td></tr>
           <tr><td>Diffuse and specular light</td><td>Linear, pre-exposed light.</td><td>AO affects qualified ambient diffuse. Direct light and added GI retain their separate contributions.</td></tr>
-          <tr><td>Prepared source</td><td>RGBA32F outgoing diffuse radiance and validity.</td><td>Shared diffuse/specular searches read original light before application changes the destinations.</td></tr>
-          <tr><td>Filtered indirect results</td><td>Diffuse GI RGB with AO alpha, plus separate specular visibility and paired reflected/environment responses.</td><td>Per-signal rejection remains independent. The current FP16 F0/roughness guide is never accumulated.</td></tr>
+          <tr><td>Prepared source</td><td>RGBA32F outgoing diffuse radiance and validity.</td><td>Diffuse GI reads original light before application changes the destinations. Reflections decode the late scene at the native reflection compositor.</td></tr>
+          <tr><td>Filtered indirect results</td><td>Diffuse GI RGB with AO alpha. Separate DX12 histories store reflected light and covered environment response.</td><td>Diffuse and specular histories have separate owners. Within the specular pair, temporal and spatial weights match.</td></tr>
           <tr><td>Reflection readiness / composition</td><td>Separate R8 masks.</td><td>One proves that custom outputs were written. The other records actual use in deferred composition.</td></tr>
           <tr><td>Scene color and alpha</td><td>Encoded scene RGB can remain in RGBA16F. Alpha carries current native data.</td><td>Decode for light math and SDK inputs. Preserve alpha for downstream DoF and highlights.</td></tr>
           <tr><td>Motion and depth</td><td>Native motion is packed in .ba with object classification in .r. Depth is reverse-Z.</td><td>Preparation uses actual texture dimensions and the matching scene's camera endpoints.</td></tr>
@@ -497,14 +497,14 @@
           <tr><td>Bloom reduction variant</td><td><code>CopyReductionX2</code></td><td>Supported source branch. The reference bloom chain uses CopyReductionX4 twice.</td></tr>
           <tr><td>Flare sprites</td><td><code>0x93A0C8D8</code></td><td>Depth-tested sprites use a separate scene layer. Native clear retention and owner-qualified composition handle parallel workers.</td></tr>
           <tr><td>Damage overlay</td><td><code>Draw2D_TppDamageDirection2 0xDC6A5DF6</code></td><td>User identified the blood/bullet-hole overlay. The shader samples a sprite mask and a displaced screen image. Executable evidence establishes related damage controls and the generic 2D material path. The exact shader-specific owner and submission position remain unverified.</td></tr>
-          <tr><td>Sortie floor</td><td><code>LocalReflectionTPP 0xA621C684</code></td><td>Native planar tracing stays enabled. The native reflection compositor retains custom lighting outside contributing hits.</td></tr>
-          <tr><td>Alternative reflection/deferred families</td><td><code>LocalReflectionTPPA1/A2</code>, <code>LocalReflectionComposite</code>, generic deferred variants</td><td>Retain native behavior and report first use. Their existence in the dump does not prove current custom coverage.</td></tr>
+          <tr><td>Sortie floor</td><td><code>LocalReflectionTPP 0xA621C684</code></td><td>Enhanced skips this planar trace. The shared DX12 reflection chain uses scene depth and native material response.</td></tr>
+          <tr><td>Alternative reflection/deferred families</td><td><code>LocalReflectionTPPA1/A2</code>, <code>LocalReflectionComposite</code>, generic deferred variants</td><td>The four known reflection traces and both compositors have Enhanced bypasses. Unported generic deferred variants retain native behavior and report first use; gameplay coverage is not assumed.</td></tr>
           <tr><td>Rain occlusion and utility views</td><td>Observed 512 × 512 view and native Draw2D/material shaders</td><td>Separate view identity keeps utility color and stencil together. Generic Draw2D also handles packed normals and roughness.</td></tr>
           <tr><td>Loading and save reload</td><td><code>Draw2D 0xEF836D9D</code>, <code>GammaControl 0x1FF96E86</code></td><td>Observed UI-only work uses matching scene output and clears without a reconstruction dispatch. Other transitions still need coverage.</td></tr>
           <tr><td>Mirrors and thermography</td><td>Secondary views and guarded native projection setters</td><td>Require the correct view, camera, dimensions, and generation. The alternate thermography branch and full mirror matrix remain follow-up work.</td></tr>
         </tbody>
       </table></div>
-      <p>Deferred SH and sky ambient are relevant to indirect illumination. Direct-light Enhanced Shadows is applied in the sun and local-light shaders. Changing their contact shadows alone does not correct SH volume projection or ambient reconstruction.</p>
+      <p>Deferred SH and sky ambient are relevant to indirect illumination. Direct-light enhanced shadows is applied in the sun and local-light shaders. Changing their contact shadows alone does not correct SH volume projection or ambient reconstruction.</p>
     </section>
 
     <section id="next">

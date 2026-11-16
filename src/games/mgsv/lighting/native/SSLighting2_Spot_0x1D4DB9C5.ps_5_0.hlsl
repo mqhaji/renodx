@@ -164,7 +164,7 @@ void main(
   r2.w = min(1, r2.w);
   r2.w = r2.w * r2.w;
   const BendShadow contact_shadow = ReadBendShadow(v0.xy, 1u, g_DepthTexture);
-  const bool map_debug = CUSTOM_ENHANCED_SHADOWS_ENABLED && CUSTOM_SHADOW_MAP_DEBUG_VIEW >= 0.5
+  const bool map_debug = CUSTOM_MGSV_ENHANCED_SHADOWS && CUSTOM_SHADOW_MAP_DEBUG_VIEW >= 0.5
                          && uint(CUSTOM_SHADOW_DEBUG_LIGHT) == 1u;
   const bool shadow_required = contact_shadow.visibility > 0.0 || contact_shadow.diagnostic
                                || map_debug;
@@ -173,7 +173,7 @@ void main(
   [branch]
   if (shadow_required) {
     [branch]
-    if (CUSTOM_ENHANCED_SHADOWS_ENABLED) {
+    if (CUSTOM_MGSV_ENHANCED_SHADOWS) {
       spot_pcss = FilterSpotShadow(g_ShadowTexture, g_samplerComparisonLess_Linear_Clmap_s,
                                    r9, shadow_projected_dx, shadow_projected_dy,
                                    ReadPcssProjection(g_psScene.m_shadowProjection, (float4x4)0, false), PcssNoise(v0.xy));

@@ -50,7 +50,7 @@ BendShadow ReadBendShadow(float2 pixel, uint light_type, Texture2D<float4> depth
   BendShadow result = (BendShadow)0;
   result.visibility = 1.0;
   const bool directional = light_type == 0;
-  if (!CUSTOM_ENHANCED_SHADOWS_ENABLED) return result;
+  if (!CUSTOM_MGSV_ENHANCED_SHADOWS) return result;
   const uint debug = (uint)CUSTOM_CONTACT_SHADOW_DEBUG_VIEW;
   // The bypass view keeps the same compute work for performance comparisons.
   if (debug == 4) return result;

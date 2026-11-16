@@ -10,15 +10,19 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <utility>
+
+#include <deps/imgui/imgui.h>
 
 #include "../../utils/date.hpp"
 #include "../../utils/mutex.hpp"
 #include "../../utils/platform.hpp"
 #include "../../utils/settings.hpp"
 #include "output/output.hpp"
+#include "reconstruction/postprocess/runtime.hpp"
 #include "shared.h"
 
 namespace mgsv::settings {
@@ -81,6 +85,22 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .min = 48.f,
               .max = 500.f,
               .is_enabled = [output_state]() { return mgsv::output::IsHDROutputSelected(*output_state); },
+          },
+          new renodx::utils::settings::Setting{
+              .key = "UIVisibility",
+              .value_type = renodx::utils::settings::SettingValueType::CUSTOM,
+              .label = "UI Visibility",
+              .section = "Output",
+              .tooltip = "Shows or hides game menus, text, and HUD for this session. Starts at Show each launch. The RenoDX overlay and menu input remain available while hidden.",
+              .on_draw = [] {
+                int visibility = (reconstruction::post_process::ui_visible.load(std::memory_order_relaxed) ? 1 : 0);
+                if (ImGui::SliderInt("UI Visibility", &visibility, 0, 1, visibility == 0 ? "Hide" : "Show", ImGuiSliderFlags_NoInput)) {
+                  reconstruction::post_process::ui_visible.store(visibility != 0, std::memory_order_relaxed);
+                }
+                // Custom controls have no config value. Update rendering directly
+                // without marking the saved preset as changed.
+                return false;
+              },
           },
           new renodx::utils::settings::Setting{
               .key = "GammaCorrection",
@@ -259,6 +279,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .section = "Options",
               .group = "button-line-1",
               .on_change = [registry, shader_injection, output_state]() {
+                reconstruction::post_process::ui_visible.store(true, std::memory_order_relaxed);
                 for (auto* setting : *registry) {
                   if (setting->key.empty()) continue;
                   if (setting->is_global) continue;
@@ -331,11 +352,6 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .label = std::string("Build: ") + renodx::utils::date::ISO_DATE_TIME,
               .section = "About",
           },
-          new renodx::utils::settings::Setting{
-              .value_type = renodx::utils::settings::SettingValueType::TEXT,
-              .label = std::string("- Thanks to Maple for the earlier FSR integration\n"),
-              .section = "About",
-          },
       });
 }
 
@@ -365,9 +381,11 @@ inline void ApplyPresetOff(renodx::utils::settings::Settings* registry, ShaderIn
       {"FxSunBrightnessBoostEnabled", 0.f},
       {"FxFilmGrainStrength", 0.f},
       {"FxMotionBlurStrength", 100.f},
-      {"FxEnhancedShadowsEnabled", 0.f},
-      {"FxIndirectLightingEnabled", 0.f},
+      {"DirectLightingShadowsMode", 0.f},
+      {"IndirectLightingDiffuseMode", 0.f},
+      {"IndirectLightingReflectionsMode", 0.f},
   });
+  reconstruction::post_process::ui_visible.store(true, std::memory_order_relaxed);
   {
     const std::unique_lock lock(renodx::utils::mutex::global_mutex);
     for (const auto& [key, value] : PRESET_VALUES) {

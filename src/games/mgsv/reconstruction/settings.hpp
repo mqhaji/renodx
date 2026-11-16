@@ -257,35 +257,7 @@ inline void AppendSettings(
           .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
       },
 #endif
-      new renodx::utils::settings::Setting{
-          .key = "FxTaaJitterPattern",
-          .binding = &settings_state->jitter_pattern,
-          .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-          .default_value = static_cast<float>(state::DEFAULT_JITTER_PATTERN),
-          .label = "TAA Jitter Pattern",
-          .section = "Temporal Anti-Aliasing (Advanced)",
-          .tooltip = "Diagnostic projection sampling pattern. Off keeps analytical TAA active with zero projection jitter. "
-                     "FSR and DLSS always use Halton, with more phases at lower render resolutions. Changing modes resets temporal history "
-                     "and the sample sequence.",
-          .labels = {"Off", "Halton (2,3)"},
-          .on_change_value = [](float previous, float current) {
-            if (static_cast<uint32_t>(previous) == static_cast<uint32_t>(current)) return;
-            transitions::TransitionJitterPattern(current); },
-          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
-      },
-      new renodx::utils::settings::Setting{
-          .key = "FxUnclampMotionVectorsEnabled",
-          .binding = &shader_injection->unclamp_motion_vectors,
-          .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
-          .default_value = 0.f,
-          .label = "Unclamp Motion Vectors",
-          .section = "Temporal Anti-Aliasing (Advanced)",
-          .tooltip = "Removes only MGSV's unit-length saturate from object and camera velocity encoding while retaining the original 64-pixel scale. This can improve motion above 64 pixels but also changes native motion blur.",
-          .on_change_value = [](float previous, float current) {
-            if ((previous > 0.f) == (current > 0.f)) return;
-            transitions::InvalidateHistoryForSetting("motion-vector clamp changed"); },
-          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
-      },
+
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
       new renodx::utils::settings::Setting{
           .key = "FxTaaVelocityVisualizationRange",
@@ -307,30 +279,7 @@ inline void AppendSettings(
                    && ((view >= 3.f && view < 5.f) || view >= 7.f); },
           .is_logarithmic = true,
       },
-      new renodx::utils::settings::Setting{
-          .key = "FxTaaObjectMotionMode",
-          .binding = &settings_state->object_motion_mode,
-          .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-          .default_value = static_cast<float>(state::DEFAULT_OBJECT_MOTION_MODE),
-          .label = "TAA Object Motion Source",
-          .section = "Temporal Anti-Aliasing (Advanced)",
-          .tooltip = "Auto Center Pixel changes only Auto's spatial selection: center velocity, mask and camera depth instead of nearest-depth dilation. Compare Auto vs Auto Center with Jitter Pattern Off. Direct Object instead bypasses the composite at the same dilated pixel. Matrix Camera Everywhere removes animation motion. Changing modes resets history.",
-          .labels = {
-              "Auto-Corrected Native Object Velocity",
-              "Matrix Camera Everywhere",
-              "Native - Current Jitter",
-              "Native + Current Jitter",
-              "Native - Jitter Delta",
-              "Native + Jitter Delta",
-              "Direct Object Velocity (Bypass Composite)",
-              "Auto Center Pixel (No Dilation)",
-          },
-          .on_change_value = [](float previous, float current) {
-            (void)previous;
-            state::SetObjectMotionMode(current);
-            transitions::InvalidateHistoryForSetting("object motion mode changed"); },
-          .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
-      },
+
 #endif
       new renodx::utils::settings::Setting{
           .key = "FxTaaClipTightness",
@@ -385,97 +334,6 @@ inline void AppendSettings(
       },
   };
 
-#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
-  struct ProjectionSettingMetadata {
-    state::ProjectionJitterPath path;
-    const char* key;
-    const char* label;
-    const char* tooltip;
-    const char* reason;
-  };
-  constexpr auto projection_settings = std::to_array<ProjectionSettingMetadata>({
-      {
-          .path = state::ProjectionJitterPath::VELOCITY,
-          .key = "FxTaaVelocityProjectionJitterScale",
-          .label = "Velocity Projection Jitter",
-          .tooltip = "Scales same-frame jitter applied after MakeVelocityBuffer resets the active projection. Default native object motion automatically removes this current-jitter term.",
-          .reason = "velocity projection jitter changed",
-      },
-      {
-          .path = state::ProjectionJitterPath::FORWARD,
-          .key = "FxTaaForwardProjectionJitterScale",
-          .label = "Forward Projection Jitter",
-          .tooltip = "Scales same-frame jitter applied by the GrPluginForwardRendering setup callback.",
-          .reason = "forward projection jitter changed",
-      },
-      {
-          .path = state::ProjectionJitterPath::MODEL,
-          .key = "FxTaaModelProjectionJitterScale",
-          .label = "Model Projection Jitter",
-          .tooltip = "Scales same-frame jitter applied after GrPluginModel installs viewport projection state.",
-          .reason = "model projection jitter changed",
-      },
-      {
-          .path = state::ProjectionJitterPath::ALPHA_MODEL,
-          .key = "FxTaaAlphaProjectionJitterScale",
-          .label = "Alpha Model Projection Jitter",
-          .tooltip = "Scales same-frame jitter applied after GrPluginAlphaModel installs viewport projection state.",
-          .reason = "alpha-model projection jitter changed",
-      },
-      {
-          .path = state::ProjectionJitterPath::OVERLAY_MODEL,
-          .key = "FxTaaOverlayProjectionJitterScale",
-          .label = "Overlay Model Projection Jitter",
-          .tooltip = "Scales same-frame jitter applied after GrPluginOverlayModel installs viewport projection state.",
-          .reason = "overlay-model projection jitter changed",
-      },
-      {
-          .path = state::ProjectionJitterPath::LOCAL_LIGHT,
-          .key = "FxTaaLocalLightProjectionJitterScale",
-          .label = "Local Light Projection Jitter",
-          .tooltip = "Temporarily scales jitter on GrViewport projection while GrPluginLocalLight builds its private scene packet, then restores the exact original matrix.",
-          .reason = "local-light projection jitter changed",
-      },
-      {
-          .path = state::ProjectionJitterPath::SUN_VOLUME,
-          .key = "FxTaaSunVolumeJitterScale",
-          .label = "Sun Volume Projection Jitter",
-          .tooltip = "Experimental: translates a private VP copy for CPU-projected sunlight volumes. Default 1; test independently.",
-          .reason = "sun volume jitter changed",
-      },
-      {
-          .path = state::ProjectionJitterPath::SH_LIGHTING,
-          .key = "FxTaaShFallbackJitterScale",
-          .label = "SH Lighting Projection Jitter",
-          .tooltip = "Scales jitter for ambient light volumes. Deferred draws share the corrected projection with their inverse-position calculation. Immediate draws offset their projected vertices.",
-          .reason = "SH lighting jitter changed",
-      },
-      {
-          .path = state::ProjectionJitterPath::TERRAIN_DECAL,
-          .key = "FxTaaTerrainDecalJitterScale",
-          .label = "Terrain Decal Projection Jitter",
-          .tooltip = "Experimental: corrects the owned decal packet's copied P before publication. Affects inverse-plane reconstruction, not the separately captured raster P. Default 1.",
-          .reason = "terrain decal jitter changed",
-      },
-  });
-  for (const auto& projection_setting : projection_settings) {
-    reconstruction_settings.push_back(
-        new renodx::utils::settings::Setting{
-            .key = projection_setting.key,
-            .binding = &settings_state->projection_jitter_scales[static_cast<std::size_t>(projection_setting.path)],
-            .value_type = renodx::utils::settings::SettingValueType::FLOAT,
-            .default_value = state::DEFAULT_PROJECTION_JITTER_SCALE,
-            .label = projection_setting.label,
-            .section = "Temporal Anti-Aliasing (Advanced)",
-            .tooltip = projection_setting.tooltip,
-            .min = -2.f,
-            .max = 2.f,
-            .format = "%.2fx",
-            .on_change_value = [path = projection_setting.path, reason = projection_setting.reason](float, float current) { transitions::SetProjectionJitterScale(path, current, reason); },
-            .is_visible = [] { return state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA; },
-        });
-  }
-#endif
   reconstruction_settings.insert(
       reconstruction_settings.end(),
       {

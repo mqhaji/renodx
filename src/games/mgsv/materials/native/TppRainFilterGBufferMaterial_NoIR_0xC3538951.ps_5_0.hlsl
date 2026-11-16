@@ -61,10 +61,8 @@ void main(
     out float4 o1 : SV_Target1,
     out float4 clean_color : SV_Target2,
     out uint4 clean_owner : SV_Target3,
-    out float4 specular_reset : SV_Target4,
-    out float4 composition_reset : SV_Target5) {
+    out float4 specular_reset : SV_Target4) {
   specular_reset = 0.0;
-  composition_reset = 0.0;
   float4 r0, r1, r2, r3, r4;
   uint4 bitmask, uiDest;
   float4 fDest;

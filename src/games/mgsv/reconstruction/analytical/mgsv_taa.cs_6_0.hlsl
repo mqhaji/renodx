@@ -1,4 +1,5 @@
 #include "../../shared.h"
+#include "../../rendering/motion.hlsli"
 
 // Resolve in linear light. Shared input preparation already removed gamma and
 // decoded motion. History stays private to D3D12; this pass also encodes the
@@ -21,11 +22,8 @@ cbuffer TaaResolveConstants : register(b1) {
   float diagnostic_view;
   float velocity_visualization_range;
   float camera_reprojection_valid;
-  float object_motion_mode;
-  float2 current_jitter_uv;
-  float2 previous_jitter_uv;
-  float velocity_projection_jitter_scale;
   float clip_tightness;
+  float2 current_jitter_uv;
   float history_clip_strength;
   float current_frame_blend;
   float4 current_to_previous_clip_row_0;
@@ -144,9 +142,6 @@ VelocitySelection SelectNearestVelocity(
   selection.uv = uv;
   selection.depth = depth_texture.SampleLevel(point_sampler, uv, 0).x;
 
-  // Mode 7 isolates spatial selection only: keep Auto's composite motion,
-  // but take its velocity, mask and camera depth/UV from the output pixel.
-  if (object_motion_mode >= 6.5f) return selection;
 
   [unroll] for (uint i = 1u; i < 5u; ++i) {
     const float2 candidate_uv = uv + VELOCITY_OFFSETS[i] * inv_screen_size;
@@ -195,30 +190,7 @@ float3 SampleHistoryCatmullRom(float2 uv, float2 screen_size) {
   return renodx::math::DivideSafe(color, weight_sum, 0.f.xxx);
 }
 
-// Rebuilds camera motion from MGSV's native no-jitter projection/view state.
-// The depth came from the jittered frame, but projection jitter changes only
-// clip X/Y, so Z/W remains valid. Removing the current offset before applying
-// the no-jitter current-to-previous matrix keeps static-camera velocity zero.
-bool ComputeMatrixCameraVelocity(float2 uv, float depth, out float2 velocity) {
-  const float2 current_ndc =
-      uv * float2(2.f, -2.f) + float2(-1.f, 1.f)
-      - float2(2.f * current_jitter_uv.x, -2.f * current_jitter_uv.y);
-  const float4 current_clip = float4(current_ndc, depth, 1.f);
-  const float4 previous_clip = float4(
-      dot(current_to_previous_clip_row_0, current_clip),
-      dot(current_to_previous_clip_row_1, current_clip),
-      dot(current_to_previous_clip_row_2, current_clip),
-      dot(current_to_previous_clip_row_3, current_clip));
-  if (abs(previous_clip.w) <= 1e-8f) {
-    velocity = 0.f.xx;
-    return false;
-  }
 
-  const float2 current_no_jitter_uv = current_ndc * float2(0.5f, -0.5f) + 0.5f.xx;
-  const float2 previous_uv = previous_clip.xy / previous_clip.w * float2(0.5f, -0.5f) + 0.5f.xx;
-  velocity = current_no_jitter_uv - previous_uv;
-  return all(isfinite(velocity));
-}
 
 // Rejects reprojected history samples that land outside normalized screen UVs.
 bool IsInsideScreen(float2 uv) {
@@ -279,7 +251,9 @@ float ComputeHistoryBlend(float3 history_color, float3 clip_min, float3 clip_max
   const float2 native_velocity = velocity_selection.velocity;
   float2 matrix_camera_velocity = native_velocity;
   if (camera_reprojection_valid > 0.f) {
-    ComputeMatrixCameraVelocity(velocity_selection.uv, velocity_selection.depth, matrix_camera_velocity);
+    GetCameraVelocity(velocity_selection.uv, velocity_selection.depth, current_jitter_uv,
+                      float4x4(current_to_previous_clip_row_0, current_to_previous_clip_row_1,
+                               current_to_previous_clip_row_2, current_to_previous_clip_row_3), matrix_camera_velocity);
   }
 
   const float2 velocity = -velocity_texture.SampleLevel(point_sampler, velocity_selection.uv, 0).xy;

@@ -47,8 +47,7 @@ void main(
     out float4 o0 : SV_Target0,
     out float4 o1 : SV_Target1,
     out float4 o2 : SV_Target2,
-    out float4 specular_reset : SV_Target3,
-    out float4 composition_reset : SV_Target4) {
+    out float4 specular_reset : SV_Target3) {
   float4 r0, r1, r2, r3;
   uint4 bitmask, uiDest;
   float4 fDest;
@@ -193,6 +192,5 @@ void main(
   o0.xyzw = float4(0, 0, 0, 1);
   o2 = o1;
   specular_reset = 0.0;
-  composition_reset = 0.0;
   return;
 }

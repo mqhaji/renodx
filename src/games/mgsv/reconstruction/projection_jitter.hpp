@@ -9,16 +9,21 @@
  * then filter by the expected return address so the helper's other call sites
  * remain untouched.
  *
- * While TAA is enabled, the hook applies jitter only to the active copied
+ * While temporal reconstruction is enabled, the hook applies jitter only to the active copied
  * projection and publishes the exact camera state consumed by the resolve.
- * The next unmodified game copy restores vanilla state when TAA is disabled.
+ * The next unmodified game copy restores vanilla state when reconstruction is disabled.
+ * Final constant uploads keep depth reconstruction aligned with that projection
+ * and preserve subpixel precision in the verified character-motion transforms.
  */
 
+#include <d3d11.h>
 #include <windows.h>
+#include <wrl/client.h>
 
 #include <intrin.h>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -27,7 +32,9 @@
 #include <shared_mutex>
 
 #include <detours.h>
+#include <include/reshade.hpp>
 
+#include "../../../utils/hash.hpp"
 #include "camera_state.hpp"
 #include "logging.hpp"
 #include "resolution.hpp"
@@ -35,7 +42,17 @@
 
 namespace mgsv::reconstruction::projection_jitter {
 
+// These names identify native packet layouts, not adjustable sampling modes.
+enum class ProjectionPath : uint8_t {
+  SUN_VOLUME,
+  SH_LIGHTING,
+  TERRAIN_DECAL,
+  SKY,
+};
+
 using SetViewMatrixState = void(__fastcall*)(const float* view_matrix);
+using FlushConstants = void(__fastcall*)(void* registers, void* backend);
+using UploadConstants = void(__fastcall*)(void* manager, void* buffer, const void* values, uint32_t bytes);
 using RenderPluginCallback = void(__fastcall*)(void* plugin, void* render, void* viewport);
 using RequestLocalLightDraws = void(__fastcall*)(
     void* renderer, void* packet, void* visible_lights, void* shadow_ready,
@@ -53,6 +70,27 @@ inline constexpr uintptr_t LOCAL_LIGHT_REQUEST_RVA = 0x2A43E0u;
 inline constexpr uintptr_t LOCAL_LIGHT_REQUEST_RETURN_RVA = 0x20B8A3u;
 inline constexpr uintptr_t LOCAL_LIGHT_REQUEST_VTABLE_RVA = 0x211E8D8u;
 inline constexpr uintptr_t LOCAL_LIGHT_VIEWPORT_280_COPY_RVA = 0x20B48Cu;
+inline constexpr uintptr_t FLUSH_CONSTANTS_RVA = 0x2C5A10u;
+inline constexpr uintptr_t MODEL_CONSTANT_UPLOAD_RETURN_RVA = 0x2D664Fu;
+inline constexpr uintptr_t UPLOAD_CONSTANTS_RVA = 0x311E40u;
+inline constexpr uintptr_t SCATTER_UPLOAD_RETURN_RVA = 0x30E7EFu;
+// Native scene constants occupy thirty float4 registers in bank 2. Register 28
+// carries the projection center used to reconstruct camera rays from depth.
+inline constexpr int SCENE_CAMERA_CENTER_REGISTER = 28;
+inline constexpr uint32_t SCENE_CONSTANT_REGISTERS = 30u;
+// The velocity vertex programs give c12 and c16 different meanings from the
+// lighting programs. Identify their exact bytecode before changing those fields.
+inline constexpr GUID VELOCITY_SHADER_GUID = {
+    .Data1 = 0x153488D9u,
+    .Data2 = 0x1D71u,
+    .Data3 = 0x494Du,
+    .Data4 = {0x90u, 0x68u, 0xA9u, 0xFCu, 0x18u, 0x62u, 0x3Bu, 0xD7u},
+};
+enum class VelocityShaderKind : uint8_t {
+  NONE,
+  OPAQUE_MOTION,
+  MASKED_MOTION,
+};
 
 inline constexpr std::array<uint8_t, 16> FORWARD_RENDERING_PROLOGUE = {
     0x40,
@@ -242,6 +280,10 @@ inline constexpr std::array<uint8_t, 56> PROJECTION_COPY_PATTERN = {
 inline constexpr uint32_t REQUIRED_RESTORATION_HITS = 3u;
 
 inline SetViewMatrixState set_view_matrix_state = nullptr;
+inline FlushConstants flush_constants = nullptr;
+inline const void* motion_upload_return_address = nullptr;
+inline UploadConstants upload_constants = nullptr;
+inline const void* scatter_upload_return_address = nullptr;
 inline RenderPluginCallback forward_rendering = nullptr;
 inline RequestLocalLightDraws request_local_light_draws = nullptr;
 inline const void* local_light_request_return_address = nullptr;
@@ -375,7 +417,14 @@ inline bool InitializeAdditionalHookAddresses(HMODULE module, const uint8_t* hel
       || !MatchesBytes(base + LOCAL_LIGHT_REQUEST_RVA, LOCAL_LIGHT_REQUEST_PROLOGUE)
       || !MatchesBytes(base + LOCAL_LIGHT_REQUEST_RETURN_RVA - LOCAL_LIGHT_REQUEST_CALL_PATTERN.size(), LOCAL_LIGHT_REQUEST_CALL_PATTERN)
       || *reinterpret_cast<const uintptr_t*>(base + LOCAL_LIGHT_REQUEST_VTABLE_RVA) != reinterpret_cast<uintptr_t>(base + LOCAL_LIGHT_REQUEST_RVA)
-      || !MatchesBytes(base + LOCAL_LIGHT_VIEWPORT_280_COPY_RVA, LOCAL_LIGHT_VIEWPORT_280_COPY_PATTERN)) {
+      || !MatchesBytes(base + LOCAL_LIGHT_VIEWPORT_280_COPY_RVA, LOCAL_LIGHT_VIEWPORT_280_COPY_PATTERN)
+      || !MatchesBytes(base + FLUSH_CONSTANTS_RVA, std::array<uint8_t, 16>{0x48, 0x89, 0x4C, 0x24, 0x08, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57})
+      // The model worker flushes shader bindings, then constants. The latter
+      // helper tail-calls this upload, preserving the model worker's return site.
+      || DecodeRelativeCall(base + 0x2D6642u) != base + 0x2D73D0u
+      || DecodeRelativeCall(base + MODEL_CONSTANT_UPLOAD_RETURN_RVA - 5u) != base + 0x2D7390u
+      || !MatchesBytes(base + UPLOAD_CONSTANTS_RVA, std::array<uint8_t, 16>{0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57})
+      || DecodeRelativeCall(base + SCATTER_UPLOAD_RETURN_RVA - 5u) != base + UPLOAD_CONSTANTS_RVA) {
     logging::Warn("known additional projection jitter paths failed executable validation");
     return false;
   }
@@ -389,6 +438,10 @@ inline bool InitializeAdditionalHookAddresses(HMODULE module, const uint8_t* hel
   forward_rendering = reinterpret_cast<RenderPluginCallback>(base + FORWARD_RENDERING_RVA);
   request_local_light_draws = reinterpret_cast<RequestLocalLightDraws>(base + LOCAL_LIGHT_REQUEST_RVA);
   local_light_request_return_address = base + LOCAL_LIGHT_REQUEST_RETURN_RVA;
+  flush_constants = reinterpret_cast<FlushConstants>(base + FLUSH_CONSTANTS_RVA);
+  motion_upload_return_address = base + MODEL_CONSTANT_UPLOAD_RETURN_RVA;
+  upload_constants = reinterpret_cast<UploadConstants>(base + UPLOAD_CONSTANTS_RVA);
+  scatter_upload_return_address = base + SCATTER_UPLOAD_RETURN_RVA;
   return true;
 }
 
@@ -429,15 +482,10 @@ inline void ApplyProjectionJitter(float* projection, float jitter_uv_x, float ji
   projection[9] -= 2.f * jitter_uv_y;
 }
 
-// Hold the publication lock through validation and the resulting matrix write.
-inline bool GetPublishedJitterForViewportLocked(
-    const uint8_t* viewport,
-    state::ProjectionJitterPath path,
-    std::array<float, 2>* jitter_uv) {
+// Called under the publication lock. Qualify the native owner's saved camera,
+// rather than using a newer scene that another worker may already be recording.
+inline bool GetPublishedCameraForViewportLocked(const uint8_t* viewport, camera_state::CameraFrame* frame) {
   if (!state::IsEnabled() || viewport == nullptr) return false;
-
-  const float scale = state::GetProjectionJitterScale(path);
-  if (scale == 0.f) return false;
 
   const auto* projection = reinterpret_cast<const float*>(viewport + 0x280u);
   const uint32_t width = *reinterpret_cast<const uint32_t*>(viewport + 0x5D8u);
@@ -468,16 +516,169 @@ inline bool GetPublishedJitterForViewportLocked(
     return false;
   }
 
+  *frame = published;
+  return true;
+}
+
+// Hold the publication lock through validation and the resulting matrix write.
+inline bool GetPublishedJitterForViewportLocked(
+    const uint8_t* viewport,
+    std::array<float, 2>* jitter_uv) {
+  camera_state::CameraFrame published;
+  if (!GetPublishedCameraForViewportLocked(viewport, &published)) return false;
   *jitter_uv = {
-      published.jitter_uv_x * scale,
-      published.jitter_uv_y * scale,
+      published.jitter_uv_x,
+      published.jitter_uv_y,
   };
   return true;
 }
 
+// Native commands can fill their scene bank without using the vector setter.
+// Correct the final upload source, after those commands have finished writing.
+inline void __fastcall HookFlushConstants(void* registers, void* backend) {
+  if (registers == nullptr) {
+    flush_constants(registers, backend);
+    return;
+  }
+  auto* bytes = static_cast<uint8_t*>(registers);
+  // Eight 32-byte bank records precede the native dirty and active masks.
+  // Bank 2 is the 480-byte scene block. Leave the game's upload decisions alone.
+  const uint32_t dirty = *reinterpret_cast<const uint32_t*>(bytes + 0x110u);
+  const uint32_t active = *reinterpret_cast<const uint32_t*>(bytes + 0x114u);
+  auto** source = reinterpret_cast<const float**>(bytes + 0x48u);
+  if ((dirty & active & 4u) == 0u || *source == nullptr
+      || *reinterpret_cast<const uint32_t*>(bytes + 0x58u) != SCENE_CONSTANT_REGISTERS) {
+    flush_constants(registers, backend);
+    return;
+  }
+  alignas(16) std::array<float, SCENE_CONSTANT_REGISTERS * 4u> corrected;
+  bool replace_source = false;
+  if (state::IsEnabled()) {
+    const camera_state::PublicationWriterGuard guard;
+    camera_state::CameraFrame frame;
+    const auto owner = rendering::native_context::GetScope().owner;
+    if (GetPublishedCameraForViewportLocked(std::bit_cast<const uint8_t*>(owner.viewport), &frame)) {
+      const auto* base = reinterpret_cast<const float*>(std::bit_cast<const uint8_t*>(frame.camera_identity) + 0x118u);
+      const size_t index = SCENE_CAMERA_CENTER_REGISTER * 4u;
+      if ((*source)[index] == base[0] && (*source)[index + 1u] == base[1]) {
+        std::memcpy(corrected.data(), *source, sizeof(corrected));
+        corrected[index] += 2.f * frame.jitter_uv_x;
+        corrected[index + 1u] -= 2.f * frame.jitter_uv_y;
+        replace_source = true;
+      }
+    }
+  }
+  if (backend != nullptr && _ReturnAddress() == motion_upload_return_address) {
+    // Only this verified model call has already flushed its shader bindings.
+    // Other upload callers may still have a shader change pending. Read this
+    // recording context's bound VS, never another worker's state.
+    auto* context = *reinterpret_cast<ID3D11DeviceContext**>(static_cast<uint8_t*>(backend) + 8u);
+    Microsoft::WRL::ComPtr<ID3D11VertexShader> vertex;
+    if (context != nullptr) {
+      context->VSGetShader(&vertex, nullptr, nullptr);
+    }
+    VelocityShaderKind vertex_kind = VelocityShaderKind::NONE;
+    UINT size = sizeof(vertex_kind);
+    bool motion_pair = false;
+    if (vertex != nullptr && SUCCEEDED(vertex->GetPrivateData(VELOCITY_SHADER_GUID, &size, &vertex_kind))
+        && size == sizeof(vertex_kind) && vertex_kind != VelocityShaderKind::NONE) {
+      // The same scene bank is visible to both stages. Require the matching
+      // native motion PS as well; an unrelated PS may read these fields itself.
+      Microsoft::WRL::ComPtr<ID3D11PixelShader> pixel;
+      context->PSGetShader(&pixel, nullptr, nullptr);
+      VelocityShaderKind pixel_kind = VelocityShaderKind::NONE;
+      size = sizeof(pixel_kind);
+      motion_pair = pixel != nullptr && SUCCEEDED(pixel->GetPrivateData(VELOCITY_SHADER_GUID, &size, &pixel_kind))
+                    && size == sizeof(pixel_kind) && pixel_kind == vertex_kind;
+    }
+    if (motion_pair) {
+      // This precision correction uses only the two native matrices from this
+      // upload. It needs no reconstruction history or camera publication and
+      // remains active with reconstruction Off, like velocity storage upgrades.
+      if (!replace_source) {
+        std::memcpy(corrected.data(), *source, sizeof(corrected));
+      }
+      // Native motion transforms the previous skinned position into world space,
+      // then into clip space. Large world coordinates lose subpixel precision in
+      // those float operations. Combine the matrices once per upload in double,
+      // before rounding back to float. The unchanged VS now transforms directly
+      // from previous model space to clip space, then multiplies by identity.
+      constexpr size_t previous_world = 12u * 4u;
+      constexpr size_t previous_clip = 16u * 4u;
+      for (size_t row = 0u; row < 4u; ++row) {
+        for (size_t column = 0u; column < 4u; ++column) {
+          double value = 0.0;
+          for (size_t k = 0u; k < 4u; ++k) {
+            value += static_cast<double>((*source)[previous_clip + (row * 4u) + k])
+                     * (*source)[previous_world + (k * 4u) + column];
+          }
+          corrected[previous_world + (row * 4u) + column] = static_cast<float>(value);
+          corrected[previous_clip + (row * 4u) + column] = (row == column ? 1.f : 0.f);
+        }
+      }
+      replace_source = true;
+    }
+  }
+  if (!replace_source) {
+    flush_constants(registers, backend);
+    return;
+  }
+  // This command context is used by one recording thread. Flush copies the
+  // selected bank synchronously into its mapped GPU buffer. Temporarily select
+  // our private values; retain all native dirty/binding updates and restore the
+  // source pointer before returning. Native CPU data and the camera stay intact.
+  struct RestoreSource {
+    const float** destination;
+    const float* original;
+    ~RestoreSource() { *destination = original; }
+  };
+  const RestoreSource restore{.destination = source, .original = *source};
+  *source = corrected.data();
+  flush_constants(registers, backend);
+}
+
+inline void __fastcall HookUploadConstants(void* manager, void* buffer, const void* values, uint32_t bytes) {
+  struct alignas(16) ScatterConstants {
+    uint32_t width;
+    uint32_t height;
+    uint32_t tiles_x;
+    uint32_t tiles_y;
+    std::array<float, 2> half_fov_recip;
+    std::array<float, 2> camera_center_offset;
+    std::array<float, 4> projection;
+    std::array<float, 2> tweak;
+    float fade;
+    float padding;
+  };
+  static_assert(sizeof(ScatterConstants) == 64u);
+  if (_ReturnAddress() != scatter_upload_return_address || bytes != sizeof(ScatterConstants)
+      || values == nullptr || !state::IsEnabled()) {
+    upload_constants(manager, buffer, values, bytes);
+    return;
+  }
+  ScatterConstants corrected;
+  const void* selected = values;
+  {
+    const camera_state::PublicationWriterGuard guard;
+    camera_state::CameraFrame frame;
+    const auto owner = rendering::native_context::GetScope().owner;
+    if (GetPublishedCameraForViewportLocked(std::bit_cast<const uint8_t*>(owner.viewport), &frame)) {
+      std::memcpy(&corrected, values, sizeof(corrected));
+      const auto* base = reinterpret_cast<const float*>(std::bit_cast<const uint8_t*>(frame.camera_identity) + 0x118u);
+      if (corrected.width == frame.width && corrected.height == frame.height
+          && corrected.camera_center_offset[0] == base[0] && corrected.camera_center_offset[1] == base[1]) {
+        corrected.camera_center_offset[0] += 2.f * frame.jitter_uv_x;
+        corrected.camera_center_offset[1] -= 2.f * frame.jitter_uv_y;
+        selected = &corrected;
+      }
+    }
+  }
+  // Both native scatter stages and custom diffuse lighting read this one block.
+  upload_constants(manager, buffer, selected, bytes);
+}
+
 inline void ApplyPublishedJitterToActiveProjection(
-    const uint8_t* viewport,
-    state::ProjectionJitterPath jitter_path) {
+    const uint8_t* viewport) {
   // Native callbacks may already hold the execution gate, so do not take it
   // here. Keep camera validation and the write under one publication lock so
   // reset, camera replacement, or sample advancement cannot split them.
@@ -488,7 +689,7 @@ inline void ApplyPublishedJitterToActiveProjection(
     return;
   }
   auto* active_projection = reinterpret_cast<float*>(static_cast<uint8_t*>(shader_manager) + 0x680u);
-  if (!GetPublishedJitterForViewportLocked(viewport, jitter_path, &jitter_uv)) return;
+  if (!GetPublishedJitterForViewportLocked(viewport, &jitter_uv)) return;
 
   const auto* projection = reinterpret_cast<const float*>(viewport + 0x280u);
   if (std::memcmp(projection, active_projection, 16u * sizeof(float)) != 0) {
@@ -505,23 +706,11 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   original(view_matrix);
 
   if (return_address != expected_return_address) {
-    state::ProjectionJitterPath path;
-    if (return_address == velocity_return_address) {
-      path = state::ProjectionJitterPath::VELOCITY;
-    } else if (return_address == model_return_address) {
-      path = state::ProjectionJitterPath::MODEL;
-    } else if (return_address == alpha_model_return_address) {
-      path = state::ProjectionJitterPath::ALPHA_MODEL;
-    } else if (return_address == overlay_model_return_address) {
-      path = state::ProjectionJitterPath::OVERLAY_MODEL;
-    } else if (return_address == new_thermography_return_address
-               || return_address == thermography_return_address) {
-      path = state::ProjectionJitterPath::THERMOGRAPHY;
-    } else {
-      return;
-    }
+    if (return_address != velocity_return_address && return_address != model_return_address
+        && return_address != alpha_model_return_address && return_address != overlay_model_return_address
+        && return_address != new_thermography_return_address && return_address != thermography_return_address) return;
     const auto* viewport = reinterpret_cast<const uint8_t*>(view_matrix) - 0x2C0u;
-    ApplyPublishedJitterToActiveProjection(viewport, path);
+    ApplyPublishedJitterToActiveProjection(viewport);
     return;
   }
 
@@ -620,7 +809,7 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
       projection_w_scale / projection[0],
       projection_w_scale / projection[5],
   };
-  camera_state::PublishLocked(camera_state::CameraFrame{
+  camera_state::CameraFrame camera_frame = {
       .valid = true,
       .camera_matrix_valid = current_camera_matrix_valid,
       .camera_reprojection_valid = camera_reprojection_valid,
@@ -638,7 +827,13 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
       .inverse_view_projection = current_inverse_view_projection,
       .projection = camera_state::staged_projection,
       .view = camera_state::staged_view,
-  });
+  };
+  // Read native history while the originating viewport is alive. A later
+  // draw may run after another worker changes it, so retain values, not pointers.
+  std::memcpy(camera_frame.native_previous_projection.data(), viewport + 0x400u, sizeof(camera_frame.native_previous_projection));
+  std::memcpy(camera_frame.native_previous_view.data(), viewport + 0x3C0u, sizeof(camera_frame.native_previous_view));
+  camera_frame.native_history_available = true;
+  camera_state::PublishLocked(camera_frame);
 }
 
 inline void __fastcall HookForwardRendering(void* plugin, void* render, void* viewport_pointer) {
@@ -646,9 +841,7 @@ inline void __fastcall HookForwardRendering(void* plugin, void* render, void* vi
   if (original == nullptr) return;
   original(plugin, render, viewport_pointer);
 
-  ApplyPublishedJitterToActiveProjection(
-      static_cast<const uint8_t*>(viewport_pointer),
-      state::ProjectionJitterPath::FORWARD);
+  ApplyPublishedJitterToActiveProjection(static_cast<const uint8_t*>(viewport_pointer));
 }
 
 inline void __fastcall HookRequestLocalLightDraws(
@@ -667,7 +860,7 @@ inline void __fastcall HookRequestLocalLightDraws(
     std::array<float, 2> jitter_uv = {};
     // Match the copied P/V and viewport rectangle as well as the scene's camera.
     // A packet already carrying jitter fails this check, preventing a second offset.
-    if (GetPublishedJitterForViewportLocked(viewport, state::ProjectionJitterPath::LOCAL_LIGHT, &jitter_uv)
+    if (GetPublishedJitterForViewportLocked(viewport, &jitter_uv)
         && std::memcmp(packet + 0x1A0u, viewport + 0x280u, 2u * 16u * sizeof(float)) == 0
         && std::memcmp(packet + 0x370u, viewport + 0x5D0u, 4u * sizeof(uint32_t)) == 0) {
       // Workers retain or copy this render P. The separate culling P/V and
@@ -681,7 +874,6 @@ inline void __fastcall HookRequestLocalLightDraws(
            input_context, output_context, viewport_pointer, jobs);
 }
 
-#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
 using SunPass = void(__fastcall*)(void*, void*, uint32_t, uint32_t, uint8_t, uint8_t);
 using SunVolume = void(__fastcall*)(void*, const float*, const void*, const void*, void*, void*);
 using ShFallback = uint32_t(__fastcall*)(void*, uint32_t, float*, float*, float*, void*, void*);
@@ -689,9 +881,6 @@ using ShProducer = void(__fastcall*)(void*, void*, void*, void*);
 using SkyParameters = void*(__fastcall*)(void*, uint32_t*, void*, void*);
 using TerrainProducer = void(__fastcall*)(void*, void*, void*, void*, uint64_t);
 using AttachPacket = void(__fastcall*)(void*, void*, uint64_t, uint64_t);
-using AlternateProjection = void(__fastcall*)(void*);
-using AlternateCommand = void*(__fastcall*)(void*, void*);
-using StageMatrix = void(__fastcall*)(void*, uint32_t, const float*);
 inline SunPass sun_pass = nullptr;
 inline SunVolume sun_volume = nullptr;
 inline ShFallback sh_fallback = nullptr;
@@ -700,9 +889,6 @@ inline AttachPacket sh_attach = nullptr;
 inline SkyParameters sky_parameters = nullptr;
 inline TerrainProducer terrain_producer = nullptr;
 inline AttachPacket terrain_attach = nullptr;
-inline AlternateProjection alternate_projection = nullptr;
-inline AlternateCommand alternate_command = nullptr;
-inline StageMatrix stage_matrix = nullptr;
 inline uint8_t* native_base = nullptr;
 inline constexpr std::array<uint32_t, 4> SH_VERTEX_COUNTS = {8u, 6u, 18u, 8u};
 
@@ -714,17 +900,17 @@ inline thread_local const NativeProjectionScope* native_scope = nullptr;
 // synchronous children. Even a rejected nested parent shadows its predecessor.
 struct NativeProjectionScope {
   const NativeProjectionScope* previous = native_scope;
-  state::ProjectionJitterPath path;
+  ProjectionPath path;
   camera_state::CameraFrame frame = {};
   alignas(16) std::array<float, 16> projection = {};
   alignas(16) std::array<float, 16> view = {};
   std::array<float, 2> jitter = {};
   bool valid = false;
 
-  NativeProjectionScope(state::ProjectionJitterPath selected, const void* source, bool alternate = false)
+  NativeProjectionScope(ProjectionPath selected, const void* source)
       : path(selected) {
     native_scope = this;
-    if (source == nullptr || state::GetProjectionJitterScale(path) == 0.f) return;
+    if (source == nullptr) return;
     // Scene camera data has its own lock. GPU reconstruction can run while
     // workers prepare these matrices without making them skip jitter.
     const camera_state::PublicationWriterGuard publication_guard;
@@ -734,22 +920,13 @@ struct NativeProjectionScope {
         || frame.scene == 0u
         || frame.reset_generation != camera_state::reset_generation.load(std::memory_order_relaxed)) return;
     const auto* bytes = static_cast<const uint8_t*>(source);
-    const auto* p = reinterpret_cast<const float*>(bytes + (alternate ? 0x1C0u : 0x280u));
-    const auto* v = reinterpret_cast<const float*>(bytes + (alternate ? 0x200u : 0x2C0u));
-    const void* camera = *reinterpret_cast<void* const*>(bytes + (alternate ? 0x308u : 0x570u));
+    const auto* p = reinterpret_cast<const float*>(bytes + 0x280u);
+    const auto* v = reinterpret_cast<const float*>(bytes + 0x2C0u);
+    const void* camera = *reinterpret_cast<void* const*>(bytes + 0x570u);
     if (camera == nullptr || reinterpret_cast<uintptr_t>(camera) != frame.camera_identity) return;
-    uint32_t width = 0u;
-    uint32_t height = 0u;
-    if (alternate) {
-      const auto* descriptor = *reinterpret_cast<const uint8_t* const*>(bytes + 0x2F0u);
-      if (descriptor == nullptr) return;
-      width = *reinterpret_cast<const uint32_t*>(descriptor + 0x48u);
-      height = *reinterpret_cast<const uint32_t*>(descriptor + 0x4Cu);
-    } else {
-      if (reinterpret_cast<uintptr_t>(source) != frame.viewport_identity || (bytes[0x6E2u] & 1u) == 0u) return;
-      width = *reinterpret_cast<const uint32_t*>(bytes + 0x5D8u);
-      height = *reinterpret_cast<const uint32_t*>(bytes + 0x5DCu);
-    }
+    if (reinterpret_cast<uintptr_t>(source) != frame.viewport_identity || (bytes[0x6E2u] & 1u) == 0u) return;
+    const uint32_t width = *reinterpret_cast<const uint32_t*>(bytes + 0x5D8u);
+    const uint32_t height = *reinterpret_cast<const uint32_t*>(bytes + 0x5DCu);
     if (width != frame.width || height != frame.height
         || !LooksLikeGameplayProjection(p, width, height, 1u, camera)
         || std::memcmp(p, frame.projection.data(), 64u) != 0
@@ -761,8 +938,7 @@ struct NativeProjectionScope {
     }
     std::memcpy(projection.data(), p, 64u);
     std::memcpy(view.data(), v, 64u);
-    const float scale = state::GetProjectionJitterScale(path);
-    jitter = {frame.jitter_uv_x * scale, frame.jitter_uv_y * scale};
+    jitter = {frame.jitter_uv_x, frame.jitter_uv_y};
     valid = std::isfinite(jitter[0]) && std::isfinite(jitter[1]) && (jitter[0] != 0.f || jitter[1] != 0.f);
   }
   NativeProjectionScope(const NativeProjectionScope&) = delete;
@@ -772,7 +948,6 @@ struct NativeProjectionScope {
   [[nodiscard]] bool CurrentLocked() const {
     const auto owner = rendering::native_context::GetScope().owner;
     return valid && state::IsEnabled()
-           && state::GetProjectionJitterScale(path) != 0.f
            && frame.scene == owner.scene && frame.owner_generation == owner.generation
            && frame.reset_generation == camera_state::reset_generation.load(std::memory_order_relaxed);
   }
@@ -834,7 +1009,7 @@ inline bool CorrectNativeMatrix(float* matrix, const NativeProjectionScope& scop
 }
 
 inline void __fastcall HookSunPass(void* renderer, void* viewport, uint32_t a, uint32_t b, uint8_t c, uint8_t d) {
-  const NativeProjectionScope scope(state::ProjectionJitterPath::SUN_VOLUME, viewport);
+  const NativeProjectionScope scope(ProjectionPath::SUN_VOLUME, viewport);
   sun_pass(renderer, viewport, a, b, c, d);
 }
 
@@ -842,7 +1017,7 @@ inline void __fastcall HookSunVolume(void* context, const float* vp, const void*
                                      void* vertices, void* indices) {
   alignas(16) std::array<float, 16> copy = {};
   if (_ReturnAddress() == native_base + 0x30B07Du && native_scope != nullptr
-      && native_scope->path == state::ProjectionJitterPath::SUN_VOLUME && vp != nullptr) {
+      && native_scope->path == ProjectionPath::SUN_VOLUME && vp != nullptr) {
     std::memcpy(copy.data(), vp, 64u);
     if (CorrectNativeMatrix(copy.data(), *native_scope)) vp = copy.data();
   }
@@ -853,7 +1028,7 @@ inline void __fastcall HookSunVolume(void* context, const float* vp, const void*
 inline uint32_t __fastcall HookShFallback(void* renderer, uint32_t kind, float* output, float* min_w,
                                           float* max_w, void* shape, void* viewport) {
   const bool qualified = _ReturnAddress() == native_base + 0x1F2529u && kind < SH_VERTEX_COUNTS.size();
-  const NativeProjectionScope scope(state::ProjectionJitterPath::SH_LIGHTING, qualified ? viewport : nullptr);
+  const NativeProjectionScope scope(ProjectionPath::SH_LIGHTING, qualified ? viewport : nullptr);
   const uint32_t success = sh_fallback(renderer, kind, output, min_w, max_w, shape, viewport);
   if (success != 0u && scope.valid) {
     const camera_state::PublicationWriterGuard publication_guard;
@@ -865,13 +1040,13 @@ inline uint32_t __fastcall HookShFallback(void* renderer, uint32_t kind, float* 
 }
 
 inline void __fastcall HookShProducer(void* renderer, void* scene, void* viewport, void* inputs) {
-  const NativeProjectionScope scope(state::ProjectionJitterPath::SH_LIGHTING, viewport);
+  const NativeProjectionScope scope(ProjectionPath::SH_LIGHTING, viewport);
   sh_producer(renderer, scene, viewport, inputs);
 }
 
 inline void __fastcall HookShAttach(void* job, void* packet, uint64_t c, uint64_t d) {
   if (_ReturnAddress() == native_base + 0x282A8Bu && packet != nullptr && native_scope != nullptr
-      && native_scope->path == state::ProjectionJitterPath::SH_LIGHTING
+      && native_scope->path == ProjectionPath::SH_LIGHTING
       && std::memcmp(static_cast<const uint8_t*>(packet) + 0x120u, native_scope->view.data(), 64u) == 0) {
     // Both SH workers retain this packet. ExecuteDrawLight derives its clip
     // vertices and inverse light-volume coordinates from the same render P/V.
@@ -883,7 +1058,7 @@ inline void __fastcall HookShAttach(void* job, void* packet, uint64_t c, uint64_
 
 inline void* __fastcall HookSkyParameters(void* plugin, uint32_t* result, void* viewport, void* parameters) {
   const bool qualified = _ReturnAddress() == native_base + 0x1F5990u && result != nullptr && parameters != nullptr;
-  const NativeProjectionScope scope(state::ProjectionJitterPath::SKY, qualified ? viewport : nullptr);
+  const NativeProjectionScope scope(ProjectionPath::SKY, qualified ? viewport : nullptr);
   void* returned = sky_parameters(plugin, result, viewport, parameters);
   if (!scope.valid || *result == UINT32_MAX) return returned;
 
@@ -916,44 +1091,20 @@ inline void* __fastcall HookSkyParameters(void* plugin, uint32_t* result, void* 
 }
 
 inline void __fastcall HookTerrainProducer(void* a, void* b, void* scene, void* viewport, uint64_t e) {
-  const NativeProjectionScope scope(state::ProjectionJitterPath::TERRAIN_DECAL, viewport);
+  const NativeProjectionScope scope(ProjectionPath::TERRAIN_DECAL, viewport);
   terrain_producer(a, b, scene, viewport, e);
 }
 
 inline void __fastcall HookTerrainAttach(void* command, void* packet, uint64_t c, uint64_t d) {
   if (_ReturnAddress() == native_base + 0x2755CAu && packet != nullptr && native_scope != nullptr
-      && native_scope->path == state::ProjectionJitterPath::TERRAIN_DECAL) {
+      && native_scope->path == ProjectionPath::TERRAIN_DECAL) {
     CorrectNativeMatrix(reinterpret_cast<float*>(static_cast<uint8_t*>(packet) + 0x160u), *native_scope, true);
   }
   // Original native object/header is retained; no borrowed/stack packet escapes.
   terrain_attach(command, packet, c, d);
 }
 
-inline void __fastcall HookAlternateProjection(void* context) {
-  const NativeProjectionScope scope(state::ProjectionJitterPath::ALTERNATE_CAMERA, context, true);
-  alternate_projection(context);
-}
-
-inline void* __fastcall HookAlternateCommand(void* context, void* command) {
-  const NativeProjectionScope scope(state::ProjectionJitterPath::ALTERNATE_CAMERA, context, true);
-  return alternate_command(context, command);
-}
-
-inline void __fastcall HookStageMatrix(void* context, uint32_t id, const float* matrix) {
-  const void* caller = _ReturnAddress();
-  alignas(16) std::array<float, 16> copy = {};
-  if ((caller == native_base + 0x2E7484u || caller == native_base + 0x2E4DD7u)
-      && id == 0x47u && matrix != nullptr && native_scope != nullptr
-      && native_scope->path == state::ProjectionJitterPath::ALTERNATE_CAMERA) {
-    std::memcpy(copy.data(), matrix, 64u);
-    if (CorrectNativeMatrix(copy.data(), *native_scope)) matrix = copy.data();
-  }
-  // Only the synchronous staging source changes. Context P/V never change,
-  // including null-camera updates, nested streams and every early return.
-  stage_matrix(context, id, matrix);
-}
-
-inline bool InitializeNativeDiagnosticAddresses(HMODULE module) {
+inline bool InitializeNativeProjectionAddresses(HMODULE module) {
   auto* base = reinterpret_cast<uint8_t*>(module);
   const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
   const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
@@ -1057,61 +1208,7 @@ inline bool InitializeNativeDiagnosticAddresses(HMODULE module) {
                                              0xFF,
                                              0x48,
                                          })
-      || !MatchesBytes(base + 0x2E7330u, std::array<uint8_t, 16>{
-                                             0x4C,
-                                             0x8B,
-                                             0xDC,
-                                             0x48,
-                                             0x81,
-                                             0xEC,
-                                             0xA8,
-                                             0x00,
-                                             0x00,
-                                             0x00,
-                                             0x48,
-                                             0x8B,
-                                             0x05,
-                                             0xEF,
-                                             0x1F,
-                                             0x86,
-                                         })
-      || !MatchesBytes(base + 0x2E4C70u, std::array<uint8_t, 16>{
-                                             0x48,
-                                             0x8B,
-                                             0xC4,
-                                             0x48,
-                                             0x89,
-                                             0x58,
-                                             0x10,
-                                             0x57,
-                                             0x48,
-                                             0x81,
-                                             0xEC,
-                                             0xC0,
-                                             0x00,
-                                             0x00,
-                                             0x00,
-                                             0x0F,
-                                         })
-      || !MatchesBytes(base + 0x2D7AA0u, std::array<uint8_t, 16>{
-                                             0x48,
-                                             0x81,
-                                             0xEC,
-                                             0x88,
-                                             0x00,
-                                             0x00,
-                                             0x00,
-                                             0x48,
-                                             0x8B,
-                                             0x05,
-                                             0x82,
-                                             0x18,
-                                             0x87,
-                                             0x02,
-                                             0x48,
-                                             0x33,
-                                         })
-      || DecodeRelativeCall(base + 0x30B078u) != base + 0x30B680u || DecodeRelativeCall(base + 0x1F2524u) != base + 0x27EF80u || DecodeRelativeCall(base + 0x2755C5u) != base + 0x2D18D0u || DecodeRelativeCall(base + 0x2E747Fu) != base + 0x2D7AA0u || DecodeRelativeCall(base + 0x2E4DD2u) != base + 0x2D7AA0u || std::memcmp(base + 0x21102B8u, SH_VERTEX_COUNTS.data(), sizeof(SH_VERTEX_COUNTS)) != 0) {
+      || DecodeRelativeCall(base + 0x30B078u) != base + 0x30B680u || DecodeRelativeCall(base + 0x1F2524u) != base + 0x27EF80u || DecodeRelativeCall(base + 0x2755C5u) != base + 0x2D18D0u || std::memcmp(base + 0x21102B8u, SH_VERTEX_COUNTS.data(), sizeof(SH_VERTEX_COUNTS)) != 0) {
     return false;
   }
   native_base = base;
@@ -1123,12 +1220,8 @@ inline bool InitializeNativeDiagnosticAddresses(HMODULE module) {
   sky_parameters = reinterpret_cast<SkyParameters>(base + 0x1F50D0u);
   terrain_producer = reinterpret_cast<TerrainProducer>(base + 0x275280u);
   terrain_attach = reinterpret_cast<AttachPacket>(base + 0x2D18D0u);
-  alternate_projection = reinterpret_cast<AlternateProjection>(base + 0x2E7330u);
-  alternate_command = reinterpret_cast<AlternateCommand>(base + 0x2E4C70u);
-  stage_matrix = reinterpret_cast<StageMatrix>(base + 0x2D7AA0u);
   return true;
 }
-#endif
 
 inline bool Attach() {
   const std::scoped_lock lifecycle_guard(lifecycle_mutex);
@@ -1155,12 +1248,10 @@ inline bool Attach() {
     return false;
   }
 
-#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
-  if (!InitializeNativeDiagnosticAddresses(module)) {
-    logging::Warn("native projection diagnostic executable validation failed");
+  if (!InitializeNativeProjectionAddresses(module)) {
+    logging::Warn("native projection executable validation failed");
     return false;
   }
-#endif
   // Never reclaim trampolines while native callers can still enter. Pin the
   // addon as well: device destruction/FreeLibrary is not native quiescence.
   // Installation remains at initial device creation, before scene rendering.
@@ -1194,7 +1285,11 @@ inline bool Attach() {
     DetourTransactionAbort();
     return false;
   }
-#if ENABLE_TAA_PROJECTION_JITTER_DIAGNOSTICS
+  if (DetourAttach(reinterpret_cast<void**>(&flush_constants), reinterpret_cast<void*>(HookFlushConstants)) != NO_ERROR
+      || DetourAttach(reinterpret_cast<void**>(&upload_constants), reinterpret_cast<void*>(HookUploadConstants)) != NO_ERROR) {
+    DetourTransactionAbort();
+    return false;
+  }
   if (DetourAttach(reinterpret_cast<void**>(&sun_pass), reinterpret_cast<void*>(HookSunPass)) != NO_ERROR
       || DetourAttach(reinterpret_cast<void**>(&sun_volume), reinterpret_cast<void*>(HookSunVolume)) != NO_ERROR
       || DetourAttach(reinterpret_cast<void**>(&sh_fallback), reinterpret_cast<void*>(HookShFallback)) != NO_ERROR
@@ -1202,14 +1297,10 @@ inline bool Attach() {
       || DetourAttach(reinterpret_cast<void**>(&sh_attach), reinterpret_cast<void*>(HookShAttach)) != NO_ERROR
       || DetourAttach(reinterpret_cast<void**>(&sky_parameters), reinterpret_cast<void*>(HookSkyParameters)) != NO_ERROR
       || DetourAttach(reinterpret_cast<void**>(&terrain_producer), reinterpret_cast<void*>(HookTerrainProducer)) != NO_ERROR
-      || DetourAttach(reinterpret_cast<void**>(&terrain_attach), reinterpret_cast<void*>(HookTerrainAttach)) != NO_ERROR
-      || DetourAttach(reinterpret_cast<void**>(&alternate_projection), reinterpret_cast<void*>(HookAlternateProjection)) != NO_ERROR
-      || DetourAttach(reinterpret_cast<void**>(&alternate_command), reinterpret_cast<void*>(HookAlternateCommand)) != NO_ERROR
-      || DetourAttach(reinterpret_cast<void**>(&stage_matrix), reinterpret_cast<void*>(HookStageMatrix)) != NO_ERROR) {
+      || DetourAttach(reinterpret_cast<void**>(&terrain_attach), reinterpret_cast<void*>(HookTerrainAttach)) != NO_ERROR) {
     DetourTransactionAbort();
     return false;
   }
-#endif
   if (DetourTransactionCommit() != NO_ERROR) {
     DetourTransactionAbort();
     set_view_matrix_state = nullptr;
@@ -1255,11 +1346,41 @@ inline void OnInitDevice(reshade::api::device* device) {
   Attach();
 }
 
+inline void OnInitPipeline(reshade::api::device* device, reshade::api::pipeline_layout /*layout*/,
+                           uint32_t count, const reshade::api::pipeline_subobject* objects,
+                           reshade::api::pipeline pipeline) {
+  if (device->get_api() != reshade::api::device_api::d3d11 || pipeline.handle == 0u || count != 1u
+      || objects[0].data == nullptr) return;
+  const bool vertex = objects[0].type == reshade::api::pipeline_subobject_type::vertex_shader;
+  if (!vertex && objects[0].type != reshade::api::pipeline_subobject_type::pixel_shader) return;
+  const auto& shader = *static_cast<const reshade::api::shader_desc*>(objects[0].data);
+  if (shader.code == nullptr || shader.code_size == 0u) return;
+  const uint32_t hash = renodx::utils::hash::ComputeCRC32(static_cast<const uint8_t*>(shader.code), shader.code_size);
+  VelocityShaderKind kind = VelocityShaderKind::NONE;
+  if (vertex) {
+    switch (hash) {
+      case 0x1D2531B7u: kind = VelocityShaderKind::OPAQUE_MOTION; break;
+      case 0x7B809E72u: kind = VelocityShaderKind::MASKED_MOTION; break;
+      default:          return;
+    }
+  } else {
+    switch (hash) {
+      case 0x9815404Fu: kind = VelocityShaderKind::OPAQUE_MOTION; break;
+      case 0x58C10658u: kind = VelocityShaderKind::MASKED_MOTION; break;
+      default:          return;
+    }
+  }
+  auto* shader_object = reinterpret_cast<ID3D11DeviceChild*>(pipeline.handle);  // NOLINT(performance-no-int-to-ptr)
+  shader_object->SetPrivateData(VELOCITY_SHADER_GUID, sizeof(kind), &kind);
+}
+
 inline void Use(DWORD reason) {
   if (reason == DLL_PROCESS_ATTACH) {
     reshade::register_event<reshade::addon_event::init_device>(OnInitDevice);
+    reshade::register_event<reshade::addon_event::init_pipeline>(OnInitPipeline);
   } else if (reason == DLL_PROCESS_DETACH) {
     reshade::unregister_event<reshade::addon_event::init_device>(OnInitDevice);
+    reshade::unregister_event<reshade::addon_event::init_pipeline>(OnInitPipeline);
     // DllMain holds the loader lock. Process termination reclaims pinned code;
     // never run a Detours transaction or wait for native work here.
     StopAdmission(false, false);

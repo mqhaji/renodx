@@ -48,6 +48,11 @@ struct CameraFrame {
   Matrix4d inverse_view_projection = {};
   std::array<float, 16> projection = {};
   std::array<float, 16> view = {};
+  // Native object velocity uses this endpoint. It is distinct from the last
+  // successfully reconstructed or denoised camera and is retained for auditing.
+  std::array<float, 16> native_previous_projection = {};
+  std::array<float, 16> native_previous_view = {};
+  bool native_history_available = false;
 };
 
 // Pending reconstruction jobs keep their own copies. This small CPU cache

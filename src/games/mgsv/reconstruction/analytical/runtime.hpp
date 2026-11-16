@@ -21,17 +21,14 @@ struct alignas(16) ResolveConstants {
   float diagnostic_view = state::DEFAULT_DIAGNOSTIC_VIEW;
   float velocity_visualization_range = state::DEFAULT_VELOCITY_VISUALIZATION_RANGE;
   float camera_reprojection_valid = 0.f;
-  float object_motion_mode = 0.f;
-  std::array<float, 2> current_jitter_uv = {0.f, 0.f};
-  std::array<float, 2> previous_jitter_uv = {0.f, 0.f};
-  float velocity_projection_jitter_scale = 0.f;
   float clip_tightness = state::DEFAULT_CLIP_TIGHTNESS;
+  std::array<float, 2> current_jitter_uv = {0.f, 0.f};
   float history_clip_strength = state::DEFAULT_HISTORY_CLIP_STRENGTH;
   float current_frame_blend = state::DEFAULT_CURRENT_FRAME_BLEND;
   std::array<float, 16> current_to_previous_clip = {};
 };
 
-static_assert(sizeof(ResolveConstants) == 112u, "TAA resolve constants must occupy seven 16-byte registers");
+static_assert(sizeof(ResolveConstants) == 96u, "TAA resolve constants must occupy six 16-byte registers");
 
 struct Resources {
   dx12::compute::Pipeline pipeline;
@@ -63,14 +60,8 @@ inline bool Dispatch(const ValidatedFrameInputs& inputs) {
       .diagnostic_view = state::GetDiagnosticView(),
       .velocity_visualization_range = state::GetVelocityVisualizationRange(),
       .camera_reprojection_valid = resources.initialized && inputs.camera.camera_reprojection_valid ? 1.f : 0.f,
-      .object_motion_mode = static_cast<float>(state::GetObjectMotionMode()),
-      .current_jitter_uv = {inputs.camera.jitter_uv_x, inputs.camera.jitter_uv_y},
-      .previous_jitter_uv = {
-          inputs.camera.previous_jitter_uv_x,
-          inputs.camera.previous_jitter_uv_y,
-      },
-      .velocity_projection_jitter_scale = state::GetProjectionJitterScale(state::ProjectionJitterPath::VELOCITY),
       .clip_tightness = state::GetClipTightness(),
+      .current_jitter_uv = {inputs.camera.jitter_uv_x, inputs.camera.jitter_uv_y},
       .history_clip_strength = state::GetHistoryClipStrength(),
       .current_frame_blend = state::GetCurrentFrameBlend(),
       .current_to_previous_clip = inputs.camera.current_to_previous_clip,

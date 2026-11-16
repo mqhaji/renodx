@@ -160,10 +160,8 @@ void main(
     float4 material_position : SV_Position,
     out float4 clean_material : SV_Target3,
     out uint4 material_owner : SV_Target4,
-    out float4 specular_reset : SV_Target5,
-    out float4 composition_reset : SV_Target6) {
+    out float4 specular_reset : SV_Target5) {
   specular_reset = 0.0;
-  composition_reset = 0.0;
   material_clean_pass = false;
   NativeMaterialMain(v0, v1, w1, v2, v3, v4, o0, o1, o2);
   clean_material = float4(0.0, 0.0, 0.0, -1.0);
