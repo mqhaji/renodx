@@ -10,7 +10,7 @@ Shadows selects Vanilla or Enhanced. Enhanced combines PCSS filtering of native 
 | [contact/](contact/) | Added Bend setup, clear, and trace compute shaders, with their shared declarations |
 | [pcss.hlsli](pcss.hlsli), [screen_space_shadows.hlsli](screen_space_shadows.hlsli) | Shared shadow-map filtering and contact-mask application used by the native replacements |
 | [screen_space_shadows.hpp](screen_space_shadows.hpp), [settings.hpp](settings.hpp) | Resource ownership, command recording, state restoration, and controls |
-| [batch.hpp](batch.hpp), [native_groups.hpp](native_groups.hpp) | Native local-light collection and shared compute submission |
+| [batch.hpp](batch.hpp), [native_lights.hpp](native_lights.hpp) | The engine hook where local lighting begins, CPU light constants, and the shared compute batch |
 
 ## Coverage and placement
 
@@ -18,7 +18,7 @@ The [shader registry](../../shaders.hpp) covers all 29 direct-light variants ide
 
 The ambient skylight shader, `SSLighting2_SH_SkyLight_Encode_ps` (`0x4FBDBB39`), has a separate role. It samples directional sky illumination and blends it with native diffuse accumulation, then applies the native SH mask. It has no direct-light shadow map or single source direction for PCSS or Bend. Its existing callback identifies ambient inputs for GT-VBGI's diffuse AO; Enhanced shadows do not darken this contribution again.
 
-The [host](screen_space_shadows.hpp) runs [setup](contact/bend_setup.cs_5_0.hlsl), a bounded [clear](contact/bend_clear.cs_5_0.hlsl), and a depth [trace](contact/bend_trace.cs_5_0.hlsl). Compatible local lights share these dispatches; the remaining lights run them individually. Each native light draw then [combines](screen_space_shadows.hlsli) contact visibility with its shadow-map result before coloring the light. Missing contact inputs leave shadow-map lighting available. Unsupported replacement bindings retain the original shader.
+The [host](screen_space_shadows.hpp) runs [setup](contact/bend_setup.cs_5_0.hlsl), a bounded [clear](contact/bend_clear.cs_5_0.hlsl), and a depth [trace](contact/bend_trace.cs_5_0.hlsl). All local lights of a lighting pass share one run of these dispatches; the sun runs them once per pass. Each native light draw then [combines](screen_space_shadows.hlsli) contact visibility with its shadow-map result before coloring the light. Missing contact inputs leave shadow-map lighting available. Unsupported replacement bindings retain the original shader.
 
 ## Shadow-map filtering
 
@@ -42,11 +42,13 @@ The selected swapchain's Present bookkeeping advances the noise layer. This move
 
 ### Local-light batches
 
-[Native group hooks](native_groups.hpp) collect point and spot draws for lights without shadow maps. Collection copies each light's exact CPU constants when its draw writes lighting. The bound GPU scene buffer is also copied before the first light, preserving its camera jitter and constant-buffer range.
+The [local-light hook](native_lights.hpp) runs when the engine's local-light plugin begins on its build thread, before it branches the jobs that draw unshadowed and shadowed lights. There the [batch](batch.hpp) cuts the build thread's command list and reserves its dispatches at that point. The engine executes that list before every light job's list, and only after all of them have been recorded.
 
-[Batch submission](batch.hpp) inserts three dispatches before those light draws. Setup walks the lights in native order and applies the shared budget. Clear and trace distribute their work across GPU thread groups. Each light reads its own dispatch record and packed mask rectangle from a shared atlas. Replaying a command list computes fresh masks from that execution's depth; copied inputs and GPU resources remain alive until their recorded work is retired.
+Every local light draw that writes lighting, with or without a shadow map, then adds its light to the batch: the CPU constants its worker has just uploaded, its type, and for shadowed lights its shadow-map projection. The batch uploads all lights when its dispatches execute, so lights recorded after the cut are included. All lights of a batch share depth, lighting target, settings, and camera; the first light fixes them.
 
-One atlas allocation stays below 256 MiB and the D3D11 texture-size limit. Groups split when their input records or possible masks would exceed capacity. A finite spotlight budget lets a batch collect additional records because only the admitted lights need mask space. The original ray traversal, sampling, and budget order stay the same. Shadow-map light jobs, immediate contexts, unsupported executable versions, and failed batch checks use the per-light path. Lights without native shadow maps still receive contact shadows.
+Setup builds every light's record in parallel, then admits lights in the order their draws execute: each takes atlas space for its receiver bounds, and spotlights count against the budget. Clear and trace then process all admitted rectangles in parallel, and each light draw reads its own record and packed rectangle. The clear is required because the trace skips ray bundles that miss the light's range and leaves their texels unwritten. Replaying a command list recomputes the masks from that execution's depth; uploaded inputs and GPU resources remain alive until their recorded work is retired.
+
+The sun records a one-light batch beside its first draw of a pass, copying its constants from that draw's bound buffers; the pass's later sun draws reuse its mask. A local light the frame batch cannot take records a one-light batch the same way and logs the reason once. One atlas allocation stays below 256 MiB and the D3D11 texture-size limit. It holds 13 screens of masks, or as many as the spotlight budget, and a light that no longer fits keeps its shadow-map result. On an executable whose hooks cannot be verified, Enhanced shadows keep the native light shaders.
 
 ### Soft contact edges
 
@@ -54,7 +56,7 @@ Bend traces toward the native light center. The first solid caster determines a 
 
 This bounded filter approximates a finite source; it is not an exact area-light integral. Map and contact visibility are still multiplied. Hidden geometry is unavailable, and thin geometry can change coverage with resolution or camera jitter. Longer reach extends the search without increasing sampling density, so it can expose more screen-space errors. Bend keeps its source centered and adds no animated sampling of its own.
 
-Fixed trace settings are contrast 4, 0.5% relative nonlinear-depth thickness, a 2% bilinear depth threshold, four hard-contact samples, eight end-fade samples, and 64 threads per group. One sample advances roughly one render pixel along the ray's main screen axis. All sample groups run at the current scene resolution. Optional edge discard, precision offset, ray-aligned sampling, and group depth-bound early-out are disabled.
+Fixed trace settings are contrast 4, 0.5% relative nonlinear-depth thickness, a 2% bilinear depth threshold, four hard-contact samples, four interleaved soft-sample minima, eight end-fade samples, and 64 threads per group. One sample advances roughly one render pixel along the ray's main screen axis. All sample groups run at the current scene resolution. The sample counts and the neighbor-depth bias are tuned in output pixels: below about 71% render scale the trace uses two hard samples, two minima, and four fade samples, and below about 35% one hard sample and one minimum, while the bias scales directly with render scale. Without that, thin casters lost most of their shadow in upscaled modes. Casters thinner than a render pixel still appear in only some jittered frames, so their accumulated shadow stays lighter than at native resolution. Optional edge discard, precision offset, ray-aligned sampling, and group depth-bound early-out are disabled.
 
 ## Controls
 
@@ -80,7 +82,7 @@ Follow the [addon build and deployment checks](../../README.md#build-and-deploy)
 2. Compare softness at 0%, 50%, and 100%, including the ACC menu. Check different reconstruction resolutions, startup, resize, odd dimensions, and native shadow-quality settings. Thin beard geometry can still show instability.
 3. At Mother Base at night, compare spotlight budgets 13 and 0. Confirm omitted contacts retain map shadows. Check daylight and moonlight separately, using Toward Light to identify the source when needed.
 
-Local GPU fixtures check shadow masks, dispatch records, budgets, packed mask bounds, and command-list replay against the per-light path. Native collection fixtures check context identity, constant copies, nested groups, and resource lifetime. In-game checks covered the main menu and Mother Base at night, including a 241-record spotlight batch and its native lighting draw. The outdoor guardrail/moon direction comparison remains unverified. Use a fixed-camera Enhanced / Vanilla / Enhanced comparison for performance, with debug views and capture copies disabled.
+In-game checks at Mother Base at night, at Native and DLSS Performance: one batch covered all 495 local light draws of a pass, including 16 shadowed spotlights; each traced light's record matched the projection from its draw's own GPU constants within 0.0001 render pixel; and the parallel setup admitted the same lights, with the same bounds, as the earlier serial setup. The outdoor guardrail/moon direction comparison remains unverified. Use a fixed-camera Enhanced / Vanilla / Enhanced comparison for performance, with debug views and capture copies disabled.
 
 ## References and licenses
 

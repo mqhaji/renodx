@@ -164,6 +164,16 @@ struct DofScope {
 };
 using Observer = void (*)(const Event&);
 
+// The native objects recording on the calling thread. Both are borrowed: read
+// them only inside the native call that is using them.
+struct Recording {
+  // The D3D context of the engine context between BeginRecord and EndRecord.
+  // It can be a ReShade proxy; UNWRAPPED_OBJECT gives the native context.
+  uintptr_t d3d_context = 0u;
+  // The innermost worker CommandBuffer, which holds its CPU constant banks.
+  uintptr_t command_buffer = 0u;
+};
+
 // One module owns the hooks and all native bookkeeping. Other addons exchange
 // copied scopes through these entry points. No allocator-owned object crosses
 // the DLL boundary. The provider is pinned while native jobs can return to it.
@@ -179,6 +189,7 @@ struct __declspec(uuid("e9ee935e-2efd-4613-9cad-15e506da643c")) Shared {
   bool (*healthy)() = nullptr;
   Owner (*read_presentation_owner)() = nullptr;
   DofScope (*read_dof)() = nullptr;
+  Recording (*read_recording)() = nullptr;
 };
 static renodx::utils::cross_addon::Shared<Shared> shared;
 static bool registered = false;
@@ -201,6 +212,7 @@ static Runtime runtime;
 static thread_local DofScope dof_scope;
 static thread_local Owner owner;
 static thread_local uint64_t node_serial = 0u;
+static thread_local uintptr_t recording_d3d_context = 0u;
 struct Worker {
   uintptr_t object = 0u;
   Owner previous_owner;
@@ -261,6 +273,11 @@ inline Owner GetPresentationOwner() {
 inline DofScope GetDofScope() {
   if (shared.data == nullptr || shared.data->read_dof == nullptr) return {};
   return shared.data->read_dof();
+}
+
+inline Recording GetRecording() {
+  if (shared.data == nullptr || shared.data->read_recording == nullptr) return {};
+  return shared.data->read_recording();
 }
 
 // A submitted addon dispatch runs on the immediate context, after the native
@@ -579,6 +596,7 @@ inline void __fastcall BeginRecord(uintptr_t node, uintptr_t context) {
     // the actual D3D context separately so the report can prove their crosswalk.
     Emit({.kind = Kind::BEGIN_RECORDING, .owner = owner, .subject = node, .related = native_context, .node = node_serial});
   });
+  recording_d3d_context = Read<uintptr_t>(context, D3D_CONTEXT_OFFSET);
   begin_record(node, context);
 }
 
@@ -597,6 +615,7 @@ inline void __fastcall EndRecord(uintptr_t node, uintptr_t context) {
   });
   end_record(node, context);
   node_serial = previous;
+  recording_d3d_context = 0u;
 }
 
 inline void __fastcall DestroyView(uintptr_t viewport) {
@@ -792,6 +811,9 @@ inline bool Install() {
       if (runtime.failed.load(std::memory_order_relaxed)
           || dof_scope.scope.owner.generation != runtime.generation) return {};
       return dof_scope;
+    };
+    shared.data->read_recording = +[]() -> Recording {
+      return {.d3d_context = recording_d3d_context, .command_buffer = workers.empty() ? 0u : workers.back().object};
     };
     shared.data->read.store(+[]() -> Scope {
       if (runtime.failed.load(std::memory_order_relaxed)) return {};

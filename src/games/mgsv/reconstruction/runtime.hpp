@@ -604,6 +604,7 @@ inline void OnPresent(
     const coordinator::ExecutionGuard execution_guard;
     const bool bridge_required = state::IsEnabled()
                                  || lighting::temporal_inputs::enabled.load(std::memory_order_acquire)
+                                 || coordinator::shadow_batch_requested.load(std::memory_order_acquire)
                                  || (dlss::activation_requested.load(std::memory_order_acquire)
                                      && dlss::ActivationPending());
     const bool bridge_ready = !bridge_required || coordinator::EnsureTemporalSubmissionBridge(device);

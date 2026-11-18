@@ -69,6 +69,7 @@ namespace mgsv::game {
 // The supplied shader data must outlive this registry and its draw callbacks.
 inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shader_injection) {
   mgsv::lighting::material_inputs::controls = shader_injection;
+  mgsv::shadows::batch::controls = shader_injection;
   // Take one settings snapshot for the added work. Bind the shared PCSS noise
   // only for lights with a native map; End restores every displaced pixel input.
   const auto begin_shadows = [shader_injection](reshade::api::command_list* cmd_list, uint32_t light_type,
@@ -79,7 +80,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
       if (shader_injection->shadows_mode < 0.5f) return;
       constants = *shader_injection;
     }
-    mgsv::shadows::screen_space::Begin(cmd_list, constants, light_type);
+    mgsv::shadows::screen_space::Begin(cmd_list, constants, light_type, has_shadow_map);
     if (has_shadow_map) {
       auto* state = cmd_list->get_private_data<mgsv::shadows::screen_space::DrawState>();
       if (state != nullptr && state->replacement_safe) {

@@ -21,7 +21,7 @@ The [render map](render-map.html) follows these owners through the native frame,
 | `materials/capture.hpp`, `materials/native/` | Clean material/owner capture, native ports, and material registration inventory |
 | `materials/brdf.hlsli`, `lighting/reflections/sssr_brdf.cs_6_6.hlsl` | Native material decoding, reciprocal GGX response, and one-time integration table; [material contracts](../materials/README.md) describe producers, palette fields, and conversion limits |
 | `lighting/native/` | Native direct/environment light ports |
-| `lighting/shadows/` | PCSS, Bend kernels, per-light state, batch atlas, native light-group hooks, and controls |
+| `lighting/shadows/` | PCSS, Bend kernels, per-draw state, the local-light hook and frame batch atlas, and controls |
 | `lighting/indirect/runtime.hpp` | Combined resources, controls, input checks, scheduling, and dispatches |
 | `lighting/indirect/ambient_diffuse.hpp` | Native ambient snapshots and diffuse-copy observation |
 | `lighting/indirect/source_preparation.hpp`, `source_radiance.hlsli` | Shared outgoing diffuse radiance beside the native diffuse copy |

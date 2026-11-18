@@ -96,6 +96,8 @@ struct SubmissionState {
   std::shared_mutex mutex;
   std::vector<PendingTemporalDispatch> pending_dispatches;
   std::unordered_map<ID3D11DeviceContext*, std::unordered_set<ID3D11Asynchronous*>> active_queries;
+  // The ReShade command list of each deferred context above.
+  std::unordered_map<ID3D11DeviceContext*, reshade::api::command_list*> recording_lists;
 };
 inline SubmissionState submission;
 
@@ -108,6 +110,9 @@ inline std::atomic<reshade::api::device*> submission_bridge_device = nullptr;
 inline std::atomic<uint32_t> execution_hook_calls_in_flight = 0u;
 inline std::atomic<bool> logged_immediate_dispatch = false;
 inline std::atomic<bool> submission_failure_pending = false;
+// Contact shadows reserve their batch through this bridge even when no temporal
+// feature needs it. Set once such a batch has been wanted.
+inline std::atomic<bool> shadow_batch_requested = false;
 
 inline bool EnlistProcessThreads(std::vector<HANDLE>* handles) {
   const DWORD current_process = GetCurrentProcessId();
@@ -550,6 +555,7 @@ inline void UninstallTemporalSubmissionBridge() {
     const std::unique_lock lock(submission.mutex);
     retired_dispatches.swap(submission.pending_dispatches);
     submission.active_queries.clear();
+    submission.recording_lists.clear();
   }
   for (const auto& pending : retired_dispatches) {
     lighting::temporal_inputs::Forget(pending.prefix.Get());
@@ -571,6 +577,14 @@ inline void OnInitCommandList(reshade::api::command_list* command_list) {
       || context->GetType() != D3D11_DEVICE_CONTEXT_DEFERRED) return;
   const std::unique_lock lock(submission.mutex);
   submission.active_queries.try_emplace(context.Get());
+  submission.recording_lists.insert_or_assign(context.Get(), command_list);
+}
+
+// Work scheduled from an engine hook knows only the native deferred context.
+inline reshade::api::command_list* FindRecordingList(ID3D11DeviceContext* context) {
+  const std::shared_lock lock(submission.mutex);
+  const auto found = submission.recording_lists.find(context);
+  return found != submission.recording_lists.end() ? found->second : nullptr;
 }
 
 inline void CompleteRecording(reshade::api::command_list* recording, ID3D11CommandList* finished) {
@@ -601,6 +615,8 @@ inline void CompleteRecording(reshade::api::command_list* recording, ID3D11Comma
   {
     const std::unique_lock lock(submission.mutex);
     submission.active_queries[context].clear();
+    // A context created before the bridge was installed is first seen here.
+    submission.recording_lists.insert_or_assign(context, recording);
     const auto pending = std::ranges::find_if(
         submission.pending_dispatches,
         [recording](const PendingTemporalDispatch& candidate) {
@@ -820,6 +836,7 @@ inline void OnDestroyCommandList(reshade::api::command_list* command_list) {
   {
     const std::unique_lock lock(submission.mutex);
     submission.active_queries.erase(native_context);
+    submission.recording_lists.erase(native_context);
     std::vector<ID3D11CommandList*> orphaned_lists = {native_command_list};
     // Intermediate prefixes were finished through the native context, so they
     // have no ReShade wrapper destruction event. Retire their whole chain.

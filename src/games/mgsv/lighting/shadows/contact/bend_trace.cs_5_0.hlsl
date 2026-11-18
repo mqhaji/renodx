@@ -13,20 +13,15 @@ groupshared float shared_depth[((BEND_MAX_SAMPLES + BEND_GROUP_SIZE - 1) / BEND_
 
 [numthreads(BEND_GROUP_SIZE, 1, 1)]
 void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
-  uint light_index = 0u;
-  uint record = 0u;
+  // One dispatch traces every admitted light; each group finds its light from its tile index.
   uint tile = group.y + (group.z << BEND_TILE_ROW_BITS);
-#ifdef MGSV_BEND_BATCH
   const uint light_count = asuint(bend_lights.Load(0u).x);
-  light_index = FindBendBatchLight(tile, light_count, BEND_TRACE_END_OFFSET);
+  const uint light_index = FindBendLight(tile, light_count, BEND_TRACE_END_OFFSET);
   if (light_index == light_count) return;
-  record = light_index * BEND_BATCH_RECORD_STRIDE;
-  const uint first_light_tile = light_index == 0u ? 0u : bend_dispatch.Load(record - BEND_BATCH_RECORD_STRIDE + BEND_TRACE_END_OFFSET);
+  const uint record = light_index * BEND_RECORD_STRIDE;
+  const uint first_light_tile = light_index == 0u ? 0u : bend_dispatch.Load(record - BEND_RECORD_STRIDE + BEND_TRACE_END_OFFSET);
   tile -= first_light_tile;
-  const float light_type = float(asuint(bend_lights.Load(BEND_BATCH_LIGHT_VECTORS + light_index * BEND_BATCH_LIGHT_VECTORS).x));
-#else
-  const float light_type = CUSTOM_CONTACT_SHADOW_LIGHT_TYPE;
-#endif
+  const float light_type = float(ReadBendLightKind(light_index).x);
   const uint4 metadata = bend_dispatch.Load4(record + 32u);
   if (metadata.z != 1) return;
   const bool directional = light_type < 0.5;
@@ -102,6 +97,17 @@ void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
   const uint samples = (uint)clamp(isfinite(CUSTOM_CONTACT_SHADOW_REACH_PIXELS) ? CUSTOM_CONTACT_SHADOW_REACH_PIXELS : 60.0,
                                    16.0, float(BEND_MAX_SAMPLES));
   const float thickness = 0.005;
+  // Reach arrives in render pixels. The trace's other distances are tuned in
+  // output pixels too: an upscaled frame crosses more of the screen per sample,
+  // so it uses proportionally fewer hard and interleaved samples, a shorter end
+  // fade, and a smaller neighbor-depth bias. Otherwise thin casters lose most
+  // of their shadow as the render resolution drops.
+  const float render_scale = isfinite(CUSTOM_CONTACT_SHADOW_RENDER_SCALE) && CUSTOM_CONTACT_SHADOW_RENDER_SCALE > 0.0
+                                 ? min(CUSTOM_CONTACT_SHADOW_RENDER_SCALE, 1.0)
+                                 : 1.0;
+  // Whole divisors keep the four interleaved minima aligned. The thresholds are
+  // the geometric midpoints between scales 1, 1/2, and 1/4.
+  const uint sample_divisor = render_scale > 0.7071 ? 1u : (render_scale > 0.3536 ? 2u : 4u);
   // The last receiver reads through shared index 63 + samples.
   const uint reads = ((samples + BEND_GROUP_SIZE - 1u) >> 6) + 1u;
   const float2 inverse_size = rcp(float2(metadata.xy));
@@ -123,8 +129,9 @@ void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
     second = isfinite(second) && second > 0.0 ? second : 0.0;
     // Bend's default 2% threshold avoids joining separate surfaces.
     const bool depth_edge = abs(first - second) > abs(first) * 0.02;
-    // Reverse-Z: moving the casting depth farther away means subtracting.
-    const float casting_depth = depth_edge ? first : first - abs(first - second);
+    // Reverse-Z: moving the casting depth farther away means subtracting. The
+    // neighbor is one render pixel away; bias by one output pixel's difference.
+    const float casting_depth = depth_edge ? first : first - abs(first - second) * render_scale;
     const float distance = pixel_distance + BEND_GROUP_SIZE * read * direction;
     float stored = (casting_depth - light.z) / distance;
     if (abs(distance) < 1e-7 || (read != 0 && distance <= 0.0) || !isfinite(stored)) {
@@ -190,22 +197,26 @@ void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
   const float depth_scale = min(pixel_distance + direction, rcp(thickness)) * pixel_distance / receiver_depth;
   const float reference = (receiver_depth - light.z) / pixel_distance * depth_scale + 1.0;
   const uint first_sample = lane + 1;
-  const uint hard_samples = 4u;
-  const uint fade_samples = 8u;
+  // Four hard samples and eight fade samples at native scale. The fade keeps
+  // at least one whole group of four.
+  const uint hard_samples = 4u / sample_divisor;
+  const uint fade_samples = sample_divisor == 1u ? 8u : 4u;
   const float contrast = 4.0;
   const float solid_threshold = 1.0 - rcp(contrast);
   float hard = 1.0;
   uint blocker_sample = 0u;
-  // Keep the nearest four contacts sharp. Farther samples use four interleaved
-  // visibility minima, followed by the reference method's eight-sample end fade.
+  // Keep the nearest contacts sharp. Farther samples use interleaved visibility
+  // minima, followed by the reference method's end fade.
   [unroll(4)]
-  for (uint hard_index = 0; hard_index < hard_samples; ++hard_index) {
-    const float separation = abs(reference - shared_depth[first_sample + hard_index] * depth_scale);
-    if (separation < hard) {
-      hard = separation;
-    }
-    if (blocker_sample == 0u && separation <= solid_threshold) {
-      blocker_sample = hard_index + 1u;
+  for (uint hard_index = 0; hard_index < 4u; ++hard_index) {
+    if (hard_index < hard_samples) {
+      const float separation = abs(reference - shared_depth[first_sample + hard_index] * depth_scale);
+      if (separation < hard) {
+        hard = separation;
+      }
+      if (blocker_sample == 0u && separation <= solid_threshold) {
+        blocker_sample = hard_index + 1u;
+      }
     }
   }
   const float hard_visibility = saturate(hard * contrast + 1.0 - contrast);
@@ -238,31 +249,42 @@ void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
       if (blocker_sample == 0u && separation <= solid_threshold) {
         blocker_sample = soft_index + 1u;
       }
-      switch (soft_index & 3u) {
+      switch ((soft_index - hard_samples) & 3u) {
         case 0u: soft.x = min(soft.x, separation); break;
         case 1u: soft.y = min(soft.y, separation); break;
         case 2u: soft.z = min(soft.z, separation); break;
         case 3u: soft.w = min(soft.w, separation); break;
       }
     }
-    // The eight fade samples form two groups of four. Align their minima once
-    // with the existing groups instead of selecting a component for every sample.
+    // The fade samples form groups of four. Align their minima once with the
+    // existing groups instead of selecting a component for every sample.
     float4 fade = 1.0;
     [unroll(2)]
-    for (uint fade_block = 0; fade_block < fade_samples / 4u; ++fade_block) {
-      const uint address = first_sample + samples - fade_samples + fade_block * 4u;
-      const float4 depths = float4(shared_depth[address], shared_depth[address + 1u],
-                                   shared_depth[address + 2u], shared_depth[address + 3u]);
-      const float4 fade_offset = (float4(1, 2, 3, 4) + fade_block * 4u) / float(fade_samples + 1u) * 0.75;
-      fade = min(fade, abs(reference - depths * depth_scale) + fade_offset);
+    for (uint fade_block = 0; fade_block < 2u; ++fade_block) {
+      if (fade_block * 4u < fade_samples) {
+        const uint address = first_sample + samples - fade_samples + fade_block * 4u;
+        const float4 depths = float4(shared_depth[address], shared_depth[address + 1u],
+                                     shared_depth[address + 2u], shared_depth[address + 3u]);
+        const float4 fade_offset = (float4(1, 2, 3, 4) + fade_block * 4u) / float(fade_samples + 1u) * 0.75;
+        fade = min(fade, abs(reference - depths * depth_scale) + fade_offset);
+      }
     }
-    // Match the fade lanes to the same four minima as the preceding samples.
-    switch ((samples - fade_samples) & 3u) {
+    // Match the fade lanes to the same four minima as the preceding samples,
+    // which count from the first soft sample.
+    switch ((samples - fade_samples - hard_samples) & 3u) {
       case 1u: fade = fade.wxyz; break;
       case 2u: fade = fade.zwxy; break;
       case 3u: fade = fade.yzwx; break;
     }
     soft = min(soft, fade);
+    // A lower render scale interleaves fewer minima: lanes two apart share
+    // one, and at the lowest scales all four do.
+    if (sample_divisor >= 2u) {
+      soft = min(soft, soft.zwxy);
+    }
+    if (sample_divisor == 4u) {
+      soft = min(soft, soft.yxwz);
+    }
     soft_visibility = dot(saturate(soft * contrast + 1.0 - contrast), 0.25);
   }
   float visibility = min(hard_visibility, soft_visibility);

@@ -1008,9 +1008,16 @@ inline bool CorrectNativeMatrix(float* matrix, const NativeProjectionScope& scop
   return true;
 }
 
+// Identifies the sun pass recording on this thread, or 0 outside one. A pass
+// shades one directional light against one depth image, with up to four draws.
+inline thread_local uint64_t sun_pass_count = 0u;
+inline thread_local uint64_t active_sun_pass = 0u;
+
 inline void __fastcall HookSunPass(void* renderer, void* viewport, uint32_t a, uint32_t b, uint8_t c, uint8_t d) {
   const NativeProjectionScope scope(ProjectionPath::SUN_VOLUME, viewport);
+  active_sun_pass = ++sun_pass_count;
   sun_pass(renderer, viewport, a, b, c, d);
+  active_sun_pass = 0u;
 }
 
 inline void __fastcall HookSunVolume(void* context, const float* vp, const void* volume, const void* color,

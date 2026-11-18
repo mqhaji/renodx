@@ -93,7 +93,7 @@ struct ShaderInjectData {
   // Bend contact-shadow controls and values copied for this light draw.
   float contact_shadow_debug_view;
   float shadow_debug_light;
-  float contact_shadow_light_type;  // 0 = directional, 1/2 = spot/point, 3/4 = distance spot/point.
+  float contact_shadow_render_scale;  // Render pixels per output pixel along each axis; 1 without upscaling.
 
   // Local-light contact work limits.
   float spot_contact_shadow_budget;  // Maximum spotlight evaluations per lighting-buffer fill; 0 = unlimited.
@@ -148,9 +148,9 @@ cbuffer RenoDXSettings : register(b13) {
 #define CUSTOM_SHADOW_MAP_DEBUG_VIEW       shader_injection.shadow_map_debug_view
 #define CUSTOM_SHADOW_NOISE_FRAME          shader_injection.shadow_noise_frame
 
-#define CUSTOM_CONTACT_SHADOW_DEBUG_VIEW shader_injection.contact_shadow_debug_view
-#define CUSTOM_SHADOW_DEBUG_LIGHT        shader_injection.shadow_debug_light
-#define CUSTOM_CONTACT_SHADOW_LIGHT_TYPE shader_injection.contact_shadow_light_type
+#define CUSTOM_CONTACT_SHADOW_DEBUG_VIEW   shader_injection.contact_shadow_debug_view
+#define CUSTOM_SHADOW_DEBUG_LIGHT          shader_injection.shadow_debug_light
+#define CUSTOM_CONTACT_SHADOW_RENDER_SCALE shader_injection.contact_shadow_render_scale
 
 #define CUSTOM_SPOT_CONTACT_SHADOW_BUDGET shader_injection.spot_contact_shadow_budget
 
