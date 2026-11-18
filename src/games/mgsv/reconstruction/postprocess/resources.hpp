@@ -39,8 +39,6 @@
 #include <embed/post_system.h>
 #include <include/reshade.hpp>
 
-#include "../../../../utils/resource.hpp"
-#include "../../../../utils/resource_upgrade.hpp"
 #include "../../rendering/native_context.hpp"
 #include "../../rendering/shared_texture.hpp"
 #include "../frame_inputs.hpp"
@@ -297,10 +295,8 @@ struct Output {
   reshade::api::device* device = nullptr;
   uint32_t render_width = 0u;
   uint32_t render_height = 0u;
-  // Both native scene identities can appear in later bindings: the upgraded
-  // float texture and the game's original texture that it replaces.
+  // The engine's float scene image this output reconstructs.
   Microsoft::WRL::ComPtr<ID3D11Resource> source;
-  Microsoft::WRL::ComPtr<ID3D11Resource> original_source;
   // Reconstruction writes here. Subsequent native effects and UI can read or
   // update it through the sample view (srv) and render-target view (rtv).
   // Float storage does not change MGSV's expected scene-color encoding.
@@ -347,14 +343,6 @@ struct Output {
       : pipelines(std::move(shared_pipelines)), device(inputs.device), render_width(inputs.render_width), render_height(inputs.render_height), allocation_inputs(inputs) {
     auto* native_device = reinterpret_cast<ID3D11Device*>(device->get_native());  // NOLINT(performance-no-int-to-ptr)
     source = reinterpret_cast<ID3D11Resource*>(inputs.color_resource.handle);     // NOLINT(performance-no-int-to-ptr)
-    if (inputs.color_srv.handle != 0u && renodx::utils::resource::shared.data != nullptr) {
-      renodx::utils::resource::GetResourceViewInfo(inputs.color_srv, [&](const auto& view) {
-        if (!view.destroyed && view.device == device
-            && (view.clone_resource == inputs.color_resource || view.original_resource == inputs.color_resource)) {
-          original_source = reinterpret_cast<ID3D11Resource*>(view.original_resource.handle);  // NOLINT(performance-no-int-to-ptr)
-        }
-      });
-    }
     // Color needs read, render-target, and compute-write access. Depth resources
     // below reuse the dimensions but choose their own formats and access flags.
     const D3D11_TEXTURE2D_DESC description = {
@@ -569,7 +557,7 @@ struct Output {
   }
 
   [[nodiscard]] bool IsSceneTarget(ID3D11Resource* resource) const {
-    return resource != nullptr && (resource == source.Get() || resource == original_source.Get());
+    return resource != nullptr && resource == source.Get();
   }
 
   [[nodiscard]] bool IsScaled() const {
@@ -760,23 +748,11 @@ struct Output {
     if (IsSceneTarget(original.Get())) {
       result.role = Surface::Role::SCENE_COLOR;
     }
-    // The float scene uses explicit encoding. Leave unrelated native sRGB
-    // views to the existing clone path rather than changing their transfer.
+    // Every view of the float scene carries encoded color; shaders decode
+    // where the game's view was sRGB. Each reads this frame's reconstructed image.
     if (original == source) {
       result.view = srv;
       return result;
-    }
-    if (original == original_source) {
-      D3D11_SHADER_RESOURCE_VIEW_DESC description;
-      view->GetDesc(&description);
-      // Native UNORM and float scene views both carry encoded color. A draw
-      // using the native alias still needs this frame's reconstructed image.
-      // An sRGB view would decode on read, so it cannot use the same float SRV.
-      if (description.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D && description.Texture2D.MostDetailedMip == 0u
-          && (description.Format == DXGI_FORMAT_B8G8R8A8_UNORM || description.Format == DXGI_FORMAT_R8G8B8A8_UNORM)) {
-        result.view = srv;
-        return result;
-      }
     }
     // Stencil is integer mask data, not sampled geometry. Keep its view separate
     // even when the game's geometry and UI share one depth/stencil texture.
@@ -931,8 +907,8 @@ struct State {
 };
 inline State state;
 
-// A later resource upgrade can transfer the same scene's earlier clear to its
-// float clone. Copies and writes use the resulting native resource identity.
+// Remembers a full clear of a native target for the output-size surface that
+// a later qualified draw creates for it.
 inline void RecordClear(ID3D11Resource* resource, const ClearColor& clear) {
   const std::unique_lock lock(state.mutex);
   const auto route = std::ranges::find_if(state.pool, [&](const Recording& candidate) {

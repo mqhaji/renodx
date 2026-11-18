@@ -41,7 +41,7 @@ Screen reflections replace the saved native environment term in linear light whi
 
 ## Precision and presets
 
-Precision upgrades work independently of HDR output and reconstruction. Selected scene color, DoF, motion-blur, velocity, and color-grading LUT textures use RGBA16F replacements. MGSV reuses shaders and textures for unrelated work, so redirects require an identified resource role rather than a matching size or shader name. Float storage can still contain encoded color.
+Precision upgrades work independently of HDR output and reconstruction. The engine itself creates scene color, its `TEMPORARY_OUTPUT` copy, both velocity targets, the color-grading LUTs, and the bloom images as RGBA16F: RenoDX changes their format where the engine creates them, by name, on the verified executable. Depth of field and motion blur keep the scene in temporaries that SSAO, DoF parameters, and rain's material layer use as 8-bit, so those stay 8-bit: the two plugins instead receive RGBA16F images of their own, which the engine creates and resizes beside its temporaries and hands over when each plugin looks its temporaries up. RenoDX keeps no copies of game textures and redirects no bindings. Float storage can still contain encoded color.
 
 Preset Off selects Vanilla for Shadows, Diffuse Lighting, and Reflections but leaves reconstruction selected. Reset All restores defaults. Vanilla/0 tonemapping is not full Preset Off; other selected effects and grading controls can remain active.
 

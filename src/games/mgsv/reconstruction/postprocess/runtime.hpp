@@ -37,7 +37,7 @@
 
 #include "../../../../utils/command_action.hpp"
 #include "../../../../utils/hash.hpp"
-#include "../../../../utils/resource_upgrade.hpp"
+#include "../../rendering/engine_targets.hpp"
 #include "../logging.hpp"
 #include "../resolution.hpp"
 #include "../state.hpp"
@@ -317,8 +317,8 @@ inline void OnDestroyCommandList(reshade::api::command_list* command_list) {
   }
 }
 
-// The binding event carries live native views, before addon clone activation
-// can remove an otherwise unused DSV from a fullscreen composition draw.
+// The binding event carries a draw's native color and depth views together,
+// including a depth view a fullscreen composition draw does not use.
 inline void OnBindTargets(reshade::api::command_list* command_list, uint32_t count,
                           const reshade::api::resource_view* targets, reshade::api::resource_view depth) {
   if (count == 0u || targets == nullptr || targets[0].handle == 0u || depth.handle == 0u
@@ -331,15 +331,13 @@ inline void OnBindTargets(reshade::api::command_list* command_list, uint32_t cou
   D3D11_TEXTURE2D_DESC description;
   texture->GetDesc(&description);
   const auto render = resolution::ReadActual();
+  // Render-sized color images that can hold the scene: the engine's float
+  // scene images, the float copy DoF and motion blur make, and 8-bit temporaries.
   if (description.Width != render.width || description.Height != render.height
-      || (description.Format != DXGI_FORMAT_B8G8R8A8_TYPELESS && description.Format != DXGI_FORMAT_B8G8R8A8_UNORM)) return;
+      || (description.Format != DXGI_FORMAT_B8G8R8A8_TYPELESS && description.Format != DXGI_FORMAT_B8G8R8A8_UNORM
+          && rendering::engine_targets::ReadSceneRole(resource.Get()) == 0u)) return;
   auto* native_depth = reinterpret_cast<ID3D11DepthStencilView*>(depth.handle);  // NOLINT(performance-no-int-to-ptr)
   resource->SetPrivateDataInterface(SCENE_DEPTH_GUID, native_depth);
-  const auto clone = renodx::utils::resource::upgrade::GetResourceClone({reinterpret_cast<uint64_t>(resource.Get())}, {.allow_create = false});
-  if (clone.handle != 0u) {
-    auto* cloned = reinterpret_cast<ID3D11Resource*>(clone.handle);  // NOLINT(performance-no-int-to-ptr)
-    cloned->SetPrivateDataInterface(SCENE_DEPTH_GUID, native_depth);
-  }
 }
 
 // Loading and independently recorded UI acquire storage for their native scene.
@@ -1170,8 +1168,7 @@ inline bool OnClearRenderTarget(reshade::api::command_list* command_list, reshad
   const uint64_t recording_frame = (output != nullptr ? route.frame : reconstruction::state::CurrentFrameToken());
   const auto plan = (output == nullptr ? resolution::Read() : resolution::Plan{});
   if (output == nullptr && !plan.IsScaled()) return false;
-  const auto clone = renodx::utils::resource::upgrade::GetResourceViewClone(view);
-  const auto resource = command_list->get_device()->get_resource_from_view(clone.handle == 0u ? view : clone);
+  const auto resource = command_list->get_device()->get_resource_from_view(view);
   if (output == nullptr && resource.handle != 0u) {
     auto ui_route = GetUiRoute(command_list);
     if (ui_route.output != nullptr) {
@@ -1210,7 +1207,7 @@ inline bool OnClearRenderTarget(reshade::api::command_list* command_list, reshad
   if (resolution::active_dof.IsScaled() && !dof && !output->IsSceneTarget(reinterpret_cast<ID3D11Resource*>(resource.handle))) return false;  // NOLINT(performance-no-int-to-ptr)
   // Mirror clears for known output targets. A clear alone cannot identify a
   // post-processing surface; its first qualified draw can use the saved clear.
-  auto mapped = output->MapTarget(reinterpret_cast<ID3D11RenderTargetView*>((clone.handle == 0u ? view : clone).handle), dof, !dof,  // NOLINT(performance-no-int-to-ptr)
+  auto mapped = output->MapTarget(reinterpret_cast<ID3D11RenderTargetView*>(view.handle), dof, !dof,  // NOLINT(performance-no-int-to-ptr)
                                   recording_frame, route.producer.get());
   if (mapped.view != nullptr) {
     Microsoft::WRL::ComPtr<ID3D11Resource> mapped_resource;
@@ -1280,12 +1277,10 @@ inline bool OnCopyResource(reshade::api::command_list* command_list, reshade::ap
   Recording route;
   const auto output = GetActive(command_list, &route);
   if (output == nullptr || !output->IsScaled()) return false;
-  const auto source_clone = renodx::utils::resource::upgrade::GetResourceClone(from, {.allow_create = false});
-  const auto destination_clone = renodx::utils::resource::upgrade::GetResourceClone(to, {.allow_create = false});
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   const bool copied = output->CopySurface(context,
-                                          reinterpret_cast<ID3D11Resource*>((source_clone.handle != 0u ? source_clone : from).handle),          // NOLINT(performance-no-int-to-ptr)
-                                          reinterpret_cast<ID3D11Resource*>((destination_clone.handle != 0u ? destination_clone : to).handle),  // NOLINT(performance-no-int-to-ptr)
+                                          reinterpret_cast<ID3D11Resource*>(from.handle),  // NOLINT(performance-no-int-to-ptr)
+                                          reinterpret_cast<ID3D11Resource*>(to.handle),    // NOLINT(performance-no-int-to-ptr)
                                           route.frame, route.producer.get());
   if (copied) {
     RetainOutput(command_list, output);
@@ -1444,7 +1439,7 @@ inline constexpr auto DRAW_CALLBACK = [](auto& command) {
   };
 };
 
-// Register after shader replacements so their own clone activation runs first.
+// Register after shader replacements so their draw callbacks run first.
 inline void Use(DWORD reason) {
   if (reason == DLL_PROCESS_ATTACH) {
     reshade::register_event<reshade::addon_event::init_command_list>(OnInitCommandList);

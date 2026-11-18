@@ -21,8 +21,8 @@
 #include "../../../utils/settings.hpp"
 #include "../../../utils/state.hpp"
 #include "../../../utils/swapchain.hpp"
+#include "../rendering/draw_roles.hpp"
 #include "../rendering/inputs.hpp"
-#include "../rendering/resource_upgrades.hpp"
 #include "../shared.h"
 #include "camera_state.hpp"
 #include "coordinator.hpp"
@@ -84,8 +84,8 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list, [[maybe_unused]] co
   auto* device = cmd_list->get_device();
   if (device == nullptr || device->get_api() != reshade::api::device_api::d3d11) return false;
 
-  namespace upgrades = ::mgsv::rendering::resource_upgrades;
-  using upgrades::VelocityProducer;
+  namespace draw_roles = ::mgsv::rendering::draw_roles;
+  using draw_roles::VelocityProducer;
 
   // MGSV issues thousands of draws per frame. Classify first so unrelated
   // draws never touch TAA command-list state or contend on the resolve lock.
@@ -94,7 +94,7 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list, [[maybe_unused]] co
       cmd_list, reshade::api::pipeline_stage::vertex_shader, &state_cache);
   const uint32_t pixel_hash = renodx::utils::state::GetCurrentShaderHash(
       cmd_list, reshade::api::pipeline_stage::pixel_shader, &state_cache);
-  const auto velocity_producer = upgrades::IdentifyVelocityProducer(vertex_hash, pixel_hash);
+  const auto velocity_producer = draw_roles::IdentifyVelocityProducer(vertex_hash, pixel_hash);
   const bool is_dof_marker = pixel_hash == shader_hashes::DOF_NEAR_PS
                              || pixel_hash == shader_hashes::DOF_FAR_PS
                              || pixel_hash == shader_hashes::DOF_FINAL_PS;
@@ -128,7 +128,6 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list, [[maybe_unused]] co
   reshade::api::resource_view velocity_rtv = {0};
   if (velocity_producer != VelocityProducer::NONE) {
     velocity_rtv = renodx::utils::state::GetRenderTarget(cmd_list, 0u);
-    velocity_rtv = upgrades::PrepareVelocityTarget(cmd_list, velocity_rtv, vertex_hash, pixel_hash);
   }
 
   const bool lighting_motion_needed = velocity_producer == VelocityProducer::CAMERA
@@ -194,7 +193,7 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list, [[maybe_unused]] co
   // Reconstruct the source before bloom downsamples it. Role and frame-input
   // checks reject unrelated reductions and the subsequent smaller bloom images.
   if (pixel_hash == shader_hashes::COPY_REDUCTION_X4_PS) {
-    if (upgrades::ResourceViewMatchesCloneTarget(data->pixel_srv_t0, &upgrades::scene_tonemap_upgrade_info)) {
+    if (draw_roles::PixelShaderInputIsSceneImage(cmd_list)) {
       log_observed_shader("pixel", "scene reduction before bloom", pixel_hash, &logged_bloom_reduction);
       runtime::coordinator::MaybeRunLocked(cmd_list, *data, "BeforeBloom");
     }

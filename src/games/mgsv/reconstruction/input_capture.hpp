@@ -10,7 +10,6 @@
 
 #include <include/reshade.hpp>
 
-#include "../../../utils/resource_upgrade.hpp"
 #include "../rendering/inputs.hpp"
 #include "camera_state.hpp"
 #include "frame_inputs.hpp"
@@ -80,7 +79,7 @@ inline Resources CaptureCameraMotionLocked(
     return {};
   }
 
-  // Retain live native bindings and preserve the precision module's selected RTV and enabled object clone.
+  // Retain the live native bindings, including the velocity target this draw writes.
   auto motion = inputs::CaptureMotion(cmd_list, velocity_rtv, true);
   if (motion.velocity == nullptr) return {};
   Resources resources = {
@@ -118,7 +117,7 @@ inline bool IsSingleSampleTexture(const reshade::api::resource_desc& description
 
 inline bool BuildValidatedFrameInputsLocked(
     reshade::api::command_list* cmd_list,
-    reshade::api::resource_view source_color_srv,
+    reshade::api::resource_view color_srv,
     const char* insertion_name,
     ValidatedFrameInputs& output) {
   auto* device = cmd_list != nullptr ? cmd_list->get_device() : nullptr;
@@ -142,19 +141,6 @@ inline bool BuildValidatedFrameInputsLocked(
   const reshade::api::resource_view velocity_srv = {reinterpret_cast<uintptr_t>(motion.velocity.Get())};
   const reshade::api::resource_view depth_srv = {reinterpret_cast<uintptr_t>(motion.depth.Get())};
   const reshade::api::resource_view object_velocity_srv = {reinterpret_cast<uintptr_t>(motion.object_velocity.Get())};
-  auto color_srv = source_color_srv;
-  if (color_srv.handle != 0u) {
-    const auto clone = renodx::utils::resource::upgrade::GetResourceViewClone(
-        color_srv,
-        {
-            .require_enabled = true,
-            .allow_create = true,
-            .activate = false,
-        });
-    if (clone.handle != 0u) {
-      color_srv = clone;
-    }
-  }
   if (device == nullptr
       || color_srv.handle == 0u
       || velocity_srv.handle == 0u

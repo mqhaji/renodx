@@ -6,7 +6,6 @@
 #include <mutex>
 #include <shared_mutex>
 #include <string>
-#include <type_traits>
 #include <utility>
 
 #include <d3d11.h>
@@ -16,8 +15,6 @@
 
 #include "../../../utils/bitwise.hpp"
 #include "../../../utils/descriptor.hpp"
-#include "../../../utils/resource.hpp"
-#include "../../../utils/resource_upgrade.hpp"
 
 namespace mgsv::inputs::descriptor_tracker {
 
@@ -281,11 +278,11 @@ inline void OnDestroyDevice(reshade::api::device* device) {
                         ("MgsvInputs: device retired; generation=" + std::to_string(generation)).c_str());
 }
 
-// Composition keeps the existing execution gate across precision preparation and both motion capture paths.
+// Composition keeps the existing execution gate across both motion capture paths.
 // Generation checks reject late publication; they do not synchronize native context use or device destruction.
 inline Motion CaptureMotion(
     reshade::api::command_list* cmd_list,
-    reshade::api::resource_view prepared_velocity_rtv,
+    reshade::api::resource_view expected_velocity_rtv,
     bool publish_lighting) {
   if (cmd_list == nullptr) return {};
   auto* device = cmd_list->get_device();
@@ -310,45 +307,10 @@ inline Motion CaptureMotion(
   motion.object_velocity.Attach(pixel_views[1]);
   // Missing bindings preserve the previous observation, as in the original capture path.
   if (producer == nullptr || motion.depth == nullptr || motion.object_velocity == nullptr) return {};
-  const auto retain_enabled_clone = [device]<typename T>(const Microsoft::WRL::ComPtr<T>& original) {
-    static_assert(std::is_same_v<T, ID3D11RenderTargetView> || std::is_same_v<T, ID3D11ShaderResourceView>);
-    if (renodx::utils::resource::shared.data == nullptr) return original;
-    const reshade::api::resource_view original_view = {reinterpret_cast<uintptr_t>(original.Get())};
-    reshade::api::resource original_resource = {0};
-    bool use_clone = false;
-    renodx::utils::resource::GetLiveResourceViewInfo(
-        original_view, [&](const renodx::utils::resource::ResourceViewInfo& info) {
-          use_clone = info.device == device && !info.is_clone && info.clone_enabled;
-          original_resource = info.original_resource;
-        });
-    if (!use_clone) return original;
-    // Creation can reenter callbacks. No input or resource-map lock spans this call.
-    const auto clone = renodx::utils::resource::upgrade::GetResourceViewClone(original_view);
-    if (clone.handle == 0) return original;
-    Microsoft::WRL::ComPtr<T> retained;
-    renodx::utils::resource::GetLiveResourceViewInfo(
-        clone, [&](const renodx::utils::resource::ResourceViewInfo& info) {
-          if (info.device != device || !info.is_clone || info.view.handle != clone.handle
-              || info.original_resource.handle != original_resource.handle) return;
-          if constexpr (std::is_same_v<T, ID3D11RenderTargetView>) {
-            if (info.usage != reshade::api::resource_usage::render_target) return;
-          } else {
-            if (info.usage != reshade::api::resource_usage::shader_resource
-                && info.usage != reshade::api::resource_usage::shader_resource_pixel
-                && info.usage != reshade::api::resource_usage::shader_resource_non_pixel) return;
-          }
-          // Queued destruction marks this clone entry before releasing its native reference.
-          retained = reinterpret_cast<T*>(clone.handle);  // NOLINT(performance-no-int-to-ptr)
-        });
-    return retained;
-  };
-  producer = retain_enabled_clone(producer);
-  motion.object_velocity = retain_enabled_clone(motion.object_velocity);
-  if (producer == nullptr || motion.object_velocity == nullptr) return {};
-  // Only retain the expected target through the live getter or its protected clone mapping.
-  // A nonzero prepared identity is never converted directly into an owning COM pointer.
-  if (prepared_velocity_rtv.handle != 0
-      && prepared_velocity_rtv.handle != reinterpret_cast<uintptr_t>(producer.Get())) return {};
+  // Only retain the expected target through the live getter.
+  // A nonzero expected identity is never converted directly into an owning COM pointer.
+  if (expected_velocity_rtv.handle != 0
+      && expected_velocity_rtv.handle != reinterpret_cast<uintptr_t>(producer.Get())) return {};
 
   auto* native_device = reinterpret_cast<ID3D11Device*>(device->get_native());  // NOLINT(performance-no-int-to-ptr)
   D3D11_TEXTURE2D_DESC velocity_description = {};

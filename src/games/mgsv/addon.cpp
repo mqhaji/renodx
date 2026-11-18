@@ -67,10 +67,11 @@
 #include "reconstruction/resolution.hpp"
 #include "reconstruction/runtime.hpp"
 #include "reconstruction/settings.hpp"
+#include "rendering/draw_roles.hpp"
+#include "rendering/engine_targets.hpp"
 #include "rendering/inputs.hpp"
 #include "rendering/native_context.hpp"
 #include "rendering/producer_records.hpp"
-#include "rendering/resource_upgrades.hpp"
 #include "settings.hpp"
 #include "shaders.hpp"
 #include "shared.h"
@@ -455,9 +456,6 @@ void OnPresent(
   if (swapchain->get_color_space() != output_color_space) {
     renodx::utils::swapchain::ChangeColorSpace(swapchain, output_color_space);
   }
-
-  mgsv::rendering::resource_upgrades::DeactivateDofFinalCopyRenderBufferTarget();
-  mgsv::rendering::resource_upgrades::ResetTonemapCopyTracking();
 }
 
 void OnDestroyDevice(reshade::api::device* device) {
@@ -477,9 +475,6 @@ void OnDestroyDevice(reshade::api::device* device) {
   mgsv::il::Destroy(device);
   mgsv::lighting::DestroyLightPassLayout(device);
   mgsv::lighting::DestroyFallbackViews(device);
-  mgsv::rendering::resource_upgrades::dof_copy_state = {};
-  mgsv::rendering::resource_upgrades::motion_blur_copy_state = {};
-  mgsv::rendering::resource_upgrades::tonemap_copy_state = {};
 }
 
 bool initialized = false;
@@ -522,10 +517,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
             | reshade::api::shader_stage::compute;
         renodx::mods::swapchain::v2::expected_constant_buffer_index = 13;
 
-        renodx::mods::swapchain::v2::use_resource_cloning = true;
-
-        renodx::mods::swapchain::v2::resource_upgrade_infos.push_back(mgsv::rendering::resource_upgrades::lut_builder_upgrade_info);
-
         // Keep the tuning and diagnostic groups out of the way on first open.
         // Every other section stays expanded, so only the "(Advanced)" groups start collapsed.
         renodx::utils::settings::open_sections_by_default = false;
@@ -546,7 +537,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
         initialized = true;
       }
 
-      reshade::register_event<reshade::addon_event::copy_resource>(mgsv::rendering::resource_upgrades::OnCopyTonemapOutputResource);
+      reshade::register_event<reshade::addon_event::copy_resource>(mgsv::rendering::draw_roles::OnCopySceneResource);
       reshade::register_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);  // detect peak brightness
       reshade::register_event<reshade::addon_event::destroy_swapchain>(OnDestroySwapchain);
       reshade::register_event<reshade::addon_event::present>(OnPresent);
@@ -556,7 +547,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     case DLL_PROCESS_DETACH:
       mgsv::rendering::native_context::Shutdown();
       reshade::unregister_overlay(nullptr, ADDON_SETTINGS);
-      reshade::unregister_event<reshade::addon_event::copy_resource>(mgsv::rendering::resource_upgrades::OnCopyTonemapOutputResource);
+      reshade::unregister_event<reshade::addon_event::copy_resource>(mgsv::rendering::draw_roles::OnCopySceneResource);
       reshade::unregister_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);
       reshade::unregister_event<reshade::addon_event::destroy_swapchain>(OnDestroySwapchain);
       reshade::unregister_event<reshade::addon_event::present>(OnPresent);
@@ -581,6 +572,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   if (fdw_reason == DLL_PROCESS_ATTACH) {
     mgsv::lighting::reflections::UseProbe(true);
     mgsv::reconstruction::dx12::UseProbe(true);
+    reshade::register_event<reshade::addon_event::init_device>(mgsv::rendering::engine_targets::OnInitDevice);
+    reshade::register_event<reshade::addon_event::destroy_device>(mgsv::rendering::engine_targets::OnDestroyDevice);
     reshade::register_event<reshade::addon_event::init_device>(mgsv::shadows::screen_space::OnInitDevice);
     reshade::register_event<reshade::addon_event::destroy_device>(mgsv::shadows::screen_space::OnDestroyDevice);
     reshade::register_event<reshade::addon_event::init_command_list>(mgsv::shadows::screen_space::OnInitCommandList);
@@ -591,7 +584,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     reshade::register_event<reshade::addon_event::destroy_device>(mgsv::lighting::environment_specular::OnDestroyDevice);
     reshade::register_event<reshade::addon_event::destroy_device>(mgsv::lighting::material_inputs::OnDestroyDevice);
     reshade::register_event<reshade::addon_event::init_command_list>(mgsv::inputs::descriptor_tracker::OnInitCommandList);
-    reshade::register_event<reshade::addon_event::init_command_list>(mgsv::rendering::resource_upgrades::OnInitBloomCommandList);
+    reshade::register_event<reshade::addon_event::init_command_list>(mgsv::rendering::draw_roles::OnInitBloomCommandList);
     reshade::register_event<reshade::addon_event::init_command_list>(mgsv::lighting::environment_specular::OnInitCommandList);
     reshade::register_event<reshade::addon_event::init_command_list>(mgsv::lighting::material_inputs::OnInitCommandList);
     reshade::register_event<reshade::addon_event::init_command_list>(mgsv::lighting::source_preparation::OnInitCommandList);
@@ -618,13 +611,15 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     reshade::register_event<reshade::addon_event::destroy_resource>(mgsv::lighting::ambient_diffuse::OnDestroyResource);
     reshade::register_event<reshade::addon_event::clear_render_target_view>(mgsv::lighting::ambient_diffuse::OnClearRenderTarget);
     reshade::register_event<reshade::addon_event::destroy_command_list>(mgsv::inputs::descriptor_tracker::OnDestroyCommandList);
-    reshade::register_event<reshade::addon_event::destroy_command_list>(mgsv::rendering::resource_upgrades::OnDestroyBloomCommandList);
+    reshade::register_event<reshade::addon_event::destroy_command_list>(mgsv::rendering::draw_roles::OnDestroyBloomCommandList);
     reshade::register_event<reshade::addon_event::reset_command_list>(mgsv::inputs::descriptor_tracker::OnResetCommandList);
-    reshade::register_event<reshade::addon_event::reset_command_list>(mgsv::rendering::resource_upgrades::OnResetBloomCommandList);
+    reshade::register_event<reshade::addon_event::reset_command_list>(mgsv::rendering::draw_roles::OnResetBloomCommandList);
     reshade::register_event<reshade::addon_event::push_descriptors>(mgsv::inputs::descriptor_tracker::OnPushDescriptors);
   } else if (fdw_reason == DLL_PROCESS_DETACH) {
     mgsv::lighting::reflections::UseProbe(false);
     mgsv::reconstruction::dx12::UseProbe(false);
+    reshade::unregister_event<reshade::addon_event::init_device>(mgsv::rendering::engine_targets::OnInitDevice);
+    reshade::unregister_event<reshade::addon_event::destroy_device>(mgsv::rendering::engine_targets::OnDestroyDevice);
     reshade::unregister_event<reshade::addon_event::init_device>(mgsv::shadows::screen_space::OnInitDevice);
     reshade::unregister_event<reshade::addon_event::destroy_device>(mgsv::shadows::screen_space::OnDestroyDevice);
     reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::shadows::screen_space::OnInitCommandList);
@@ -635,7 +630,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     reshade::unregister_event<reshade::addon_event::destroy_device>(mgsv::lighting::environment_specular::OnDestroyDevice);
     reshade::unregister_event<reshade::addon_event::destroy_device>(mgsv::lighting::material_inputs::OnDestroyDevice);
     reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::inputs::descriptor_tracker::OnInitCommandList);
-    reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::rendering::resource_upgrades::OnInitBloomCommandList);
+    reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::rendering::draw_roles::OnInitBloomCommandList);
     reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::lighting::environment_specular::OnInitCommandList);
     reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::lighting::material_inputs::OnInitCommandList);
     reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::lighting::source_preparation::OnInitCommandList);
@@ -662,9 +657,9 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     reshade::unregister_event<reshade::addon_event::destroy_resource>(mgsv::lighting::ambient_diffuse::OnDestroyResource);
     reshade::unregister_event<reshade::addon_event::clear_render_target_view>(mgsv::lighting::ambient_diffuse::OnClearRenderTarget);
     reshade::unregister_event<reshade::addon_event::destroy_command_list>(mgsv::inputs::descriptor_tracker::OnDestroyCommandList);
-    reshade::unregister_event<reshade::addon_event::destroy_command_list>(mgsv::rendering::resource_upgrades::OnDestroyBloomCommandList);
+    reshade::unregister_event<reshade::addon_event::destroy_command_list>(mgsv::rendering::draw_roles::OnDestroyBloomCommandList);
     reshade::unregister_event<reshade::addon_event::reset_command_list>(mgsv::inputs::descriptor_tracker::OnResetCommandList);
-    reshade::unregister_event<reshade::addon_event::reset_command_list>(mgsv::rendering::resource_upgrades::OnResetBloomCommandList);
+    reshade::unregister_event<reshade::addon_event::reset_command_list>(mgsv::rendering::draw_roles::OnResetBloomCommandList);
     reshade::unregister_event<reshade::addon_event::push_descriptors>(mgsv::inputs::descriptor_tracker::OnPushDescriptors);
   }
   mgsv::reconstruction::Use(fdw_reason, reconstruction_settings);

@@ -10,7 +10,7 @@ The Enhanced path decodes scene color before the first reduction. The second red
 
 The working region remains 246x138 inside the native buffers. The preparation pass compensates for the half-texel offset in the unchanged [final copy](../../copy/CopyRenderBuffer_0x83272BCB.ps_5_0.hlsl). Lens flares retain their native arrangement and clip their source signal per channel. The fixed grid limits fine detail; this is a compact scattering approximation rather than a measured lens model.
 
-Resource upgrades follow the identified bloom chain so unrelated draws using the same shaders keep their original path. New float images start cleared, and native clears continue to reach them. One image is later reused for DoF controls, which retain their original 0-1 range without color conversion. Reconstruction's [post-processing support](../../reconstruction/README.md) handles output dimensions and the final crop when upscaling is active.
+The engine creates the three bloom images as RGBA16F. The replacement shaders run only for draws of the identified bloom chain into those images, so unrelated draws using the same shaders keep their original path. A new image is cleared once before the chain writes its working region, and native clears reach it directly. One image is later reused for DoF controls, which retain their original 0-1 range without color conversion. Reconstruction's [post-processing support](../../reconstruction/README.md) handles output dimensions and the final crop when upscaling is active.
 
 Build `mgsv`, then compare both types in the ACC/menu, daylight, dark interiors, fog, and bright moving lights. Check zero, intermediate, and full strength, screen edges, flares, DoF, motion blur, and Native/FSR/DLSS quality changes.
 

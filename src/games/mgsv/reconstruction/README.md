@@ -28,7 +28,7 @@ Failed output allocation, an unsupported native path, or repeated failures with 
 
 ## Code ownership and output routing
 
-[runtime.hpp](runtime.hpp) manages requested/effective methods and insertion. [settings.hpp](settings.hpp) binds controls to addon-owned storage. The shared [input owner](../rendering/inputs.hpp) selects one device/swapchain and retains native material/motion views; [input_capture.hpp](input_capture.hpp) checks reconstruction's camera, sample, size, and texture layout. Velocity precision remains active with reconstruction Off.
+[runtime.hpp](runtime.hpp) manages requested/effective methods and insertion. [settings.hpp](settings.hpp) binds controls to addon-owned storage. The shared [input owner](../rendering/inputs.hpp) selects one device/swapchain and retains native material/motion views; [input_capture.hpp](input_capture.hpp) checks reconstruction's camera, sample, size, and texture layout. The engine creates both velocity targets as RGBA16F, so velocity precision does not depend on the reconstruction setting.
 
 Draw classification reads the tracked vertex and pixel shader hashes directly. Velocity capture queries the first render target only after identifying a velocity producer. These focused reads keep unrelated draws out of reconstruction setup and avoid constructing full command-state snapshots.
 
