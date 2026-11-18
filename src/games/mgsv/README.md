@@ -6,7 +6,8 @@ RenoDX for Metal Gear Solid V: The Phantom Pain adds HDR output and color gradin
 
 | Guide | Contents |
 |---|---|
-| [Render map](docs/render-map.html) | Portable frame diagram, native shader chains, CPU/GPU dependencies, resource sizes, and current validation |
+| [Render map](docs/render-map.html) | Frame explorer (every stage and job with its shaders, targets, and RenoDX cuts), engine plugins, RenoDX lighting handoffs, resource sizes, CPU/GPU dependencies, native shader chains, and current validation |
+| [Engine plugins](docs/render-engine.html) | Plugin explorer: what each engine render plugin records, its jobs, branches, and shaders, read from the executable with evidence addresses |
 | [Temporal reconstruction](reconstruction/README.md) | Reconstruction methods, upscaling quality, controls, compatibility, and testing |
 | [Indirect lighting](lighting/indirect/README.md) | Diffuse AO/GI, diagnostics, and limitations |
 | [Reflections](lighting/reflections/README.md) | DX12 stochastic SSR, environment replacement, and native-pass bypass |

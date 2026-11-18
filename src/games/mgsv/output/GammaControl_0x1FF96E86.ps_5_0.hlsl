@@ -49,7 +49,9 @@ void main(
   r0.xy = r0.xy;
   r0.xy = r0.xy;
   r0.xyzw = inImage.Sample(g_samplerLinear_Clamp_s, r0.xy).xyzw;
-  r0.rgb = renodx::color::srgb::DecodeSafe(r0.rgb);  // needed due to upgrades
+#if FIX_UNORM_SRGB
+  r0.rgb = renodx::color::srgb::DecodeSafe(r0.rgb);
+#endif
 
   if (RENODX_TONE_MAP_TYPE != 0.f) {
     o0.w = saturate(r0.w);

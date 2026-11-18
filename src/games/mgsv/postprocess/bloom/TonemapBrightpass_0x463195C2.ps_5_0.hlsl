@@ -34,7 +34,9 @@ void main(
   r0.xy = r0.xy * r0.zw;
   r0.xyzw = inImage.Sample(g_samplerPoint_Wrap_s, r0.xy).xyzw;
   r0 = saturate(r0);
+#if FIX_UNORM_SRGB
   r0.rgb = renodx::color::srgb::Decode(r0.rgb);
+#endif
   r0.w = r0.w * r0.w;
   r0.w = 32 * r0.w;
   r1.x = dot(r0.xyz, float3(0.212500006, 0.715399981, 0.0720999986));

@@ -1,4 +1,5 @@
 #include "../../../../shaders/color/srgb.hlsl"
+#include "../../shared.h"
 #include "../../materials/material_source.hlsli"
 #include "common.hlsli"
 #include "../../rendering/motion.hlsli"
@@ -43,10 +44,13 @@ cbuffer NativeSceneBytes : register(b3) { uint4 scene_rows[30]; }
   const bool valid = depth > 0.0 && color.a >= 0.0 && material.valid && normal_valid
                      && captured.a >= 0.5 && receiver_environment.Load(int3(pixel, 0)).a >= 0.0;
 
-  // The native late source is extended sRGB in a float view. Decode exactly
-  // once here, before tracing. Its sky, direct light, fog and forward light do
-  // not depend on material-capture coverage.
-  const float3 radiance = renodx::color::srgb::Decode(max(late_scene.Load(int3(pixel, 0)).rgb, 0.0));
+  // The native late source is the game's sRGB view, now a float clone holding
+  // extended sRGB. Decode exactly once here, before tracing. Its sky, direct
+  // light, fog and forward light do not depend on material-capture coverage.
+  float3 radiance = late_scene.Load(int3(pixel, 0)).rgb;
+#if FIX_UNORM_SRGB
+  radiance = renodx::color::srgb::Decode(max(radiance, 0.0));
+#endif
   const bool source_valid = all(isfinite(radiance));
   source_output[pixel] = float4(source_valid ? radiance : 0.0, source_valid ? 1.0 : 0.0);
   // An unsupported receiver can still supply reflected light elsewhere. Keep
