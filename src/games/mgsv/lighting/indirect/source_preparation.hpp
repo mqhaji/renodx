@@ -62,7 +62,8 @@ inline std::shared_ptr<Target> Read(reshade::api::device* device, ID3D11Resource
   if (selected.device == nullptr || copied == nullptr) return result;
   targets.if_contains(copied, [&](const auto& entry) {
     const auto& [native_copy, target] = entry;
-    if (target->generation == selected.generation) {
+    // Reset empties entries before it clears the map.
+    if (target != nullptr && target->generation == selected.generation) {
       result = target;
     }
   });

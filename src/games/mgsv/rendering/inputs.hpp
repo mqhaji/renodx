@@ -16,13 +16,12 @@
 #include "../../../utils/bitwise.hpp"
 #include "../../../utils/descriptor.hpp"
 
-// Records the pixel shader views bound at t0, t2 and t3 on each command list, so
+// Records the pixel shader views bound at t2 and t3 on each command list, so
 // the camera-velocity draw can find its depth and object-velocity inputs.
 namespace mgsv::inputs::descriptor_tracker {
 
 struct __declspec(uuid("9F1A3A38-9D2A-4E5B-B5A3-3F2D0F38CD33")) CommandListData {
   // The pixel shader views most recently bound on this command list.
-  reshade::api::resource_view pixel_srv_t0 = {0};  // HDR color at insertion draws
   reshade::api::resource_view pixel_srv_t2 = {0};  // Depth at MotionBlurCameraVelocity
   reshade::api::resource_view pixel_srv_t3 = {0};  // Object velocity at MotionBlurCameraVelocity
 };
@@ -62,11 +61,10 @@ inline void OnPushDescriptors(
   for (uint32_t i = 0u; i < update.count; ++i) {
     // For D3D11, ReShade reports bindings as shader register numbers.
     const uint32_t slot = update.binding + i;
-    if (slot != 0u && slot != 2u && slot != 3u) continue;
+    if (slot != 2u && slot != 3u) continue;
 
     const auto view = renodx::utils::descriptor::GetResourceViewFromDescriptorUpdate(update, i);
     switch (slot) {
-      case 0u: data->pixel_srv_t0 = view; break;
       case 2u: data->pixel_srv_t2 = view; break;
       case 3u: data->pixel_srv_t3 = view; break;
       default: break;
@@ -111,7 +109,6 @@ struct Snapshot {
   reshade::api::device* device = nullptr;
   uint64_t generation = 0;
   Motion motion;
-  Motion lighting_motion;  // Updated only by captures made with reconstruction on (publish_lighting).
   Materials materials;
 };
 
@@ -131,7 +128,6 @@ struct State {
   // The newest capture ticket published to each slot. A ticket stays raised after a failed view
   // creation clears its slot, so an older capture cannot fill the slot again.
   uint64_t motion_ticket = 0;
-  uint64_t lighting_ticket = 0;
   uint64_t materials_ticket = 0;
 };
 
@@ -288,13 +284,12 @@ inline void OnDestroyDevice(reshade::api::device* device) {
 }
 
 // Called at the camera-velocity draw; both callers hold the reconstruction ExecutionGuard.
-// publish_lighting also updates lighting_motion. Generation checks reject a capture that
+// Generation checks reject a capture that
 // finishes after its selection retired; they do not synchronize native context use or
 // device destruction.
 inline Motion CaptureMotion(
     reshade::api::command_list* cmd_list,
-    reshade::api::resource_view expected_velocity_rtv,
-    bool publish_lighting) {
+    reshade::api::resource_view expected_velocity_rtv) {
   if (cmd_list == nullptr) return {};
   auto* device = cmd_list->get_device();
   Snapshot previous;
@@ -365,7 +360,6 @@ inline Motion CaptureMotion(
                                              motion.velocity_format, 0, 1, 0, 1),
             &velocity_view)) {
       Motion retired_motion;
-      Motion retired_lighting;
       bool cleared = false;
       {
         const std::unique_lock lock(internal::state.mutex);
@@ -379,17 +373,9 @@ inline Motion CaptureMotion(
             snapshot.motion = {};
             cleared = retired_motion.velocity != nullptr;
           }
-          if (publish_lighting && ticket > internal::state.lighting_ticket
-              && snapshot.lighting_motion.observation == previous.lighting_motion.observation) {
-            internal::state.lighting_ticket = ticket;
-            retired_lighting = std::move(snapshot.lighting_motion);
-            snapshot.lighting_motion = {};
-            cleared = cleared || retired_lighting.velocity != nullptr;
-          }
         }
       }
-      // A failed view creation clears the cached capture, and lighting_motion too when
-      // publish_lighting is set. Captures made with reconstruction off never touch lighting_motion.
+      // A failed view creation clears the cached capture.
       if (cleared) {
         reshade::log::message(reshade::log::level::warning,
                               "MgsvInputs: velocity SRV creation failed; previous selection retired");
@@ -405,27 +391,16 @@ inline Motion CaptureMotion(
   }
 
   Motion retired_motion;
-  Motion retired_lighting;
-  bool published_motion = false;
-  bool published_lighting = false;
   {
     const std::unique_lock lock(internal::state.mutex);
     auto& snapshot = internal::state.snapshot;
     if (!internal::state.accepting || snapshot.device != device || snapshot.generation != previous.generation) return {};
-    if (ticket > internal::state.motion_ticket) {
-      internal::state.motion_ticket = ticket;
-      retired_motion = std::move(snapshot.motion);
-      snapshot.motion = motion;
-      published_motion = true;
-    }
-    if (publish_lighting && ticket > internal::state.lighting_ticket) {
-      internal::state.lighting_ticket = ticket;
-      retired_lighting = std::move(snapshot.lighting_motion);
-      snapshot.lighting_motion = motion;
-      published_lighting = true;
-    }
+    // An older capture that finishes after a newer one is not published.
+    if (ticket <= internal::state.motion_ticket) return {};
+    internal::state.motion_ticket = ticket;
+    retired_motion = std::move(snapshot.motion);
+    snapshot.motion = motion;
   }
-  if (!published_motion && !published_lighting) return {};
   return motion;
 }
 

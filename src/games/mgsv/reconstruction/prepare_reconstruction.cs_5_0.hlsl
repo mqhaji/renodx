@@ -33,22 +33,24 @@ RWTexture2D<float4> motion_debug_output : register(u3);
   depth_output[pixel] = depth;
 
   const float2 native_velocity = DecodeNativeMotion(native_velocity_texture.Load(int3(pixel, 0)).ba, reciprocal_render_size);
+  // The engine's velocity pass draws with the jittered projection, so its
+  // motion contains the current jitter on every pixel. Remove it once here for
+  // every use of the game's motion.
+  const float2 unjittered_native_velocity = native_velocity - current_jitter_uv;
   // Static pixels use camera motion from depth and the unjittered camera
   // matrices when camera history is valid, and the game's motion otherwise.
-  float2 camera_velocity = native_velocity;
+  float2 camera_velocity = unjittered_native_velocity;
   if (camera_reprojection_valid > 0.f) {
     if (!GetCameraVelocity(uv, depth, current_jitter_uv,
                            float4x4(current_to_previous_clip_row_0, current_to_previous_clip_row_1,
-                                    current_to_previous_clip_row_2, current_to_previous_clip_row_3), camera_velocity)) camera_velocity = native_velocity;
+                                    current_to_previous_clip_row_2, current_to_previous_clip_row_3), camera_velocity)) camera_velocity = unjittered_native_velocity;
   }
   const float4 object_sample = object_velocity_texture.Load(int3(pixel, 0));
-  // Object pixels keep the game's motion, so bone and object movement survive,
-  // minus the current projection jitter that motion contains.
-  const float2 object_velocity = native_velocity - current_jitter_uv;
   if (analytical_taa > 0.f) {
     motion_debug_output[pixel] = float4(native_velocity, object_sample.r, 0.f);
   }
-  const float2 velocity = (object_sample.r > 0.5f ? object_velocity : camera_velocity);
+  // Object pixels keep the game's motion, so bone and object movement survive.
+  const float2 velocity = (object_sample.r > 0.5f ? unjittered_native_velocity : camera_velocity);
   // All consumers receive a previous-minus-current UV delta with jitter removed.
   motion_vector_output[pixel] = -velocity;
 }

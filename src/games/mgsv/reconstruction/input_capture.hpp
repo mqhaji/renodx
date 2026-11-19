@@ -71,7 +71,7 @@ inline Resources CaptureCameraMotionLocked(
   }
 
   // Retain the live native bindings, including the velocity target this draw writes.
-  auto motion = inputs::CaptureMotion(cmd_list, velocity_rtv, true);
+  auto motion = inputs::CaptureMotion(cmd_list, velocity_rtv);
   if (motion.velocity == nullptr) return {};
   return {.motion = std::move(motion), .camera = camera_state::GetForCapture()};
 }

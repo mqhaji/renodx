@@ -64,7 +64,7 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list, [[maybe_unused]] co
   // The lighting history tracks this capture through its own submissions.
   // Without reconstruction the scene has no jitter, so no camera is attached.
   if (!runtime::state::IsEnabled()) {
-    auto motion = inputs::CaptureMotion(cmd_list, velocity_rtv, false);
+    auto motion = inputs::CaptureMotion(cmd_list, velocity_rtv);
     lighting::temporal_inputs::Record(cmd_list, {
                                                     .device = device,
                                                     .generation = motion.generation,

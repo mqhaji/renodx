@@ -1020,7 +1020,7 @@ inline void OnInitDevice(reshade::api::device* device) {
 inline void OnInitPipeline(reshade::api::device* device, reshade::api::pipeline_layout /*layout*/,
                            uint32_t count, const reshade::api::pipeline_subobject* objects,
                            reshade::api::pipeline pipeline) {
-  if (device->get_api() != reshade::api::device_api::d3d11 || pipeline.handle == 0u || count != 1u
+  if (device->get_api() != reshade::api::device_api::d3d11 || pipeline.handle == 0u || count != 1u || objects == nullptr
       || objects[0].data == nullptr) return;
   const bool vertex = objects[0].type == reshade::api::pipeline_subobject_type::vertex_shader;
   if (!vertex && objects[0].type != reshade::api::pipeline_subobject_type::pixel_shader) return;
