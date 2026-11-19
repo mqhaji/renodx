@@ -45,7 +45,17 @@ inline constexpr std::array REQUIRED_ENTRIES = {
     engine::Entry::SHADOW_CONSTANT_REGISTER_SET_VECTOR,
     engine::Entry::SHADOW_CONSTANT_REGISTER_FLUSH,
 };
-inline constexpr engine::Requirement REQUIREMENT = {.feature = "Contact shadows", .entries = REQUIRED_ENTRIES};
+inline constexpr std::array REQUIRED_FIELDS = {
+    Field::COMMAND_BUFFER_CONTEXT,
+    Field::CONTEXT_D3D_CONTEXT,
+    Field::COMMAND_BUFFER_CONSTANTS,
+    Field::CONSTANT_BANK_COUNT,
+    Field::CONSTANT_BANKS_ACTIVE,
+    Field::CONSTANT_BANK_SHIFT,
+    Field::CONSTANT_BANK_VECTORS,
+    Field::CONSTANT_BANK_DATA,
+};
+inline constexpr engine::Requirement REQUIREMENT = {.feature = "Contact shadows", .entries = REQUIRED_ENTRIES, .fields = REQUIRED_FIELDS};
 
 namespace internal {
 
@@ -78,23 +88,21 @@ static void __fastcall HookMainExec(void* plugin, void* render, void* viewport) 
 // recording into the draw's context.
 inline bool ReadConstants(uintptr_t command_buffer, ID3D11DeviceContext* context, Constants* output) {
   if (command_buffer == 0u || context == nullptr) return false;
-  // The executable signatures checked at installation establish these layouts:
-  // CommandBuffer+8 is its native context, whose +8 is the D3D context, and
-  // CommandBuffer+0x28 points to eight 32-byte bank entries, followed by the bank
-  // count at +0x108 and a mask of active banks at +0x114. Each entry holds its
-  // CPU data at +8 and float4 count at +0x18. Banks 2 and 3 match shader b2/b3.
+  // The command buffer's render context holds the D3D11 context, and its
+  // constant registers hold eight bank records followed by the bank count and a
+  // mask of active banks. Banks 2 and 3 match shader b2/b3.
   const auto* buffer = reinterpret_cast<const std::byte*>(command_buffer);  // NOLINT(performance-no-int-to-ptr)
-  const auto* native_context = *reinterpret_cast<const std::byte* const*>(buffer + 8u);
-  if (native_context == nullptr || engine::views::Unwrap(*reinterpret_cast<const uintptr_t*>(native_context + 8u)).Get() != context) return false;
-  const auto* banks = *reinterpret_cast<const std::byte* const*>(buffer + 0x28u);
+  const auto* native_context = *reinterpret_cast<const std::byte* const*>(buffer + Value(Field::COMMAND_BUFFER_CONTEXT));
+  if (native_context == nullptr || engine::views::Unwrap(*reinterpret_cast<const uintptr_t*>(native_context + Value(Field::CONTEXT_D3D_CONTEXT))).Get() != context) return false;
+  const auto* banks = *reinterpret_cast<const std::byte* const*>(buffer + Value(Field::COMMAND_BUFFER_CONSTANTS));
   if (banks == nullptr) return false;
-  const auto bank_count = *reinterpret_cast<const uint32_t*>(banks + 0x108u);
-  const auto active_banks = *reinterpret_cast<const uint32_t*>(banks + 0x114u);
+  const auto bank_count = *reinterpret_cast<const uint32_t*>(banks + Value(Field::CONSTANT_BANK_COUNT));
+  const auto active_banks = *reinterpret_cast<const uint32_t*>(banks + Value(Field::CONSTANT_BANKS_ACTIVE));
   if (bank_count != 8u || (active_banks & 0xCu) != 0xCu) return false;
   const auto copy_bank = [banks](uint32_t bank, std::span<float> destination) {
-    const auto* entry = banks + (bank * 0x20u);
-    const auto count = *reinterpret_cast<const uint32_t*>(entry + 0x18u);
-    const auto* data = *reinterpret_cast<const float* const*>(entry + 8u);
+    const auto* entry = banks + (size_t{bank} << Value(Field::CONSTANT_BANK_SHIFT));
+    const auto count = *reinterpret_cast<const uint32_t*>(entry + Value(Field::CONSTANT_BANK_VECTORS));
+    const auto* data = *reinterpret_cast<const float* const*>(entry + Value(Field::CONSTANT_BANK_DATA));
     if (data == nullptr || count != destination.size() / 4u) return false;
     std::memcpy(destination.data(), data, destination.size_bytes());
     return true;
@@ -117,8 +125,8 @@ inline bool Install(LocalLightsCallback on_local_lights) {
     }
     return false;
   };
-  if (!engine::Verified(REQUIRED_ENTRIES)) {
-    return fail("MgsvShadows: the local-light entries did not verify; contact shadows are off.");
+  if (!engine::Verified(REQUIREMENT)) {
+    return fail("MgsvShadows: the local-light entries or structure fields did not verify; contact shadows are off.");
   }
   internal::hooks.main_exec = reinterpret_cast<internal::MainExec>(engine::Address(engine::Entry::LOCAL_LIGHT_MAIN_EXEC));
   try {

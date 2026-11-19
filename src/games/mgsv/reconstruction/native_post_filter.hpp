@@ -180,7 +180,7 @@ inline bool Install(CutCallback on_cut) {
       }
       return false;
     };
-    if (!engine::Verified(REQUIRED_ENTRIES)) {
+    if (!engine::Verified(REQUIREMENT)) {
       return fail("the post-processing start entry did not verify; reconstruction cannot be scheduled");
     }
     internal::hooks.start_post_filter = reinterpret_cast<internal::StartPostFilter>(engine::Address(engine::Entry::DG_START_POST_FILTER));

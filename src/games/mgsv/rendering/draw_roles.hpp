@@ -18,21 +18,12 @@
 #include "../../../utils/resource.hpp"
 #include "../../../utils/swapchain.hpp"
 #include "../engine/render_targets.hpp"
+#include "../engine/shader_names.hpp"
 #include "../reconstruction/output_size/runtime.hpp"
 
 // Roles of draws that run generic or shared game shaders: velocity
 // producers, the bloom chain, and reads of the engine's scene images.
 namespace mgsv::rendering::draw_roles {
-
-namespace shader_hashes {
-
-inline constexpr uint32_t CAMERA_VELOCITY_PS = 0xA13321B6u;
-inline constexpr uint32_t GBUFFER_VELOCITY_VS = 0x1D2531B7u;
-inline constexpr uint32_t GBUFFER_VELOCITY_PS = 0x9815404Fu;
-inline constexpr uint32_t GBUFFER_MASKED_VELOCITY_VS = 0x7B809E72u;
-inline constexpr uint32_t GBUFFER_MASKED_VELOCITY_PS = 0x58C10658u;
-
-}  // namespace shader_hashes
 
 enum class VelocityProducer : std::uint8_t {
   NONE,
@@ -43,13 +34,13 @@ enum class VelocityProducer : std::uint8_t {
 
 constexpr VelocityProducer IdentifyVelocityProducer(uint32_t vertex_hash, uint32_t pixel_hash) {
   switch (pixel_hash) {
-    case shader_hashes::CAMERA_VELOCITY_PS:
+    case engine::shaders::MOTION_BLUR_CAMERA_VELOCITY_PS:
       return VelocityProducer::CAMERA;
-    case shader_hashes::GBUFFER_VELOCITY_PS:
-      if (vertex_hash == shader_hashes::GBUFFER_VELOCITY_VS) return VelocityProducer::GBUFFER;
+    case engine::shaders::GBUFFER_VELOCITY_PS:
+      if (vertex_hash == engine::shaders::GBUFFER_VELOCITY_VS) return VelocityProducer::GBUFFER;
       break;
-    case shader_hashes::GBUFFER_MASKED_VELOCITY_PS:
-      if (vertex_hash == shader_hashes::GBUFFER_MASKED_VELOCITY_VS) return VelocityProducer::GBUFFER_MASKED;
+    case engine::shaders::GBUFFER_MASKED_VELOCITY_PS:
+      if (vertex_hash == engine::shaders::GBUFFER_MASKED_VELOCITY_VS) return VelocityProducer::GBUFFER_MASKED;
       break;
   }
   return VelocityProducer::NONE;

@@ -31,15 +31,16 @@ namespace mgsv::engine::motion_vectors {
 inline std::atomic<bool> wanted = false;
 
 inline constexpr std::array REQUIRED_ENTRIES = {engine::Entry::DEFERRED_GEOMETRY_POST_EXEC, engine::Entry::DG_END_SCREEN_SPACE_VELOCITY};
-inline constexpr engine::Requirement REQUIREMENT = {.feature = "Motion vectors with the game's motion blur off", .entries = REQUIRED_ENTRIES};
+inline constexpr std::array REQUIRED_FIELDS = {Field::RENDER_FRAME_FLAGS, Field::FRAME_FLAG_MOTION_VECTORS};
+inline constexpr engine::Requirement REQUIREMENT = {.feature = "Motion vectors with the game's motion blur off", .entries = REQUIRED_ENTRIES, .fields = REQUIRED_FIELDS};
 
 namespace internal {
 
-// Render keeps a pointer to the build's frame flags at +0xD0. Bit 0 of the
-// first word asks for motion vectors: PluginMotionBlur::InitRender is its only
-// writer and PostExec its only reader. The motion blur draw has its own test.
-inline constexpr size_t RENDER_FRAME_FLAGS_OFFSET = 0xD0u;
-inline constexpr uint64_t MOTION_VECTORS_FLAG = 1u;
+// Render keeps a pointer to the build's frame flags. One bit of the first word
+// asks for motion vectors: PluginMotionBlur::InitRender is its only writer and
+// PostExec its only reader. The motion blur draw has its own test. The word is
+// 64 bits, so the mask is too: clearing the bit must not clear the upper half.
+inline constexpr uint64_t MOTION_VECTORS_FLAG = Value(Field::FRAME_FLAG_MOTION_VECTORS);
 
 using PostExec = void(__fastcall*)(void* plugin, void* render, void* viewport);
 using EndScreenSpaceVelocity = void(__fastcall*)(void* dg);
@@ -63,7 +64,7 @@ static thread_local Scene recorded;
 
 static void __fastcall HookPostExec(void* plugin, void* render, void* viewport) {
   calls_in_flight.fetch_add(1u, std::memory_order_acq_rel);
-  auto* flags = *reinterpret_cast<uint64_t* const*>(static_cast<const uint8_t*>(render) + RENDER_FRAME_FLAGS_OFFSET);
+  auto* flags = *reinterpret_cast<uint64_t* const*>(static_cast<const uint8_t*>(render) + Value(Field::RENDER_FRAME_FLAGS));
   // Every view of the build shares the flags, so the bit is set only for the
   // presented main view's call and cleared again after it.
   const bool keep = flags != nullptr && (*flags & MOTION_VECTORS_FLAG) == 0u && wanted.load(std::memory_order_acquire)
@@ -119,8 +120,8 @@ inline bool Install() {
     }
     return false;
   };
-  if (!engine::Verified(REQUIRED_ENTRIES)) {
-    return fail("MgsvVelocity: the velocity pass entries did not verify; motion vectors follow the game's motion blur.");
+  if (!engine::Verified(REQUIREMENT)) {
+    return fail("MgsvVelocity: the velocity pass entries or structure fields did not verify; motion vectors follow the game's motion blur.");
   }
   internal::hooks.post_exec = reinterpret_cast<internal::PostExec>(engine::Address(engine::Entry::DEFERRED_GEOMETRY_POST_EXEC));
   internal::hooks.end_screen_space_velocity = reinterpret_cast<internal::EndScreenSpaceVelocity>(engine::Address(engine::Entry::DG_END_SCREEN_SPACE_VELOCITY));

@@ -9,11 +9,13 @@
 #include <span>
 #include <string_view>
 
-// Everything the mod relies on at a fixed place in the game's executable.
-// No other file holds an address or the bytes expected there; features ask
-// engine/image.hpp for an entry by name. Game updates do not change the
-// renderer, but a rebuilt executable moves its code, so every entry keeps the
-// bytes that identify it and every reference between entries is checked.
+// Everything the mod relies on at a fixed place in the game's executable, and
+// every engine structure layout it reads. No other file holds an address, a
+// structure offset or the bytes expected in the game's code; features ask
+// engine/image.hpp for an entry and engine::Value for a field by name. Game
+// updates do not change the renderer, but a rebuilt executable moves its code,
+// so every entry keeps the bytes that identify it, every reference between
+// entries is checked, and every field is checked in an instruction that uses it.
 namespace mgsv::engine {
 
 // The executable the entries were read from, built 2026-07-07.
@@ -108,6 +110,12 @@ enum class Entry : uint8_t {
   TERRAIN_DECAL_DRAW_ON_JOB,
   TERRAIN_DECAL_SET_INPUT,
   TERRAIN_DECAL_SET_INPUT_RETURN,
+
+  // Read only to verify structure fields; never hooked.
+  SHADOW_CONSTANT_REGISTER_DUPLICATE,
+  RENDER_INFO_RESIZE_SWAP_CHAIN,
+  SWAP_CHAIN_PRESENT,
+  SHADER_RESOURCE_VIEW_CREATE,
 
   COUNT,
 };
@@ -216,6 +224,12 @@ inline constexpr std::array<EntryInfo, ENTRY_COUNT> ENTRIES = {{
     {.entry = Entry::TERRAIN_DECAL_DRAW_ON_JOB, .name = "fox::gr::dg::plugins::TerrainRendering::TerrainDecalDrawOnJob", .rva = 0x275280u, .bytes = "40 53 55 56 57 41 54 41 55 41 56 41 57 48 81 EC"},
     {.entry = Entry::TERRAIN_DECAL_SET_INPUT, .name = "fox::gr::dg::BuildTerrainDecalJob::SetInputBuildParameters", .rva = 0x2D18D0u, .bytes = "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48"},
     {.entry = Entry::TERRAIN_DECAL_SET_INPUT_RETURN, .name = "fox::gr::dg::plugins::TerrainRendering::TerrainDecalDrawOnJob: return from SetInputBuildParameters", .rva = 0x2755CAu, .bytes_before = 5u, .bytes = "E8 ?? ?? ?? ??"},
+
+    // Read only to verify structure fields; never hooked.
+    {.entry = Entry::SHADOW_CONSTANT_REGISTER_DUPLICATE, .name = "fox::gr::dg::ShadowConstantRegister::Duplicate", .rva = 0x2C5790u, .bytes = "40 55 56 57 48 81 EC A0 00 00 00 48 C7 44 24 28 FE FF FF FF"},
+    {.entry = Entry::RENDER_INFO_RESIZE_SWAP_CHAIN, .name = "fox::gr::dg::RenderInfoDx11::ResizeSwapChain", .rva = 0x24AD80u, .bytes = "40 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 D9 48 81 EC B0 00 00 00"},
+    {.entry = Entry::SWAP_CHAIN_PRESENT, .name = "gn::swapchain::Present", .rva = 0x19F5990u, .bytes = "48 8B 49 18 45 33 C0 48 8B 01 48 FF 60 40"},
+    {.entry = Entry::SHADER_RESOURCE_VIEW_CREATE, .name = "gn::shaderresourceview::Create", .rva = 0x19F5400u, .bytes = "48 89 5C 24 18 57 48 83 EC 40 48 8B 79 10 48 8B CF 48 8B 07 FF 50 08"},
 }};
 
 // An instruction in one entry's code that refers to another entry: a call
@@ -279,11 +293,205 @@ inline constexpr bool ENTRIES_WELL_FORMED = std::ranges::all_of(ENTRIES, [](cons
 });
 static_assert(ENTRIES_WELL_FORMED, "every entry's bytes must be space-separated pairs inside the image");
 
-// The entries one feature needs. A feature whose entries do not all verify
-// stays off, and the menu names it.
+// A value inside an engine structure that the mod reads or writes: a field
+// offset, an array stride or shift, a mask or a flag. Each stays a compile-time
+// constant. At startup one instruction in a verified entry must still encode
+// it, so a changed structure turns off the features that use it instead of
+// letting them read the wrong memory.
+enum class Field : uint8_t {
+  // fox::gr::Viewport.
+  VIEWPORT_NEXT,
+  VIEWPORT_PROJECTION,
+  VIEWPORT_VIEW,
+  VIEWPORT_PREVIOUS_VIEW,
+  VIEWPORT_PREVIOUS_PROJECTION,
+  VIEWPORT_CAMERA,
+  VIEWPORT_RECTANGLE,
+  VIEWPORT_WIDTH,
+  VIEWPORT_HEIGHT,
+  VIEWPORT_FLAGS,
+  VIEWPORT_FLAG_BUILD,
+
+  // fox::gr::Render.
+  RENDER_INFO,
+  RENDER_VIEWPORTS,
+  RENDER_FRAME_FLAGS,
+  FRAME_FLAG_MOTION_VECTORS,
+
+  // The backend (fox::gr::dg::DgDx11), its render info and swap chain.
+  BACKEND_OUTPUT_SIZE,
+  BACKEND_WANTED_SIZE,
+  BACKEND_RENDER_SIZE,
+  BACKEND_FLAGS,
+  BACKEND_FLAG_RESIZE,
+  RENDER_INFO_RENDER_SIZE,
+  RENDER_INFO_SWAP_CHAIN,
+  SWAP_CHAIN_NATIVE,
+
+  // Command buffers, their render context and branch records.
+  COMMAND_BUFFER_CONTEXT,
+  COMMAND_BUFFER_CONSTANTS,
+  CONTEXT_D3D_CONTEXT,
+  BRANCH_NODE,
+  BRANCH_TARGET,
+  BRANCH_MATRICES,
+
+  // Depth of field.
+  DEPTH_OF_FIELD_EFFECT,
+
+  // Render targets, their D3D11 objects and the manager that stores them.
+  RENDER_TARGET_TEXTURE,
+  RENDER_TARGET_SHADER_VIEW,
+  TEXTURE_RESOURCE,
+  SHADER_VIEW_OBJECT,
+  HANDLE_TYPE_MASK,
+  HANDLE_TYPE_RENDER_TARGET,
+  HANDLE_INDEX_SHIFT,
+  RESOURCE_ENTRY_SIZE,
+  RESOURCE_MANAGER_ENTRIES,
+  RESOURCE_ENTRY_PARAMETER,
+  RESOURCE_MANAGER_USED,
+  PARAMETER_FORMAT_CODE,
+
+  // Constant banks (fox::gr::dg::ShadowConstantRegister).
+  CONSTANT_BANK_SHIFT,
+  CONSTANT_BANK_DATA,
+  CONSTANT_BANK_VECTORS,
+  CONSTANT_BANK_COUNT,
+  CONSTANT_BANKS_DIRTY,
+  CONSTANT_BANKS_ACTIVE,
+
+  // Camera and shader manager.
+  CAMERA_CENTER,
+  SHADER_MANAGER_PROJECTION,
+  SHADER_MANAGER_DIRTY,
+  SHADER_MANAGER_DIRTY_PROJECTION,
+  SHADER_MANAGER_DIRTY_SECOND,
+  SHADER_MANAGER_DIRTY_SECOND_PROJECTION,
+
+  // Draw packets and sky parameters.
+  LIGHT_PACKET_PROJECTION,
+  LIGHT_PACKET_RECTANGLE,
+  DRAW_PACKET_VIEW,
+  DRAW_PACKET_PROJECTION,
+  SKY_PARAMETERS_INVERSE_PROJECTION,
+
+  COUNT,
+};
+inline constexpr size_t FIELD_COUNT = static_cast<size_t>(Field::COUNT);
+
+struct FieldInfo {
+  Field field = Field::COUNT;
+  // The structure and what the value is in it.
+  std::string_view name;
+  uint32_t value = 0u;
+  // The entry whose code encodes the value, the start of that instruction
+  // relative to the entry, and where in the instruction the value sits.
+  Entry source = Entry::COUNT;
+  uint32_t instruction = 0u;
+  uint8_t position = 0u;
+  // 1 or 4 bytes, little-endian.
+  uint8_t size = 0u;
+};
+
+inline constexpr std::array<FieldInfo, FIELD_COUNT> FIELDS = {{
+    // fox::gr::Viewport.
+    {.field = Field::VIEWPORT_NEXT, .name = "fox::gr::Viewport: next viewport in the renderer's list", .value = 0x30u, .source = Entry::RENDER_DESTRUCTOR, .instruction = 0xC8u, .position = 3u, .size = 1u},
+    {.field = Field::VIEWPORT_PROJECTION, .name = "fox::gr::Viewport: projection matrix", .value = 0x280u, .source = Entry::FORWARD_RENDERING_PRE_EXEC, .instruction = 0x22u, .position = 3u, .size = 4u},
+    {.field = Field::VIEWPORT_VIEW, .name = "fox::gr::Viewport: view matrix", .value = 0x2C0u, .source = Entry::FORWARD_RENDERING_PRE_EXEC, .instruction = 0x1Bu, .position = 3u, .size = 4u},
+    {.field = Field::VIEWPORT_PREVIOUS_VIEW, .name = "fox::gr::Viewport: previous frame's view matrix", .value = 0x3C0u, .source = Entry::DEFERRED_GEOMETRY_POST_EXEC, .instruction = 0x1F1u, .position = 3u, .size = 4u},
+    {.field = Field::VIEWPORT_PREVIOUS_PROJECTION, .name = "fox::gr::Viewport: previous frame's projection matrix", .value = 0x400u, .source = Entry::DEFERRED_GEOMETRY_POST_EXEC, .instruction = 0xDBu, .position = 4u, .size = 4u},
+    {.field = Field::VIEWPORT_CAMERA, .name = "fox::gr::Viewport: camera", .value = 0x570u, .source = Entry::DG_INIT_VIEWPORT, .instruction = 0x4Au, .position = 3u, .size = 4u},
+    {.field = Field::VIEWPORT_RECTANGLE, .name = "fox::gr::Viewport: rectangle (x, y, width, height)", .value = 0x5D0u, .source = Entry::DG_INIT_VIEWPORT, .instruction = 0x2E1u, .position = 2u, .size = 4u},
+    {.field = Field::VIEWPORT_WIDTH, .name = "fox::gr::Viewport: width", .value = 0x5D8u, .source = Entry::RENDER_BUILD_RENDERING, .instruction = 0x118u, .position = 3u, .size = 4u},
+    {.field = Field::VIEWPORT_HEIGHT, .name = "fox::gr::Viewport: height", .value = 0x5DCu, .source = Entry::RENDER_BUILD_RENDERING, .instruction = 0x121u, .position = 3u, .size = 4u},
+    {.field = Field::VIEWPORT_FLAGS, .name = "fox::gr::Viewport: flags", .value = 0x6E2u, .source = Entry::RENDER_BUILD_RENDERING, .instruction = 0x10Fu, .position = 2u, .size = 4u},
+    {.field = Field::VIEWPORT_FLAG_BUILD, .name = "fox::gr::Viewport flags: bit buildRendering requires before it uses the viewport", .value = 0x1u, .source = Entry::RENDER_BUILD_RENDERING, .instruction = 0x10Fu, .position = 6u, .size = 1u},
+
+    // fox::gr::Render.
+    {.field = Field::RENDER_INFO, .name = "fox::gr::Render: render info", .value = 0x98u, .source = Entry::RENDER_BUILD_RENDERING, .instruction = 0x5Au, .position = 3u, .size = 4u},
+    {.field = Field::RENDER_VIEWPORTS, .name = "fox::gr::Render: first active viewport", .value = 0xA0u, .source = Entry::RENDER_BUILD_RENDERING, .instruction = 0xEDu, .position = 3u, .size = 4u},
+    {.field = Field::RENDER_FRAME_FLAGS, .name = "fox::gr::Render: frame flags of the build in progress", .value = 0xD0u, .source = Entry::RENDER_BUILD_RENDERING, .instruction = 0x80u, .position = 3u, .size = 4u},
+    {.field = Field::FRAME_FLAG_MOTION_VECTORS, .name = "frame flags: bit that asks for motion vectors", .value = 0x1u, .source = Entry::DEFERRED_GEOMETRY_POST_EXEC, .instruction = 0xBFu, .position = 2u, .size = 1u},
+
+    // The backend (fox::gr::dg::DgDx11), its render info and swap chain.
+    {.field = Field::BACKEND_OUTPUT_SIZE, .name = "fox::gr::dg::DgDx11: output size", .value = 0x180u, .source = Entry::DG_INIT_RENDER, .instruction = 0x205u, .position = 2u, .size = 4u},
+    {.field = Field::BACKEND_WANTED_SIZE, .name = "fox::gr::dg::DgDx11: requested render size", .value = 0x188u, .source = Entry::DG_START, .instruction = 0x42u, .position = 2u, .size = 4u},
+    {.field = Field::BACKEND_RENDER_SIZE, .name = "fox::gr::dg::DgDx11: render size", .value = 0x190u, .source = Entry::DG_START, .instruction = 0x48u, .position = 2u, .size = 4u},
+    {.field = Field::BACKEND_FLAGS, .name = "fox::gr::dg::DgDx11: flags", .value = 0x198u, .source = Entry::DG_START, .instruction = 0x9u, .position = 2u, .size = 4u},
+    {.field = Field::BACKEND_FLAG_RESIZE, .name = "fox::gr::dg::DgDx11 flags: bit that requests a resize", .value = 0x2u, .source = Entry::DG_START, .instruction = 0x39u, .position = 6u, .size = 1u},
+    {.field = Field::RENDER_INFO_RENDER_SIZE, .name = "fox::gr::dg::RenderInfoDx11: render size", .value = 0x14u, .source = Entry::DG_INIT_RENDER, .instruction = 0x36Cu, .position = 2u, .size = 1u},
+    {.field = Field::RENDER_INFO_SWAP_CHAIN, .name = "fox::gr::dg::RenderInfoDx11: swap chain wrapper", .value = 0x20u, .source = Entry::RENDER_INFO_RESIZE_SWAP_CHAIN, .instruction = 0x32Au, .position = 3u, .size = 1u},
+    {.field = Field::SWAP_CHAIN_NATIVE, .name = "gn swap chain wrapper: IDXGISwapChain", .value = 0x18u, .source = Entry::SWAP_CHAIN_PRESENT, .instruction = 0x0u, .position = 3u, .size = 1u},
+
+    // Command buffers, their render context and branch records.
+    {.field = Field::COMMAND_BUFFER_CONTEXT, .name = "fox::gr::dg::CommandBuffer: render context", .value = 0x8u, .source = Entry::COMMAND_BUFFER_FLUSH_CONSTANT_REGISTER, .instruction = 0x24u, .position = 3u, .size = 1u},
+    {.field = Field::COMMAND_BUFFER_CONSTANTS, .name = "fox::gr::dg::CommandBuffer: constant registers", .value = 0x28u, .source = Entry::COMMAND_BUFFER_FLUSH_CONSTANT_REGISTER, .instruction = 0x28u, .position = 3u, .size = 1u},
+    {.field = Field::CONTEXT_D3D_CONTEXT, .name = "render context: D3D11 device context", .value = 0x8u, .source = Entry::SHADOW_CONSTANT_REGISTER_FLUSH, .instruction = 0xA0u, .position = 3u, .size = 1u},
+    {.field = Field::BRANCH_NODE, .name = "branch subcontext: command list node", .value = 0x10u, .source = Entry::COMMAND_BUFFER_BRANCH, .instruction = 0x52u, .position = 3u, .size = 1u},
+    {.field = Field::BRANCH_TARGET, .name = "branch subcontext: target", .value = 0x18u, .source = Entry::COMMAND_BUFFER_BRANCH, .instruction = 0x11Au, .position = 3u, .size = 1u},
+    {.field = Field::BRANCH_MATRICES, .name = "branch subcontext: two 4x4 matrices", .value = 0x40u, .source = Entry::COMMAND_BUFFER_BRANCH, .instruction = 0x5Du, .position = 3u, .size = 1u},
+
+    // Depth of field.
+    {.field = Field::DEPTH_OF_FIELD_EFFECT, .name = "fox::gr::PluginDepthOfField: effect", .value = 0x68u, .source = Entry::DEPTH_OF_FIELD_MAIN_EXEC, .instruction = 0x32Eu, .position = 3u, .size = 1u},
+
+    // Render targets, their D3D11 objects and the manager that stores them.
+    {.field = Field::RENDER_TARGET_TEXTURE, .name = "fox::gr::dg::RenderTargetDx11: texture wrapper", .value = 0x40u, .source = Entry::RENDER_TARGET_INITIALIZE, .instruction = 0x23Eu, .position = 3u, .size = 1u},
+    {.field = Field::RENDER_TARGET_SHADER_VIEW, .name = "fox::gr::dg::RenderTargetDx11: shader view wrapper", .value = 0x50u, .source = Entry::RENDER_TARGET_INITIALIZE, .instruction = 0x3CEu, .position = 3u, .size = 1u},
+    {.field = Field::TEXTURE_RESOURCE, .name = "gn texture wrapper: ID3D11Resource", .value = 0x10u, .source = Entry::RENDER_TARGET_INITIALIZE, .instruction = 0x242u, .position = 3u, .size = 1u},
+    {.field = Field::SHADER_VIEW_OBJECT, .name = "gn shader view wrapper: ID3D11ShaderResourceView", .value = 0x8u, .source = Entry::SHADER_RESOURCE_VIEW_CREATE, .instruction = 0x68u, .position = 3u, .size = 1u},
+    {.field = Field::HANDLE_TYPE_MASK, .name = "resource handle: type mask", .value = 0x7Fu, .source = Entry::RENDER_TARGET_RESTORE_WITH_RESIZE, .instruction = 0x20u, .position = 2u, .size = 1u},
+    {.field = Field::HANDLE_TYPE_RENDER_TARGET, .name = "resource handle: render target type", .value = 0xBu, .source = Entry::RENDER_TARGET_RESTORE_WITH_RESIZE, .instruction = 0x23u, .position = 1u, .size = 1u},
+    {.field = Field::HANDLE_INDEX_SHIFT, .name = "resource handle: shift of the entry index", .value = 0x11u, .source = Entry::RENDER_TARGET_RESTORE_WITH_RESIZE, .instruction = 0x2Bu, .position = 2u, .size = 1u},
+    {.field = Field::RESOURCE_ENTRY_SIZE, .name = "render target manager: entry size", .value = 0x70u, .source = Entry::RENDER_TARGET_RESTORE_WITH_RESIZE, .instruction = 0x30u, .position = 3u, .size = 1u},
+    {.field = Field::RESOURCE_MANAGER_ENTRIES, .name = "render target manager: entries", .value = 0x8u, .source = Entry::RENDER_TARGET_RESTORE_WITH_RESIZE, .instruction = 0x34u, .position = 3u, .size = 1u},
+    {.field = Field::RESOURCE_ENTRY_PARAMETER, .name = "render target manager entry: parameter", .value = 0x28u, .source = Entry::RENDER_TARGET_RESTORE_WITH_RESIZE, .instruction = 0x38u, .position = 3u, .size = 1u},
+    {.field = Field::RESOURCE_MANAGER_USED, .name = "render target manager: number of entries in use", .value = 0x14u, .source = Entry::RENDER_TARGET_CREATE_RESOURCE, .instruction = 0x19Eu, .position = 2u, .size = 1u},
+    {.field = Field::PARAMETER_FORMAT_CODE, .name = "fox::gr::dg::RenderTargetParameter: format code", .value = 0x14u, .source = Entry::GET_BUFFER_FORMAT_FROM_PARAMETER, .instruction = 0x0u, .position = 3u, .size = 1u},
+
+    // Constant banks (fox::gr::dg::ShadowConstantRegister).
+    {.field = Field::CONSTANT_BANK_SHIFT, .name = "fox::gr::dg::ShadowConstantRegister: bank record size as a power of two", .value = 0x5u, .source = Entry::SHADOW_CONSTANT_REGISTER_SET_VECTOR, .instruction = 0x2Cu, .position = 3u, .size = 1u},
+    {.field = Field::CONSTANT_BANK_DATA, .name = "fox::gr::dg::ShadowConstantRegister bank: CPU data", .value = 0x8u, .source = Entry::SHADOW_CONSTANT_REGISTER_SET_VECTOR, .instruction = 0x38u, .position = 4u, .size = 1u},
+    {.field = Field::CONSTANT_BANK_VECTORS, .name = "fox::gr::dg::ShadowConstantRegister bank: number of float4 vectors", .value = 0x18u, .source = Entry::SHADOW_CONSTANT_REGISTER_FLUSH, .instruction = 0xFAu, .position = 3u, .size = 1u},
+    {.field = Field::CONSTANT_BANK_COUNT, .name = "fox::gr::dg::ShadowConstantRegister: bank count", .value = 0x108u, .source = Entry::SHADOW_CONSTANT_REGISTER_DUPLICATE, .instruction = 0x74u, .position = 3u, .size = 4u},
+    {.field = Field::CONSTANT_BANKS_DIRTY, .name = "fox::gr::dg::ShadowConstantRegister: dirty banks", .value = 0x110u, .source = Entry::SHADOW_CONSTANT_REGISTER_SET_VECTOR, .instruction = 0x45u, .position = 2u, .size = 4u},
+    {.field = Field::CONSTANT_BANKS_ACTIVE, .name = "fox::gr::dg::ShadowConstantRegister: active banks", .value = 0x114u, .source = Entry::SHADOW_CONSTANT_REGISTER_SET_VECTOR, .instruction = 0x19u, .position = 2u, .size = 4u},
+
+    // Camera and shader manager.
+    {.field = Field::CAMERA_CENTER, .name = "fox::gr::Camera: center", .value = 0x118u, .source = Entry::DG_INIT_VIEWPORT, .instruction = 0x2B2u, .position = 4u, .size = 4u},
+    {.field = Field::SHADER_MANAGER_PROJECTION, .name = "fox::gr::dg::ShaderManager: active projection", .value = 0x680u, .source = Entry::FORWARD_RENDERING_PRE_EXEC, .instruction = 0x29u, .position = 3u, .size = 4u},
+    {.field = Field::SHADER_MANAGER_DIRTY, .name = "fox::gr::dg::ShaderManager: first dirty mask", .value = 0x890u, .source = Entry::FORWARD_RENDERING_PRE_EXEC, .instruction = 0x5Au, .position = 2u, .size = 4u},
+    {.field = Field::SHADER_MANAGER_DIRTY_PROJECTION, .name = "fox::gr::dg::ShaderManager: first dirty mask bits a projection commit sets", .value = 0x9u, .source = Entry::FORWARD_RENDERING_PRE_EXEC, .instruction = 0x5Au, .position = 6u, .size = 1u},
+    {.field = Field::SHADER_MANAGER_DIRTY_SECOND, .name = "fox::gr::dg::ShaderManager: second dirty mask", .value = 0x894u, .source = Entry::FORWARD_RENDERING_PRE_EXEC, .instruction = 0x61u, .position = 2u, .size = 4u},
+    {.field = Field::SHADER_MANAGER_DIRTY_SECOND_PROJECTION, .name = "fox::gr::dg::ShaderManager: second dirty mask bits a projection commit sets", .value = 0x8u, .source = Entry::FORWARD_RENDERING_PRE_EXEC, .instruction = 0x61u, .position = 6u, .size = 1u},
+
+    // Draw packets and sky parameters.
+    {.field = Field::LIGHT_PACKET_PROJECTION, .name = "local-light draw packet: projection and view", .value = 0x1A0u, .source = Entry::LOCAL_LIGHT_MAIN_EXEC, .instruction = 0xA94u, .position = 4u, .size = 4u},
+    {.field = Field::LIGHT_PACKET_RECTANGLE, .name = "local-light draw packet: viewport rectangle", .value = 0x370u, .source = Entry::LOCAL_LIGHT_MAIN_EXEC, .instruction = 0x7D1u, .position = 3u, .size = 4u},
+    {.field = Field::DRAW_PACKET_VIEW, .name = "spherical-harmonic lighting and terrain decal draw packet: view", .value = 0x120u, .source = Entry::TERRAIN_DECAL_DRAW_ON_JOB, .instruction = 0xC1u, .position = 3u, .size = 4u},
+    {.field = Field::DRAW_PACKET_PROJECTION, .name = "spherical-harmonic lighting and terrain decal draw packet: projection", .value = 0x160u, .source = Entry::TERRAIN_DECAL_DRAW_ON_JOB, .instruction = 0xFDu, .position = 3u, .size = 4u},
+    {.field = Field::SKY_PARAMETERS_INVERSE_PROJECTION, .name = "sky shader parameters: inverse projection rows", .value = 0x40u, .source = Entry::SKY_CALC_SHADER_PARAMETERS, .instruction = 0x30Eu, .position = 3u, .size = 1u},
+}};
+
+inline constexpr bool FIELDS_WELL_FORMED = [] {
+  for (size_t index = 0u; index < FIELD_COUNT; ++index) {
+    if (FIELDS[index].field != static_cast<Field>(index)) return false;
+    if (FIELDS[index].size != 1u && FIELDS[index].size != 4u) return false;
+  }
+  return true;
+}();
+static_assert(FIELDS_WELL_FORMED, "FIELDS must list every field in the order of Field, each 1 or 4 bytes");
+
+constexpr uint32_t Value(Field field) {
+  return FIELDS[static_cast<size_t>(field)].value;
+}
+
+// The entries and fields one feature needs. A feature whose entries and fields
+// do not all verify stays off, and the menu names it.
 struct Requirement {
   std::string_view feature;
   std::span<const Entry> entries;
+  std::span<const Field> fields;
 };
 
 }  // namespace mgsv::engine

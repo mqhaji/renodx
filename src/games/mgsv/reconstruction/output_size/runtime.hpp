@@ -38,6 +38,7 @@
 #include "../../../../utils/command_action.hpp"
 #include "../../../../utils/hash.hpp"
 #include "../../engine/render_targets.hpp"
+#include "../../engine/shader_names.hpp"
 #include "../logging.hpp"
 #include "../resolution.hpp"
 #include "../state.hpp"
@@ -71,10 +72,9 @@ inline constexpr uint32_t PIXEL_INPUT_COUNT = 16u;
 inline constexpr uint32_t PIXEL_INPUT_MASK = (1u << PIXEL_INPUT_COUNT) - 1u;
 // Native DoF sprites also read their baked color and mask through VS t0/t1.
 inline constexpr uint32_t VERTEX_INPUT_COUNT = 2u;
-// This native shader draws depth-tested flare sprites into a separate layer.
-inline constexpr uint32_t LENS_FLARE_SHADER_HASH = 0x93A0C8D8u;
 // One metadata word records the shader's actual reads: bits 0..2 identify the
-// constant bindings above, bit 3 identifies flare sprites, and bit 4 says the
+// constant bindings above, bit 3 marks the lens flare shader (it draws
+// depth-tested flare sprites into a separate layer), and bit 4 says the
 // texture reads are known. Bits 16..31 identify sampled texture slots t0..t15.
 inline constexpr uint32_t LENS_FLARE_SHADER_FLAG = 8u;
 inline constexpr uint32_t PIXEL_INPUTS_KNOWN_FLAG = 16u;
@@ -234,7 +234,7 @@ inline void OnInitPipeline(reshade::api::device* device, reshade::api::pipeline_
         }
       }
     }
-    if (renodx::utils::hash::ComputeCRC32(code.data(), code.size()) == LENS_FLARE_SHADER_HASH) {
+    if (renodx::utils::hash::ComputeCRC32(code.data(), code.size()) == engine::shaders::DRAW2D_TPP_LENS_FLARE_PS) {
       flags |= LENS_FLARE_SHADER_FLAG;
     }
     auto* pixel = reinterpret_cast<ID3D11PixelShader*>(pipeline.handle);  // NOLINT(performance-no-int-to-ptr)
@@ -481,7 +481,7 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
     saved->srvs[index].Attach(inputs[index]);
   }
   bool qualified_flare = true;
-  if (pass != nullptr && pass->shader_hash == LENS_FLARE_SHADER_HASH && output->IsScaled()) {
+  if (pass != nullptr && pass->shader_hash == engine::shaders::DRAW2D_TPP_LENS_FLARE_PS && output->IsScaled()) {
     Microsoft::WRL::ComPtr<ID3D11Resource> depth_resource;
     if (inputs[1] != nullptr) {
       inputs[1]->GetResource(&depth_resource);
@@ -506,7 +506,7 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
   // The exposure meter measures the render-size scene, and its later draws are
   // not routed. The copy that feeds it stays native too, whatever it reads.
   bool feeds_exposure_meter = false;
-  if (pass != nullptr && pass->shader_hash == 0x83272BCBu && targets[0] != nullptr) {
+  if (pass != nullptr && pass->shader_hash == engine::shaders::COPY_RENDER_BUFFER_PS && targets[0] != nullptr) {
     Microsoft::WRL::ComPtr<ID3D11Resource> resource;
     targets[0]->GetResource(&resource);
     feeds_exposure_meter = engine::render_targets::ReadSceneRole(resource.Get()) == engine::render_targets::EXPOSURE_SOURCE;
@@ -545,7 +545,7 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
   // One reduction writes only the fixed bloom rectangle. Keep that rectangle's
   // viewport and carry its sampling rules through flare generation and the copy.
   bool fixed_bloom_reduction = false;
-  if (pass != nullptr && pass->shader_hash == 0x72C1D157u && input_role == Surface::Role::BLOOM && targets[0] != nullptr) {
+  if (pass != nullptr && pass->shader_hash == engine::shaders::COPY_REDUCTION_X4_PS && input_role == Surface::Role::BLOOM && targets[0] != nullptr) {
     D3D11_VIEWPORT viewport = {};
     UINT count = 1u;
     context->RSGetViewports(&count, &viewport);
@@ -562,8 +562,8 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
     }
   }
   const bool patch_fixed_bloom = pass != nullptr
-                                 && (fixed_bloom_reduction || (input_role == Surface::Role::BLOOM_FIXED_GRID && (pass->shader_hash == 0x1AC1A5EFu || pass->shader_hash == 0x265053A6u || pass->shader_hash == 0x83272BCBu)));
-  if (pass != nullptr && pass->shader_hash == 0xD05F5ABCu && output->IsScaled()) {
+                                 && (fixed_bloom_reduction || (input_role == Surface::Role::BLOOM_FIXED_GRID && (pass->shader_hash == engine::shaders::SSLENS_FLARE_PASS1_PS || pass->shader_hash == engine::shaders::SSLENS_FLARE_PASS2_PS || pass->shader_hash == engine::shaders::COPY_RENDER_BUFFER_PS)));
+  if (pass != nullptr && pass->shader_hash == engine::shaders::DOF_SCATTER_SPRITE_PS && output->IsScaled()) {
     // Native DoF sprites fetch their prepared color and mask in the VS.
     // Their output-sized grid must sample the output-sized textures the bake wrote.
     context->VSGetShaderResources(0u, static_cast<UINT>(vertex_inputs.size()), vertex_inputs.data());
@@ -608,7 +608,7 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
   }
   if (pass != nullptr && pass->require_scene_input && pass->role != Surface::Role::BLOOM) {
     target_role = input_role;
-    if (pass->shader_hash == 0x83272BCBu && input_role == Surface::Role::BLOOM_FIXED_GRID) {
+    if (pass->shader_hash == engine::shaders::COPY_RENDER_BUFFER_PS && input_role == Surface::Role::BLOOM_FIXED_GRID) {
       // This copy expands the fixed working region into the final bloom image.
       target_role = Surface::Role::BLOOM;
     }
@@ -642,7 +642,7 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
         if (!already_cleared) {
           pending_clears[i] = GetRecordedClear(target_resource.Get(), route.owner.scene, route.owner.generation);
         }
-        if (!already_cleared && !pending_clears[i].has_value() && pass != nullptr && pass->shader_hash == LENS_FLARE_SHADER_HASH) {
+        if (!already_cleared && !pending_clears[i].has_value() && pass != nullptr && pass->shader_hash == engine::shaders::DRAW2D_TPP_LENS_FLARE_PS) {
           // A blended layer must not start with undefined color or alpha.
           std::ostringstream reason;
           reason << "native lens-flare layer clear was not observed; scene=" << route.owner.scene
@@ -914,7 +914,7 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
     for (size_t i = 0u; i < saved->constants.size(); ++i) {
       if ((constant_mask & (1u << i)) == 0u) continue;
       if (i == 1u && pass != nullptr && pass->keep_scene_size) continue;
-      if (i == 2u && (pass == nullptr || (pass->shader_hash != 0xFE1DC3F8u && pass->shader_hash != 0x9BE51873u && !patch_fixed_bloom))) continue;
+      if (i == 2u && (pass == nullptr || (pass->shader_hash != engine::shaders::DOF_SCATTER_BAKE_FIRST_PS && pass->shader_hash != engine::shaders::BLUR_KAWASE_PS && !patch_fixed_bloom))) continue;
       const UINT slot = CONSTANT_BINDINGS[i].slot;
       context1->PSGetConstantBuffers1(slot, 1u, &saved->constants[i], &saved->first_constants[i], &saved->constant_counts[i]);
       if (saved->constants[i] == nullptr) {
@@ -951,7 +951,7 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
         draw->output_constant_bytes[i] = description.ByteWidth;
       }
       const bool compute_patch = (i == 0u && !native_output_view)
-                                 || (i == 2u && pass != nullptr && pass->shader_hash == 0x9BE51873u);
+                                 || (i == 2u && pass != nullptr && pass->shader_hash == engine::shaders::BLUR_KAWASE_PS);
       // A complete native buffer needs only the compute result. Larger buffers
       // can contain other ranges, so preserve those bytes before replacing the
       // selected prefix. Replaying the list reads the native data again.
@@ -972,7 +972,7 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
       } else if (i == 1u) {
         // Scene b2 keeps the viewport dimensions in c22.xy.
         copy_bytes(draw->output_constants[i].Get(), offset + SCENE_VIEWPORT_SIZE_OFFSET, patch.Get(), offsetof(SizePatch, output_size), 8u);
-      } else if (pass != nullptr && pass->shader_hash == 0x9BE51873u) {
+      } else if (pass != nullptr && pass->shader_hash == engine::shaders::BLUR_KAWASE_PS) {
         // Kawase stores four UV offsets in c9 and reciprocal size in c12.xy.
         // Preserve c12.zw and the rest of the native object buffer.
         if (!run_constants(saved->output->pipelines->bloom_shader.Get(), saved->constants[i].Get(), saved->first_constants[i], saved->constant_counts[i])) {
@@ -984,20 +984,20 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
         // The native bloom region stays 246x138. Its offsets, flare center,
         // edge fade, and final-copy crop must describe the output-sized buffer.
         switch (pass->shader_hash) {
-          case 0x72C1D157u: {
+          case engine::shaders::COPY_REDUCTION_X4_PS: {
             copy_bytes(draw->output_constants[i].Get(), offset + OBJECT_LAST_PARAM_OFFSET, patch.Get(), offsetof(SizePatch, sample_step), 8u);
             break;
           }
-          case 0x1AC1A5EFu: {
+          case engine::shaders::SSLENS_FLARE_PASS1_PS: {
             copy_bytes(draw->output_constants[i].Get(), offset + OBJECT_LOCAL_PARAM_OFFSET, patch.Get(), offsetof(SizePatch, flare_center), 12u);
             copy_bytes(draw->output_constants[i].Get(), offset + OBJECT_LOCAL_PARAM_OFFSET + 16u, patch.Get(), offsetof(SizePatch, flare_edge), 8u);
             break;
           }
-          case 0x265053A6u: {
+          case engine::shaders::SSLENS_FLARE_PASS2_PS: {
             copy_bytes(draw->output_constants[i].Get(), offset + OBJECT_LOCAL_PARAM_OFFSET, patch.Get(), offsetof(SizePatch, flare_center), 8u);
             break;
           }
-          case 0x83272BCBu: {
+          case engine::shaders::COPY_RENDER_BUFFER_PS: {
             copy_bytes(draw->output_constants[i].Get(), offset + OBJECT_LAST_PARAM_OFFSET, patch.Get(), offsetof(SizePatch, bloom_crop), 16u);
             break;
           }
@@ -1087,13 +1087,13 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
   if (saved->vertex_inputs_changed) {
     context->VSSetShaderResources(0u, static_cast<UINT>(vertex_inputs.size()), vertex_inputs.data());
   }
-  if (pass != nullptr && pass->shader_hash == 0x83272BCBu && input_role == Surface::Role::FLARE_LAYER
+  if (pass != nullptr && pass->shader_hash == engine::shaders::COPY_RENDER_BUFFER_PS && input_role == Surface::Role::FLARE_LAYER
       && targets[0] == saved->output->rtv.Get()
       && (saved->output->observed_passes.fetch_or(16384u, std::memory_order_relaxed) & 16384u) == 0u) {
     logging::Info("recorded flare layer composite to output scene size=", saved->output->target.width, "x", saved->output->target.height);
   }
   if (saved->output->IsScaled() && input_role == Surface::Role::SCENE_COLOR && pass != nullptr
-      && (pass->shader_hash == 0x72C1D157u || pass->shader_hash == 0xFE1DC3F8u)) {
+      && (pass->shader_hash == engine::shaders::COPY_REDUCTION_X4_PS || pass->shader_hash == engine::shaders::DOF_SCATTER_BAKE_FIRST_PS)) {
     // A bloom or DoF pass reading the scene publishes this route as the scene's
     // open sequence, so other workers find it. retired is declared before the
     // lock so the replaced route is released after unlocking; destroying its
@@ -1312,26 +1312,26 @@ inline bool OnCopyResource(reshade::api::command_list* command_list, reshade::ap
 // Existing native draw families that need output-size routing. This table
 // describes interception rules; its order does not schedule GPU execution.
 inline constexpr auto PASSES = std::to_array<Pass>({
-    {.shader_hash = 0x72C1D157u, .observation_bit = 1u, .name = "bloom reduction", .resize_targets = true, .require_scene_input = true, .role = Surface::Role::BLOOM},
-    {.shader_hash = 0x463195C2u, .observation_bit = 256u, .name = "bloom bright pass", .resize_targets = true, .require_scene_input = true, .role = Surface::Role::BLOOM},
-    {.shader_hash = 0x1AC1A5EFu, .observation_bit = 512u, .name = "lens flare first pass", .resize_targets = true, .require_scene_input = true, .role = Surface::Role::BLOOM},
-    {.shader_hash = 0x265053A6u, .observation_bit = 1024u, .name = "lens flare second pass", .resize_targets = true, .require_scene_input = true, .role = Surface::Role::BLOOM},
-    {.shader_hash = 0x9BE51873u, .observation_bit = 2048u, .name = "bloom blur", .resize_targets = true, .require_scene_input = true, .role = Surface::Role::BLOOM},
-    {.shader_hash = 0xFE1DC3F8u, .observation_bit = 2u, .name = "depth of field", .resize_targets = true, .dof_pass = true},
-    {.shader_hash = 0x490E22EBu, .observation_bit = 2u, .name = "depth of field", .resize_targets = true, .dof_pass = true},
-    {.shader_hash = 0xE26983EEu, .observation_bit = 2u, .name = "depth of field", .resize_targets = true, .dof_pass = true},
-    {.shader_hash = 0xD05F5ABCu, .observation_bit = 128u, .name = "depth of field sprites", .resize_targets = true, .dof_pass = true},
-    {.shader_hash = 0xE2D609B1u, .observation_bit = 2u, .name = "depth of field", .resize_targets = true, .dof_pass = true},
-    {.shader_hash = 0x7C017264u, .observation_bit = 2u, .name = "depth of field", .resize_targets = true, .dof_pass = true},
-    {.shader_hash = 0xFC5542BBu, .observation_bit = 2u, .name = "depth of field", .resize_targets = true, .dof_pass = true},
-    {.shader_hash = 0x83272BCBu, .observation_bit = 4u, .name = "scene copy / motion blur", .resize_targets = true, .require_scene_input = true},
-    {.shader_hash = 0x512E2B48u, .observation_bit = 4u, .name = "motion blur input", .resize_targets = true, .keep_scene_size = true},
-    {.shader_hash = 0xBFC7D3C2u, .observation_bit = 4u, .name = "motion blur", .resize_targets = true, .role = Surface::Role::SCENE_COLOR},
-    {.shader_hash = 0xE04D1471u, .observation_bit = 8u, .name = "tonemap"},
-    {.shader_hash = 0xC0C26E46u, .observation_bit = 8u, .name = "tonemap"},
-    {.shader_hash = 0x900968FFu, .observation_bit = 16u, .name = "FXAA / grain"},
-    {.shader_hash = 0x1FF96E86u, .observation_bit = 32u, .name = "display output", .display_output = true},
-    {.shader_hash = LENS_FLARE_SHADER_HASH, .observation_bit = 4096u, .name = "depth-tested lens flares", .resize_targets = true, .role = Surface::Role::FLARE_LAYER},
+    {.shader_hash = engine::shaders::COPY_REDUCTION_X4_PS, .observation_bit = 1u, .name = "bloom reduction", .resize_targets = true, .require_scene_input = true, .role = Surface::Role::BLOOM},
+    {.shader_hash = engine::shaders::TONEMAP_BRIGHTPASS_PS, .observation_bit = 256u, .name = "bloom bright pass", .resize_targets = true, .require_scene_input = true, .role = Surface::Role::BLOOM},
+    {.shader_hash = engine::shaders::SSLENS_FLARE_PASS1_PS, .observation_bit = 512u, .name = "lens flare first pass", .resize_targets = true, .require_scene_input = true, .role = Surface::Role::BLOOM},
+    {.shader_hash = engine::shaders::SSLENS_FLARE_PASS2_PS, .observation_bit = 1024u, .name = "lens flare second pass", .resize_targets = true, .require_scene_input = true, .role = Surface::Role::BLOOM},
+    {.shader_hash = engine::shaders::BLUR_KAWASE_PS, .observation_bit = 2048u, .name = "bloom blur", .resize_targets = true, .require_scene_input = true, .role = Surface::Role::BLOOM},
+    {.shader_hash = engine::shaders::DOF_SCATTER_BAKE_FIRST_PS, .observation_bit = 2u, .name = "depth of field", .resize_targets = true, .dof_pass = true},
+    {.shader_hash = engine::shaders::DOF_SCATTER_BAKE_SECOND_PS, .observation_bit = 2u, .name = "depth of field", .resize_targets = true, .dof_pass = true},
+    {.shader_hash = engine::shaders::DOF_SCATTER_GATHER1_PS, .observation_bit = 2u, .name = "depth of field", .resize_targets = true, .dof_pass = true},
+    {.shader_hash = engine::shaders::DOF_SCATTER_SPRITE_PS, .observation_bit = 128u, .name = "depth of field sprites", .resize_targets = true, .dof_pass = true},
+    {.shader_hash = engine::shaders::DOF_SCATTER_COMPOSITE_NEAR_PS, .observation_bit = 2u, .name = "depth of field", .resize_targets = true, .dof_pass = true},
+    {.shader_hash = engine::shaders::DOF_SCATTER_COMPOSITE_FAR_PS, .observation_bit = 2u, .name = "depth of field", .resize_targets = true, .dof_pass = true},
+    {.shader_hash = engine::shaders::DOF_SCATTER_COMPOSITE_FINAL_PS, .observation_bit = 2u, .name = "depth of field", .resize_targets = true, .dof_pass = true},
+    {.shader_hash = engine::shaders::COPY_RENDER_BUFFER_PS, .observation_bit = 4u, .name = "scene copy / motion blur", .resize_targets = true, .require_scene_input = true},
+    {.shader_hash = engine::shaders::MOTION_BLUR_BAKE_VELOCITY_DEPTH_PS, .observation_bit = 4u, .name = "motion blur input", .resize_targets = true, .keep_scene_size = true},
+    {.shader_hash = engine::shaders::MOTION_BLUR_MCGUIRE_PS, .observation_bit = 4u, .name = "motion blur", .resize_targets = true, .role = Surface::Role::SCENE_COLOR},
+    {.shader_hash = engine::shaders::TONEMAP_PS, .observation_bit = 8u, .name = "tonemap"},
+    {.shader_hash = engine::shaders::TONEMAP_1DLUT_PS, .observation_bit = 8u, .name = "tonemap"},
+    {.shader_hash = engine::shaders::FXAA_PS, .observation_bit = 16u, .name = "FXAA / grain"},
+    {.shader_hash = engine::shaders::GAMMA_CONTROL_PS, .observation_bit = 32u, .name = "display output", .display_output = true},
+    {.shader_hash = engine::shaders::DRAW2D_TPP_LENS_FLARE_PS, .observation_bit = 4096u, .name = "depth-tested lens flares", .resize_targets = true, .role = Surface::Role::FLARE_LAYER},
 });
 
 inline constexpr Pass DRAW_2D_PASS = {.shader_hash = 0u, .observation_bit = 64u, .name = "2D / UI"};
@@ -1354,7 +1354,7 @@ inline constexpr auto DRAW_CALLBACK = [](auto& command) {
     const auto output = GetActive(command.cmd_list, &route);
     if (output != nullptr && output->IsScaled()) {
       if (!resolution::active_dof.Matches(route.owner)) return renodx::utils::command_action::CallbackResult<Context>{};
-      if (pass.shader_hash == 0xFE1DC3F8u) {
+      if (pass.shader_hash == engine::shaders::DOF_SCATTER_BAKE_FIRST_PS) {
         draw->dof_active = false;
         auto* context = reinterpret_cast<ID3D11DeviceContext*>(command.cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> input;

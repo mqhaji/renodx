@@ -41,12 +41,15 @@
 #include "../../../utils/hash.hpp"
 #include "../engine/build.hpp"
 #include "../engine/image.hpp"
+#include "../engine/shader_names.hpp"
 #include "camera_state.hpp"
 #include "logging.hpp"
 #include "resolution.hpp"
 #include "state.hpp"
 
 namespace mgsv::reconstruction::projection_jitter {
+
+using engine::Field;
 
 // The native path a NativeProjectionScope belongs to. Nested hooks check it
 // before they read the scope's camera.
@@ -69,6 +72,8 @@ using RequestLocalLightDraws = void(__fastcall*)(
 // carries the projection center used to reconstruct camera rays from depth.
 inline constexpr int SCENE_CAMERA_CENTER_REGISTER = 28;
 inline constexpr uint32_t SCENE_CONSTANT_REGISTERS = 30u;
+// The constant bank that holds the scene block (shader b2).
+inline constexpr uint32_t SCENE_BANK = 2u;
 // The velocity vertex programs give c12 and c16 different meanings from the
 // lighting programs. Identify their exact bytecode before changing those fields.
 inline constexpr GUID VELOCITY_SHADER_GUID = {
@@ -123,7 +128,35 @@ inline constexpr std::array REQUIRED_ENTRIES = {
     engine::Entry::TERRAIN_DECAL_SET_INPUT,
     engine::Entry::TERRAIN_DECAL_SET_INPUT_RETURN,
 };
-inline constexpr engine::Requirement REQUIREMENT = {.feature = "Camera jitter for temporal reconstruction", .entries = REQUIRED_ENTRIES};
+inline constexpr std::array REQUIRED_FIELDS = {
+    Field::VIEWPORT_PROJECTION,
+    Field::VIEWPORT_VIEW,
+    Field::VIEWPORT_PREVIOUS_PROJECTION,
+    Field::VIEWPORT_PREVIOUS_VIEW,
+    Field::VIEWPORT_CAMERA,
+    Field::VIEWPORT_RECTANGLE,
+    Field::VIEWPORT_WIDTH,
+    Field::VIEWPORT_HEIGHT,
+    Field::VIEWPORT_FLAGS,
+    Field::VIEWPORT_FLAG_BUILD,
+    Field::CAMERA_CENTER,
+    Field::SHADER_MANAGER_PROJECTION,
+    Field::SHADER_MANAGER_DIRTY,
+    Field::SHADER_MANAGER_DIRTY_PROJECTION,
+    Field::SHADER_MANAGER_DIRTY_SECOND,
+    Field::SHADER_MANAGER_DIRTY_SECOND_PROJECTION,
+    Field::CONSTANT_BANKS_DIRTY,
+    Field::CONSTANT_BANKS_ACTIVE,
+    Field::CONSTANT_BANK_SHIFT,
+    Field::CONSTANT_BANK_DATA,
+    Field::CONSTANT_BANK_VECTORS,
+    Field::LIGHT_PACKET_PROJECTION,
+    Field::LIGHT_PACKET_RECTANGLE,
+    Field::DRAW_PACKET_VIEW,
+    Field::DRAW_PACKET_PROJECTION,
+    Field::SKY_PARAMETERS_INVERSE_PROJECTION,
+};
+inline constexpr engine::Requirement REQUIREMENT = {.feature = "Camera jitter for temporal reconstruction", .entries = REQUIRED_ENTRIES, .fields = REQUIRED_FIELDS};
 
 inline constexpr uint32_t REQUIRED_RESTORATION_HITS = 3u;
 
@@ -177,7 +210,7 @@ inline bool LooksLikeGameplayProjection(
     uint32_t height,
     uint8_t flags,
     const void* camera) {
-  if (projection == nullptr || (flags & 1u) == 0u || camera == nullptr) return false;
+  if (projection == nullptr || (flags & engine::Value(Field::VIEWPORT_FLAG_BUILD)) == 0u || camera == nullptr) return false;
   if (width < 640u || height < 360u) {
     const std::shared_lock lock(resolution::sizing_state.mutex);
     if (!resolution::sizing_state.requested.IsScaled() || resolution::sizing_state.actual != resolution::Size{.width = width, .height = height}) return false;
@@ -201,8 +234,8 @@ inline void ApplyProjectionJitter(
     float jitter_uv_y) {
   active_projection[8] += 2.f * jitter_uv_x;
   active_projection[9] -= 2.f * jitter_uv_y;
-  *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(shader_manager) + 0x890u) |= 0x09u;
-  *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(shader_manager) + 0x894u) |= 0x08u;
+  *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(shader_manager) + engine::Value(Field::SHADER_MANAGER_DIRTY)) |= engine::Value(Field::SHADER_MANAGER_DIRTY_PROJECTION);
+  *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(shader_manager) + engine::Value(Field::SHADER_MANAGER_DIRTY_SECOND)) |= engine::Value(Field::SHADER_MANAGER_DIRTY_SECOND_PROJECTION);
 }
 
 inline void ApplyProjectionJitter(float* projection, float jitter_uv_x, float jitter_uv_y) {
@@ -216,11 +249,11 @@ inline void ApplyProjectionJitter(float* projection, float jitter_uv_x, float ji
 inline bool GetPublishedCameraForViewportLocked(const uint8_t* viewport, camera_state::CameraFrame* frame) {
   if (!state::IsEnabled() || viewport == nullptr) return false;
 
-  const auto* projection = reinterpret_cast<const float*>(viewport + 0x280u);
-  const uint32_t width = *reinterpret_cast<const uint32_t*>(viewport + 0x5D8u);
-  const uint32_t height = *reinterpret_cast<const uint32_t*>(viewport + 0x5DCu);
-  const uint8_t flags = *(viewport + 0x6E2u);
-  const void* camera = *reinterpret_cast<void* const*>(viewport + 0x570u);
+  const auto* projection = reinterpret_cast<const float*>(viewport + engine::Value(Field::VIEWPORT_PROJECTION));
+  const uint32_t width = *reinterpret_cast<const uint32_t*>(viewport + engine::Value(Field::VIEWPORT_WIDTH));
+  const uint32_t height = *reinterpret_cast<const uint32_t*>(viewport + engine::Value(Field::VIEWPORT_HEIGHT));
+  const uint8_t flags = *(viewport + engine::Value(Field::VIEWPORT_FLAGS));
+  const void* camera = *reinterpret_cast<void* const*>(viewport + engine::Value(Field::VIEWPORT_CAMERA));
   const camera_state::CameraFrame published = camera_state::GetForSceneLocked();
   if (!LooksLikeGameplayProjection(projection, width, height, flags, camera)) {
     return false;
@@ -241,7 +274,7 @@ inline bool GetPublishedCameraForViewportLocked(const uint8_t* viewport, camera_
       || published.viewport_identity != reinterpret_cast<uintptr_t>(viewport)
       || published.camera_identity != reinterpret_cast<uintptr_t>(camera)
       || std::memcmp(projection, published.projection.data(), sizeof(published.projection)) != 0
-      || std::memcmp(viewport + 0x2C0u, published.view.data(), sizeof(published.view)) != 0) {
+      || std::memcmp(viewport + engine::Value(Field::VIEWPORT_VIEW), published.view.data(), sizeof(published.view)) != 0) {
     return false;
   }
 
@@ -272,13 +305,14 @@ inline void __fastcall HookFlushConstants(void* registers, void* backend) {
     return;
   }
   auto* bytes = static_cast<uint8_t*>(registers);
-  // Eight 32-byte bank records precede the native dirty and active masks.
-  // Bank 2 is the 480-byte scene block. Leave the game's upload decisions alone.
-  const uint32_t dirty = *reinterpret_cast<const uint32_t*>(bytes + 0x110u);
-  const uint32_t active = *reinterpret_cast<const uint32_t*>(bytes + 0x114u);
-  auto** source = reinterpret_cast<const float**>(bytes + 0x48u);
-  if ((dirty & active & 4u) == 0u || *source == nullptr
-      || *reinterpret_cast<const uint32_t*>(bytes + 0x58u) != SCENE_CONSTANT_REGISTERS) {
+  // The scene bank holds the 480-byte scene block. Leave the game's upload
+  // decisions alone.
+  const uint32_t dirty = *reinterpret_cast<const uint32_t*>(bytes + engine::Value(Field::CONSTANT_BANKS_DIRTY));
+  const uint32_t active = *reinterpret_cast<const uint32_t*>(bytes + engine::Value(Field::CONSTANT_BANKS_ACTIVE));
+  auto* scene_bank = bytes + (size_t{SCENE_BANK} << engine::Value(Field::CONSTANT_BANK_SHIFT));
+  auto** source = reinterpret_cast<const float**>(scene_bank + engine::Value(Field::CONSTANT_BANK_DATA));
+  if ((dirty & active & (1u << SCENE_BANK)) == 0u || *source == nullptr
+      || *reinterpret_cast<const uint32_t*>(scene_bank + engine::Value(Field::CONSTANT_BANK_VECTORS)) != SCENE_CONSTANT_REGISTERS) {
     flush_constants(registers, backend);
     return;
   }
@@ -289,7 +323,7 @@ inline void __fastcall HookFlushConstants(void* registers, void* backend) {
     camera_state::CameraFrame frame;
     const auto owner = engine::views::GetScope().owner;
     if (GetPublishedCameraForViewportLocked(std::bit_cast<const uint8_t*>(owner.viewport), &frame)) {
-      const auto* base = reinterpret_cast<const float*>(std::bit_cast<const uint8_t*>(frame.camera_identity) + 0x118u);
+      const auto* base = reinterpret_cast<const float*>(std::bit_cast<const uint8_t*>(frame.camera_identity) + engine::Value(Field::CAMERA_CENTER));
       const size_t index = SCENE_CAMERA_CENTER_REGISTER * 4u;
       if ((*source)[index] == base[0] && (*source)[index + 1u] == base[1]) {
         std::memcpy(corrected.data(), *source, sizeof(corrected));
@@ -399,7 +433,7 @@ inline void __fastcall HookUploadConstants(void* manager, void* buffer, const vo
     const auto owner = engine::views::GetScope().owner;
     if (GetPublishedCameraForViewportLocked(std::bit_cast<const uint8_t*>(owner.viewport), &frame)) {
       std::memcpy(&corrected, values, sizeof(corrected));
-      const auto* base = reinterpret_cast<const float*>(std::bit_cast<const uint8_t*>(frame.camera_identity) + 0x118u);
+      const auto* base = reinterpret_cast<const float*>(std::bit_cast<const uint8_t*>(frame.camera_identity) + engine::Value(Field::CAMERA_CENTER));
       if (corrected.width == frame.width && corrected.height == frame.height
           && corrected.camera_center_offset[0] == base[0] && corrected.camera_center_offset[1] == base[1]) {
         corrected.camera_center_offset[0] += 2.f * frame.jitter_uv_x;
@@ -425,10 +459,10 @@ inline void ApplyPublishedJitterToActiveProjection(
   if (shader_manager == nullptr) {
     return;
   }
-  auto* active_projection = reinterpret_cast<float*>(static_cast<uint8_t*>(shader_manager) + 0x680u);
+  auto* active_projection = reinterpret_cast<float*>(static_cast<uint8_t*>(shader_manager) + engine::Value(Field::SHADER_MANAGER_PROJECTION));
   if (!GetPublishedJitterForViewportLocked(viewport, &jitter_uv)) return;
 
-  const auto* projection = reinterpret_cast<const float*>(viewport + 0x280u);
+  const auto* projection = reinterpret_cast<const float*>(viewport + engine::Value(Field::VIEWPORT_PROJECTION));
   if (std::memcmp(projection, active_projection, 16u * sizeof(float)) != 0) {
     return;
   }
@@ -446,7 +480,7 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
     if (return_address != velocity_return_address && return_address != model_return_address
         && return_address != alpha_model_return_address && return_address != overlay_model_return_address
         && return_address != new_thermography_return_address && return_address != thermography_return_address) return;
-    const auto* viewport = reinterpret_cast<const uint8_t*>(view_matrix) - 0x2C0u;
+    const auto* viewport = reinterpret_cast<const uint8_t*>(view_matrix) - engine::Value(Field::VIEWPORT_VIEW);
     ApplyPublishedJitterToActiveProjection(viewport);
     return;
   }
@@ -458,12 +492,12 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
     return;
   }
 
-  const auto* viewport = reinterpret_cast<const uint8_t*>(view_matrix) - 0x2C0u;
-  const auto* projection = reinterpret_cast<const float*>(viewport + 0x280u);
-  const uint32_t width = *reinterpret_cast<const uint32_t*>(viewport + 0x5D8u);
-  const uint32_t height = *reinterpret_cast<const uint32_t*>(viewport + 0x5DCu);
-  const uint8_t flags = *(viewport + 0x6E2u);
-  const void* camera = *reinterpret_cast<void* const*>(viewport + 0x570u);
+  const auto* viewport = reinterpret_cast<const uint8_t*>(view_matrix) - engine::Value(Field::VIEWPORT_VIEW);
+  const auto* projection = reinterpret_cast<const float*>(viewport + engine::Value(Field::VIEWPORT_PROJECTION));
+  const uint32_t width = *reinterpret_cast<const uint32_t*>(viewport + engine::Value(Field::VIEWPORT_WIDTH));
+  const uint32_t height = *reinterpret_cast<const uint32_t*>(viewport + engine::Value(Field::VIEWPORT_HEIGHT));
+  const uint8_t flags = *(viewport + engine::Value(Field::VIEWPORT_FLAGS));
+  const void* camera = *reinterpret_cast<void* const*>(viewport + engine::Value(Field::VIEWPORT_CAMERA));
   void* shader_manager = shader_manager_global != nullptr ? *shader_manager_global : nullptr;
 
   if (!LooksLikeGameplayProjection(projection, width, height, flags, camera) || shader_manager == nullptr) {
@@ -471,7 +505,7 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   }
 
   auto* active_projection = reinterpret_cast<float*>(
-      static_cast<uint8_t*>(shader_manager) + 0x680u);
+      static_cast<uint8_t*>(shader_manager) + engine::Value(Field::SHADER_MANAGER_PROJECTION));
   const bool projection_matches = std::memcmp(projection, active_projection, 16u * sizeof(float)) == 0;
 
   // Three matching unmodified copies in a row confirm that turning
@@ -569,8 +603,8 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   };
   // Read native history while the originating viewport is alive. A later
   // draw may run after another worker changes it, so retain values, not pointers.
-  std::memcpy(camera_frame.native_previous_projection.data(), viewport + 0x400u, sizeof(camera_frame.native_previous_projection));
-  std::memcpy(camera_frame.native_previous_view.data(), viewport + 0x3C0u, sizeof(camera_frame.native_previous_view));
+  std::memcpy(camera_frame.native_previous_projection.data(), viewport + engine::Value(Field::VIEWPORT_PREVIOUS_PROJECTION), sizeof(camera_frame.native_previous_projection));
+  std::memcpy(camera_frame.native_previous_view.data(), viewport + engine::Value(Field::VIEWPORT_PREVIOUS_VIEW), sizeof(camera_frame.native_previous_view));
   camera_frame.native_history_available = true;
   camera_state::PublishLocked(camera_frame);
 }
@@ -604,12 +638,12 @@ inline void __fastcall HookRequestLocalLightDraws(
     // as the scene's camera. A packet that already has jitter fails this
     // check, so it never gets a second offset.
     if (GetPublishedJitterForViewportLocked(viewport, &jitter_uv)
-        && std::memcmp(packet + 0x1A0u, viewport + 0x280u, 2u * 16u * sizeof(float)) == 0
-        && std::memcmp(packet + 0x370u, viewport + 0x5D0u, 4u * sizeof(uint32_t)) == 0) {
+        && std::memcmp(packet + engine::Value(Field::LIGHT_PACKET_PROJECTION), viewport + engine::Value(Field::VIEWPORT_PROJECTION), 2u * 16u * sizeof(float)) == 0
+        && std::memcmp(packet + engine::Value(Field::LIGHT_PACKET_RECTANGLE), viewport + engine::Value(Field::VIEWPORT_RECTANGLE), 4u * sizeof(uint32_t)) == 0) {
       // Workers keep or copy this render projection. The separate culling
       // matrices and frustum planes are left alone, and the shared viewport is
       // only read.
-      ApplyProjectionJitter(reinterpret_cast<float*>(packet + 0x1A0u), jitter_uv[0], jitter_uv[1]);
+      ApplyProjectionJitter(reinterpret_cast<float*>(packet + engine::Value(Field::LIGHT_PACKET_PROJECTION)), jitter_uv[0], jitter_uv[1]);
     }
   }
 
@@ -674,13 +708,13 @@ struct NativeProjectionScope {
         || frame.scene == 0u
         || frame.reset_generation != camera_state::reset_generation.load(std::memory_order_relaxed)) return;
     const auto* bytes = static_cast<const uint8_t*>(source);
-    const auto* p = reinterpret_cast<const float*>(bytes + 0x280u);
-    const auto* v = reinterpret_cast<const float*>(bytes + 0x2C0u);
-    const void* camera = *reinterpret_cast<void* const*>(bytes + 0x570u);
+    const auto* p = reinterpret_cast<const float*>(bytes + engine::Value(Field::VIEWPORT_PROJECTION));
+    const auto* v = reinterpret_cast<const float*>(bytes + engine::Value(Field::VIEWPORT_VIEW));
+    const void* camera = *reinterpret_cast<void* const*>(bytes + engine::Value(Field::VIEWPORT_CAMERA));
     if (camera == nullptr || reinterpret_cast<uintptr_t>(camera) != frame.camera_identity) return;
-    if (reinterpret_cast<uintptr_t>(source) != frame.viewport_identity || (bytes[0x6E2u] & 1u) == 0u) return;
-    const uint32_t width = *reinterpret_cast<const uint32_t*>(bytes + 0x5D8u);
-    const uint32_t height = *reinterpret_cast<const uint32_t*>(bytes + 0x5DCu);
+    if (reinterpret_cast<uintptr_t>(source) != frame.viewport_identity || (bytes[engine::Value(Field::VIEWPORT_FLAGS)] & engine::Value(Field::VIEWPORT_FLAG_BUILD)) == 0u) return;
+    const uint32_t width = *reinterpret_cast<const uint32_t*>(bytes + engine::Value(Field::VIEWPORT_WIDTH));
+    const uint32_t height = *reinterpret_cast<const uint32_t*>(bytes + engine::Value(Field::VIEWPORT_HEIGHT));
     if (width != frame.width || height != frame.height
         || !LooksLikeGameplayProjection(p, width, height, 1u, camera)
         || std::memcmp(p, frame.projection.data(), 64u) != 0
@@ -816,11 +850,11 @@ inline void __fastcall HookShProducer(void* renderer, void* scene, void* viewpor
 inline void __fastcall HookShAttach(void* job, void* packet, uint64_t c, uint64_t d) {
   if (_ReturnAddress() == sh_set_output_return_address && packet != nullptr && native_scope != nullptr
       && native_scope->path == ProjectionPath::SH_LIGHTING
-      && std::memcmp(static_cast<const uint8_t*>(packet) + 0x120u, native_scope->view.data(), 64u) == 0) {
+      && std::memcmp(static_cast<const uint8_t*>(packet) + engine::Value(Field::DRAW_PACKET_VIEW), native_scope->view.data(), 64u) == 0) {
     // Both SH workers retain this packet. ExecuteDrawLight derives its clip
     // vertices and inverse light-volume coordinates from the same render P/V.
     // Correct it before publication so the two calculations use one sample.
-    CorrectNativeMatrix(reinterpret_cast<float*>(static_cast<uint8_t*>(packet) + 0x160u), *native_scope, true);
+    CorrectNativeMatrix(reinterpret_cast<float*>(static_cast<uint8_t*>(packet) + engine::Value(Field::DRAW_PACKET_PROJECTION)), *native_scope, true);
   }
   sh_attach(job, packet, c, d);
 }
@@ -833,7 +867,7 @@ inline void* __fastcall HookSkyParameters(void* plugin, uint32_t* result, void* 
 
   const camera_state::PublicationWriterGuard publication_guard;
   if (!scope.CurrentLocked()) return returned;
-  auto* inverse = reinterpret_cast<float*>(static_cast<uint8_t*>(parameters) + 0x40u);
+  auto* inverse = reinterpret_cast<float*>(static_cast<uint8_t*>(parameters) + engine::Value(Field::SKY_PARAMETERS_INVERSE_PROJECTION));
   // Sky_Draw reconstructs a ray from clip XY using this inverse projection.
   // Validate the native inverse before composing inverse(P) * inverse(jitter).
   // CalcShaderParameters stores inverse rows for direct shader dot products.
@@ -867,7 +901,7 @@ inline void __fastcall HookTerrainProducer(void* a, void* b, void* scene, void* 
 inline void __fastcall HookTerrainAttach(void* command, void* packet, uint64_t c, uint64_t d) {
   if (_ReturnAddress() == terrain_set_input_return_address && packet != nullptr && native_scope != nullptr
       && native_scope->path == ProjectionPath::TERRAIN_DECAL) {
-    CorrectNativeMatrix(reinterpret_cast<float*>(static_cast<uint8_t*>(packet) + 0x160u), *native_scope, true);
+    CorrectNativeMatrix(reinterpret_cast<float*>(static_cast<uint8_t*>(packet) + engine::Value(Field::DRAW_PACKET_PROJECTION)), *native_scope, true);
   }
   // The engine's packet is corrected in place and passed on; no
   // temporary copy reaches the engine.
@@ -880,8 +914,8 @@ inline bool Attach() {
 
   camera_state::Invalidate();
 
-  if (!engine::Verified(REQUIRED_ENTRIES)) {
-    logging::Warn("the native projection entries did not verify; camera jitter is off");
+  if (!engine::Verified(REQUIREMENT)) {
+    logging::Warn("the native projection entries or structure fields did not verify; camera jitter is off");
     return false;
   }
   using engine::Address;
@@ -1030,15 +1064,15 @@ inline void OnInitPipeline(reshade::api::device* device, reshade::api::pipeline_
   VelocityShaderKind kind = VelocityShaderKind::NONE;
   if (vertex) {
     switch (hash) {
-      case 0x1D2531B7u: kind = VelocityShaderKind::OPAQUE_MOTION; break;
-      case 0x7B809E72u: kind = VelocityShaderKind::MASKED_MOTION; break;
-      default:          return;
+      case engine::shaders::GBUFFER_VELOCITY_VS:        kind = VelocityShaderKind::OPAQUE_MOTION; break;
+      case engine::shaders::GBUFFER_MASKED_VELOCITY_VS: kind = VelocityShaderKind::MASKED_MOTION; break;
+      default:                                          return;
     }
   } else {
     switch (hash) {
-      case 0x9815404Fu: kind = VelocityShaderKind::OPAQUE_MOTION; break;
-      case 0x58C10658u: kind = VelocityShaderKind::MASKED_MOTION; break;
-      default:          return;
+      case engine::shaders::GBUFFER_VELOCITY_PS:        kind = VelocityShaderKind::OPAQUE_MOTION; break;
+      case engine::shaders::GBUFFER_MASKED_VELOCITY_PS: kind = VelocityShaderKind::MASKED_MOTION; break;
+      default:                                          return;
     }
   }
   auto* shader_object = reinterpret_cast<ID3D11DeviceChild*>(pipeline.handle);  // NOLINT(performance-no-int-to-ptr)

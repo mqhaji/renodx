@@ -22,9 +22,9 @@
 
 #include "build.hpp"
 
-// Verifies every entry of engine/build.hpp once and hands out the addresses
-// that verified. A feature asks for the entries it needs; if any is missing,
-// that feature stays off and the others keep running.
+// Verifies every entry and field of engine/build.hpp once and hands out the
+// addresses that verified. A feature asks for the entries and fields it needs;
+// if any is missing, that feature stays off and the others keep running.
 namespace mgsv::engine {
 
 struct Image {
@@ -32,6 +32,7 @@ struct Image {
   bool known_build = false;
   // nullptr where the entry did not verify.
   std::array<uint8_t*, ENTRY_COUNT> addresses = {};
+  std::array<bool, FIELD_COUNT> fields = {};
 };
 
 inline const Image& GetImage() {
@@ -148,9 +149,30 @@ inline const Image& GetImage() {
       reshade::log::message(reshade::log::level::warning,
                             std::format("MgsvEngine: {} (RVA {:#x}) failed verification: {}.", info.name, info.rva, failure[entry]).c_str());
     }
+
+    // A field holds when the instruction that uses it, inside a verified
+    // entry, still encodes the same value.
+    size_t field_count = 0u;
+    for (const auto& info : FIELDS) {
+      uint32_t encoded = 0u;
+      const bool source_verified = verified[index_of(info.source)];
+      if (source_verified && read_at(ENTRIES[index_of(info.source)].rva + info.instruction + info.position, &encoded, info.size)
+          && encoded == info.value) {
+        result.fields[static_cast<size_t>(info.field)] = true;
+        ++field_count;
+        continue;
+      }
+      reshade::log::message(
+          reshade::log::level::warning,
+          std::format("MgsvEngine: {} ({:#x}) failed verification: {}.", info.name, info.value,
+                      source_verified ? "the instruction that uses it encodes another value" : "the entry that uses it did not verify")
+              .c_str());
+    }
     reshade::log::message(
-        verified_count == ENTRY_COUNT ? reshade::log::level::info : reshade::log::level::warning,
-        std::format("MgsvEngine: verified {} of {} engine entries in the supported executable.", verified_count, ENTRY_COUNT).c_str());
+        verified_count == ENTRY_COUNT && field_count == FIELD_COUNT ? reshade::log::level::info : reshade::log::level::warning,
+        std::format("MgsvEngine: verified {} of {} engine entries and {} of {} structure fields in the supported executable.",
+                    verified_count, ENTRY_COUNT, field_count, FIELD_COUNT)
+            .c_str());
     return result;
   }();
   return RUNNING_IMAGE;
@@ -161,8 +183,10 @@ inline uint8_t* Address(Entry entry) {
   return GetImage().addresses[static_cast<size_t>(entry)];
 }
 
-inline bool Verified(std::span<const Entry> entries) {
-  return std::ranges::all_of(entries, [](Entry entry) { return Address(entry) != nullptr; });
+inline bool Verified(const Requirement& requirement) {
+  const auto& image = GetImage();
+  return std::ranges::all_of(requirement.entries, [&image](Entry entry) { return image.addresses[static_cast<size_t>(entry)] != nullptr; })
+         && std::ranges::all_of(requirement.fields, [&image](Field field) { return image.fields[static_cast<size_t>(field)]; });
 }
 
 }  // namespace mgsv::engine

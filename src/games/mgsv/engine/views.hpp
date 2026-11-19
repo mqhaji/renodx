@@ -57,7 +57,24 @@ inline constexpr std::array REQUIRED_ENTRIES = {
     engine::Entry::DEPTH_OF_FIELD_MAIN_EXEC,
     engine::Entry::GET_MAIN_VIEWPORT,
 };
-inline constexpr engine::Requirement REQUIREMENT = {.feature = "View tracking (needed by enhanced lighting and reconstruction)", .entries = REQUIRED_ENTRIES};
+inline constexpr std::array REQUIRED_FIELDS = {
+    Field::RENDER_INFO,
+    Field::RENDER_VIEWPORTS,
+    Field::BACKEND_OUTPUT_SIZE,
+    Field::BACKEND_RENDER_SIZE,
+    Field::RENDER_INFO_RENDER_SIZE,
+    Field::RENDER_INFO_SWAP_CHAIN,
+    Field::SWAP_CHAIN_NATIVE,
+    Field::VIEWPORT_CAMERA,
+    Field::VIEWPORT_RECTANGLE,
+    Field::VIEWPORT_NEXT,
+    Field::BRANCH_NODE,
+    Field::BRANCH_TARGET,
+    Field::BRANCH_MATRICES,
+    Field::CONTEXT_D3D_CONTEXT,
+    Field::DEPTH_OF_FIELD_EFFECT,
+};
+inline constexpr engine::Requirement REQUIREMENT = {.feature = "View tracking (needed by enhanced lighting and reconstruction)", .entries = REQUIRED_ENTRIES, .fields = REQUIRED_FIELDS};
 // Engine pointers are read only while the engine call that owns them is running;
 // everything kept afterward is a copy. These limits cap the node and branch tables
 // and the active-view list walk, so an unexpected layout stops tracking instead of
@@ -65,24 +82,6 @@ inline constexpr engine::Requirement REQUIREMENT = {.feature = "View tracking (n
 inline constexpr size_t MAX_RECORDS = 32768u;
 inline constexpr size_t MAX_ACTIVE_VIEWS = 256u;
 inline constexpr GUID UNWRAPPED_OBJECT = {.Data1 = 0x7F2C9A11, .Data2 = 0x3B4E, .Data3 = 0x4D6A, .Data4 = {0x81, 0x2F, 0x5E, 0x9C, 0xD3, 0x7A, 0x1B, 0x42}};
-
-// Byte offsets into engine objects. Dg is the engine's rendering backend, shared
-// by every renderer; it holds the render and output sizes.
-inline constexpr size_t RENDER_INFO_OFFSET = 0x98u;
-inline constexpr size_t ACTIVE_VIEWS_OFFSET = 0xA0u;
-inline constexpr size_t OUTPUT_SIZE_OFFSET = 0x180u;
-inline constexpr size_t RENDER_SIZE_OFFSET = 0x190u;
-inline constexpr size_t INFO_RENDER_SIZE_OFFSET = 0x14u;
-inline constexpr size_t INFO_PRESENTATION_OFFSET = 0x20u;
-inline constexpr size_t NATIVE_SWAPCHAIN_OFFSET = 0x18u;
-inline constexpr size_t VIEW_CAMERA_OFFSET = 0x570u;
-inline constexpr size_t VIEW_RECTANGLE_OFFSET = 0x5D0u;
-inline constexpr size_t NEXT_VIEW_OFFSET = 0x30u;
-inline constexpr size_t BRANCH_NODE_OFFSET = 0x10u;
-inline constexpr size_t BRANCH_TARGET_OFFSET = 0x18u;
-inline constexpr size_t BRANCH_MATRICES_OFFSET = 0x40u;
-inline constexpr size_t D3D_CONTEXT_OFFSET = 8u;
-inline constexpr size_t DOF_EFFECT_OFFSET = 0x68u;
 
 enum class Kind : uint8_t {
   RENDER,
@@ -116,6 +115,8 @@ struct Owner {
   uint64_t view_id = 0u;
   uint64_t scene = 0u;
   uint64_t membership = 0u;
+  // The engine's rendering backend (DgDx11), shared by every renderer; it
+  // holds the render and output sizes.
   uintptr_t backend = 0u;
   uintptr_t renderer = 0u;
   uintptr_t render_info = 0u;
@@ -410,9 +411,9 @@ inline void __fastcall BuildRender(uintptr_t renderer, uintptr_t backend, uintpt
         .generation = runtime.generation,
         .backend = backend,
         .renderer = renderer,
-        .render_info = Read<uintptr_t>(renderer, RENDER_INFO_OFFSET),
-        .render_size = Read<std::array<uint32_t, 2>>(backend, RENDER_SIZE_OFFSET),
-        .output_size = Read<std::array<uint32_t, 2>>(backend, OUTPUT_SIZE_OFFSET),
+        .render_info = Read<uintptr_t>(renderer, Value(Field::RENDER_INFO)),
+        .render_size = Read<std::array<uint32_t, 2>>(backend, Value(Field::BACKEND_RENDER_SIZE)),
+        .output_size = Read<std::array<uint32_t, 2>>(backend, Value(Field::BACKEND_OUTPUT_SIZE)),
     };
     node_serial = 0u;
     auto [entry, added] = runtime.renders.try_emplace(renderer);
@@ -433,9 +434,9 @@ inline void __fastcall InitRender(uintptr_t backend, uintptr_t render_info) {
   init_render(backend, render_info);
   Track([&] {
     owner.render_info = render_info;
-    owner.render_size = Read<std::array<uint32_t, 2>>(render_info, INFO_RENDER_SIZE_OFFSET);
-    const auto wrapper = Read<uintptr_t>(render_info, INFO_PRESENTATION_OFFSET);
-    auto* native = Read<IDXGISwapChain*>(wrapper, NATIVE_SWAPCHAIN_OFFSET);
+    owner.render_size = Read<std::array<uint32_t, 2>>(render_info, Value(Field::RENDER_INFO_RENDER_SIZE));
+    const auto wrapper = Read<uintptr_t>(render_info, Value(Field::RENDER_INFO_SWAP_CHAIN));
+    auto* native = Read<IDXGISwapChain*>(wrapper, Value(Field::SWAP_CHAIN_NATIVE));
     Microsoft::WRL::ComPtr<IDXGISwapChain> expected;
     {
       const std::shared_lock lock(runtime.mutex);
@@ -481,8 +482,8 @@ inline void __fastcall InitView(uintptr_t backend, uintptr_t viewport) {
     if (runtime.failed.load(std::memory_order_relaxed) || owner.generation != runtime.generation) return;
     view_owners.push_back({.viewport = viewport, .previous_owner = owner});
     owner.viewport = viewport;
-    owner.camera = Read<uintptr_t>(viewport, VIEW_CAMERA_OFFSET);
-    owner.rectangle = Read<std::array<int32_t, 4>>(viewport, VIEW_RECTANGLE_OFFSET);
+    owner.camera = Read<uintptr_t>(viewport, Value(Field::VIEWPORT_CAMERA));
+    owner.rectangle = Read<std::array<int32_t, 4>>(viewport, Value(Field::VIEWPORT_RECTANGLE));
     owner.main_view = get_main_view != nullptr && get_main_view() == viewport;
     auto [entry, added] = runtime.views.try_emplace(viewport, 0u);
     if (added) {
@@ -509,8 +510,8 @@ inline void __fastcall DofMainExec(uintptr_t plugin, uintptr_t renderer, uintptr
   const auto previous = dof_scope;
   dof_scope = {};
   Track([&] {
-    const auto effect = Read<uintptr_t>(plugin, DOF_EFFECT_OFFSET);
-    const auto camera = Read<uintptr_t>(viewport, VIEW_CAMERA_OFFSET);
+    const auto effect = Read<uintptr_t>(plugin, Value(Field::DEPTH_OF_FIELD_EFFECT));
+    const auto camera = Read<uintptr_t>(viewport, Value(Field::VIEWPORT_CAMERA));
     const std::unique_lock lock(runtime.mutex);
     if (runtime.failed.load(std::memory_order_relaxed) || owner.generation != runtime.generation) return;
     dof_scope = {
@@ -564,7 +565,7 @@ inline void CaptureBranch(uintptr_t subcontext, Kind kind) {
   // Dg and CommandBuffer branches share this subcontext layout. Copy the owner
   // when each job is created, including jobs created by a running worker.
   Track([&] {
-    Branch captured = {.node_address = Read<uintptr_t>(subcontext, BRANCH_NODE_OFFSET), .target = Read<uintptr_t>(subcontext, BRANCH_TARGET_OFFSET), .matrices = Read<std::array<float, 32>>(subcontext, BRANCH_MATRICES_OFFSET)};
+    Branch captured = {.node_address = Read<uintptr_t>(subcontext, Value(Field::BRANCH_NODE)), .target = Read<uintptr_t>(subcontext, Value(Field::BRANCH_TARGET)), .matrices = Read<std::array<float, 32>>(subcontext, Value(Field::BRANCH_MATRICES))};
     const std::unique_lock lock(runtime.mutex);
     if (runtime.failed.load(std::memory_order_relaxed)) return;
     const auto found = runtime.nodes.find(captured.node_address);
@@ -602,8 +603,8 @@ inline void __fastcall WorkerBegin(uintptr_t object, uintptr_t subcontext) {
     workers.push_back({.object = object, .previous_owner = owner, .previous_node = node_serial});
     owner = {};
     node_serial = 0u;
-    const auto node = Read<uintptr_t>(subcontext, BRANCH_NODE_OFFSET);
-    const auto matrices = Read<std::array<float, 32>>(subcontext, BRANCH_MATRICES_OFFSET);
+    const auto node = Read<uintptr_t>(subcontext, Value(Field::BRANCH_NODE));
+    const auto matrices = Read<std::array<float, 32>>(subcontext, Value(Field::BRANCH_MATRICES));
     int64_t worker_result = 0;
     const auto captured = runtime.branches.find(node);
     const auto live_node = runtime.nodes.find(node);
@@ -639,7 +640,7 @@ inline void __fastcall WorkerEnd(uintptr_t object) {
 
 inline void __fastcall BeginRecord(uintptr_t node, uintptr_t context) {
   Track([&] {
-    const auto native_context = Read<uintptr_t>(context, D3D_CONTEXT_OFFSET);
+    const auto native_context = Read<uintptr_t>(context, Value(Field::CONTEXT_D3D_CONTEXT));
     const std::unique_lock lock(runtime.mutex);
     if (runtime.failed.load(std::memory_order_relaxed)) return;
     node_serial = 0u;
@@ -653,7 +654,7 @@ inline void __fastcall BeginRecord(uintptr_t node, uintptr_t context) {
     // context from their own hooks, so they can match the two.
     Emit({.kind = Kind::BEGIN_RECORDING, .owner = owner, .subject = node, .related = native_context, .node = node_serial});
   });
-  recording_d3d_context = Read<uintptr_t>(context, D3D_CONTEXT_OFFSET);
+  recording_d3d_context = Read<uintptr_t>(context, Value(Field::CONTEXT_D3D_CONTEXT));
   begin_record(node, context);
   if (recording_began.load(std::memory_order_acquire) == nullptr) return;
   // The read lock lets a replacement wait for this call.
@@ -718,15 +719,15 @@ inline void __fastcall UpdateViews(uintptr_t renderer) {
     }
     std::vector<uint64_t> members;
     // The native call has applied the queued additions and removals. Walk the
-    // live viewport list (linked through NEXT_VIEW_OFFSET), not the queues.
-    auto view = Read<uintptr_t>(renderer, ACTIVE_VIEWS_OFFSET);
+    // live viewport list (linked through Field::VIEWPORT_NEXT), not the queues.
+    auto view = Read<uintptr_t>(renderer, Value(Field::RENDER_VIEWPORTS));
     while (view != 0u && members.size() < MAX_ACTIVE_VIEWS) {
       auto [entry, new_view] = runtime.views.try_emplace(view, 0u);
       if (new_view) {
         entry->second = ++runtime.next_id;
       }
       members.push_back(entry->second);
-      view = Read<uintptr_t>(view, NEXT_VIEW_OFFSET);
+      view = Read<uintptr_t>(view, Value(Field::VIEWPORT_NEXT));
     }
     if (view != 0u) {
       runtime.failed.store(true, std::memory_order_relaxed);
@@ -765,8 +766,8 @@ inline bool Install() {
   if (shared.data->consumers == 0u) {
     const std::unique_lock hook_lock(hook_mutex);
     if (!installed) {
-      if (!engine::Verified(REQUIRED_ENTRIES)) {
-        installation_status = "Native ownership needs engine entries that did not verify; see the log";
+      if (!engine::Verified(REQUIREMENT)) {
+        installation_status = "Native ownership needs engine entries or structure fields that did not verify; see the log";
         return false;
       }
       const std::array hooked = {

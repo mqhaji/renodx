@@ -163,13 +163,17 @@ inline constexpr std::array REQUIRED_ENTRIES = {
     engine::Entry::DEPTH_OF_FIELD_SCATTER_SCALE,
     engine::Entry::DEPTH_OF_FIELD_REFERENCE_WIDTH,
 };
-inline constexpr engine::Requirement REQUIREMENT = {.feature = "Upscaling (DLSS and FSR below native resolution)", .entries = REQUIRED_ENTRIES};
+inline constexpr std::array REQUIRED_FIELDS = {
+    engine::Field::BACKEND_WANTED_SIZE,
+    engine::Field::BACKEND_FLAGS,
+    engine::Field::BACKEND_FLAG_RESIZE,
+    engine::Field::BACKEND_OUTPUT_SIZE,
+    engine::Field::BACKEND_RENDER_SIZE,
+};
+inline constexpr engine::Requirement REQUIREMENT = {.feature = "Upscaling (DLSS and FSR below native resolution)", .entries = REQUIRED_ENTRIES, .fields = REQUIRED_FIELDS};
 
 // These fields belong to the shared Dg backend. Its Start call applies size
 // requests before the game begins building views for the next render.
-inline constexpr size_t BACKEND_WANTED_SIZE_OFFSET = 0x188u;
-inline constexpr size_t BACKEND_FLAGS_OFFSET = 0x198u;
-inline constexpr uint32_t BACKEND_RESIZE_FLAG = 2u;
 inline constexpr uint32_t BACKEND_BUSY_FLAG = 4u;
 inline constexpr size_t BACKEND_START_SLOT = 6u;
 
@@ -192,9 +196,9 @@ static thread_local DofDrawState active_dof;
 inline void __fastcall HookBackendStep(uint8_t* backend) {
   const auto presentation = engine::views::GetPresentationOwner();
   const auto backend_address = reinterpret_cast<uintptr_t>(backend);
-  auto* wanted = reinterpret_cast<Size*>(backend + BACKEND_WANTED_SIZE_OFFSET);
-  auto* flags = reinterpret_cast<uint32_t*>(backend + BACKEND_FLAGS_OFFSET);
-  const auto display = *reinterpret_cast<const Size*>(backend + engine::views::OUTPUT_SIZE_OFFSET);
+  auto* wanted = reinterpret_cast<Size*>(backend + engine::Value(engine::Field::BACKEND_WANTED_SIZE));
+  auto* flags = reinterpret_cast<uint32_t*>(backend + engine::Value(engine::Field::BACKEND_FLAGS));
+  const auto display = *reinterpret_cast<const Size*>(backend + engine::Value(engine::Field::BACKEND_OUTPUT_SIZE));
   const auto* table = *reinterpret_cast<const uintptr_t* const*>(backend);
   bool managed = false;
   bool acquired = false;
@@ -226,7 +230,7 @@ inline void __fastcall HookBackendStep(uint8_t* backend) {
       const auto desired = (scaled ? plan.render : sizing_state.engine_wanted);
       if ((*flags & BACKEND_BUSY_FLAG) == 0u && desired.width != 0u && desired.height != 0u && *wanted != desired) {
         *wanted = desired;
-        *flags |= BACKEND_RESIZE_FLAG;
+        *flags |= engine::Value(engine::Field::BACKEND_FLAG_RESIZE);
       }
       sizing_state.last_written = *wanted;
     }
@@ -237,7 +241,7 @@ inline void __fastcall HookBackendStep(uint8_t* backend) {
   }
   backend_step(backend);
   if (!managed) return;
-  const auto actual = *reinterpret_cast<const Size*>(backend + engine::views::RENDER_SIZE_OFFSET);
+  const auto actual = *reinterpret_cast<const Size*>(backend + engine::Value(engine::Field::BACKEND_RENDER_SIZE));
   const std::unique_lock lock(sizing_state.mutex);
   if (sizing_state.backend != backend_address) return;
   if (sizing_state.actual != actual) {
@@ -323,8 +327,8 @@ inline void __fastcall HookDofSprites(void* effect, uint32_t width, uint32_t hei
 
 inline void OnInitDevice(reshade::api::device* device) {
   if (device->get_api() != reshade::api::device_api::d3d11 || installed.load(std::memory_order_acquire)) return;
-  if (!engine::Verified(REQUIRED_ENTRIES)) {
-    logging::Warn("the upscaling entries did not verify; upscaling is off");
+  if (!engine::Verified(REQUIREMENT)) {
+    logging::Warn("the upscaling entries or structure fields did not verify; upscaling is off");
     return;
   }
   backend_step = reinterpret_cast<BackendStep>(engine::Address(engine::Entry::DG_START));

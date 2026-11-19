@@ -35,6 +35,9 @@
 // an 8-bit temporary other plugins share gets separate float images instead.
 namespace mgsv::engine::render_targets {
 
+// Besides the creation hooks: the motion blur and DoF constructors look up the
+// temporaries those plugins draw into, and restoreTemporaryRenderTarget resizes
+// the resident temporaries.
 inline constexpr std::array REQUIRED_ENTRIES = {
     engine::Entry::RENDER_TARGET_INITIALIZE,
     engine::Entry::GET_BUFFER_FORMAT_FROM_PARAMETER,
@@ -46,7 +49,21 @@ inline constexpr std::array REQUIRED_ENTRIES = {
     engine::Entry::RENDER_TARGET_RESTORE_WITH_RESIZE,
     engine::Entry::RENDER_TARGET_MANAGER,
 };
-inline constexpr engine::Requirement REQUIREMENT = {.feature = "Float render targets (HDR precision)", .entries = REQUIRED_ENTRIES};
+inline constexpr std::array REQUIRED_FIELDS = {
+    Field::RENDER_TARGET_TEXTURE,
+    Field::TEXTURE_RESOURCE,
+    Field::RENDER_TARGET_SHADER_VIEW,
+    Field::SHADER_VIEW_OBJECT,
+    Field::HANDLE_TYPE_MASK,
+    Field::HANDLE_TYPE_RENDER_TARGET,
+    Field::HANDLE_INDEX_SHIFT,
+    Field::RESOURCE_ENTRY_SIZE,
+    Field::RESOURCE_MANAGER_ENTRIES,
+    Field::RESOURCE_ENTRY_PARAMETER,
+    Field::RESOURCE_MANAGER_USED,
+    Field::PARAMETER_FORMAT_CODE,
+};
+inline constexpr engine::Requirement REQUIREMENT = {.feature = "Float render targets (HDR precision)", .entries = REQUIRED_ENTRIES, .fields = REQUIRED_FIELDS};
 
 // Private data on the D3D texture of each bloom image: NEW until the bloom
 // chain has cleared it once, because the chain writes only a working region.
@@ -89,22 +106,8 @@ struct Parameter {
   uint32_t format_code = 0u;
   std::array<uint32_t, 10> rest = {};
 };
-static_assert(sizeof(Parameter) == 0x40u && offsetof(Parameter, format_code) == 0x14u);
+static_assert(sizeof(Parameter) == 0x40u && offsetof(Parameter, format_code) == Value(Field::PARAMETER_FORMAT_CODE));
 
-// The render target manager instance: +0x08 points to its 0x70-byte entries,
-// each with its parameter at +0x28; +0x14 counts live targets. The two
-// constructors look up the temporaries motion blur and DoF draw into, and
-// restoreTemporaryRenderTarget resizes the resident temporaries.
-// A render target handle is its entry's index above bit 17 and this type below.
-inline constexpr uint32_t HANDLE_TYPE_MASK = 0x7Fu;
-inline constexpr uint32_t RENDER_TARGET_HANDLE = 0x0Bu;
-// RenderTargetDx11 keeps its engine ("gn") texture object at +0x40, and that
-// object keeps the D3D texture at +0x10.
-inline constexpr size_t TARGET_TEXTURE_OFFSET = 0x40u;
-inline constexpr size_t TEXTURE_RESOURCE_OFFSET = 0x10u;
-// Its engine shader view object is at +0x50, and that keeps the D3D view at +0x08.
-inline constexpr size_t TARGET_SHADER_VIEW_OFFSET = 0x50u;
-inline constexpr size_t VIEW_OBJECT_OFFSET = 0x08u;
 // Code 1 is a B8G8R8A8 typeless texture with UNORM or sRGB views. Code 6 is
 // R16G16B16A16 with FLOAT views; it ignores the sRGB flags, so shaders convert
 // where a game view was sRGB (FIX_UNORM_SRGB).
@@ -249,17 +252,19 @@ inline void __fastcall HookInitialize(void* target, const Parameter* parameter, 
   }
   if (!is_float && frame_target == FRAME_TARGETS.end() && !is_exposure_source) return;
 
-  const auto* texture = *reinterpret_cast<const uint8_t* const*>(static_cast<const uint8_t*>(target) + TARGET_TEXTURE_OFFSET);
+  // RenderTargetDx11 keeps engine ("gn") texture and shader view objects, which
+  // hold the D3D11 resource and view.
+  const auto* texture = *reinterpret_cast<const uint8_t* const*>(static_cast<const uint8_t*>(target) + Value(Field::RENDER_TARGET_TEXTURE));
   if (texture == nullptr) return;
-  auto* resource = *reinterpret_cast<ID3D11Resource* const*>(texture + TEXTURE_RESOURCE_OFFSET);
+  auto* resource = *reinterpret_cast<ID3D11Resource* const*>(texture + Value(Field::TEXTURE_RESOURCE));
   Microsoft::WRL::ComPtr<ID3D11Texture2D> created;
   if (resource == nullptr || FAILED(resource->QueryInterface(IID_PPV_ARGS(&created)))) return;
   if (frame_target != FRAME_TARGETS.end()) {
-    const auto* shader_view = *reinterpret_cast<const uint8_t* const*>(static_cast<const uint8_t*>(target) + TARGET_SHADER_VIEW_OFFSET);
+    const auto* shader_view = *reinterpret_cast<const uint8_t* const*>(static_cast<const uint8_t*>(target) + Value(Field::RENDER_TARGET_SHADER_VIEW));
     const std::unique_lock lock(frame_images.mutex);
     frame_images.images[static_cast<size_t>(frame_target - FRAME_TARGETS.begin())] = {
         .texture = created,
-        .shader_view = (shader_view != nullptr ? *reinterpret_cast<ID3D11ShaderResourceView* const*>(shader_view + VIEW_OBJECT_OFFSET) : nullptr),
+        .shader_view = (shader_view != nullptr ? *reinterpret_cast<ID3D11ShaderResourceView* const*>(shader_view + Value(Field::SHADER_VIEW_OBJECT)) : nullptr),
     };
   }
   if (is_exposure_source) {
@@ -290,10 +295,13 @@ inline uint32_t __fastcall HookReadTextureFormat(const Parameter* parameter) {
   return hooks.read_texture_format(parameter);
 }
 
-// The parameter the manager stores for a live render target handle.
+// The parameter the manager stores for a live render target handle. The
+// manager keeps one entry per target; a handle holds its entry's index in the
+// high bits and its type in the low bits.
 inline const Parameter* ReadStoredParameter(uint32_t handle) {
-  const auto* entries = *reinterpret_cast<const uint8_t* const*>(*hooks.manager + 0x08u);
-  return reinterpret_cast<const Parameter*>(entries + (static_cast<size_t>(handle >> 17u) * 0x70u) + 0x28u);
+  const auto* entries = *reinterpret_cast<const uint8_t* const*>(*hooks.manager + Value(Field::RESOURCE_MANAGER_ENTRIES));
+  const size_t index = handle >> Value(Field::HANDLE_INDEX_SHIFT);
+  return reinterpret_cast<const Parameter*>(entries + (index * Value(Field::RESOURCE_ENTRY_SIZE)) + Value(Field::RESOURCE_ENTRY_PARAMETER));
 }
 
 // The engine also calls this lookup on several threads while recording draws,
@@ -302,7 +310,7 @@ inline const Parameter* ReadStoredParameter(uint32_t handle) {
 inline uint32_t __fastcall HookLookup(const uint64_t* name) {
   if (constructing_plugin == 0u) return hooks.lookup(name);
   const uint32_t shared = hooks.lookup(name);
-  if ((shared & HANDLE_TYPE_MASK) != RENDER_TARGET_HANDLE) return shared;
+  if ((shared & Value(Field::HANDLE_TYPE_MASK)) != Value(Field::HANDLE_TYPE_RENDER_TARGET)) return shared;
   const auto target = std::ranges::find_if(private_targets, [shared_name = *name & NAME_MASK](const PrivateTarget& candidate) {
     return candidate.shared_name == shared_name && (candidate.plugins & constructing_plugin) != 0u;
   });
@@ -386,8 +394,8 @@ inline bool Install() {
     }
     return false;
   };
-  if (!engine::Verified(REQUIRED_ENTRIES)) {
-    return fail("MgsvTargets: the render target creation entries did not verify; render targets stay 8-bit and HDR output will be wrong.");
+  if (!engine::Verified(REQUIREMENT)) {
+    return fail("MgsvTargets: the render target creation entries or structure fields did not verify; render targets stay 8-bit and HDR output will be wrong.");
   }
   internal::hooks.initialize = reinterpret_cast<internal::Initialize>(engine::Address(engine::Entry::RENDER_TARGET_INITIALIZE));
   internal::hooks.read_texture_format = reinterpret_cast<internal::ReadTextureFormat>(engine::Address(engine::Entry::GET_BUFFER_FORMAT_FROM_PARAMETER));
@@ -406,7 +414,7 @@ inline bool Install() {
   internal::hooks.registrations = 1u;
   internal::hooks.logged_failure = false;
   const auto* manager = *internal::hooks.manager;
-  if (manager != nullptr && *reinterpret_cast<const uint32_t*>(manager + 0x14u) != 0u) {
+  if (manager != nullptr && *reinterpret_cast<const uint32_t*>(manager + Value(Field::RESOURCE_MANAGER_USED)) != 0u) {
     reshade::log::message(reshade::log::level::warning, "MgsvTargets: installed after the engine created its render targets; restart the game to create them as float.");
   } else {
     reshade::log::message(reshade::log::level::info, "MgsvTargets: installed render target creation hooks.");

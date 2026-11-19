@@ -526,7 +526,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       mgsv::lighting::AppendSettings(&settings, &shader_injection);
 
       // Before the menu is first drawn, list the features whose engine entries
-      // did not verify in the running executable.
+      // or structure fields did not verify in the running executable.
       if (std::ranges::none_of(settings, [](auto* setting) { return setting->section == "Game Version"; })) {
         std::string unavailable;
         for (const auto& requirement : {
@@ -538,7 +538,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
                  mgsv::reconstruction::resolution::REQUIREMENT,
                  mgsv::engine::local_lights::REQUIREMENT,
              }) {
-          if (mgsv::engine::Verified(requirement.entries)) continue;
+          if (mgsv::engine::Verified(requirement)) continue;
           unavailable.append(unavailable.empty() ? "" : ", ").append(requirement.feature);
         }
         if (!unavailable.empty()) {
