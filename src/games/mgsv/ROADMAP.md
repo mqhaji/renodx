@@ -18,7 +18,7 @@ The goal is a path-traced method with DLSS Ray Reconstruction as the highest-qua
 
 | Stage | Contents | Depends on |
 |---|---|---|
-| 1. Harden | Engine entries that survive game updates, the `engine/` folder, reconstruction coverage, the motion-precision check, temporal quality, cleanup | — |
+| 1. Harden | The engine table and its update guide, the `engine/` folder, reconstruction coverage, the motion-precision check, temporal quality, cleanup | — |
 | 2. Raster lighting | Scene memory, probe grid, reflection chain, forward-drawn surfaces, screen probes at Ultra, new settings, BRDF replacement | 1 |
 | 3. Atmosphere | Volumetric fog with light shafts, physical sky, clouds | 1; the fog volume can run beside 2 |
 | 4. Water | River, pond and ocean shaders: reflections, absorption, caustics | 2's trace and probe grid; 3's sky |
@@ -55,12 +55,7 @@ How each lighting method treats these surfaces is in the design: [raster](docs/D
 
 Reconstruction runs where the engine starts post-processing; contact shadows run as one batch per lighting pass; Global Illumination is one mode with a reduced material capture.
 
-**Engine entries that survive game updates.** This comes first, because every later stage adds hooks. Code addresses and structure fields are now in one verified table, `engine/build.hpp`, and each feature turns off by itself when an entry or field it needs does not verify. Any rebuilt executable still turns off every engine-side feature, because the table only knows this build's addresses. The [design](docs/DESIGN.md#13-surviving-a-game-update) adds a search that finds each entry in a rebuilt executable by a byte pattern that skips everything that moves with the code, confirmed against the executable's function table and by its relations to other entries, so a small game update needs no new mod build.
-
-1. **The table and one startup check, no behavior change.** Done: `engine/build.hpp` and `engine/image.hpp`, checked against the executable file, with a menu note naming features that cannot run; on the current executable every hook installs at the same address as before, and an accidental failure of two entries turned off only the two features that use them. Each of the 59 structure fields (offsets, strides, shifts, masks and flag bits) is checked in an instruction of a verified entry that uses it; a deliberately wrong field turned off only upscaling, the one feature that uses it. `engine/shader_names.hpp`, generated from the dumped shaders' debug names, names every game shader that feature code recognizes; registrations of ported shaders keep the hash that also names their file.
-2. **The authoring tool.** Decodes instructions, writes the shortest unique pattern for every entry with wildcards on moving fields, and resolves the table offline against any executable. **Gate:** every pattern unique on the current build and every relation holding.
-3. **Search at startup for unknown builds,** with function-table and relation checks. **Gate:** with the current executable treated as unknown, every entry resolves to exactly its stored address.
-4. **Trial on another build.** If an older build of the game can be obtained, the whole path is tried on it. Game updates are not expected to change shaders, so only a startup report of ported shaders the game never loads is added.
+**The engine table.** Done. Code addresses and structure fields are in one verified table, `engine/build.hpp`, checked against the executable file at startup, with a menu note naming features that cannot run. Each feature turns off by itself when an entry or field it needs does not verify: an accidental failure of two entries turned off only the two features that use them, and a deliberately wrong field turned off only upscaling. Each of the 59 structure fields (offsets, strides, shifts, masks and flag bits) is checked in an instruction of a verified entry that uses it. `engine/shader_names.hpp`, generated from the dumped shaders' debug names, names every game shader that feature code recognizes; registrations of ported shaders keep the hash that also names their file. A rebuilt executable turns off every engine-side feature until the table is moved to it; the [engine table guide](engine/README.md) says how, and the [design](docs/DESIGN.md#13-surviving-a-game-update) why the mod does not search for its entries at startup.
 
 **Folder layout.** Done, with no behavior change: the engine-facing headers are in `engine/`, `reconstruction/postprocess/` is `reconstruction/output_size/`, the depth-of-field and motion-blur ports have folders beside bloom, `UI/` is `ui/`, and the unused `tonemap/customtest31.hlsli` and the two superseded documents are gone. The moved shaders compile to the same bytes and every hook installs as before. Still to move, each when its dependency is cut: the scheduler (`reconstruction/coordinator.hpp` to `rendering/submission.hpp`, with the scheduling cleanup), the post-processing start hook and draw identification (to `engine/`). The full list is in the [planned layout](docs/DESIGN.md#14-folder-layout).
 
@@ -88,7 +83,7 @@ Reconstruction runs where the engine starts post-processing; contact shadows run
 - Investigate letting the engine create the post-processing targets at output size, one plugin at a time, instead of redirecting them. First deliverables: the redirection's measured cost and a table of where each pass takes its size.
 - Decide the DLSS model default: it is preset F, which NVIDIA's current programming guide (`external/DLSS/doc`) marks deprecated.
 
-**Exit:** no file outside `engine/` holds an address, offset or byte pattern, the current build resolves identically by search, a broken entry turns off only the feature that needs it, the coverage list passes, the wobble is explained or fixed, and the measurements are recorded.
+**Exit:** the coverage list passes, the wobble is explained or fixed, and the measurements are recorded.
 
 ## Stage 2: raster lighting
 
