@@ -16,6 +16,9 @@ struct ReflectionResult {
   float4 environment;
   int status;
   bool valid;
+  // The host bound a result for this view, so its native trace was canceled.
+  // Views without one draw with the same compositor and keep the native path.
+  bool replaces_native;
 };
 
 // Load the result once for both routing and composition. The GPU-written mode
@@ -25,6 +28,7 @@ ReflectionResult LoadReflectionResult(float2 uv) {
   uint width, height, ready_width, ready_height;
   reflection_ready.GetDimensions(ready_width, ready_height);
   if (ready_width == 0u || ready_height == 0u) return result;
+  result.replaces_native = true;
   const int2 pixel = clamp(int2(uv * float2(ready_width, ready_height)), 0, int2(ready_width, ready_height) - 1);
   result.status = (int)round(reflection_ready.Load(int3(pixel, 0)) * 255.0);
   // Native-only and unavailable states must not sample stale enhanced images.
@@ -49,19 +53,19 @@ float3 ComposeReflections(float3 encoded_scene, ReflectionResult result) {
   const float4 environment_weight = result.environment_weight;
   const float4 environment = result.environment;
   if (result.valid) {
-    if (debug_view == 16)
+    if (debug_view == 11)
+      scene = light.rgb;
+    else if (debug_view == 12)
+      scene = environment_weight.rgb;
+    else if (debug_view == 13)
+      scene = float3(0.0, 1.0, 0.0);
+    else if (debug_view == 14)
+      scene = environment.rgb;
+    else if (debug_view == 15)
+      scene = environment_weight.aaa;
+    else if (debug_view == 16)
       scene = light.rgb;
     else if (debug_view == 17)
-      scene = environment_weight.rgb;
-    else if (debug_view == 18)
-      scene = float3(0.0, 1.0, 0.0);
-    else if (debug_view == 19)
-      scene = environment.rgb;
-    else if (debug_view == 20)
-      scene = environment_weight.aaa;
-    else if (debug_view == 21)
-      scene = light.rgb;
-    else if (debug_view == 22)
       scene = environment_weight.rgb;
     else {
       // Visibility and fallback selection were part of the complete estimator
@@ -72,7 +76,7 @@ float3 ComposeReflections(float3 encoded_scene, ReflectionResult result) {
       // and fog in-scattering already present in the rest of the scene.
       scene += CUSTOM_MGSV_REFLECTION_STRENGTH * (reflected - environment.rgb);
     }
-  } else if (debug_view >= 16 && debug_view <= 22) {
+  } else if (debug_view >= 11 && debug_view <= 17) {
     scene = float3(1.0, 0.0, 1.0);
   }
   return renodx::color::srgb::Encode(max(scene, 0.0));

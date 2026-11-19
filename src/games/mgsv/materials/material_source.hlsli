@@ -1,4 +1,5 @@
-// Clean color is usable only while the native surface still matches its writer.
+// A baked material cube can be separated from albedo only while its record
+// still describes the albedo that is visible.
 #ifndef MGSV_MATERIAL_SOURCE_HLSLI_
 #define MGSV_MATERIAL_SOURCE_HLSLI_
 
@@ -9,34 +10,49 @@ uint PackMaterialUNorm(float4 value) {
   return bytes.x | (bytes.y << 8u) | (bytes.z << 16u) | (bytes.w << 24u);
 }
 
+// UNORM render-target conversion can choose the adjacent code at a rounding
+// boundary, and shader round() need not resolve ties the same way.
 bool MatchMaterialUNorm(uint stored, uint current) {
-  if (stored == current) return true;
-  // UNORM render-target conversion can choose the adjacent code at a rounding
-  // boundary. Shader round() and the hardware store need not resolve ties alike.
   const uint4 shift = uint4(0u, 8u, 16u, 24u);
   return all(abs(int4((stored >> shift) & 255u) - int4((current >> shift) & 255u)) <= 1);
 }
 
-// RGB is linear material color, including native diffuse allocation. Alpha is
-// valid when nonnegative; -1 means missing or invalid data.
-// Compare all native channels within one UNORM code and match depth exactly.
-float4 LoadCleanMaterial(Texture2D<float4> color, Texture2D<uint4> owner,
-                         int2 pixel, uint2 size, float4 albedo, float4 normal, float4 material, float depth) {
+// Color bytes only: decals blend albedo color and never write its alpha.
+bool MatchAlbedoUNorm(uint stored, uint current) {
+  return MatchMaterialUNorm(stored | 0xFF000000u, current | 0xFF000000u);
+}
+
+// Only material shaders that bake a cube into albedo write a record: their
+// color without the cube, the three values they wrote, and their depth. RGB
+// returns linear material color with the cube removed, including native
+// diffuse allocation. Alpha is 1 when that color is known and -1 when it is not.
+//
+// - No record, or a record that is not the visible surface: that surface never
+//   had a cube, so its albedo is the answer.
+// - A record whose albedo still matches: the capture's cube-free color.
+// - A record whose albedo no longer matches: a later writer, such as a decal,
+//   changed this surface, and the cube's remaining share is unknown.
+//
+// A record is the visible surface when it was written at this depth. A cube
+// draw that does not write depth leaves a record at another depth; it is the
+// visible surface only while all three values it wrote are still there.
+//
+// `albedo` is the native value as decoded by its sRGB view.
+float4 LoadCleanMaterial(Texture2D<float4> color, Texture2D<uint4> owner, int2 pixel, uint2 size,
+                         float3 albedo, float4 normal, float4 material, float depth) {
   uint width, height;
   color.GetDimensions(width, height);
-  if (width != size.x || height != size.y) return float4(0.0, 0.0, 0.0, -1.0);
-  const float4 clean = color.Load(int3(pixel, 0));
-  if (clean.a < 0.0 || !all(isfinite(clean)) || any(clean.rgb < 0.0)) return float4(0.0, 0.0, 0.0, -1.0);
-  // Native albedo is sampled through an sRGB view. Re-encode only for matching
-  // its original UNORM codes; lighting continues to use the decoded RGB.
-  const uint4 expected = uint4(PackMaterialUNorm(float4(renodx::color::srgb::Encode(albedo.rgb), albedo.a)),
-                               PackMaterialUNorm(normal), PackMaterialUNorm(material), asuint(depth));
-  const uint4 captured = owner.Load(int3(pixel, 0));
-  if (captured.w != expected.w || !MatchMaterialUNorm(captured.x, expected.x)
-      || !MatchMaterialUNorm(captured.y, expected.y) || !MatchMaterialUNorm(captured.z, expected.z)) {
-    return float4(0.0, 0.0, 0.0, -1.0);
+  if (width != size.x || height != size.y) return float4(albedo, 1.0);
+  const uint4 record = owner.Load(int3(pixel, 0));
+  if (record.w == 0u) return float4(albedo, 1.0);
+  const bool albedo_matches = MatchAlbedoUNorm(record.x, PackMaterialUNorm(float4(renodx::color::srgb::Encode(saturate(albedo)), 0.0)));
+  if (record.w != asuint(depth)
+      && !(albedo_matches && MatchMaterialUNorm(record.y, PackMaterialUNorm(normal)) && MatchMaterialUNorm(record.z, PackMaterialUNorm(material)))) {
+    return float4(albedo, 1.0);
   }
-  return clean;
+  const float4 clean = color.Load(int3(pixel, 0));
+  if (albedo_matches && clean.a >= 0.0 && all(isfinite(clean)) && all(clean.rgb >= 0.0)) return float4(clean.rgb, 1.0);
+  return float4(0.0, 0.0, 0.0, -1.0);
 }
 
 #endif  // MGSV_MATERIAL_SOURCE_HLSLI_

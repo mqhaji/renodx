@@ -19,8 +19,7 @@
 #include <include/reshade.hpp>
 
 #include "../../../utils/data.hpp"
-#include "../../../utils/mutex.hpp"
-#include "../lighting/reflections/result.hpp"
+#include "../lighting/indirect_lighting_mode.hpp"
 #include "../rendering/inputs.hpp"
 #include "../shared.h"
 
@@ -29,6 +28,13 @@ namespace mgsv::lighting::material_inputs {
 inline const ShaderInjectData* controls = nullptr;
 
 struct Target {
+  // Guards the copies below, which are created the first time it rains.
+  std::shared_mutex mutex;
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> color_before_rain;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> color_before_rain_srv;
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> owner_before_rain;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> owner_before_rain_srv;
+
   uint64_t generation = 0u;
   uint32_t width = 0u;
   uint32_t height = 0u;
@@ -143,11 +149,7 @@ inline void OnResetCommandList(reshade::api::command_list* cmd_list) {
 
 // Called only for registered G-buffer or wet-material draws.
 inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
-  if (controls == nullptr || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return true;
-  {
-    const std::shared_lock lock(renodx::utils::mutex::global_mutex);
-    if (controls->diffuse_lighting_mode < 0.5f && controls->reflections_mode < 0.5f) return true;
-  }
+  if (!UsesEnhancedIndirectLighting() || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return true;
   const auto selected = inputs::ReadSelection(cmd_list->get_device());
   auto* saved = cmd_list->get_private_data<DrawState>();
   auto* device_state = cmd_list->get_device()->get_private_data<DeviceState>();
@@ -218,17 +220,6 @@ inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
     }
     if (!layout.qualified) return true;
   }
-  std::shared_ptr<Target> rain_source;
-  if (rain) {
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> source;
-    Microsoft::WRL::ComPtr<ID3D11Resource> resource;
-    context->PSGetShaderResources(8u, 1u, &source);
-    if (source == nullptr) return true;
-    source->GetResource(&resource);
-    if (resource.Get() == resources[0]) return true;
-    rain_source = Read(cmd_list->get_device(), resource.Get());
-    if (rain_source == nullptr || rain_source->width != width || rain_source->height != height) return true;
-  }
   std::array<ID3D11UnorderedAccessView*, D3D11_PS_CS_UAV_REGISTER_COUNT> native_uavs = {};
   context->OMGetRenderTargetsAndUnorderedAccessViews(0u, nullptr, nullptr, 0u, static_cast<UINT>(native_uavs.size()), native_uavs.data());
   bool has_uav = false;
@@ -273,7 +264,7 @@ inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
       return entry.BlendEnable == FALSE && entry.RenderTargetWriteMask == D3D11_COLOR_WRITE_ENABLE_ALL;
     });
     description.IndependentBlendEnable = TRUE;
-    for (size_t index = native_count; index < native_count + 3u; ++index) {
+    for (size_t index = native_count; index < native_count + 2u; ++index) {
       description.RenderTarget[index] = {.BlendEnable = FALSE, .SrcBlend = D3D11_BLEND_ONE, .DestBlend = D3D11_BLEND_ZERO, .BlendOp = D3D11_BLEND_OP_ADD, .SrcBlendAlpha = D3D11_BLEND_ONE, .DestBlendAlpha = D3D11_BLEND_ZERO, .BlendOpAlpha = D3D11_BLEND_OP_ADD, .RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL};
     }
     if (FAILED(device->CreateBlendState(&description, &blend.capture))) return true;
@@ -288,10 +279,13 @@ inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
     }
   };
 
-  // 3. Reuse two attachments per native albedo allocation.
-  // Native color/normal/material codes and exact depth reject stale data from an
-  // unsupported foreground writer instead of guessing from material ID or alpha.
+  // 3. Reuse two attachments per native albedo allocation. Each record keeps
+  // the albedo its cube material wrote and that draw's depth, so a consumer can
+  // tell a changed or covered surface from the one the record describes.
   auto target = Read(cmd_list->get_device(), resources[0]);
+  // The wet-surface pass only carries records forward. With none, wet albedo
+  // is already free of a baked cube and the native shader runs unchanged.
+  if (rain && target == nullptr) return true;
   if (target == nullptr) {
     auto created = std::make_shared<Target>();
     created->generation = selected.generation;
@@ -333,73 +327,52 @@ inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
       target = capture; }, [&](const auto& insert) { insert(resources[0], created); target = created; });
     static std::atomic_flag reported = {};
     if (!reported.test_and_set(std::memory_order_relaxed)) {
-      reshade::log::message(reshade::log::level::info, "MgsvMaterials: separate linear material color and native owner guides created");
+      reshade::log::message(reshade::log::level::info, "MgsvMaterials: cube-material records created");
     }
   }
   if (target->width != width || target->height != height) return true;
 
-  auto result = specular_result::Read(cmd_list->get_device(), resources[native_count - 1u]);
-  if (result == nullptr) {
-    auto created = std::make_shared<specular_result::Target>();
-    created->generation = selected.generation;
-    created->width = width;
-    created->height = height;
-    D3D11_TEXTURE2D_DESC description = {
-        .Width = width,
-        .Height = height,
-        .MipLevels = 1u,
-        .ArraySize = 1u,
-        .Format = DXGI_FORMAT_R16G16B16A16_FLOAT,
-        .SampleDesc = {.Count = 1u},
-        .Usage = D3D11_USAGE_DEFAULT,
-        .BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
-        .MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE,
-    };
-    const std::array<float, 4> empty = {};
-    for (auto& image : created->images) {
-      if (FAILED(device->CreateTexture2D(&description, nullptr, &image.texture))
-          || FAILED(device->CreateShaderResourceView(image.texture.Get(), nullptr, &image.srv))
-          || FAILED(device->CreateUnorderedAccessView(image.texture.Get(), nullptr, &image.uav))) {
-        report_failure();
-        return true;
+  // The wet-surface pass rewrites albedo in place over the whole view, and its
+  // port rewrites every record with it. The game reads a copy of albedo for
+  // the same reason; give the port the records as they were before this draw.
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> color_before_rain;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> owner_before_rain;
+  if (rain) {
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> color_copy;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> owner_copy;
+    {
+      const std::unique_lock lock(target->mutex);
+      if (target->color_before_rain == nullptr) {
+        D3D11_TEXTURE2D_DESC description = {};
+        target->color->GetDesc(&description);
+        description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> created_color;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> created_color_srv;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> created_owner;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> created_owner_srv;
+        if (FAILED(device->CreateTexture2D(&description, nullptr, &created_color))
+            || FAILED(device->CreateShaderResourceView(created_color.Get(), nullptr, &created_color_srv))) {
+          report_failure();
+          return true;
+        }
+        description.Format = DXGI_FORMAT_R32G32B32A32_UINT;
+        if (FAILED(device->CreateTexture2D(&description, nullptr, &created_owner))
+            || FAILED(device->CreateShaderResourceView(created_owner.Get(), nullptr, &created_owner_srv))) {
+          report_failure();
+          return true;
+        }
+        target->color_before_rain = std::move(created_color);
+        target->color_before_rain_srv = std::move(created_color_srv);
+        target->owner_before_rain = std::move(created_owner);
+        target->owner_before_rain_srv = std::move(created_owner_srv);
       }
-      image.shared = rendering::ExportTexture(image.texture.Get());
-      if (image.shared == nullptr) {
-        report_failure();
-        return true;
-      }
+      color_copy = target->color_before_rain;
+      owner_copy = target->owner_before_rain;
+      color_before_rain = target->color_before_rain_srv;
+      owner_before_rain = target->owner_before_rain_srv;
     }
-    description.BindFlags |= D3D11_BIND_RENDER_TARGET;
-    if (FAILED(device->CreateTexture2D(&description, nullptr, &created->environment.texture))
-        || FAILED(device->CreateRenderTargetView(created->environment.texture.Get(), nullptr, &created->environment.rtv))
-        || FAILED(device->CreateShaderResourceView(created->environment.texture.Get(), nullptr, &created->environment.srv))) {
-      report_failure();
-      return true;
-    }
-    created->environment.shared = rendering::ExportTexture(created->environment.texture.Get());
-    if (created->environment.shared == nullptr) {
-      report_failure();
-      return true;
-    }
-    const std::array<float, 4> unavailable = {0.f, 0.f, 0.f, -1.f};
-    context->ClearRenderTargetView(created->environment.rtv.Get(), unavailable.data());
-    description.MiscFlags = 0u;
-    description.Format = DXGI_FORMAT_R8_UNORM;
-    if (FAILED(device->CreateTexture2D(&description, nullptr, &created->ready.texture))
-        || FAILED(device->CreateRenderTargetView(created->ready.texture.Get(), nullptr, &created->ready.rtv))
-        || FAILED(device->CreateShaderResourceView(created->ready.texture.Get(), nullptr, &created->ready.srv))
-        || FAILED(device->CreateUnorderedAccessView(created->ready.texture.Get(), nullptr, &created->ready.uav))) {
-      report_failure();
-      return true;
-    }
-    context->ClearRenderTargetView(created->ready.rtv.Get(), empty.data());
-    std::shared_ptr<specular_result::Target> retired;
-    specular_result::targets.lazy_emplace_l(resources[native_count - 1u], [&](auto& entry) {
-      auto& [native_material, capture] = entry;
-      if (capture == nullptr || capture->generation != selected.generation) {
-        retired = std::exchange(capture, created);
-      }
-      result = capture; }, [&](const auto& insert) { insert(resources[native_count - 1u], created); result = created; });
+    context->CopyResource(color_copy.Get(), target->color.Get());
+    context->CopyResource(owner_copy.Get(), target->owner.Get());
   }
 
   // 4. Blended decals invalidate their captured inputs instead of treating
@@ -420,14 +393,9 @@ inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
   *saved = std::move(state);
   bound[native_count] = target->color_rtv.Get();
   bound[native_count + 1u] = target->owner_rtv.Get();
-  bound[native_count + 2u] = result->ready.rtv.Get();
-  // Reset one byte of readiness instead of overwriting HDR reflection RGB.
-  // GPU ordering keeps old reflection pixels from surviving a failed dispatch.
-  context->OMSetRenderTargets(native_count + 3u, bound.data(), saved->depth.Get());
+  context->OMSetRenderTargets(native_count + 2u, bound.data(), saved->depth.Get());
   context->OMSetBlendState(blend.capture.Get(), saved->blend_factor.data(), saved->sample_mask);
-  const std::array<ID3D11ShaderResourceView*, 3> inputs = {
-      rain ? rain_source->color_srv.Get() : nullptr,
-      rain ? rain_source->owner_srv.Get() : nullptr, parameters.Get()};
+  const std::array<ID3D11ShaderResourceView*, 3> inputs = {color_before_rain.Get(), owner_before_rain.Get(), parameters.Get()};
   context->PSSetShaderResources(18u, static_cast<UINT>(inputs.size()), inputs.data());
   return true;
 }
@@ -469,13 +437,7 @@ inline bool OnClearRenderTarget(reshade::api::command_list* cmd_list, reshade::a
   if (rtv.handle == 0u || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return false;
   Microsoft::WRL::ComPtr<ID3D11Resource> resource;
   reinterpret_cast<ID3D11RenderTargetView*>(rtv.handle)->GetResource(&resource);  // NOLINT(performance-no-int-to-ptr)
-  // Material clears retire reflection readiness beside
-  // the native command. Albedo clears independently invalidate clean color.
-  if (const auto result = specular_result::Read(cmd_list->get_device(), resource.Get())) {
-    const std::array<float, 4> empty = {};
-    auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
-    context->ClearRenderTargetView(result->ready.rtv.Get(), empty.data());
-  }
+  // An albedo clear invalidates clean color beside the native command.
   const auto target = Read(cmd_list->get_device(), resource.Get());
   if (target != nullptr) {
     const std::array<float, 4> invalid = {0.f, 0.f, 0.f, -1.f};
@@ -494,12 +456,6 @@ inline void OnDestroyResource(reshade::api::device* device, reshade::api::resour
     retired = std::move(target);
     return true;
   });
-  std::shared_ptr<specular_result::Target> retired_result;
-  specular_result::targets.erase_if(reinterpret_cast<ID3D11Resource*>(resource.handle), [&](auto& entry) {  // NOLINT(performance-no-int-to-ptr)
-    auto& [native_material, target] = entry;
-    retired_result = std::move(target);
-    return true;
-  });
 }
 
 inline void Reset() {
@@ -509,12 +465,6 @@ inline void Reset() {
     retired.push_back(std::move(target));
   });
   targets.clear();
-  std::vector<std::shared_ptr<specular_result::Target>> retired_results;
-  specular_result::targets.for_each_m([&](auto& entry) {
-    auto& [native_material, target] = entry;
-    retired_results.push_back(std::move(target));
-  });
-  specular_result::targets.clear();
 }
 
 }  // namespace mgsv::lighting::material_inputs

@@ -4,7 +4,8 @@
 #include "../../materials/material_source.hlsli"
 
 // RGB is outgoing diffuse radiance in linear, pre-exposed scene units. Alpha
-// distinguishes qualified material color from the native albedo fallback.
+// is 1 where the color has no baked material cube in it and 0 where a changed
+// cube surface falls back to native albedo.
 // Zero RGB is a valid black source; finiteness is checked by the consumer.
 float4 LoadSourceRadiance(Texture2D<float4> diffuse, Texture2D<float4> albedo,
                           Texture2D<float4> material, Texture2D<float4> clean, Texture2D<uint4> owner,
@@ -12,7 +13,7 @@ float4 LoadSourceRadiance(Texture2D<float4> diffuse, Texture2D<float4> albedo,
   const float4 native_albedo = albedo.Load(int3(pixel, 0));
   float4 color = float4(native_albedo.rgb, 0.0);
   if (use_clean) {
-    const float4 captured = LoadCleanMaterial(clean, owner, pixel, size, native_albedo, normal,
+    const float4 captured = LoadCleanMaterial(clean, owner, pixel, size, native_albedo.rgb, normal,
                                               material.Load(int3(pixel, 0)), depth);
     if (captured.a >= 0.0) color = float4(captured.rgb, 1.0);
   }

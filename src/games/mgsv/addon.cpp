@@ -51,6 +51,7 @@
 #include "lighting/indirect/ambient_diffuse.hpp"
 #include "lighting/indirect/runtime.hpp"
 #include "lighting/indirect/source_preparation.hpp"
+#include "lighting/indirect_lighting_mode.hpp"
 #include "lighting/reflections/native_chain.hpp"
 #include "lighting/reflections/runtime.hpp"
 #include "lighting/shadows/screen_space_shadows.hpp"
@@ -71,6 +72,7 @@
 #include "rendering/engine_targets.hpp"
 #include "rendering/inputs.hpp"
 #include "rendering/native_context.hpp"
+#include "rendering/probe_controls.hpp"
 #include "rendering/producer_records.hpp"
 #include "settings.hpp"
 #include "shaders.hpp"
@@ -408,15 +410,14 @@ void OnPresent(
     const reshade::api::rect* dest_rect,
     uint32_t dirty_rect_count,
     const reshade::api::rect* dirty_rects) {
-  bool temporal_lighting_enabled = false;
   bool lighting_enabled = false;
   bool selected_present = false;
   uint32_t shadow_noise_frame = 0u;
   {
     const std::shared_lock settings_lock(renodx::utils::mutex::global_mutex);
-    lighting_enabled = shader_injection.diffuse_lighting_mode >= 0.5f || shader_injection.reflections_mode >= 0.5f;
-    temporal_lighting_enabled = shader_injection.reflections_mode >= 0.5f
-                                || (shader_injection.diffuse_lighting_mode >= 0.5f && shader_injection.lighting_temporal_enabled >= 0.5f);
+    // Enhanced indirect lighting needs the RenoDX tone mapper, and its controls say so. This is the
+    // host side of CUSTOM_MGSV_ENHANCED_INDIRECT_LIGHTING in shared.h.
+    lighting_enabled = shader_injection.indirect_lighting_mode >= 0.5f && shader_injection.tone_map_type != 0.f;
   }
   {
     const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
@@ -435,7 +436,10 @@ void OnPresent(
         mgsv::lighting::ambient_diffuse::Reset();
         mgsv::lighting::ResetNativeLightViews(queue->get_device());
       }
-      mgsv::lighting::temporal_inputs::enabled.store(temporal_lighting_enabled, std::memory_order_release);
+      // Scene camera and motion records serve reflection history and the gather's
+      // noise phase, so they follow the mode.
+      mgsv::lighting::temporal_inputs::enabled.store(lighting_enabled, std::memory_order_release);
+      mgsv::lighting::indirect_lighting_enhanced.store(lighting_enabled, std::memory_order_release);
       shadow_noise_frame = mgsv::lighting::noise_frame.fetch_add(1u, std::memory_order_relaxed) + 1u;
       selected_present = true;
     }
@@ -572,6 +576,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   if (fdw_reason == DLL_PROCESS_ATTACH) {
     mgsv::lighting::reflections::UseProbe(true);
     mgsv::reconstruction::dx12::UseProbe(true);
+    mgsv::rendering::probe::UseProbe(true);
     reshade::register_event<reshade::addon_event::init_device>(mgsv::rendering::engine_targets::OnInitDevice);
     reshade::register_event<reshade::addon_event::destroy_device>(mgsv::rendering::engine_targets::OnDestroyDevice);
     reshade::register_event<reshade::addon_event::init_device>(mgsv::shadows::screen_space::OnInitDevice);
@@ -618,6 +623,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   } else if (fdw_reason == DLL_PROCESS_DETACH) {
     mgsv::lighting::reflections::UseProbe(false);
     mgsv::reconstruction::dx12::UseProbe(false);
+    mgsv::rendering::probe::UseProbe(false);
     reshade::unregister_event<reshade::addon_event::init_device>(mgsv::rendering::engine_targets::OnInitDevice);
     reshade::unregister_event<reshade::addon_event::destroy_device>(mgsv::rendering::engine_targets::OnDestroyDevice);
     reshade::unregister_event<reshade::addon_event::init_device>(mgsv::shadows::screen_space::OnInitDevice);

@@ -105,17 +105,17 @@ void main(
   r3.xyz = r3.xyz;
   const float2 specular_uv = r0.zw;
   r0.z = inOcclusion.Sample(g_samplerLinear_Wrap_s, r0.zw).x;
-  const float3 specular_correction = GetEnvironmentSpecularCorrection(specular_uv, r0.z, r1.yzw, r3.xyz, r2.xyz, reflection_environment);
+  const float3 specular_correction = GetEnvironmentSpecularCorrection(specular_uv, inDepth, r0.z, r1.yzw, r3.xyz, r2.xyz, reflection_environment);
   r4.xyz = r0.zzz;
   r2.xyz = r3.xyz * r2.xyz;
   // Diffuse already has ambient-only AO; the correction separates specular below.
-  if (CUSTOM_MGSV_ENHANCED_DIFFUSE_LIGHTING != 0.f) {
+  if (UsesEnhancedIndirectLighting()) {
     r1.yzw = r2.xyz + r1.yzw * r4.xyz;
   } else {
     r1.yzw = r2.xyz + r1.yzw;
     r1.yzw = r1.yzw * r4.xyz;
   }
-  if (CUSTOM_MGSV_ENHANCED_REFLECTIONS) {
+  if (UsesEnhancedIndirectLighting()) {
     r1.yzw += specular_correction;
   }
   r1.yzw = r1.yzw;
@@ -193,7 +193,5 @@ void main(
   o0.rgb = renodx::color::srgb::Encode(max(0, o0.rgb));
 #endif
 
-  // A clipped vanilla tone curve is not recoverable linear radiance.
-  if (RENODX_TONE_MAP_TYPE == 0.0) reflection_environment.a = -1.0;
   return;
 }

@@ -35,25 +35,19 @@ inline constexpr GUID PREPARED_SOURCE_GUID = {.Data1 = 0xe7302e42, .Data2 = 0x2f
 inline constexpr GUID MATERIAL_PALETTE_GUID = {.Data1 = 0x5ab2941c, .Data2 = 0x55db, .Data3 = 0x4712, .Data4 = {0x83, 0xf4, 0x2c, 0xa8, 0xe1, 0x29, 0xe8, 0xe5}};
 inline constexpr GUID MATERIAL_PALETTE_GENERATION_GUID = {.Data1 = 0x9ee98019, .Data2 = 0x58a5, .Data3 = 0x46c6, .Data4 = {0x91, 0x3a, 0xa2, 0x71, 0x18, 0xb5, 0x09, 0xe4}};
 
-// Own the native scene-buffer copy and its original D3D11.1 binding range.
-// Camera identity and jitter describe the producer, not the thread reading it.
+// The native scene's depth allocation and the camera sample it was drawn with.
+// Jitter describes the producer, not the thread reading it.
 struct Scene {
-  Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;
   Microsoft::WRL::ComPtr<ID3D11Resource> depth;
-  UINT first_constant = 0u;
-  UINT constant_count = 0u;
-  uintptr_t depth_identity = 0u;
   std::array<float, 2> current_jitter_uv = {};
   uint64_t camera_publication = 0u;
   uint64_t camera_generation = 0u;
   uint32_t camera_sample = 0u;
-  uintptr_t viewport_identity = 0u;
-  uintptr_t camera_identity = 0u;
   bool jitter_valid = false;
 };
 
 // One submitted camera/motion pair. Read() qualifies their depth, generation,
-// and camera sample against the scatter before history may use these pixels.
+// and camera sample against the consumer's depth before history may use them.
 struct Snapshot {
   rendering::native_context::Owner owner;
   inputs::Motion motion;
@@ -206,8 +200,8 @@ inline void Record(reshade::api::command_list* cmd_list, Producer producer) {
 }
 
 inline void CaptureScene(reshade::api::command_list* cmd_list) {
-  // Capture the supported native scene producer's b2 and t2 together. Keeping
-  // the buffer object alive would not protect its contents from later writes.
+  // Pair the native scene producer's depth (t2) with this scene's camera
+  // sample. Its b2 range qualifies the producer as the 480-byte scene layout.
   if (cmd_list == nullptr || !enabled.load(std::memory_order_acquire)) return;
   const auto selected = inputs::ReadSelection(cmd_list->get_device());
   if (selected.device == nullptr) return;
@@ -223,38 +217,24 @@ inline void CaptureScene(reshade::api::command_list* cmd_list) {
     scene.camera_publication = camera.publication_sequence;
     scene.camera_generation = camera.reset_generation;
     scene.camera_sample = camera.sample_index;
-    scene.viewport_identity = camera.viewport_identity;
-    scene.camera_identity = camera.camera_identity;
     scene.jitter_valid = camera.valid && camera.camera_matrix_valid;
   } else {
     scene.jitter_valid = true;
   }
+  UINT first_constant = 0u;
+  UINT constant_count = 0u;
   context->PSGetShaderResources(2u, 1u, &depth);
   if (SUCCEEDED(context->QueryInterface(IID_PPV_ARGS(&context1)))) {
-    context1->PSGetConstantBuffers1(2u, 1u, &original, &scene.first_constant, &scene.constant_count);
+    context1->PSGetConstantBuffers1(2u, 1u, &original, &first_constant, &constant_count);
   } else {
     context->PSGetConstantBuffers(2u, 1u, &original);
   }
   if (original != nullptr && depth != nullptr) {
     D3D11_BUFFER_DESC description = {};
     original->GetDesc(&description);
-    if (context1 == nullptr) scene.constant_count = description.ByteWidth / 16u;
-    const uint64_t first_byte = static_cast<uint64_t>(scene.first_constant) * 16u;
-    if (scene.constant_count >= 30u && first_byte + 480u <= description.ByteWidth) {
-      // Copy the allocation, not just the reflected 480 bytes. D3D11 constant
-      // buffers cannot be partially copied; keep the original binding range.
-      description.Usage = D3D11_USAGE_DEFAULT;
-      description.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-      description.CPUAccessFlags = 0u;
-      description.MiscFlags = 0u;
-      description.StructureByteStride = 0u;
-      Microsoft::WRL::ComPtr<ID3D11Device> device;
-      original->GetDevice(&device);
-      if (device != nullptr && SUCCEEDED(device->CreateBuffer(&description, nullptr, &scene.buffer))) {
-        context->CopyResource(scene.buffer.Get(), original.Get());
-        depth->GetResource(&scene.depth);
-        scene.depth_identity = reinterpret_cast<uintptr_t>(scene.depth.Get());
-      }
+    if (context1 == nullptr) constant_count = description.ByteWidth / 16u;
+    if (constant_count >= 30u && (static_cast<uint64_t>(first_constant) * 16u) + 480u <= description.ByteWidth) {
+      depth->GetResource(&scene.depth);
     }
   }
   Record(cmd_list, {
@@ -305,7 +285,7 @@ inline Snapshot Read(reshade::api::device* device, reshade::api::resource_view s
   result.current_jitter_uv = result.scene.current_jitter_uv;
   Microsoft::WRL::ComPtr<ID3D11Resource> motion_depth;
   if (result.motion.depth != nullptr) result.motion.depth->GetResource(&motion_depth);
-  result.valid = result.scene.buffer != nullptr && result.scene.depth.Get() == depth.Get()
+  result.valid = result.scene.depth != nullptr && result.scene.depth.Get() == depth.Get()
                  && result.motion.generation == selected.generation
                  && result.motion.velocity != nullptr && result.motion.object_velocity != nullptr
                  && motion_depth.Get() == depth.Get() && result.jitter_valid && result.scene.jitter_valid

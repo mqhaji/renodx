@@ -18,7 +18,7 @@ The [render map](render-map.html) follows these owners through the native frame,
 | `rendering/engine_targets.hpp` | Hooks on the engine's render target creation that make it create selected targets as RGBA16F, the private float images of depth of field and motion blur, and the scene-role tag |
 | `rendering/draw_roles.hpp` | Velocity-producer identification, the bloom chain gate, and scene-image checks for draws that run generic or shared shaders |
 | `rendering/d3d11_state.hpp`, `rendering/geometry.hlsli` | D3D11 state preservation and native geometry reconstruction |
-| `materials/capture.hpp`, `materials/native/` | Clean material/owner capture, native ports, and material registration inventory |
+| `materials/capture.hpp`, `materials/native/` | Records for the 59 materials that bake a cube map into albedo, their ports, the two rain ports, and the registration inventory |
 | `materials/brdf.hlsli`, `lighting/reflections/sssr_brdf.cs_6_6.hlsl` | Native material decoding, reciprocal GGX response, and one-time integration table; [material contracts](../materials/README.md) describe producers, palette fields, and conversion limits |
 | `lighting/native/` | Native direct/environment light ports |
 | `lighting/shadows/` | PCSS, Bend kernels, per-draw state, the local-light hook and frame batch atlas, and controls |
@@ -26,7 +26,7 @@ The [render map](render-map.html) follows these owners through the native frame,
 | `lighting/indirect/ambient_diffuse.hpp` | Native ambient snapshots and diffuse-copy observation |
 | `lighting/indirect/source_preparation.hpp`, `source_radiance.hlsli` | Shared outgoing diffuse radiance beside the native diffuse copy |
 | `lighting/environment_specular.hpp` | Shared environment capture, material lookup tables, and scoped composition inputs |
-| `lighting/indirect/trace/`, `denoise/`, `compose/` | Diffuse estimators, temporal/spatial filtering, and application; shared specular composition contracts |
+| `lighting/indirect/trace/`, `compose/` | Diffuse estimator and its application |
 | `lighting/reflections/` | GGX screen/environment estimation, NRD history and native reflection-chain bypass |
 | `lighting/compose/` | Native deferred lighting/fog composition ports, including their early tone curves |
 | `sky/native/`, `water/native/`, `effects/` | Existing sky/cloud, ocean, and wormhole/sand-wind ports, not new rendering models |
@@ -56,10 +56,10 @@ Reconstruction's preferred insertion is before bloom preparation `0x72C1D157`. G
 
 ## Shared layouts and color
 
-- `ShaderInjectData` contains 73 floats: 292 CPU bytes and 304 bytes after GPU alignment at `b13`. Shader controls use its defines in `shared.h`. Effect-local copies carry scale, history flags, filter spacing, and light type without modifying user settings.
-- Lighting reuses the native scatter pass's 64-byte geometry buffer at compute `b0`. Pixel `b0` has a different meaning. Temporal lighting uses current/previous native scene buffers at `b1/b2`; the reflected scene layout is 480 bytes. Preserve actual D3D11.1 buffer ranges when copying and restoring them.
+- `ShaderInjectData` contains 51 floats: 204 CPU bytes and 208 bytes after GPU alignment at `b13`. Shader controls use its defines in `shared.h`. Effect-local copies carry scale, noise phase, and light type without modifying user settings.
+- Lighting reuses the native scatter pass's 64-byte geometry buffer at compute `b0`. Pixel `b0` has a different meaning. Reflection preparation copies the native 480-byte scene block. Preserve actual D3D11.1 buffer ranges when copying and restoring them.
 - FSR/DLSS share a 96-byte preparation layout. Post-processing copy helpers use their own 32-byte layout, not a second settings buffer.
-- Native albedo's sRGB view decodes color once. Diffuse/specular lighting and prepared outgoing diffuse are linear and pre-exposed. Later floating-point scene color may be encoded. Depth, normals, visibility, motion, ownership codes, and masks are data, not color.
+- Native albedo's sRGB view decodes color once. Diffuse/specular lighting and prepared outgoing diffuse are linear and pre-exposed. Later floating-point scene color may be encoded. Depth, normals, visibility, motion, material record codes, and masks are data, not color.
 - Feature guides own image formats, missing-data markers, binding slots, and filtering rules. Do not infer those contracts from texture format alone or reuse an output as an unused fallback input.
 
 ## Submission and lifetime
@@ -70,7 +70,7 @@ Retained COM objects protect lifetime, not pixels. Native producers may overwrit
 
 The coordinator preserves native prefixes and remainders around custom work. Lighting consumes a diffuse-copy association once to avoid repeated application or history advancement on cached-list replay. Bend batches intentionally recompute masks on every replay from that execution's depth. Reconstruction cancellation fills the selected output from current native scene data before continuing the remainder. These different replay rules are deliberate.
 
-Immutable palettes may be reused directly. Mutable palettes require ordered GPU snapshots on each producer/replay. The custom GGX path does not copy the native Fresnel lookup. Palette metadata belongs to the native specular accumulation allocation. A one-byte readiness image gates the paired reflection result. Native surface writes and clears reset readiness in GPU order. The old actual-composition mask is gone because native SSR no longer blends over custom output.
+Immutable palettes may be reused directly. Mutable palettes require ordered GPU snapshots on each producer/replay. The custom GGX path does not copy the native Fresnel lookup. Palette metadata belongs to the native specular accumulation allocation. A one-byte readiness image gates the paired reflection result. The sun lighting pass, material clears, the canceled native trace, and each submission reset readiness in GPU order. The old actual-composition mask is gone because native SSR no longer blends over custom output.
 
 Every feature restores displaced graphics/compute state, including empty bindings, shader class instances, render targets, depth/stencil, and D3D11.1 constant-buffer ranges. Release replaced views outside shared-map locks so destruction callbacks cannot reenter a held lock.
 

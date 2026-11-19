@@ -50,7 +50,7 @@ Further CPU work can trace the native constant setters and uploads for bloom and
 - Exercise lazy DLSS startup from saved and manual selection, cancellation, missing-DLL/unsupported-device explanations, model-F fallback, query boundaries, insertion fallbacks, state restoration, and callbacks crossing Present.
 - Validate feature release/recreation across DLSS, FSR, Analytical, and Off, then test model/size recreation and device teardown separately. One successful switch does not prove the earlier crash is resolved.
 - Compare methods on the same verified inputs: motion direction/scale, reverse-Z depth, current alpha, and downstream scene/UI output. Keep automatic exposure until a suitable MGSV exposure resource is proven.
-- Shared indirect lighting has its own submitted producer/history ledger and controlled replay coverage. Do not treat the older AA-Off motion compatibility concern as the current implementation or assume scene-reconstruction history proves lighting history. See the [lighting guide](../lighting/indirect/README.md).
+- Shared indirect lighting has its own submitted producer ledger and controlled replay coverage. The diffuse gather keeps no history; reflection history belongs to NRD. Do not treat the older AA-Off motion compatibility concern as the current implementation or assume scene-reconstruction history proves reflection history. See the [lighting guide](../lighting/indirect/README.md).
 
 ## Temporal quality after input correctness
 
@@ -86,7 +86,7 @@ Group passes around their actual consumers. Connected D3D12 work can share priva
 | Group | Initial boundary | Candidate improvements after the port |
 | --- | --- | --- |
 | Reconstruction | Prepared scene color, depth, and motion enter D3D12 before bloom; encoded output returns before native post-processing | One submission for SDK evaluation and output encoding; private SDK scratch and history; direct writes to the shared scene destination |
-| Indirect lighting | Accepted geometry, materials, and lighting inputs enter before skin scattering; the composed result returns for native scattering | Keep depth reduction, tracing, temporal history, and spatial filtering together; evaluate wave reductions, tile classification, and compacted tracing work |
+| Indirect lighting | Accepted geometry, materials, and lighting inputs enter before skin scattering; the composed result returns for native scattering | Keep depth reduction, tracing, and application together; evaluate wave reductions, tile classification, and compacted tracing work |
 | Contact shadows | Accepted light/depth batches enter before their native lighting consumers | Preserve batched light work; evaluate wave operations within the depth scan while retaining workgroup synchronization where lanes cross wave boundaries |
 | Ray/path tracing | Geometry, poses, materials, lights, and camera data enter at their verified producer boundaries; outputs return to their actual composition consumers | Keep acceleration structures, tracing, radiance caches, denoising or Ray Reconstruction, and their histories on D3D12; avoid exporting intermediate signals with no native consumer |
 

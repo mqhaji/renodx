@@ -48,7 +48,7 @@ struct ShaderInjectData {
   float shadow_map_debug_view;
 
   // Indirect Lighting controls. Keep their storage order stable across passes.
-  float diffuse_lighting_mode;  // 0 = Vanilla, 1 = Enhanced diffuse AO/GI.
+  float indirect_lighting_mode;  // 0 = Vanilla, 1 = Enhanced diffuse AO/GI and reflections together.
   float ao_strength;
   float diffuse_gi_strength;
   float reflection_strength;  // Blends the complete screen/environment reflection replacement.
@@ -60,35 +60,11 @@ struct ShaderInjectData {
   float lighting_samples_per_side;
   float lighting_depth_mips_enabled;  // User choice; each dispatch copy records whether the mips are ready.
   float gi_reject_backfaces;
-  float lighting_temporal_enabled;
-  // Ambient visibility history is independent of diffuse radiance history.
-  float occlusion_history_weight;
-  float occlusion_depth_rejection;
-  float occlusion_normal_rejection;
-  float ao_history_clamp;
-  float gi_history_weight;
-  float gi_depth_rejection;
-  float gi_normal_rejection;
-  float gi_history_clamp;
-  float lighting_spatial_enabled;
-  float lighting_filter_radius;
-  float lighting_filter_passes;
-  float lighting_filter_width;
   float lighting_debug_view;
 
   // Dispatch-local values, separate from user controls.
   float lighting_resolution_divisor;  // Full-resolution pixels per trace pixel along each axis: 1, 2, 4, or 8.
   float lighting_noise_frame;         // Changes the FAST sample sequence; does not prove history is valid.
-  float gi_history_valid;
-  float gi_temporal_active;
-  float lighting_filter_step;
-  float lighting_current_jitter_uv_x;
-  float lighting_current_jitter_uv_y;
-  float lighting_previous_jitter_uv_x;
-  float lighting_previous_jitter_uv_y;
-  float lighting_velocity_jitter_scale;
-  float ao_history_valid;
-  float ao_temporal_active;
 
   // Bend contact-shadow controls and values copied for this light draw.
   float contact_shadow_debug_view;
@@ -102,7 +78,6 @@ struct ShaderInjectData {
   float shadow_noise_frame;
 
   float bloom_type;                   // 0 = Vanilla, 1 = Enhanced.
-  float reflections_mode;             // 0 = Vanilla, 1 = Enhanced; shares material capture with diffuse AO/GI.
   float specular_occlusion_strength;  // Blocks environment fallback along confirmed geometry hits.
   float reflection_rays_per_pixel;    // GGX samples per receiver; controls trace cost rather than strength.
 };
@@ -154,8 +129,9 @@ cbuffer RenoDXSettings : register(b13) {
 
 #define CUSTOM_SPOT_CONTACT_SHADOW_BUDGET shader_injection.spot_contact_shadow_budget
 
-#define CUSTOM_MGSV_ENHANCED_REFLECTIONS          (shader_injection.reflections_mode >= 0.5)
-#define CUSTOM_MGSV_ENHANCED_DIFFUSE_LIGHTING     (shader_injection.diffuse_lighting_mode >= 0.5)
+// The vanilla tone curve runs inside deferred composition, before late reflections could exchange
+// linear light, so Enhanced needs the RenoDX tone mapper. OnPresent in addon.cpp applies the same rule.
+#define CUSTOM_MGSV_ENHANCED_INDIRECT_LIGHTING    (shader_injection.indirect_lighting_mode >= 0.5 && RENODX_TONE_MAP_TYPE != 0.0)
 #define CUSTOM_MGSV_AO_STRENGTH                   shader_injection.ao_strength
 #define CUSTOM_MGSV_DIFFUSE_GI_STRENGTH           shader_injection.diffuse_gi_strength
 #define CUSTOM_MGSV_REFLECTION_STRENGTH           shader_injection.reflection_strength
@@ -168,31 +144,10 @@ cbuffer RenoDXSettings : register(b13) {
 #define CUSTOM_MGSV_LIGHTING_SAMPLES_PER_SIDE     shader_injection.lighting_samples_per_side
 #define CUSTOM_MGSV_LIGHTING_DEPTH_MIPS_ENABLED   shader_injection.lighting_depth_mips_enabled
 #define CUSTOM_MGSV_GI_REJECT_BACKFACES           shader_injection.gi_reject_backfaces
-#define CUSTOM_MGSV_LIGHTING_TEMPORAL_ENABLED     shader_injection.lighting_temporal_enabled
-#define CUSTOM_MGSV_OCCLUSION_HISTORY_WEIGHT      shader_injection.occlusion_history_weight
-#define CUSTOM_MGSV_OCCLUSION_DEPTH_REJECTION     shader_injection.occlusion_depth_rejection
-#define CUSTOM_MGSV_OCCLUSION_NORMAL_REJECTION    shader_injection.occlusion_normal_rejection
-#define CUSTOM_MGSV_AO_HISTORY_CLAMP              shader_injection.ao_history_clamp
-#define CUSTOM_MGSV_GI_HISTORY_WEIGHT             shader_injection.gi_history_weight
-#define CUSTOM_MGSV_GI_DEPTH_REJECTION            shader_injection.gi_depth_rejection
-#define CUSTOM_MGSV_GI_NORMAL_REJECTION           shader_injection.gi_normal_rejection
-#define CUSTOM_MGSV_GI_HISTORY_CLAMP              shader_injection.gi_history_clamp
-#define CUSTOM_MGSV_LIGHTING_SPATIAL_ENABLED      shader_injection.lighting_spatial_enabled
-#define CUSTOM_MGSV_LIGHTING_FILTER_WIDTH         shader_injection.lighting_filter_width
 #define CUSTOM_MGSV_LIGHTING_DEBUG_VIEW           shader_injection.lighting_debug_view
 
-#define CUSTOM_MGSV_LIGHTING_RESOLUTION_DIVISOR    shader_injection.lighting_resolution_divisor
-#define CUSTOM_MGSV_LIGHTING_NOISE_FRAME           shader_injection.lighting_noise_frame
-#define CUSTOM_MGSV_GI_HISTORY_VALID               shader_injection.gi_history_valid
-#define CUSTOM_MGSV_GI_TEMPORAL_ACTIVE             shader_injection.gi_temporal_active
-#define CUSTOM_MGSV_LIGHTING_FILTER_STEP           shader_injection.lighting_filter_step
-#define CUSTOM_MGSV_LIGHTING_CURRENT_JITTER_UV_X   shader_injection.lighting_current_jitter_uv_x
-#define CUSTOM_MGSV_LIGHTING_CURRENT_JITTER_UV_Y   shader_injection.lighting_current_jitter_uv_y
-#define CUSTOM_MGSV_LIGHTING_PREVIOUS_JITTER_UV_X  shader_injection.lighting_previous_jitter_uv_x
-#define CUSTOM_MGSV_LIGHTING_PREVIOUS_JITTER_UV_Y  shader_injection.lighting_previous_jitter_uv_y
-#define CUSTOM_MGSV_LIGHTING_VELOCITY_JITTER_SCALE shader_injection.lighting_velocity_jitter_scale
-#define CUSTOM_MGSV_AO_HISTORY_VALID               shader_injection.ao_history_valid
-#define CUSTOM_MGSV_AO_TEMPORAL_ACTIVE             shader_injection.ao_temporal_active
+#define CUSTOM_MGSV_LIGHTING_RESOLUTION_DIVISOR shader_injection.lighting_resolution_divisor
+#define CUSTOM_MGSV_LIGHTING_NOISE_FRAME        shader_injection.lighting_noise_frame
 
 #include "../../shaders/renodx.hlsl"
 

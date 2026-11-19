@@ -38,7 +38,7 @@ cbuffer NativeSceneBytes : register(b3) { uint4 scene_rows[30]; }
   const float3 normal = DecodeReflectionNormal(packed_normal.xyz);
   const bool normal_valid = all(isfinite(normal));
   const float4 color = LoadCleanMaterial(clean_material, material_owner, pixel, reflection_size,
-                                         native_albedo.Load(int3(pixel, 0)), packed_normal, packed_material, depth);
+                                         native_albedo.Load(int3(pixel, 0)).rgb, packed_normal, packed_material, depth);
   const SpecularMaterial material = LoadSpecularMaterial(palette, packed_material);
   const float4 captured = environment.Load(int3(pixel, 0));
   const bool valid = depth > 0.0 && color.a >= 0.0 && material.valid && normal_valid

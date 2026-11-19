@@ -163,9 +163,9 @@ uint GetCoverageMask(float2 sample_position, float sample_depth, float thickness
   prepared_source.GetDimensions(prepared_width, prepared_height);
   const bool prepared_available = prepared_width == buffer_width && prepared_height == buffer_height;
   const int diagnostic = (int)CUSTOM_MGSV_LIGHTING_DEBUG_VIEW;
-  if (diagnostic >= 2 && diagnostic <= 11) {
+  if (diagnostic >= 2 && diagnostic <= 6) {
     diagnostic_output[ao_pixel] = diagnostic == 4 ? float4(1.0, 0.0, 0.0, 1.0) : float4(0.0, 0.0, 0.0, 1.0);
-    if (diagnostic >= 8 && diagnostic <= 10) diagnostic_output[ao_pixel] = 1.0;
+    if (diagnostic == 6) diagnostic_output[ao_pixel] = 1.0;
   }
 
   const float scale = max(CUSTOM_MGSV_LIGHTING_RESOLUTION_DIVISOR, 1.0);
@@ -232,9 +232,9 @@ uint GetCoverageMask(float2 sample_position, float sample_depth, float thickness
   float accepted_coverage = 0.0;
   bool gi_valid = true;
 
-  const uint noise_frame = (CUSTOM_RECONSTRUCTION_MODE != 0.0 || CUSTOM_MGSV_GI_TEMPORAL_ACTIVE > 0.5 || CUSTOM_MGSV_AO_TEMPORAL_ACTIVE > 0.5)
-                               ? (uint)CUSTOM_MGSV_LIGHTING_NOISE_FRAME
-                               : 0u;
+  // The temporal upscaler accumulates a noise pattern that moves with its
+  // camera sample. Without one, a fixed pattern keeps the image still.
+  const uint noise_frame = CUSTOM_RECONSTRUCTION_MODE != 0.0 ? (uint)CUSTOM_MGSV_LIGHTING_NOISE_FRAME : 0u;
   const uint2 noise_pixel = ao_pixel & 127u;
 
   // 4. Rotate each slice using IS-FAST noise on the lighting grid. Each slice
@@ -367,7 +367,7 @@ uint GetCoverageMask(float2 sample_position, float sample_depth, float thickness
   // covered sectors contribute source radiance once.
   const float occlusion = saturate(1.0 - visibility / float(slices));
   const float applied = saturate(occlusion * CUSTOM_MGSV_AO_STRENGTH);
-  if (diagnostic >= 8 && diagnostic <= 10) {
+  if (diagnostic == 6) {
     diagnostic_output[ao_pixel] = float4((1.0 - applied).xxx, 1.0);
   }
   // No-hit and black-source results remain valid zero. Missing qualification

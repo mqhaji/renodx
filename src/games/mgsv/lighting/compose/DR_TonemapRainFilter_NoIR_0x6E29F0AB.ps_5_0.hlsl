@@ -233,16 +233,16 @@ void main(
   r0.xyz = inAlbedo.Sample(g_samplerLinear_Wrap_s, r0.xy).xyz;
   r0.xyz = r0.xyz;
   // The wet cubemap is added below; include it in the environment replacement.
-  const float3 specular_correction = GetEnvironmentSpecularCorrection(specular_uv, r2.x, r3.xyz, r0.xyz, r4.xyz, reflection_environment, r1.xyw);
+  const float3 specular_correction = GetEnvironmentSpecularCorrection(specular_uv, inDepth, r2.x, r3.xyz, r0.xyz, r4.xyz, reflection_environment, r1.xyw);
   r0.xyz = r0.xyz * r4.xyz;
   // Diffuse already has ambient-only AO; the correction separates specular below.
-  if (CUSTOM_MGSV_ENHANCED_DIFFUSE_LIGHTING != 0.f) {
+  if (UsesEnhancedIndirectLighting()) {
     r0.xyz = r0.xyz + r3.xyz * r2.xyz;
   } else {
     r0.xyz = r0.xyz + r3.xyz;
     r0.xyz = r0.xyz * r2.xyz;
   }
-  if (CUSTOM_MGSV_ENHANCED_REFLECTIONS) {
+  if (UsesEnhancedIndirectLighting()) {
     r0.xyz += specular_correction;
   }
   r0.xyz = r0.xyz;
@@ -319,7 +319,5 @@ void main(
   o0.rgb = renodx::color::srgb::Encode(max(0, o0.rgb));
 #endif
 
-  // A clipped vanilla tone curve is not recoverable linear radiance.
-  if (RENODX_TONE_MAP_TYPE == 0.0) reflection_environment.a = -1.0;
   return;
 }

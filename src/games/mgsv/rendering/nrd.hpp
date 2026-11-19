@@ -17,6 +17,7 @@
 #include "../../../utils/path.hpp"
 #include "../third_party/nrd/NRD.h"
 #include "d3d12_compute.hpp"
+#include "d3d12_timing.hpp"
 
 namespace mgsv::rendering::denoising {
 
@@ -172,7 +173,7 @@ struct Runtime {
   // COMMON, where the surrounding passes and the shared-resource bridge expect them.
   uint32_t Record(ID3D12Device* device, ID3D12GraphicsCommandList* commands, d3d12_compute::Frame* frame,
                   const nrd::CommonSettings& settings, const std::array<ID3D12Resource*, RESOURCE_COUNT>& resources,
-                  std::span<std::byte> constant_capture = {}) {
+                  std::span<std::byte> constant_capture = {}, d3d12_timing::Scope* timing = nullptr) {
     const auto& library = instance.get_deleter().library;
     const nrd::DispatchDesc* dispatches = nullptr;
     uint32_t count = 0u;
@@ -225,6 +226,10 @@ struct Runtime {
         commands->SetComputeRootConstantBufferView(1u, constant_address);
       }
       commands->Dispatch(dispatch.gridWidth, dispatch.gridHeight, 1u);
+      // The SDK names each of its dispatches.
+      if (timing != nullptr) {
+        timing->Mark(dispatch.name);
+      }
     }
     for (size_t index = 0u; index < resources.size(); ++index) {
       if (resources[index] != nullptr) d3d12_compute::Transition(commands, resources[index], states[index], D3D12_RESOURCE_STATE_COMMON);

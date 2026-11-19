@@ -27,7 +27,7 @@ Reconstruction stays independent of RenoDX presets. Off restores the original ca
 
 ## Indirect lighting
 
-**Diffuse Lighting** and **Reflections** each select Vanilla or Enhanced, with Enhanced selected by default. GT-VBGI supplies diffuse AO/GI on D3D11 before skin scattering. The DX12 reflection chain runs at the native late reflection compositor, after deferred composition and intervening sky/forward draws. AO affects supported ambient diffuse; direct light keeps its own shadows.
+**Global Illumination** selects Vanilla or Enhanced for diffuse AO/GI and reflections together, with Enhanced selected by default. It runs in the presented main view only and needs the RenoDX tone mapper: under the Vanilla tone mapper it is off, and its controls are grayed out with a red note saying why. GT-VBGI supplies diffuse AO/GI on D3D11 before skin scattering; the temporal upscaler accumulates its noise. The DX12 reflection chain runs at the native late reflection compositor, after deferred composition and intervening sky/forward draws. AO affects supported ambient diffuse; direct light keeps its own shadows.
 
 Screen reflections replace the saved native environment term in linear light while preserving receiver fog transmission. General surfaces and the sortie floor use one GGX estimator with NRD specular denoising on the shared DX12 backend. Enhanced skips the corresponding native traces and their dependent filters/copies. Missing inputs retain environment light. Diffuse occlusion, diffuse GI, reflection and specular occlusion strengths remain separate under Indirect Lighting (Advanced). Install the matching NRD.dll beside the game executable; see the [reflection guide](lighting/reflections/README.md) for inputs, dependency packing, debug views and limitations.
 
@@ -43,7 +43,7 @@ Screen reflections replace the saved native environment term in linear light whi
 
 Precision upgrades work independently of HDR output and reconstruction. The engine itself creates scene color, its `TEMPORARY_OUTPUT` copy, both velocity targets, the color-grading LUTs, and the bloom images as RGBA16F: RenoDX changes their format where the engine creates them, by name, on the verified executable. Depth of field and motion blur keep the scene in temporaries that SSAO, DoF parameters, and rain's material layer use as 8-bit, so those stay 8-bit: the two plugins instead receive RGBA16F images of their own, which the engine creates and resizes beside its temporaries and hands over when each plugin looks its temporaries up. RenoDX keeps no copies of game textures and redirects no bindings. Float storage can still contain encoded color.
 
-Preset Off selects Vanilla for Shadows, Diffuse Lighting, and Reflections but leaves reconstruction selected. Reset All restores defaults. Vanilla/0 tonemapping is not full Preset Off; other selected effects and grading controls can remain active.
+Preset Off selects Vanilla for Shadows and Global Illumination but leaves reconstruction selected. Reset All restores defaults. Vanilla/0 tonemapping is not full Preset Off; other selected effects and grading controls can remain active.
 
 **UI Visibility**, under Output, selects Hide or Show for native menus, text, and HUD. This is a session control: it is not saved and starts at Show each launch. The RenoDX overlay remains available, and the game still handles menu input while hidden. Reset All and Preset Off select Show again.
 

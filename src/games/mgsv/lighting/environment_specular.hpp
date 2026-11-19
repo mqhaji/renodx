@@ -23,6 +23,7 @@
 #include "../materials/capture.hpp"
 #include "../rendering/inputs.hpp"
 #include "../rendering/producer_records.hpp"
+#include "indirect_lighting_mode.hpp"
 #include "reflections/result.hpp"
 
 namespace mgsv::lighting::environment_specular {
@@ -390,7 +391,83 @@ inline void BeginCapture(reshade::api::command_list* cmd_list, bool lighting_ena
   render_targets[2] = target->rtv.Get();
   Microsoft::WRL::ComPtr<ID3D11Resource> material_resource;
   material->GetResource(&material_resource);
-  const auto result = specular_result::Read(selected.device, material_resource.Get());
+  auto result = specular_result::Read(selected.device, material_resource.Get());
+  if (result == nullptr) {
+    // The reflection result belongs to this material target. This draw is the
+    // first place the lighting pass names it, so reflections do not depend on
+    // any particular material draw having been captured.
+    auto created = std::make_shared<specular_result::Target>();
+    created->generation = selected.generation;
+    created->width = description.Width;
+    created->height = description.Height;
+    D3D11_TEXTURE2D_DESC result_description = {
+        .Width = description.Width,
+        .Height = description.Height,
+        .MipLevels = 1u,
+        .ArraySize = 1u,
+        .Format = DXGI_FORMAT_R16G16B16A16_FLOAT,
+        .SampleDesc = {.Count = 1u},
+        .Usage = D3D11_USAGE_DEFAULT,
+        .BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+        .MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE,
+    };
+    bool complete = true;
+    for (auto& image : created->images) {
+      if (FAILED(device->CreateTexture2D(&result_description, nullptr, &image.texture))
+          || FAILED(device->CreateShaderResourceView(image.texture.Get(), nullptr, &image.srv))
+          || FAILED(device->CreateUnorderedAccessView(image.texture.Get(), nullptr, &image.uav))) {
+        complete = false;
+        break;
+      }
+      image.shared = rendering::ExportTexture(image.texture.Get());
+      if (image.shared == nullptr) {
+        complete = false;
+        break;
+      }
+    }
+    if (complete) {
+      result_description.BindFlags |= D3D11_BIND_RENDER_TARGET;
+      complete = SUCCEEDED(device->CreateTexture2D(&result_description, nullptr, &created->environment.texture))
+                 && SUCCEEDED(device->CreateRenderTargetView(created->environment.texture.Get(), nullptr, &created->environment.rtv))
+                 && SUCCEEDED(device->CreateShaderResourceView(created->environment.texture.Get(), nullptr, &created->environment.srv));
+    }
+    if (complete) {
+      created->environment.shared = rendering::ExportTexture(created->environment.texture.Get());
+      result_description.MiscFlags = 0u;
+      result_description.Format = DXGI_FORMAT_R8_UNORM;
+      complete = created->environment.shared != nullptr
+                 && SUCCEEDED(device->CreateTexture2D(&result_description, nullptr, &created->ready.texture))
+                 && SUCCEEDED(device->CreateRenderTargetView(created->ready.texture.Get(), nullptr, &created->ready.rtv))
+                 && SUCCEEDED(device->CreateShaderResourceView(created->ready.texture.Get(), nullptr, &created->ready.srv))
+                 && SUCCEEDED(device->CreateUnorderedAccessView(created->ready.texture.Get(), nullptr, &created->ready.uav));
+    }
+    if (complete) {
+      const std::array<float, 4> unavailable = {0.f, 0.f, 0.f, -1.f};
+      const std::array<float, 4> not_ready = {};
+      context->ClearRenderTargetView(created->environment.rtv.Get(), unavailable.data());
+      context->ClearRenderTargetView(created->ready.rtv.Get(), not_ready.data());
+      std::shared_ptr<specular_result::Target> retired;
+      specular_result::targets.lazy_emplace_l(
+          material_resource.Get(),
+          [&](auto& entry) {
+            auto& [native_material, published] = entry;
+            if (published == nullptr || published->generation != selected.generation) {
+              // Release retired COM views after leaving the map's lock.
+              retired = std::exchange(published, created);
+            }
+            result = published;
+          },
+          [&](const auto& insert) {
+            insert(material_resource.Get(), created);
+            result = created;
+          });
+    } else {
+      static std::atomic_flag reported = {};
+      if (!reported.test_and_set(std::memory_order_relaxed)) {
+        reshade::log::message(reshade::log::level::warning, "MgsvLighting: reflection result allocation failed; keeping native reflections");
+      }
+    }
+  }
   if (result != nullptr) {
     render_targets[3] = result->ready.rtv.Get();
   }
@@ -494,8 +571,7 @@ inline void BeginComposite(reshade::api::command_list* cmd_list) {
   }
   const auto target = Read(cmd_list->get_device(), specular_resource.Get());
   std::array<ID3D11ShaderResourceView*, 6> inputs = {};
-  if (material_inputs::controls != nullptr && material_inputs::controls->reflections_mode >= 0.5f
-      && target != nullptr && target->depth.Get() == depth_resource.Get()) {
+  if (UsesEnhancedIndirectLighting() && target != nullptr && target->depth.Get() == depth_resource.Get()) {
     inputs[0] = target->srv.Get();
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> albedo;
     Microsoft::WRL::ComPtr<ID3D11Resource> albedo_resource;
@@ -509,8 +585,15 @@ inline void BeginComposite(reshade::api::command_list* cmd_list) {
     }
     const auto material = material_inputs::Read(cmd_list->get_device(), albedo_resource.Get());
     const auto result = specular_result::Read(cmd_list->get_device(), material_resource.Get());
-    if (material != nullptr && result != nullptr) {
-      inputs[4] = material->color_srv.Get();
+    if (result != nullptr) {
+      // Records exist only where a cube material drew into this G-buffer.
+      // Without any, the shader reads every surface as free of a baked cube.
+      if (material != nullptr) {
+        inputs[1] = material->owner_srv.Get();
+        inputs[2] = target->normal.Get();
+        inputs[3] = target->material.Get();
+        inputs[4] = material->color_srv.Get();
+      }
       // Carry only the replaceable environment and receiver fog to the later
       // reflection stage. This attachment is written by the existing draw.
       std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> targets = {};
@@ -622,13 +705,17 @@ inline bool OnClearRenderTarget(reshade::api::command_list* cmd_list, reshade::a
   auto* view = reinterpret_cast<ID3D11RenderTargetView*>(rtv.handle);  // NOLINT(performance-no-int-to-ptr)
   Microsoft::WRL::ComPtr<ID3D11Resource> resource;
   view->GetResource(&resource);
+  auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
+  const std::array<float, 4> empty = {};
   const auto target = Read(cmd_list->get_device(), resource.Get());
   if (target != nullptr) {
     // Invalidate color beside the native clear in GPU order.
     // An old capture must not survive a new lighting accumulation or replay.
-    const std::array<float, 4> empty = {};
-    auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
     context->ClearRenderTargetView(target->rtv.Get(), empty.data());
+  }
+  // A material clear retires reflection readiness beside the native command.
+  if (const auto result = specular_result::Read(cmd_list->get_device(), resource.Get())) {
+    context->ClearRenderTargetView(result->ready.rtv.Get(), empty.data());
   }
   return false;
 }
@@ -641,6 +728,12 @@ inline void OnDestroyResource(reshade::api::device* device, reshade::api::resour
     retired = std::move(capture);
     return true;
   });
+  std::shared_ptr<specular_result::Target> retired_result;
+  specular_result::targets.erase_if(reinterpret_cast<ID3D11Resource*>(resource.handle), [&](auto& entry) {  // NOLINT(performance-no-int-to-ptr)
+    auto& [native_material, published] = entry;
+    retired_result = std::move(published);
+    return true;
+  });
 }
 
 inline void Reset() {
@@ -650,6 +743,12 @@ inline void Reset() {
     retired.push_back(std::move(capture));
   });
   targets.clear();
+  std::vector<std::shared_ptr<specular_result::Target>> retired_results;
+  specular_result::targets.for_each_m([&](auto& entry) {
+    auto& [native_material, published] = entry;
+    retired_results.push_back(std::move(published));
+  });
+  specular_result::targets.clear();
 }
 
 }  // namespace mgsv::lighting::environment_specular

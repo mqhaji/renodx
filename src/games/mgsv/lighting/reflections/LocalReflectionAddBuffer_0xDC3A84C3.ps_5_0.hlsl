@@ -39,10 +39,10 @@ void main(
     out float4 o0 : SV_Target0) {
   const float2 uv = (v0.xy - 0.00390625) * g_psSystem.m_renderBuffer.zw;
   ReflectionResult result = (ReflectionResult)0;
-  if (CUSTOM_MGSV_ENHANCED_REFLECTIONS) {
+  if (CUSTOM_MGSV_ENHANCED_INDIRECT_LIGHTING) {
     result = LoadReflectionResult(uv);
   }
-  if (CUSTOM_MGSV_ENHANCED_REFLECTIONS) {
+  if (result.replaces_native) {
     // General surfaces and the sortie floor use the same complete GGX result.
     const float3 color = inColorImage.Sample(g_samplerLinear_Wrap_s, uv).rgb;
 #if FIX_UNORM_SRGB

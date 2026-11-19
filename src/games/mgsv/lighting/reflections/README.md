@@ -1,6 +1,6 @@
 # Enhanced reflections
 
-Enhanced replaces general and sortie-floor screen-space reflections with one GGX model and NRD denoising on D3D12. Diffuse Lighting handles diffuse AO/GI separately. Both features share material capture and scene ownership; reflections also reuse reconstruction's device, queue and GPU fences. Vanilla restores the original game path.
+Enhanced replaces general and sortie-floor screen-space reflections with one GGX model and NRD denoising on D3D12. The diffuse chain handles AO/GI before skin scattering. Both run under the single Global Illumination mode and only in the presented main view; other views keep native reflections. They share the cube-material records and scene ownership; reflections also reuse reconstruction's device, queue and GPU fences. Vanilla restores the original game path.
 
 ## Placement and inputs
 
@@ -9,19 +9,19 @@ Work runs before LocalReflectionAddBuffer (0xDC3A84C3) or LocalReflectionComposi
 | Input | Source and purpose |
 |---|---|
 | Albedo, diffuse, specular, depth | Deferred pixel t8–t11: native surfaces and accumulated lighting |
-| Normal and material | Captured G-buffer views, including supported rain/decal writes |
-| Clean material and owner | Base color without the material cube; exact surface qualification |
+| Normal and material | Captured G-buffer views, including rain and decal writes |
+| Cube-material records | Only for materials that bake a cube into albedo: color without the cube, and what the draw wrote, to tell whether it is still the visible surface |
 | Material palette | Associated with submitted specular; F0 tint and the second roughness input |
 | Native scene constants | Actual bound range of deferred pixel b2: 480 bytes |
 | Saved environment | Deferred output 1: linear specular already present; alpha is receiver fog transmission |
 | Late scene and material | Reflection-compositor pixel t0/t2, matching the captured surface grid |
 | Motion and camera | Same scene's velocity, object mask, depth, nonjittered matrices, jitter and reservation |
 
-The late floating-point scene contains extended sRGB. Preparation decodes it once before sampling light. Albedo uses its native sRGB view. Normals, depth, motion and sampling weights receive no gamma conversion. RenoDX tonemapping keeps scene and environment in the same domain; unsupported early tone-curve paths do not qualify for replacement. See the [material contracts](../../materials/README.md) before changing interpretation.
+The late floating-point scene contains extended sRGB. Preparation decodes it once before sampling light. Albedo uses its native sRGB view. Normals, depth, motion and sampling weights receive no gamma conversion. RenoDX tone mapping keeps scene and environment linear, and Enhanced needs it: under the Vanilla tone mapper the composition shader applies its tone curve before this stage, so the environment could only be exchanged in a curved domain. Global Illumination is therefore off under the Vanilla tone mapper. Its controls are disabled there and a red note above them says to select the RenoDX tone mapper. See the [material contracts](../../materials/README.md) before changing interpretation.
 
 ## Follow the passes
 
-1. **Prepare inputs.** `prepare_reflections.cs_5_0.hlsl` validates ownership and writes linear radiance, view normal/roughness, F0/reflection rate, reverse-Z depth and exact scene bytes. The same dispatch writes NRD motion, packed world normal/roughness and positive view Z. Invalid receivers lie outside NRD's denoising range. Shared allocations avoid full-resolution transfer copies and a separate guide pass.
+1. **Prepare inputs.** `prepare_reflections.cs_5_0.hlsl` rejects cube materials that were changed after their draw and writes linear radiance, view normal/roughness, F0/reflection rate, reverse-Z depth and exact scene bytes. The same dispatch writes NRD motion, packed world normal/roughness and positive view Z. Invalid receivers lie outside NRD's denoising range. Shared allocations avoid full-resolution transfer copies and a separate guide pass.
 2. **Build depth mips.** `reflection_mips.cs_6_6.hlsl` reduces to nearest reverse-Z depth, including odd edges. Source light stays at mip zero; ray directions already sample roughness.
 3. **Trace specular light.** `sssr_trace.cs_6_6.hlsl` traces the selected number of stratified visible-GGX proposals per input pixel, defaulting to one. Each evaluates single and reciprocal multiple scattering over the matching GGX PDF; the broad scattering term is retained. Receiver data, the tangent frame, the noise lookup and the integrated response are shared by all rays. Samples use the original 2×2 pattern. Traversal uses reciprocal view depth and a finite depth slab. Backfaces block the environment but cannot supply color. In-view sky can supply visible sky light; unresolved rays use the saved environment approximation. Linear radiance is averaged by the actual sample count before packing. NRD's multi-path helper retains the nearest nonzero geometric hit for tracking; BRDF/PDF weights never change that distance.
 4. **Denoise the complete estimate.** NRD REBLUR_SPECULAR receives nonnegative demodulated light and normalized first-bounce hit distance. Screen light and remaining environment are combined before official NRD packing. REBLUR retains its SDK defaults, including anti-firefly filtering. Hit-distance reconstruction is off: diffuse and specular are not selected probabilistically, and checkerboarding is not used. A GGX ray below the surface contributes zero light and zero hit distance, as NRD expects.
@@ -58,15 +58,15 @@ Descriptors/uploads belong to retired bridge slots, which retain shared outputs 
 
 History advances after successful submission for the same camera's next reservation. Skips, camera/viewport or generation changes, resize, visibility-strength changes and live shader reloads restart it. Replaying the latest matching view/result reuses output without advancing history or adding a handoff. Different or older views cannot borrow that history.
 
-Missing/incompatible NRD or unmatched motion/camera ownership uses raw output with a warning. An SDK recording failure disables further NRD use while retaining allocations for safe retirement. Missing reflection inputs preserve environment light rather than expose a stale canceled native image.
+Missing/incompatible NRD or unmatched motion/camera ownership uses raw output with a warning. Reconstruction Off publishes no camera sample, so the result is never denoised in that mode; the Global Illumination tooltip says so. An SDK recording failure disables further NRD use while retaining allocations for safe retirement. Missing reflection inputs preserve environment light rather than expose a stale canceled native image.
 
 Enhanced skips traces 0xD6714838, 0xBC4665A3, 0xB301C16D and 0xA621C684. Gaussian/reduction shaders 0x7B69DE2B, 0xE135BBD1, 0x051711F2 and 0xA8529A23, plus copies, are skipped only when descending from a canceled trace. Unrelated uses still run. Tracking belongs to command-list recording. GPU readiness has two states: unavailable (0) and enhanced complete (255).
 
 ## Controls and validation
 
-Diffuse Lighting and Reflections have separate Vanilla/Enhanced controls because they run at different points and do not share a trace. Reflection Strength blends the complete replacement; it does not reduce work. Specular Occlusion Strength changes remaining environment and resets affected history. Both strengths are under Indirect Lighting (Advanced) and default to 100%. Enabled diffuse lighting is already in the reflection source.
+Diffuse lighting and reflections share the Global Illumination control although they run at different points and do not share a trace; neither is an intended mode on its own. Reflection Strength blends the complete replacement; it does not reduce work. Specular Occlusion Strength changes remaining environment and resets affected history. Both strengths are under Indirect Lighting (Advanced) and default to 100%. Enabled diffuse lighting is already in the reflection source.
 
-Indirect Lighting lists Diffuse Lighting, Diffuse Lighting Resolution, Reflections, then Rays per Pixel. Rays per Pixel accepts 1–4 and defaults to 1. Lower values reduce trace work but increase noise and can make motion less stable; NRD and the other passes still run. The BRDF and expected reflected energy stay the same. Changing the count restarts reflection history once and prevents reuse of an output made with the old count.
+Indirect Lighting lists Global Illumination, Diffuse Lighting Resolution, then Rays per Pixel. Rays per Pixel accepts 1–4 and defaults to 1. Lower values reduce trace work but increase noise and can make motion less stable; NRD and the other passes still run. The BRDF and expected reflected energy stay the same. Changing the count restarts reflection history once and prevents reuse of an output made with the old count.
 
 Reflected Light shows the denoised estimate; Raw Reflections bypasses NRD for display while its history continues. Environment Weight can exceed one and remains raw. Reflection Coverage green means qualified inputs and a completed result, not a ray hit; magenta means unavailable inputs. Specular Visibility averages the sampled rays: black means confirmed geometry, white means sky/unknown directions, and gray means a mixture. NRD Validation shows upstream history, motion, normal and jitter diagnostics. Probe status counts NRD submissions and history restarts without image copies; queued work is not proof of GPU completion. The live probe atomically replaces preparation and all four custom DX12 stages; SDK shaders come from the DLL. Reload retires old GPU work and resets history. Normal gameplay does not compile shaders or watch files.
 

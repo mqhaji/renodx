@@ -10,8 +10,8 @@
 #include <wrl/client.h>
 #include <include/reshade.hpp>
 
-#include "../../materials/capture.hpp"
 #include "../../rendering/producer_records.hpp"
+#include "../indirect_lighting_mode.hpp"
 #include "result.hpp"
 
 namespace mgsv::lighting::reflections::native_chain {
@@ -22,10 +22,6 @@ namespace mgsv::lighting::reflections::native_chain {
 struct __declspec(uuid("f8459b18-f389-4996-bc13-aa10037afc29")) Recording {
   std::vector<Microsoft::WRL::ComPtr<ID3D11Resource>> skipped;
 };
-
-inline bool Enabled() {
-  return material_inputs::controls != nullptr && material_inputs::controls->reflections_mode >= 0.5f;
-}
 
 inline void OnInitCommandList(reshade::api::command_list* cmd_list) { cmd_list->create_private_data<Recording>(); }
 inline void OnDestroyCommandList(reshade::api::command_list* cmd_list) { cmd_list->destroy_private_data<Recording>(); }
@@ -48,7 +44,7 @@ inline void MarkOutput(reshade::api::command_list* cmd_list, Recording* recordin
 }
 
 inline bool OnTrace(reshade::api::command_list* cmd_list) {
-  if (!Enabled()) return true;
+  if (!UsesEnhancedIndirectLighting()) return true;
   // Both native traces search the same screen depth. Enhanced uses the GGX
   // estimator for either path, including the sortie floor. Clear readiness in
   // execution order so a skipped submission retains only native environment light.
@@ -57,10 +53,12 @@ inline bool OnTrace(reshade::api::command_list* cmd_list) {
   Microsoft::WRL::ComPtr<ID3D11Resource> resource;
   context->PSGetShaderResources(3u, 1u, &material);
   if (material != nullptr) material->GetResource(&resource);
-  if (const auto result = specular_result::Read(cmd_list->get_device(), resource.Get())) {
-    const std::array<float, 4> status = {};
-    context->ClearUnorderedAccessViewFloat(result->ready.uav.Get(), status.data());
-  }
+  // The compositor takes the replacement path only when this result's readiness
+  // is bound. Without a result, keep the native trace that it will composite.
+  const auto result = specular_result::Read(cmd_list->get_device(), resource.Get());
+  if (result == nullptr) return true;
+  const std::array<float, 4> status = {};
+  context->ClearUnorderedAccessViewFloat(result->ready.uav.Get(), status.data());
   auto* recording = cmd_list->get_private_data<Recording>();
   if (recording == nullptr) return true;
   recording->skipped.clear();
@@ -70,7 +68,7 @@ inline bool OnTrace(reshade::api::command_list* cmd_list) {
 
 inline bool OnFilter(reshade::api::command_list* cmd_list) {
   auto* recording = cmd_list->get_private_data<Recording>();
-  if (!Enabled() || recording == nullptr || recording->skipped.empty()) return true;
+  if (recording == nullptr || recording->skipped.empty() || !UsesEnhancedIndirectLighting()) return true;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
   context->PSGetShaderResources(0u, 1u, &view);
@@ -84,7 +82,7 @@ inline bool OnFilter(reshade::api::command_list* cmd_list) {
 
 inline bool OnCopyResource(reshade::api::command_list* cmd_list, reshade::api::resource source, reshade::api::resource destination) {
   auto* recording = cmd_list->get_private_data<Recording>();
-  if (!Enabled() || recording == nullptr || recording->skipped.empty()) return false;
+  if (recording == nullptr || recording->skipped.empty() || !UsesEnhancedIndirectLighting()) return false;
   auto* from = reinterpret_cast<ID3D11Resource*>(source.handle);  // NOLINT(performance-no-int-to-ptr)
   const auto found = std::ranges::find_if(recording->skipped, [from](const auto& item) { return item.Get() == from; });
   if (found == recording->skipped.end()) return false;

@@ -30,6 +30,7 @@
 #include "../../rendering/nrd.hpp"
 #include "../../rendering/producer_records.hpp"
 #include "../environment_specular.hpp"
+#include "../indirect_lighting_mode.hpp"
 #include "probe_api.hpp"
 
 namespace mgsv::lighting::reflections {
@@ -520,7 +521,7 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
                            && camera.camera_identity == runtime.previous_camera.camera_identity
                            && occlusion_strength == runtime.previous_occlusion_strength
                            && rays_per_pixel == runtime.previous_rays_per_pixel;
-  Constants constants = {.size = runtime.size, .sample = scene.camera_sample, .maximum_mip = runtime.mip_count - 1u, .jitter = scene.current_jitter_uv, .environment_occlusion_strength = occlusion_strength, .flags = (consecutive ? 1u : 0u) | (debug_view == 22 ? 2u : 0u), .velocity_projection_jitter_scale = scene.velocity_projection_jitter_scale, .rays_per_pixel = rays_per_pixel};
+  Constants constants = {.size = runtime.size, .sample = scene.camera_sample, .maximum_mip = runtime.mip_count - 1u, .jitter = scene.current_jitter_uv, .environment_occlusion_strength = occlusion_strength, .flags = (consecutive ? 1u : 0u) | (debug_view == 17 ? 2u : 0u), .velocity_projection_jitter_scale = scene.velocity_projection_jitter_scale, .rays_per_pixel = rays_per_pixel};
   if (consecutive) {
     constants.current_to_previous_clip = reconstruction::camera_state::ToRowMajorFloatArray(
         reconstruction::camera_state::Multiply(runtime.previous_camera.current_view_projection, camera.inverse_view_projection));
@@ -570,7 +571,7 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
     denoising.resourceSize[axis] = denoising.resourceSizePrev[axis] = denoising.rectSize[axis] = denoising.rectSizePrev[axis] = static_cast<uint16_t>(runtime.size[axis]);
   }
   denoising.frameIndex = runtime.denoised_frame;
-  denoising.enableValidation = debug_view == 22;
+  denoising.enableValidation = debug_view == 17;
   denoising.accumulationMode = consecutive ? nrd::AccumulationMode::CONTINUE : nrd::AccumulationMode::CLEAR_AND_RESTART;
   const bool use_denoiser = runtime.denoiser_usable && camera_valid;
   if (!use_denoiser) constants.flags &= ~2u;
@@ -638,15 +639,18 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
         const std::array<ImageView, 1> outputs = {{{.resource = runtime.brdf.Get()}}};
         dispatch_pass(dispatch, &frame.arena, runtime.pipelines.integrate, constant_address, {}, outputs, 128u, 128u, false);
       }
+      dispatch.Mark("scene constants");
       for (UINT mip = 1u; mip < runtime.mip_count; ++mip) {
         const std::array<ImageView, 1> srvs = {{{.resource = runtime.depth.Get(), .mip = mip - 1u}}};
         const std::array<ImageView, 1> uavs = {{{.resource = runtime.depth.Get(), .mip = mip}}};
         dispatch_pass(dispatch, &frame.arena, runtime.pipelines.mips, constant_address, srvs, uavs,
                       std::max(runtime.size[0] >> mip, 1u), std::max(runtime.size[1] >> mip, 1u));
       }
+      dispatch.Mark("depth mips");
       const std::array<ImageView, 7> trace_inputs = {{{.resource = runtime.depth.Get(), .mip = 0u, .mips = runtime.mip_count}, {.resource = runtime.color.Get()}, {.resource = runtime.inputs[1].image.resource.Get()}, {.resource = runtime.inputs[2].image.resource.Get()}, {.resource = runtime.brdf.Get()}, {.resource = runtime.sampling_noise.image.resource.Get()}, {.resource = frame.environment.resource.Get()}}};
       const std::array<ImageView, 2> trace_outputs = {{{.resource = runtime.raw[0].Get()}, {.resource = runtime.raw[1].Get()}}};
       dispatch_pass(dispatch, &frame.arena, runtime.pipelines.trace, constant_address, trace_inputs, trace_outputs, runtime.size[0], runtime.size[1]);
+      dispatch.Mark("trace");
       if (use_denoiser) {
         std::array<ID3D12Resource*, rendering::denoising::Runtime::RESOURCE_COUNT> resources = {};
         resources[static_cast<size_t>(nrd::ResourceType::IN_MV)] = runtime.inputs[5].image.resource.Get();
@@ -656,15 +660,17 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
         resources[static_cast<size_t>(nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST)] = runtime.filtered.Get();
         if (denoising.enableValidation) resources[static_cast<size_t>(nrd::ResourceType::OUT_VALIDATION)] = frame.outputs[1].resource.Get();
         const auto captured_bytes = runtime.denoiser->Record(bridge.device12.Get(), dispatch.commands, &frame.arena, denoising, resources,
-                                                             camera_capture ? std::as_writable_bytes(std::span(camera_capture->sdk_constants)) : std::span<std::byte>{});
+                                                             camera_capture ? std::as_writable_bytes(std::span(camera_capture->sdk_constants)) : std::span<std::byte>{},
+                                                             dispatch.timing);
         if (camera_capture) {
           camera_capture->sdk_constant_bytes = captured_bytes;
         }
       }
-      const bool show_raw = debug_view == 21;
+      const bool show_raw = debug_view == 16;
       const std::array<ImageView, 6> resolve_inputs = {{{.resource = use_denoiser && !show_raw ? runtime.filtered.Get() : runtime.raw[0].Get()}, {.resource = runtime.raw[1].Get()}, {.resource = runtime.inputs[1].image.resource.Get()}, {.resource = runtime.inputs[2].image.resource.Get()}, {.resource = runtime.depth.Get()}, {.resource = runtime.brdf.Get()}}};
       const std::array<ImageView, 2> resolve_outputs = {{{.resource = frame.outputs[0].resource.Get()}, {.resource = frame.outputs[1].resource.Get()}}};
       dispatch_pass(dispatch, &frame.arena, runtime.pipelines.resolve, constant_address, resolve_inputs, resolve_outputs, runtime.size[0], runtime.size[1]);
+      dispatch.Mark("resolve");
       compute::Transition(dispatch.commands, runtime.scene.Get(), D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER, D3D12_RESOURCE_STATE_COMMON);
       return true;
     };
@@ -759,8 +765,8 @@ inline void OnResetCommandList(reshade::api::command_list* cmd_list) {
   if (auto* state = cmd_list->get_private_data<CompositeState>()) *state = {};
 }
 
-inline void Capture(reshade::api::command_list* cmd_list, const ShaderInjectData& controls) {
-  if (controls.reflections_mode < 0.5f || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return;
+inline void Capture(reshade::api::command_list* cmd_list) {
+  if (!UsesEnhancedIndirectLighting() || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return;
   // A failed capture must invalidate an earlier association for this owner.
   // Publish this beside the draw, so worker recording order cannot select it.
   temporal_inputs::Record(cmd_list, {
@@ -795,14 +801,18 @@ inline void Capture(reshade::api::command_list* cmd_list, const ShaderInjectData
   environment->material->GetResource(&material_resource);
   inputs.material = material_resource;
   inputs.result = specular_result::Read(cmd_list->get_device(), material_resource.Get());
-  if (material == nullptr || inputs.result == nullptr) {
-    Report("MgsvReflections: missing clean material or shared output");
+  if (inputs.result == nullptr) {
+    Report("MgsvReflections: missing shared output");
     return;
   }
   inputs.views[2] = environment->normal;
   inputs.views[3] = environment->material;
-  inputs.views[5] = material->color_srv;
-  inputs.views[6] = material->owner_srv;
+  // Records exist only where a cube material drew into this G-buffer. Without
+  // any, preparation reads every surface as free of a baked cube.
+  if (material != nullptr) {
+    inputs.views[5] = material->color_srv;
+    inputs.views[6] = material->owner_srv;
+  }
   inputs.views[9] = environment->srv;
   inputs.generation = environment->generation;
 
@@ -837,8 +847,7 @@ inline void Capture(reshade::api::command_list* cmd_list, const ShaderInjectData
 // The native compositor still performs the scene-target change. Insert the
 // trace immediately before it, after sky and forward lighting have contributed.
 inline bool BeginComposite(reshade::api::command_list* cmd_list) {
-  const auto* controls = material_inputs::controls;
-  if (controls == nullptr || controls->reflections_mode < 0.5f) return true;
+  if (!UsesEnhancedIndirectLighting()) return true;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> source;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> material;
@@ -868,6 +877,12 @@ inline bool BeginComposite(reshade::api::command_list* cmd_list) {
   auto* state = cmd_list->get_private_data<CompositeState>();
   if (state == nullptr) return true;
   std::array<ID3D11ShaderResourceView*, 4> outputs = {};
+  if (result != nullptr) {
+    // Bound readiness tells the compositor this view's native trace was
+    // canceled. If the late scene is unusable, readiness stays unavailable and
+    // the scene is left unchanged instead of exposing the canceled trace.
+    outputs[3] = result->ready.srv.Get();
+  }
   if (source != nullptr && result != nullptr) {
     outputs = {result->images[0].srv.Get(), result->images[1].srv.Get(), result->environment.srv.Get(), result->ready.srv.Get()};
     const auto trace_scene = [source, material_resource, result](auto* submitted, bool) {

@@ -27,7 +27,8 @@ struct Target {
   uint64_t generation = 0u;
   uint32_t width = 0u;
   uint32_t height = 0u;
-  // Original diffuse, material, albedo, normal, depth, clean color, owner.
+  // Original diffuse, material, albedo, normal, depth, then the cube records'
+  // clean color and owner, which are null when no cube material was captured.
   // These are immutable binding identities, not snapshots of their contents.
   std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 7> inputs;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
@@ -125,8 +126,11 @@ inline bool Begin(reshade::api::command_list* cmd_list) {
   selected.materials.specular->GetResource(&specular);
   const auto clean = material_inputs::Read(selected.device, albedo.Get());
   const auto environment = environment_specular::Read(selected.device, specular.Get());
-  if (clean == nullptr || environment == nullptr || environment->material == nullptr
-      || environment->normal == nullptr || environment->depth_view == nullptr) return true;
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> albedo_texture;
+  if (environment == nullptr || environment->material == nullptr || environment->normal == nullptr
+      || environment->depth_view == nullptr || FAILED(albedo.As(&albedo_texture))) return true;
+  D3D11_TEXTURE2D_DESC albedo_description = {};
+  albedo_texture->GetDesc(&albedo_description);
   if (environment->material != sources[1]) {
     Microsoft::WRL::ComPtr<ID3D11Resource> captured;
     Microsoft::WRL::ComPtr<ID3D11Resource> current;
@@ -141,12 +145,16 @@ inline bool Begin(reshade::api::command_list* cmd_list) {
   sources[2] = selected.materials.albedo;
   sources[3] = environment->normal;
   sources[4] = environment->depth_view;
-  sources[5] = clean->color_srv;
-  sources[6] = clean->owner_srv;
+  // Records exist only where a cube material drew into this G-buffer. Without
+  // any, the shader reads native albedo as free of a baked cube.
+  if (clean != nullptr) {
+    sources[5] = clean->color_srv;
+    sources[6] = clean->owner_srv;
+  }
   auto target = Read(selected.device, copied.Get());
   const bool same_inputs = target != nullptr && target->inputs == sources;
   D3D11_TEXTURE2D_DESC description = {
-      .Width = clean->width, .Height = clean->height, .MipLevels = 1u, .ArraySize = 1u, .Format = DXGI_FORMAT_R32G32B32A32_FLOAT, .SampleDesc = {.Count = 1u}, .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE};
+      .Width = albedo_description.Width, .Height = albedo_description.Height, .MipLevels = 1u, .ArraySize = 1u, .Format = DXGI_FORMAT_R32G32B32A32_FLOAT, .SampleDesc = {.Count = 1u}, .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE};
   D3D11_RENDER_TARGET_VIEW_DESC output_view = {};
   outputs[0]->GetDesc(&output_view);
   if (output_view.ViewDimension != D3D11_RTV_DIMENSION_TEXTURE2D || output_view.Texture2D.MipSlice != 0u
@@ -163,6 +171,7 @@ inline bool Begin(reshade::api::command_list* cmd_list) {
     if (output_texture == nullptr || output_desc.Width != description.Width || output_desc.Height != description.Height
         || output_desc.ArraySize != 1u || output_desc.MipLevels != 1u || output_desc.SampleDesc.Count != 1u) return true;
     for (const auto& source : sources) {
+      if (source == nullptr) continue;  // The two optional record views.
       D3D11_TEXTURE2D_DESC source_desc = {};
       const auto texture = inputs::internal::ReadTexture(source.Get(), device, &source_desc);
       if (texture == nullptr || texture == output_texture || source_desc.Width != description.Width || source_desc.Height != description.Height

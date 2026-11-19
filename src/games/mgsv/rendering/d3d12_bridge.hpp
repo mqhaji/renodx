@@ -22,6 +22,7 @@
 
 #include "../../../utils/directx.hpp"
 #include "../../../utils/gpu_fence.hpp"
+#include "d3d12_timing.hpp"
 #include "shared_texture.hpp"
 
 namespace mgsv::rendering::d3d12_bridge {
@@ -108,6 +109,15 @@ struct Dispatch {
   ID3D12Resource* output = nullptr;
   // Pass-owned descriptor and constant storage follows this slot's retirement.
   size_t slot_index = 0u;
+  // GPU timing of this recording, active only on a diagnostic request.
+  d3d12_timing::Scope* timing = nullptr;
+
+  // Ends a named timing span covering the work recorded since the last one.
+  void Mark(const char* name) const {
+    if (timing != nullptr) {
+      timing->Mark(name);
+    }
+  }
 };
 
 struct Statistics {
@@ -259,6 +269,7 @@ class Bridge {
     const auto executed12 = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
     slot->d3d12_completion = renodx::utils::gpu_fence::QueueSignal(queue12.Get(), d3d12_fence.get());
     if (slot->d3d12_completion == renodx::utils::gpu_fence::NO_SIGNAL) throw std::runtime_error("D3D12 bridge signal rejected");
+    d3d12_timing::Submitted(slot->d3d12_completion);
     const auto signaled12 = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
     if (!renodx::utils::gpu_fence::QueueWait(context, d3d12_fence.get(), slot->d3d12_completion)) throw std::runtime_error("D3D11 bridge wait rejected");
     const auto waited11 = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
@@ -328,8 +339,10 @@ class Bridge {
     auto* slot = (*pool)[index].get();
     Check(slot->allocator->Reset(), "Reset compute allocator");
     Check(slot->commands->Reset(slot->allocator.Get(), nullptr), "Reset compute list");
+    d3d12_timing::Collect(completed12);
+    d3d12_timing::Scope timing(device12.Get(), queue12.Get(), slot->commands.Get(), d3d12_timing::Stream::LIGHTING);
     try {
-      if (!record(Dispatch{.commands = slot->commands.Get(), .slot_index = index})) {
+      if (!record(Dispatch{.commands = slot->commands.Get(), .slot_index = index, .timing = &timing})) {
         Check(slot->commands->Close(), "Close canceled compute list");
         return false;
       }
@@ -337,6 +350,7 @@ class Bridge {
       slot->commands->Close();
       throw;
     }
+    timing.Finish();
     Check(slot->commands->Close(), "Close compute list");
     Submit(context, slot, scene, prepare, complete, true, copied_output);
     return true;
@@ -443,17 +457,21 @@ class Bridge {
     const auto prepared = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
     Check(selected->allocator->Reset(), "Reset bridge allocator");
     Check(selected->commands->Reset(selected->allocator.Get(), nullptr), "Reset bridge command list");
+    d3d12_timing::Collect(d3d12_fence->GetCompletedValue());
+    d3d12_timing::Scope gpu_timing(device12.Get(), queue12.Get(), selected->commands.Get(), d3d12_timing::Stream::RECONSTRUCTION);
     try {
       record(Dispatch{
           .commands = selected->commands.Get(),
           .input = selected->input.resource.Get(),
           .output = selected->output.resource.Get(),
           .slot_index = static_cast<size_t>(std::find_if(slots.begin(), slots.end(), [selected](const auto& slot) { return slot.get() == selected; }) - slots.begin()),
+          .timing = &gpu_timing,
       });
     } catch (...) {
       selected->commands->Close();
       throw;
     }
+    gpu_timing.Finish();
     Check(selected->commands->Close(), "Close recorded bridge command list");
     const auto recorded = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
 
@@ -502,6 +520,7 @@ inline void Drain() {
 
 inline void Destroy() {
   Drain();
+  d3d12_timing::Release();
   backend.reset();
 }
 

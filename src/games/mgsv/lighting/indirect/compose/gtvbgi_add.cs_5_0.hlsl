@@ -49,7 +49,7 @@ RWTexture2D<float4> scattering_copy : register(u2);
   float weight_sum = 0.0;
   float visibility = 0.0;
   float visibility_weight = 0.0;
-  const int diagnostic = (int)clamp(CUSTOM_MGSV_LIGHTING_DEBUG_VIEW, 0.0, 37.0);
+  const int diagnostic = (int)clamp(CUSTOM_MGSV_LIGHTING_DEBUG_VIEW, 0.0, 17.0);
   float3 diagnostic_sum = 0.0;
   float diagnostic_weight = 0.0;
   [unroll] for (int y = 0; y < 2; ++y) {
@@ -78,7 +78,7 @@ RWTexture2D<float4> scattering_copy : register(u2);
       }
       // Invalid GI must remain visible in the validity view. Diagnostic RGB
       // therefore has its own weights and never feeds the radiance result.
-      if (diagnostic >= 2 && diagnostic <= 11) {
+      if (diagnostic >= 2 && diagnostic <= 6) {
         diagnostic_sum += diagnostic_buffer.Load(int3(q, 0)).rgb * weight;
         diagnostic_weight += weight;
       }
@@ -143,12 +143,11 @@ RWTexture2D<float4> scattering_copy : register(u2);
   // Both native destinations receive the same RGB before scattering, with
   // their own alpha preserved: accumulation alpha and the skin-material mask.
   float3 output = (diagnostic == 1) ? bounce : shaded_diffuse + bounce;
-  if (diagnostic >= 2 && diagnostic <= 11) output = diagnostic_sum / max(diagnostic_weight, 1.0e-4);
-  if (diagnostic == 6) output *= CUSTOM_MGSV_DIFFUSE_GI_STRENGTH;
-  if (diagnostic == 12) output = ambient_valid ? ambient : float3(1.0, 0.0, 1.0);
-  if (diagnostic == 13) output = ambient_valid ? direct : float3(1.0, 0.0, 1.0);
-  if (diagnostic == 14) output = shaded_diffuse + bounce;
-  if (diagnostic == 15) output = ambient_valid ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 1.0);
+  if (diagnostic >= 2 && diagnostic <= 6) output = diagnostic_sum / max(diagnostic_weight, 1.0e-4);
+  if (diagnostic == 7) output = ambient_valid ? ambient : float3(1.0, 0.0, 1.0);
+  if (diagnostic == 8) output = ambient_valid ? direct : float3(1.0, 0.0, 1.0);
+  if (diagnostic == 9) output = shaded_diffuse + bounce;
+  if (diagnostic == 10) output = ambient_valid ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 1.0);
   // 4. Update both diffuse consumers before skin scattering. The copy's alpha
   // selects scattering materials; it is not a general lighting-validity flag.
   // Preserve finite values in the native RGBA16F destination at high strengths.

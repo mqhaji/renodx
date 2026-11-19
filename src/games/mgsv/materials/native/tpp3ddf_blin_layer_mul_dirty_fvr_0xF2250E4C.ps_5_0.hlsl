@@ -416,13 +416,12 @@ void main(
     out float4 o1 : SV_Target1,
     out float4 o2 : SV_Target2,
     out float4 clean_material : SV_Target3,
-    out uint4 material_owner : SV_Target4,
-    out float4 specular_reset : SV_Target5) {
-  specular_reset = 0.0;
+    out uint4 material_owner : SV_Target4) {
   material_clean_pass = false;
   NativeMaterialMain(v0, v1, v2, w2, v3, v4, v5, v6, o0, o1, o2);
   clean_material = float4(0.0, 0.0, 0.0, -1.0);
-  material_owner = 0u;
+  // A blended draw cannot say how much cube remains: unknown, at this depth.
+  material_owner = uint4(0u, 0u, 0u, asuint(v0.z));
   const uint capture = material_capture_parameters.Load(int3(0, 0, 0));
   if ((capture & 1u) == 0u) return;
   material_clean_pass = true;

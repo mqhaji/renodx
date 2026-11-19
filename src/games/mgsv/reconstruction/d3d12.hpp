@@ -297,6 +297,7 @@ template <typename Record>
         }
         compute::Transition(dispatch.commands, dispatch.output, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         record(evaluation);
+        dispatch.Mark("evaluate and encode");
         // Shared resources always return to COMMON before D3D11 resumes.
         compute::Transition(dispatch.commands, dispatch.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
         for (auto* input : {evaluation.color, evaluation.motion, evaluation.depth, evaluation.motion_debug}) {
