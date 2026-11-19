@@ -18,8 +18,9 @@ struct __declspec(uuid("C0ACDAC9-F85A-403E-99AD-7FA953196FEC")) Interface {
   std::shared_mutex mutex;
   // Reads any numeric setting by its saved key.
   bool (*get_setting)(const char* key, float* value) = nullptr;
-  // Changes a lighting setting (a DirectLighting or IndirectLighting key) the
-  // way the menu does. The preset is not saved, so a restart restores it.
+  // Changes a lighting setting (a DirectLighting or IndirectLighting key), or
+  // the reconstruction method or its quality, the way the menu does. The
+  // preset is not saved, so a restart restores it.
   bool (*set_setting)(const char* key, float value) = nullptr;
   // Times the next submissions of each D3D12 stream; see d3d12_timing.hpp.
   void (*request_d3d12_timing)(uint32_t submissions) = nullptr;

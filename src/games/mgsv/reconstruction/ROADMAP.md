@@ -47,7 +47,7 @@ Further CPU work can trace the native constant setters and uploads for bloom and
 
 ## SDK lifecycle and validation
 
-- Exercise lazy DLSS startup from saved and manual selection, cancellation, missing-DLL/unsupported-device explanations, model-F fallback, query boundaries, insertion fallbacks, state restoration, and callbacks crossing Present.
+- Exercise lazy DLSS startup from saved and manual selection, cancellation, missing-DLL/unsupported-device explanations, model-F fallback, query boundaries, the fill-only outcome, state restoration, and callbacks crossing Present.
 - Validate feature release/recreation across DLSS, FSR, Analytical, and Off, then test model/size recreation and device teardown separately. One successful switch does not prove the earlier crash is resolved.
 - Compare methods on the same verified inputs: motion direction/scale, reverse-Z depth, current alpha, and downstream scene/UI output. Keep automatic exposure until a suitable MGSV exposure resource is proven.
 - Shared indirect lighting has its own submitted producer ledger and controlled replay coverage. The diffuse gather keeps no history; reflection history belongs to NRD. Do not treat the older AA-Off motion compatibility concern as the current implementation or assume scene-reconstruction history proves reflection history. See the [lighting guide](../lighting/indirect/README.md).
@@ -69,7 +69,7 @@ The [bridge guide](../docs/ARCHITECTURE.md#d3d12-bridge) owns the current resour
 
 ### D3D12 reconstruction checkpoint
 
-DLSS, FSR, and Analytical TAA now share one D3D12 backend while retaining BeforeBloom insertion, scene-owned jitter, history advancement, and the native post-processing route. Input preparation combines gamma decoding and motion conversion with writes into shared storage. TAA combines resolve and output encoding; DLSS and FSR use one encoder immediately after evaluation. The old bridge diagnostic pass is removed.
+DLSS, FSR, and Analytical TAA share one D3D12 backend with scene-owned jitter, history advancement, and the native post-processing route. Since November 19, 2026 they run where the engine starts post-processing; see the [frame contracts](README.md#frame-and-resource-contracts). Input preparation combines gamma decoding and motion conversion with writes into shared storage. TAA combines resolve and output encoding; DLSS and FSR use one encoder immediately after evaluation. The old bridge diagnostic pass is removed.
 
 FSR now uses AMD's signed loader and upscaler DLLs with automatic provider selection and default algorithm tuning. The bundled host, custom FSR backend, and shader permutations are removed. TAA uses linear history, cooperative neighborhood loading, and Catmull-Rom reconstruction without repeated gamma decoding. Its single SM6.0 target covers the features it uses.
 
@@ -79,13 +79,21 @@ Saved DLSS Auto startup, Native/Auto changes in DLSS and FSR, TAA, Off, and retu
 
 The bridge experiments did not establish a worthwhile gain from extra queues, earlier signaling, explicit flushing, or alternate copy paths. Keep one direct queue, explicit states, and recording before submission. Compare the complete D3D12 reconstruction group against the previous D3D11 build, including input preparation, output encoding, and total frame time. Shared fences preserve dependencies; they do not make the handoff free. Keep detailed experiment results in local analysis.
 
+### Reconstruction at the post-processing start: open work
+
+- Pre-exposure: pass the engine's exposure value (`Viewport::GetExposureParam`, the `m_exposure.z` every light shader multiplies by), relative to its value at the last history reset, to DLSS and FSR under the RenoDX tone mapper. Keep it only if a dark-to-bright adaptation test is at least as good. Ray Reconstruction ignores exposure.
+- Finished-scene depth: try the scene's own depth-stencil (`0x242B94EBC2F5`) instead of the G-buffer depth, so forward-drawn surfaces that write depth (the ocean, forward models) get their own depth and camera motion. Keep it only if a moving-camera comparison at Mother Base shows less smearing and nothing worse elsewhere.
+- Overlap is measured and not worth doing: running the output-size depth and stencil passes while D3D12 evaluates saved about 0.05 ms of GPU time and cost about 0.07 ms on the playback thread, because the GPU runs the two APIs' work one after the other.
+- Later: move the lighting history's motion record to an engine hook too, so the per-draw handler and its descriptor tracker can go; then consider letting the engine create the post-processing targets at output size instead of redirecting them.
+- Ray Reconstruction takes this same slot. It adds guide images (diffuse and specular albedo, normals with roughness, specular hit distance), at least 32 jitter phases, and optionally the engine's scene copy before transparents; depth of field must stay after it.
+
 ### Later custom passes
 
 Group passes around their actual consumers. Connected D3D12 work can share private intermediates, but it must finish before native scattering, lighting, fog, or post-processing needs its result. Native shader replacements still run in D3D11 until their complete passes are moved. Start with equivalent algorithms and measure the complete group, including transfers and waits, before changing its implementation.
 
 | Group | Initial boundary | Candidate improvements after the port |
 | --- | --- | --- |
-| Reconstruction | Prepared scene color, depth, and motion enter D3D12 before bloom; encoded output returns before native post-processing | One submission for SDK evaluation and output encoding; private SDK scratch and history; direct writes to the shared scene destination |
+| Reconstruction | Prepared scene color, depth, and motion enter D3D12 where the engine starts post-processing; encoded output returns before the first post pass | One submission for SDK evaluation and output encoding; private SDK scratch and history; direct writes to the shared scene destination |
 | Indirect lighting | Accepted geometry, materials, and lighting inputs enter before skin scattering; the composed result returns for native scattering | Keep depth reduction, tracing, and application together; evaluate wave reductions, tile classification, and compacted tracing work |
 | Contact shadows | Accepted light/depth batches enter before their native lighting consumers | Preserve batched light work; evaluate wave operations within the depth scan while retaining workgroup synchronization where lanes cross wave boundaries |
 | Ray/path tracing | Geometry, poses, materials, lights, and camera data enter at their verified producer boundaries; outputs return to their actual composition consumers | Keep acceleration structures, tracing, radiance caches, denoising or Ray Reconstruction, and their histories on D3D12; avoid exporting intermediate signals with no native consumer |

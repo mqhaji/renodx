@@ -15,8 +15,9 @@ The [render map](render-map.html) follows these owners through the native frame,
 | `rendering/inputs.hpp` | Selected device/swapchain, reset versions, and retained native material/motion views |
 | `rendering/producer_records.hpp` | Camera/exposure, motion, diffuse-copy, prepared-source, and material-table records published in submission order |
 | `rendering/native_context.hpp` | Native renderer/view ownership, worker handoff, and copied scopes for submitted addon work |
-| `rendering/engine_targets.hpp` | Hooks on the engine's render target creation that make it create selected targets as RGBA16F, the private float images of depth of field and motion blur, and the scene-role tag |
-| `rendering/draw_roles.hpp` | Velocity-producer identification, the bloom chain gate, and scene-image checks for draws that run generic or shared shaders |
+| `rendering/engine_targets.hpp` | Hooks on the engine's render target creation that make it create selected targets as RGBA16F, the private float images of depth of field and motion blur, the scene-role tag, and the engine's current scene, depth and velocity images for reconstruction |
+| `rendering/native_velocity.hpp` | Hooks that keep the engine drawing motion vectors without the game's motion blur and note which view builds drew them |
+| `rendering/draw_roles.hpp` | Velocity-producer identification, the bloom chain gate, and scene-copy handling for draws that run generic or shared shaders |
 | `rendering/d3d11_state.hpp`, `rendering/geometry.hlsli` | D3D11 state preservation and native geometry reconstruction |
 | `materials/capture.hpp`, `materials/native/` | Records for the 59 materials that bake a cube map into albedo, their ports, the two rain ports, and the registration inventory |
 | `materials/brdf.hlsli`, `lighting/reflections/sssr_brdf.cs_6_6.hlsl` | Native material decoding, reciprocal GGX response, and one-time integration table; [material contracts](../materials/README.md) describe producers, palette fields, and conversion limits |
@@ -52,7 +53,7 @@ Custom indirect lighting runs after native diffuse copy `0xD71E843E` and before 
 
 Enhanced shadows change direct lighting inside native light draws, before indirect lighting. Deferred composition exports the replaceable environment and receiver fog transmission. DX12 reflections sample the late scene before native reflection composition, including visible sky and forward lighting. General and sortie-floor paths share one GGX estimator and NRD specular denoiser. The late compositor replaces environment light once in linear light. Enhanced skips redundant native traces and their dependent filters/copies; unavailable inputs retain environment. Vanilla restores native SSR. A tone curve inside a sky, ocean or material shader does not make that shader a late post-processing pass.
 
-Reconstruction's preferred insertion is before bloom preparation `0x72C1D157`. Geometry, lighting, and reflections use render dimensions; later scene-color processing and UI use output dimensions. Routing checks the actual producer/resource role, not every use of a shared copy shader or every Draw2D shader. Native hardware depth/stencil and sampled geometry depth are separate consumers. See the [reconstruction contracts](../reconstruction/README.md#frame-and-resource-contracts).
+Reconstruction runs where the engine starts a view's post-processing (`DgDx11::StartPostFilter`, hooked in `reconstruction/native_post_filter.hpp`): after the last scene writer and before the exposure meter, bloom, depth of field and motion blur. It has no other insertion point. Geometry, lighting, and reflections use render dimensions; later scene-color processing and UI use output dimensions. Routing checks the actual producer/resource role, not every use of a shared copy shader or every Draw2D shader. Native hardware depth/stencil and sampled geometry depth are separate consumers. See the [reconstruction contracts](../reconstruction/README.md#frame-and-resource-contracts).
 
 ## Shared layouts and color
 
@@ -87,7 +88,8 @@ DLSS, FSR, Analytical TAA and stochastic reflections use one D3D12 device and di
 | `rendering/d3d12_compute.hpp` | Store per-slot descriptors and constants; create private textures and compute pipelines |
 | `lighting/reflections/runtime.hpp` | Prepare shared native inputs, record the complete reflection chain, and publish paired shared results |
 | `reconstruction/d3d12.hpp` | Prepare shared inputs, record a method's evaluation and encoding, and retain resources |
-| `reconstruction/coordinator.hpp` | Admit the executed scene, preserve D3D11 state, and commit history only after successful submission |
+| `reconstruction/native_post_filter.hpp`, `reconstruction/input_capture.hpp` | Find the start of each scene's post-processing; build and check the scene's inputs there |
+| `reconstruction/coordinator.hpp` | Cut the native list at that point, run the job at playback with D3D11 state preserved, and commit history only after successful submission |
 | `reconstruction/analytical/`, `dlss/`, `fsr/` | Own each algorithm, its private history, and its SDK lifecycle |
 
 ### Resource ownership

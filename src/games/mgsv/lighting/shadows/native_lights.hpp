@@ -62,17 +62,6 @@ static void __fastcall HookMainExec(void* plugin, void* render, void* viewport) 
 
 }  // namespace internal
 
-// The engine stores ReShade's proxy. Its get_native() and D3D callbacks use the
-// original object, which the proxy exposes through this interface ID.
-inline Microsoft::WRL::ComPtr<ID3D11DeviceContext> Unwrap(uintptr_t stored_context) {
-  Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
-  auto* proxy = reinterpret_cast<ID3D11DeviceContext*>(stored_context);  // NOLINT(performance-no-int-to-ptr)
-  if (proxy != nullptr && FAILED(proxy->QueryInterface(rendering::native_context::UNWRAPPED_OBJECT, reinterpret_cast<void**>(context.GetAddressOf())))) {
-    context = proxy;
-  }
-  return context;
-}
-
 // Copy at the shaded draw. Native Flush has uploaded these CPU constant banks
 // without clearing them; the next light can overwrite them as soon as we return.
 // The CommandBuffer must be the one recording into the draw's own context.
@@ -84,7 +73,7 @@ inline bool ReadConstants(uintptr_t command_buffer, ID3D11DeviceContext* context
   // its CPU data at +8 and float4 count at +0x18. Banks 2/3 match shader b2/b3.
   const auto* buffer = reinterpret_cast<const std::byte*>(command_buffer);  // NOLINT(performance-no-int-to-ptr)
   const auto* native_context = *reinterpret_cast<const std::byte* const*>(buffer + 8u);
-  if (native_context == nullptr || Unwrap(*reinterpret_cast<const uintptr_t*>(native_context + 8u)).Get() != context) return false;
+  if (native_context == nullptr || rendering::native_context::Unwrap(*reinterpret_cast<const uintptr_t*>(native_context + 8u)).Get() != context) return false;
   const auto* banks = *reinterpret_cast<const std::byte* const*>(buffer + 0x28u);
   if (banks == nullptr) return false;
   const auto bank_count = *reinterpret_cast<const uint32_t*>(banks + 0x108u);

@@ -163,6 +163,9 @@ struct DofScope {
   bool matches_view = false;
 };
 using Observer = void (*)(const Event&);
+// Runs on the recording thread as soon as the engine has begun a command list,
+// before anything is recorded into it. GetRecording() names its D3D context.
+using RecordingBegan = void (*)();
 
 // The native objects recording on the calling thread. Both are borrowed: read
 // them only inside the native call that is using them.
@@ -190,6 +193,7 @@ struct __declspec(uuid("e9ee935e-2efd-4613-9cad-15e506da643c")) Shared {
   Owner (*read_presentation_owner)() = nullptr;
   DofScope (*read_dof)() = nullptr;
   Recording (*read_recording)() = nullptr;
+  bool (*set_recording_began)(RecordingBegan, RecordingBegan) = nullptr;
 };
 static renodx::utils::cross_addon::Shared<Shared> shared;
 static bool registered = false;
@@ -226,6 +230,7 @@ struct ViewScope {
 static thread_local std::vector<ViewScope> view_owners;
 static std::shared_mutex observer_mutex;
 static std::atomic<Observer> observer = nullptr;
+static std::atomic<RecordingBegan> recording_began = nullptr;
 
 // An observer only copies events. It must not call back into ownership or make
 // D3D calls. Holding this read lock lets unsubscription wait for every callback.
@@ -265,6 +270,11 @@ inline Scope GetScope() {
   return (read != nullptr ? read() : Scope{});
 }
 
+// The view build whose image the selected presentation shows.
+inline bool IsPresentedMainView(const Owner& owner) {
+  return owner.scene != 0u && owner.main_view && owner.active_member && owner.presentation_matches;
+}
+
 inline Owner GetPresentationOwner() {
   if (shared.data == nullptr || shared.data->read_presentation_owner == nullptr) return {};
   return shared.data->read_presentation_owner();
@@ -278,6 +288,17 @@ inline DofScope GetDofScope() {
 inline Recording GetRecording() {
   if (shared.data == nullptr || shared.data->read_recording == nullptr) return {};
   return shared.data->read_recording();
+}
+
+// The engine stores ReShade's proxy. Its get_native() and D3D callbacks use the
+// original object, which the proxy exposes through this interface ID.
+inline Microsoft::WRL::ComPtr<ID3D11DeviceContext> Unwrap(uintptr_t stored_context) {
+  Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+  auto* proxy = reinterpret_cast<ID3D11DeviceContext*>(stored_context);  // NOLINT(performance-no-int-to-ptr)
+  if (proxy != nullptr && FAILED(proxy->QueryInterface(UNWRAPPED_OBJECT, reinterpret_cast<void**>(context.GetAddressOf())))) {
+    context = proxy;
+  }
+  return context;
 }
 
 // A submitted addon dispatch runs on the immediate context, after the native
@@ -314,6 +335,13 @@ inline void SetPresentation(IDXGISwapChain* presentation) {
 inline bool SetObserver(Observer expected, Observer replacement) {
   return shared.data != nullptr && shared.data->set_observer != nullptr
          && shared.data->set_observer(expected, replacement);
+}
+
+// Replaces the callback only if it is still the expected one, and returns only
+// after any call of the previous one has finished.
+inline bool SetRecordingBegan(RecordingBegan expected, RecordingBegan replacement) {
+  return shared.data != nullptr && shared.data->set_recording_began != nullptr
+         && shared.data->set_recording_began(expected, replacement);
 }
 using Build = void(__fastcall*)(uintptr_t, uintptr_t, uintptr_t, uint32_t);
 using Pair = void(__fastcall*)(uintptr_t, uintptr_t);
@@ -598,6 +626,12 @@ inline void __fastcall BeginRecord(uintptr_t node, uintptr_t context) {
   });
   recording_d3d_context = Read<uintptr_t>(context, D3D_CONTEXT_OFFSET);
   begin_record(node, context);
+  if (recording_began.load(std::memory_order_acquire) == nullptr) return;
+  // The read lock lets a replacement wait for this call.
+  const std::shared_lock lock(observer_mutex);
+  if (const auto callback = recording_began.load(std::memory_order_relaxed); callback != nullptr) {
+    callback();
+  }
 }
 
 inline void __fastcall EndRecord(uintptr_t node, uintptr_t context) {
@@ -797,6 +831,12 @@ inline bool Install() {
       const std::unique_lock lock(observer_mutex);
       if (observer.load(std::memory_order_relaxed) != expected) return false;
       observer.store(replacement, std::memory_order_relaxed);
+      return true;
+    };
+    shared.data->set_recording_began = +[](RecordingBegan expected, RecordingBegan replacement) {
+      const std::unique_lock lock(observer_mutex);
+      if (recording_began.load(std::memory_order_relaxed) != expected) return false;
+      recording_began.store(replacement, std::memory_order_release);
       return true;
     };
     shared.data->remove_hooks = RemoveHooks;

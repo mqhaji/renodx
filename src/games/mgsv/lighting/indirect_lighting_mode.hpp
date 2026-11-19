@@ -28,7 +28,7 @@ inline bool UsesEnhancedIndirectLighting() {
     }
     return false;
   }
-  return owner.main_view && owner.active_member && owner.presentation_matches;
+  return rendering::native_context::IsPresentedMainView(owner);
 }
 
 }  // namespace mgsv::lighting

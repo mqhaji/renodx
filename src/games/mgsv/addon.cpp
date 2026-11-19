@@ -18,6 +18,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <span>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -63,15 +64,18 @@
 #include "reconstruction/d3d12.hpp"
 #include "reconstruction/input_capture.hpp"
 #include "reconstruction/logging.hpp"
+#include "reconstruction/native_post_filter.hpp"
 #include "reconstruction/postprocess/resources.hpp"
 #include "reconstruction/postprocess/runtime.hpp"
 #include "reconstruction/resolution.hpp"
 #include "reconstruction/runtime.hpp"
 #include "reconstruction/settings.hpp"
+#include "reconstruction/state.hpp"
 #include "rendering/draw_roles.hpp"
 #include "rendering/engine_targets.hpp"
 #include "rendering/inputs.hpp"
 #include "rendering/native_context.hpp"
+#include "rendering/native_velocity.hpp"
 #include "rendering/probe_controls.hpp"
 #include "rendering/producer_records.hpp"
 #include "settings.hpp"
@@ -347,6 +351,8 @@ void OnPresetOff() {
 void UpdateNativePresentation(reshade::api::swapchain* swapchain) {
   if (mgsv::rendering::native_context::Install()) {
     mgsv::rendering::native_context::SetPresentation(reinterpret_cast<IDXGISwapChain*>(swapchain->get_native()));  // NOLINT(performance-no-int-to-ptr)
+    mgsv::reconstruction::native_post_filter::Install(mgsv::reconstruction::OnPostFilterStart);
+    mgsv::rendering::native_velocity::Install();
     mgsv::reconstruction::logging::Info("native view ownership ready for selected presentation");
   } else {
     mgsv::reconstruction::logging::Warn("native view ownership unavailable: ", mgsv::rendering::native_context::installation_status);
@@ -440,6 +446,7 @@ void OnPresent(
       // noise phase, so they follow the mode.
       mgsv::lighting::temporal_inputs::enabled.store(lighting_enabled, std::memory_order_release);
       mgsv::lighting::indirect_lighting_enhanced.store(lighting_enabled, std::memory_order_release);
+      mgsv::rendering::native_velocity::wanted.store(lighting_enabled || mgsv::reconstruction::state::IsEnabled(), std::memory_order_release);
       shadow_noise_frame = mgsv::lighting::noise_frame.fetch_add(1u, std::memory_order_relaxed) + 1u;
       selected_present = true;
     }
@@ -465,8 +472,11 @@ void OnPresent(
 void OnDestroyDevice(reshade::api::device* device) {
   // The bridge owns its D3D12 device and may release it during D3D11 teardown.
   if (device->get_api() != reshade::api::device_api::d3d11) return;
-  const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
   if (!mgsv::inputs::IsSelectedDevice(device)) return;
+  // A cut in progress can be waiting for the execution lock taken below.
+  mgsv::reconstruction::native_post_filter::Detach();
+  mgsv::rendering::native_velocity::Detach();
+  const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
   mgsv::rendering::native_context::Shutdown();
   mgsv::lighting::reflections::Destroy();
   mgsv::inputs::OnDestroyDevice(device);
@@ -474,7 +484,6 @@ void OnDestroyDevice(reshade::api::device* device) {
   mgsv::lighting::material_inputs::Reset();
   mgsv::lighting::source_preparation::Reset();
   mgsv::lighting::ambient_diffuse::Reset();
-  mgsv::reconstruction::input_capture::InvalidateCapturedFrame();
   mgsv::ao::Destroy(device);
   mgsv::il::Destroy(device);
   mgsv::lighting::DestroyLightPassLayout(device);
@@ -549,6 +558,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
 
       break;
     case DLL_PROCESS_DETACH:
+      mgsv::reconstruction::native_post_filter::Detach();
+      mgsv::rendering::native_velocity::Detach();
       mgsv::rendering::native_context::Shutdown();
       reshade::unregister_overlay(nullptr, ADDON_SETTINGS);
       reshade::unregister_event<reshade::addon_event::copy_resource>(mgsv::rendering::draw_roles::OnCopySceneResource);
@@ -577,6 +588,26 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     mgsv::lighting::reflections::UseProbe(true);
     mgsv::reconstruction::dx12::UseProbe(true);
     mgsv::rendering::probe::UseProbe(true);
+    mgsv::rendering::probe::transition.store(
+        +[](std::string_view key, float value) {
+          namespace reconstruction = mgsv::reconstruction;
+          if (key == "FxUpscalingQuality") {
+            return reconstruction::settings::UpdateSetting(reconstruction_settings.upscaling_quality_setting, value);
+          }
+          // Not a saved setting: 1 fills upscaled scenes without reconstructing them.
+          if (key == "ReconstructionFillOnly") {
+            reconstruction::input_capture::probe_fill_only.store(value >= 0.5f, std::memory_order_release);
+            return true;
+          }
+          if (key != "FxTemporalReconstructionMode") return false;
+          const auto mode = reconstruction::state::NormalizeTemporalMode(value);
+          const auto* option = reconstruction::transitions::FindTemporalModeOption(mode);
+          if (option == nullptr || (option->unavailable_reason != nullptr && option->unavailable_reason() != nullptr)
+              || !reconstruction::settings::UpdateSetting(reconstruction_settings.temporal_mode_setting, static_cast<float>(mode))) return false;
+          reconstruction::transitions::TransitionTemporalMode(reconstruction_settings, static_cast<float>(mode), "probe request");
+          return true;
+        },
+        std::memory_order_release);
     reshade::register_event<reshade::addon_event::init_device>(mgsv::rendering::engine_targets::OnInitDevice);
     reshade::register_event<reshade::addon_event::destroy_device>(mgsv::rendering::engine_targets::OnDestroyDevice);
     reshade::register_event<reshade::addon_event::init_device>(mgsv::shadows::screen_space::OnInitDevice);
@@ -623,6 +654,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   } else if (fdw_reason == DLL_PROCESS_DETACH) {
     mgsv::lighting::reflections::UseProbe(false);
     mgsv::reconstruction::dx12::UseProbe(false);
+    mgsv::rendering::probe::transition.store(nullptr, std::memory_order_release);
     mgsv::rendering::probe::UseProbe(false);
     reshade::unregister_event<reshade::addon_event::init_device>(mgsv::rendering::engine_targets::OnInitDevice);
     reshade::unregister_event<reshade::addon_event::destroy_device>(mgsv::rendering::engine_targets::OnDestroyDevice);

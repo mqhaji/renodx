@@ -70,7 +70,6 @@ struct ValidatedFrameInputs {
   uint32_t render_width = 0u;
   uint32_t render_height = 0u;
   ColorTarget output = {};
-  const char* insertion_name = "unknown";
 
   // Analytical TAA keeps native resolution. SDK backends can use a distinct,
   // larger destination when the output-sized post-processing route is active.

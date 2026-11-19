@@ -3,6 +3,7 @@
 #define RENODX_GAMES_MGSV_RENDERING_PROBE_CONTROLS_HPP_
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <mutex>
 #include <shared_mutex>
@@ -16,6 +17,11 @@
 
 // Provides probe_api.hpp. Nothing here runs unless the probe calls it.
 namespace mgsv::rendering::probe {
+
+// Applies a setting whose change is a transition owned by one feature, the way
+// that feature's menu does. Returns false for a key it does not own.
+using Transition = bool (*)(std::string_view key, float value);
+static std::atomic<Transition> transition = nullptr;
 
 // Pair each attach with a detach before the module unloads.
 inline void UseProbe(bool attach) {
@@ -33,9 +39,12 @@ inline void UseProbe(bool attach) {
     };
     shared.data->set_setting = +[](const char* key, float value) {
       if (key == nullptr || !std::isfinite(value) || renodx::utils::settings::settings == nullptr) return false;
-      // Other settings have transitions that belong to the render thread.
       const std::string_view name = key;
-      if (!name.starts_with("DirectLighting") && !name.starts_with("IndirectLighting")) return false;
+      if (!name.starts_with("DirectLighting") && !name.starts_with("IndirectLighting")) {
+        // Other settings change only through their feature's own transition.
+        const auto apply = transition.load(std::memory_order_acquire);
+        return apply != nullptr && apply(name, value);
+      }
       auto* setting = renodx::utils::settings::FindSetting(key);
       if (setting == nullptr || !setting->HasNumericValue()) return false;
       // A labeled setting is an index into its labels.

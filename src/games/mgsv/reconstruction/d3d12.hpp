@@ -25,8 +25,10 @@
 #include <embed/prepare_reconstruction.h>
 
 #include "../rendering/d3d12_compute.hpp"
+#include "../rendering/d3d12_timing.hpp"
 #include "frame_inputs.hpp"
 #include "logging.hpp"
+#include "native_post_filter.hpp"
 #include "probe_api.hpp"
 #include "state.hpp"
 
@@ -105,6 +107,7 @@ inline void ReadProbeStatus(probe::Status* status) {
   if (status == nullptr) return;
   const std::shared_lock lock(probe_state.mutex);
   *status = probe_state.status;
+  status->post_filter = native_post_filter::ReadStatus();
 }
 
 inline void UseProbe(bool attach) {
@@ -174,9 +177,14 @@ struct Evaluation {
   ID3D12Resource* motion_debug;
   ID3D12Resource* output;
   D3D12_GPU_VIRTUAL_ADDRESS constants;
+  // GPU timing of this recording, active only on a diagnostic request.
+  rendering::d3d12_timing::Scope* timing;
 };
 
 inline void Encode(const Evaluation& evaluation, ID3D12Resource* linear_output) {
+  if (evaluation.timing != nullptr) {
+    evaluation.timing->Mark("evaluate");
+  }
   const UINT first = evaluation.frame->Allocate(3u);
   evaluation.device->CreateShaderResourceView(linear_output, nullptr, evaluation.frame->Cpu(first));
   // Only alpha is read from this input. Its RGB is already linear, so there is
@@ -272,6 +280,8 @@ template <typename Record>
   context->CSSetUnorderedAccessViews(0u, static_cast<UINT>(uavs.size()), uavs.data(), nullptr);
   const std::array<ID3D11ShaderResourceView*, 4> empty = {};
   context->CSSetShaderResources(0u, static_cast<UINT>(empty.size()), empty.data());
+  rendering::d3d12_timing::CpuSubmission::EndPart("input preparation");
+  rendering::d3d12_bridge::SubmissionTiming submission_timing;
   const bool succeeded = runtime.bridge->Execute(
       context, runtime.color.texture.Get(),
       reinterpret_cast<ID3D11Texture2D*>(inputs.output.resource.handle),  // NOLINT(performance-no-int-to-ptr)
@@ -289,6 +299,7 @@ template <typename Record>
             .motion_debug = analytical ? runtime.motion_debug.shared.resource.Get() : nullptr,
             .output = dispatch.output,
             .constants = frame.Upload(&constants, sizeof(constants)),
+            .timing = dispatch.timing,
         };
         for (auto* input : {evaluation.color, evaluation.motion, evaluation.depth, evaluation.motion_debug}) {
           if (input != nullptr) {
@@ -297,7 +308,8 @@ template <typename Record>
         }
         compute::Transition(dispatch.commands, dispatch.output, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         record(evaluation);
-        dispatch.Mark("evaluate and encode");
+        // The Analytical resolve writes the encoded scene itself.
+        dispatch.Mark(analytical ? "resolve and encode" : "encode");
         // Shared resources always return to COMMON before D3D11 resumes.
         compute::Transition(dispatch.commands, dispatch.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
         for (auto* input : {evaluation.color, evaluation.motion, evaluation.depth, evaluation.motion_debug}) {
@@ -306,15 +318,19 @@ template <typename Record>
           }
         }
       },
-      runtime.color.allocation.get(), inputs.output.shared_texture.get());
+      runtime.color.allocation.get(), inputs.output.shared_texture.get(),
+      rendering::d3d12_timing::CpuSubmission::IsTiming() ? &submission_timing : nullptr);
+  rendering::d3d12_timing::CpuSubmission::AddPart("bridge slot", submission_timing.preparation_us / 1000.);
+  rendering::d3d12_timing::CpuSubmission::AddPart("method recording", submission_timing.recording_us / 1000.);
+  // Mostly the D3D11 signal, which makes the driver submit what the frame has queued so far.
+  rendering::d3d12_timing::CpuSubmission::AddPart("queue calls", submission_timing.queue_us / 1000.);
   if (!succeeded && runtime.bridge->rejection != nullptr) {
     // Rejected bindings never reach the SDK callback. They invalidate this
     // scene's history, not the installed SDK. A partial GPU submission is fatal.
     if (runtime.bridge->failed) throw std::runtime_error(runtime.bridge->rejection);
     static uint64_t last_rejection_log = std::numeric_limits<uint64_t>::max();
     if (logging::ShouldLogFrame(state::CurrentFrameToken(), last_rejection_log)) {
-      logging::Warn("reconstruction submission rejected insertion=", inputs.insertion_name,
-                    " scene=", inputs.camera.scene, " reason=", runtime.bridge->rejection);
+      logging::Warn("reconstruction submission rejected scene=", inputs.camera.scene, " reason=", runtime.bridge->rejection);
     }
   }
   return succeeded;

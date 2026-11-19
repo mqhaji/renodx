@@ -131,18 +131,6 @@ inline bool IsBloomChainDraw(reshade::api::command_list* cmd_list, bool reductio
   return true;
 }
 
-// The engine's scene color or its TEMPORARY_OUTPUT copy, at a pixel shader slot.
-inline bool PixelShaderInputIsSceneImage(reshade::api::command_list* cmd_list, uint32_t slot = 0u) {
-  if (cmd_list == nullptr || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return false;
-  auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
-  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> input;
-  context->PSGetShaderResources(slot, 1u, &input);
-  if (input == nullptr) return false;
-  Microsoft::WRL::ComPtr<ID3D11Resource> resource;
-  input->GetResource(&resource);
-  return engine_targets::ReadSceneRole(resource.Get()) == engine_targets::SCENE_IMAGE;
-}
-
 // The engine copies scene color into TEMPORARY_OUTPUT itself. An upscaled
 // scene also needs that copy at output size; the native copy still runs.
 inline bool OnCopySceneResource(

@@ -63,17 +63,8 @@ struct FrameState {
   uint64_t temporal_generation = 0u;
   bool reconstruction_scheduled = false;
   bool reconstruction_completed = false;
-  bool full_resolution_candidate_seen = false;
-  bool scaled_inputs_valid = false;
-
-  // Pipeline markers used to identify which CopyRenderBuffer invocation
-  // is the right TAA insertion point. The primary DoF hash can also run on
-  // lower-resolution inputs, so these later full-resolution gates remain
-  // available when that candidate is skipped.
-  // Motion-blur tile preparation provides a fallback when DoF does not run.
-  // BeginFrame clears both flags.
-  bool dof_fired = false;
-  bool mb_tile_prep_fired = false;
+  // A scene since the last Present had every reconstruction input.
+  bool complete_record_seen = false;
 };
 
 inline std::atomic<TemporalMode> runtime_temporal_mode = TemporalMode::OFF;
@@ -206,8 +197,7 @@ inline void ResetTemporalState() {
   frame_state.sample_index = 0u;
   frame_state.reconstruction_scheduled = false;
   frame_state.reconstruction_completed = false;
-  frame_state.full_resolution_candidate_seen = false;
-  frame_state.scaled_inputs_valid = false;
+  frame_state.complete_record_seen = false;
   current_sample_index.store(0u, std::memory_order_release);
 }
 
@@ -215,10 +205,7 @@ inline void BeginFrame() {
   ++frame_state.frame_index;
   frame_state.reconstruction_scheduled = false;
   frame_state.reconstruction_completed = false;
-  frame_state.full_resolution_candidate_seen = false;
-  frame_state.scaled_inputs_valid = false;
-  frame_state.dof_fired = false;
-  frame_state.mb_tile_prep_fired = false;
+  frame_state.complete_record_seen = false;
   current_frame_token.store(frame_state.frame_index, std::memory_order_release);
 }
 

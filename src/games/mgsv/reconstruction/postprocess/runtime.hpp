@@ -497,7 +497,15 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
       }
     }
   }
-  if (!qualified_flare) {
+  // The exposure meter measures the render-size scene, and its later draws are
+  // not routed. The copy that feeds it stays native too, whatever it reads.
+  bool feeds_exposure_meter = false;
+  if (pass != nullptr && pass->shader_hash == 0x83272BCBu && targets[0] != nullptr) {
+    Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+    targets[0]->GetResource(&resource);
+    feeds_exposure_meter = rendering::engine_targets::ReadSceneRole(resource.Get()) == rendering::engine_targets::EXPOSURE_SOURCE;
+  }
+  if (!qualified_flare || feeds_exposure_meter) {
     *saved = {};
     return false;
   }

@@ -1,16 +1,24 @@
 #pragma once
 
-/* Adapt retained native bindings to reconstruction's camera, frame, and sample checks. */
+/* The scene record reconstruction reads where post-processing starts, and the
+ * capture at the camera-velocity draw that feeds the lighting history. */
+
+#include <d3d11.h>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <utility>
-#include <vector>
 
 #include <include/reshade.hpp>
 
+#include "../rendering/engine_targets.hpp"
 #include "../rendering/inputs.hpp"
+#include "../rendering/native_context.hpp"
+#include "../rendering/native_velocity.hpp"
 #include "camera_state.hpp"
 #include "frame_inputs.hpp"
 #include "logging.hpp"
@@ -19,36 +27,17 @@
 
 namespace mgsv::reconstruction::input_capture {
 
+// The camera-velocity draw's bindings and the camera its scene was recorded
+// with, for the lighting history.
 struct Resources {
   inputs::Motion motion;
   camera_state::CameraFrame camera = {};
-  uint64_t capture_frame = std::numeric_limits<uint64_t>::max();
 };
 
-// Accessed under the coordinator execution lock. Each entry belongs to one
-// native scene. Queued dispatches retain their own views when these entries age out.
-inline std::vector<Resources> scene_resources;
-inline uint64_t last_missing_inputs_log = std::numeric_limits<uint64_t>::max();
 inline uint64_t last_capture_missing_log = std::numeric_limits<uint64_t>::max();
-inline uint64_t last_stale_capture_log = std::numeric_limits<uint64_t>::max();
-inline uint64_t last_missing_camera_log = std::numeric_limits<uint64_t>::max();
-inline bool logged_non_full_resolution_candidate = false;
-inline bool logged_waiting_for_camera = false;
 
 inline bool LogEvery(uint64_t& last_frame, uint64_t interval = 120u) {
   return logging::ShouldLogFrame(state::CurrentFrameToken(), last_frame, interval);
-}
-
-inline void InvalidateCapturedFrame() {
-  // Reconstruction resets do not retire lighting's shared compatibility selection.
-  scene_resources.clear();
-}
-
-inline void Destroy(reshade::api::device* device) {
-  (void)device;
-  InvalidateCapturedFrame();
-  logged_non_full_resolution_candidate = false;
-  logged_waiting_for_camera = false;
 }
 
 inline reshade::api::format GetTypedViewFormat(
@@ -82,204 +71,129 @@ inline Resources CaptureCameraMotionLocked(
   // Retain the live native bindings, including the velocity target this draw writes.
   auto motion = inputs::CaptureMotion(cmd_list, velocity_rtv, true);
   if (motion.velocity == nullptr) return {};
-  Resources resources = {
-      .motion = std::move(motion),
-      .camera = camera_state::GetForCapture(),
-      .capture_frame = state::CurrentFrameToken(),
-  };
-  if (resources.camera.scene == 0u) return resources;
-  // Pending jobs own their inputs. This bounded lookup only connects motion
-  // recording to a later insertion in the same native scene.
-  std::erase_if(scene_resources, [&](const Resources& candidate) {
-    return candidate.camera.owner_generation != resources.camera.owner_generation
-           || candidate.camera.reset_generation != resources.camera.reset_generation;
-  });
-  const auto existing = std::ranges::find_if(scene_resources, [&](const Resources& candidate) {
-    return candidate.camera.scene == resources.camera.scene && candidate.camera.owner_generation == resources.camera.owner_generation;
-  });
-  if (existing != scene_resources.end()) {
-    *existing = resources;
-  } else {
-    if (scene_resources.size() == camera_state::MAX_SCENE_PUBLICATIONS) {
-      scene_resources.erase(scene_resources.begin());
-    }
-    scene_resources.push_back(resources);
-  }
-  return resources;
+  return {.motion = std::move(motion), .camera = camera_state::GetForCapture()};
 }
 
-inline bool IsSingleSampleTexture(const reshade::api::resource_desc& description) {
-  return description.type == reshade::api::resource_type::texture_2d
-         && description.texture.depth_or_layers == 1u
-         && description.texture.levels == 1u
-         && description.texture.samples == 1u;
-}
+// How much of a scene's reconstruction inputs the cut found.
+enum class Record : uint8_t {
+  // No scene image reconstruction can read.
+  UNUSABLE,
+  // The scene image is usable, but its motion vectors or camera are missing.
+  SCENE_ONLY,
+  COMPLETE,
+};
 
-inline bool BuildValidatedFrameInputsLocked(
+// Why the last record was not complete; null while records are complete.
+// Accessed under the coordinator execution lock.
+inline const char* reported_cause = nullptr;
+// The probe can have complete records treated as scene-only, to exercise the
+// fill-only outcome at will.
+inline std::atomic<bool> probe_fill_only = false;
+
+// Builds the inputs of one scene's reconstruction where its post-processing
+// starts, from the engine's own targets and the camera recorded for the view.
+// The caller holds the execution lock and keeps `images` alive while it uses
+// the result. Every check a record must pass is in this one list.
+inline Record BuildFrameInputsLocked(
     reshade::api::command_list* cmd_list,
-    reshade::api::resource_view color_srv,
-    const char* insertion_name,
-    ValidatedFrameInputs& output) {
-  auto* device = cmd_list != nullptr ? cmd_list->get_device() : nullptr;
+    const std::array<rendering::engine_targets::FrameImage, 4>& images,
+    ValidatedFrameInputs* output) {
+  using rendering::engine_targets::FrameTarget;
+  auto* device = cmd_list->get_device();
   const auto owner = rendering::native_context::GetScope().owner;
-  const auto captured = std::ranges::find_if(scene_resources, [&](const Resources& candidate) {
-    return candidate.camera.scene == owner.scene && candidate.camera.owner_generation == owner.generation;
-  });
-  if (owner.scene == 0u || captured == scene_resources.end()) {
-    if (LogEvery(last_missing_inputs_log)) {
-      logging::Warn("reconstruction has no motion recorded for scene=", owner.scene, " generation=", owner.generation);
-    }
-    return false;
-  }
-  // Resource creation below can reenter addon callbacks and reset this cache.
-  // Keep this validation's camera and retained views together through those calls.
-  const Resources resources = *captured;  // NOLINT(performance-unnecessary-copy-initialization)
-  const auto shared_inputs = inputs::Read(device);
-  if (shared_inputs.generation == 0u || resources.motion.generation != shared_inputs.generation) return false;
-  // The local snapshot retains these views through reentrant allocation calls.
-  const auto& motion = resources.motion;
-  const reshade::api::resource_view velocity_srv = {reinterpret_cast<uintptr_t>(motion.velocity.Get())};
-  const reshade::api::resource_view depth_srv = {reinterpret_cast<uintptr_t>(motion.depth.Get())};
-  const reshade::api::resource_view object_velocity_srv = {reinterpret_cast<uintptr_t>(motion.object_velocity.Get())};
-  if (device == nullptr
-      || color_srv.handle == 0u
-      || velocity_srv.handle == 0u
-      || depth_srv.handle == 0u
-      || object_velocity_srv.handle == 0u) {
-    if (LogEvery(last_missing_inputs_log)) {
-      logging::Warn("insertion missing inputs insertion=", insertion_name,
-                    " color=", logging::Hex{color_srv.handle},
-                    " velocity=", logging::Hex{velocity_srv.handle},
-                    " depth=", logging::Hex{depth_srv.handle},
-                    " object_velocity=", logging::Hex{object_velocity_srv.handle});
-    }
-    return false;
-  }
-
-  const auto color_resource = device->get_resource_from_view(color_srv);
-  const auto depth_resource = device->get_resource_from_view(depth_srv);
-  const auto object_velocity_resource = device->get_resource_from_view(object_velocity_srv);
-  if (color_resource.handle == 0u
-      || motion.velocity_resource.handle == 0u
-      || depth_resource.handle == 0u
-      || object_velocity_resource.handle == 0u) {
-    return false;
-  }
-
-  const auto color_description = device->get_resource_desc(color_resource);
-  const auto velocity_description = device->get_resource_desc(motion.velocity_resource);
-  const auto depth_description = device->get_resource_desc(depth_resource);
-  const auto object_velocity_description = device->get_resource_desc(object_velocity_resource);
-  const uint32_t width = color_description.texture.width;
-  const uint32_t height = color_description.texture.height;
-  const bool matching_resources = IsSingleSampleTexture(color_description)
-                                  && IsSingleSampleTexture(velocity_description)
-                                  && IsSingleSampleTexture(depth_description)
-                                  && IsSingleSampleTexture(object_velocity_description)
-                                  && velocity_description.texture.width == width
-                                  && velocity_description.texture.height == height
-                                  && depth_description.texture.width == width
-                                  && depth_description.texture.height == height
-                                  && object_velocity_description.texture.width == width
-                                  && object_velocity_description.texture.height == height;
-  if (!matching_resources) {
-    if (!logged_non_full_resolution_candidate) {
-      logged_non_full_resolution_candidate = true;
-      logging::Info("skipping non-full-resolution temporal insertion candidate insertion=", insertion_name,
-                    " color=", width, "x", height,
-                    " velocity=", velocity_description.texture.width, "x", velocity_description.texture.height,
-                    " depth=", depth_description.texture.width, "x", depth_description.texture.height,
-                    " object_velocity=", object_velocity_description.texture.width, "x",
-                    object_velocity_description.texture.height);
-    }
-    return false;
-  }
-  const uint64_t frame_token = state::CurrentFrameToken();
-  const uint32_t sample_index = resources.camera.sample_index;
-  if (!resources.camera.valid
-      || resources.camera.reset_generation != camera_state::reset_generation.load(std::memory_order_acquire)) {
-    if (!resources.camera.valid && sample_index == 0u) {
-      if (!logged_waiting_for_camera) {
-        logged_waiting_for_camera = true;
-        logging::Info("waiting for first native camera publication insertion=", insertion_name,
-                      " frame=", frame_token);
-      }
-    } else if (LogEvery(last_stale_capture_log)) {
-      logging::Warn("insertion reached with stale temporal capture insertion=", insertion_name,
-                    " capture_frame=", resources.capture_frame,
-                    " camera_frame=", resources.camera.frame_token,
-                    " frame=", frame_token,
-                    " sample=", sample_index);
-    }
-    return false;
-  }
-  if (!resources.camera.camera_matrix_valid
-      || resources.camera.width != width
-      || resources.camera.height != height) {
-    if (LogEvery(last_missing_camera_log, 30u)) {
-      logging::Warn("rejecting temporal dispatch with mismatched native camera insertion=", insertion_name,
-                    " camera_size=", resources.camera.width, "x", resources.camera.height,
-                    " color_size=", width, "x", height,
-                    " frame=", frame_token);
-    }
-    return false;
-  }
-
-  const auto color_format = GetTypedViewFormat(device, color_srv);
+  const auto& color = images[static_cast<size_t>(FrameTarget::SCENE_COLOR)];
+  const auto& depth = images[static_cast<size_t>(FrameTarget::DEPTH)];
+  const auto& velocity = images[static_cast<size_t>(FrameTarget::VELOCITY)];
+  const auto& object_velocity = images[static_cast<size_t>(FrameTarget::OBJECT_VELOCITY)];
+  auto record = Record::UNUSABLE;
+  const char* cause = nullptr;
   const auto plan = resolution::Read();
-  // Native resize and SDK activation can overlap worker recording. Wait for
-  // the selected method's plan and a compatible scene image; never turn a
-  // temporary LDR or differently typed binding into a permanent SDK failure.
-  if (plan.mode != state::GetTemporalMode()) return false;
-  if (!IsReconstructionColorTexture(color_description)
-      || color_format != color_description.texture.format
-      || (plan.IsScaled() && color_format != reshade::api::format::r16g16b16a16_float)) {
-    static uint64_t last_color_rejection_log = std::numeric_limits<uint64_t>::max();
-    if (LogEvery(last_color_rejection_log)) {
-      logging::Info("skipping incompatible reconstruction color insertion=", insertion_name,
-                    " scene=", owner.scene, " size=", width, "x", height,
-                    " resource_format=", static_cast<uint32_t>(color_description.texture.format),
-                    " view_format=", static_cast<uint32_t>(color_format));
+  if (std::ranges::any_of(images, [](const rendering::engine_targets::FrameImage& image) {
+        return image.texture == nullptr || image.shader_view == nullptr;
+      })) {
+    cause = "the engine created its scene, depth or velocity targets before the mod's hooks were installed";
+  } else {
+    const reshade::api::resource color_resource = {reinterpret_cast<uintptr_t>(color.texture.Get())};
+    const reshade::api::resource_view color_srv = {reinterpret_cast<uintptr_t>(color.shader_view.Get())};
+    const reshade::api::resource_view depth_srv = {reinterpret_cast<uintptr_t>(depth.shader_view.Get())};
+    const auto color_description = device->get_resource_desc(color_resource);
+    const uint32_t width = color_description.texture.width;
+    const uint32_t height = color_description.texture.height;
+    const auto color_format = GetTypedViewFormat(device, color_srv);
+    const auto matches_scene = [&](const rendering::engine_targets::FrameImage& image) {
+      D3D11_TEXTURE2D_DESC description;
+      image.texture->GetDesc(&description);
+      return description.Width == width && description.Height == height && description.ArraySize == 1u
+             && description.MipLevels == 1u && description.SampleDesc.Count == 1u;
+    };
+    if (!std::ranges::all_of(images, matches_scene)) {
+      cause = "the scene, depth and velocity targets are not single-sample images of one size";
+    } else if (plan.mode != state::GetTemporalMode()) {
+      // Native resize and SDK activation can overlap recording.
+      cause = "the size plan still belongs to another method";
+    } else if (!IsReconstructionColorTexture(color_description) || color_format != color_description.texture.format
+               || (plan.IsScaled() && color_format != reshade::api::format::r16g16b16a16_float)) {
+      cause = "the scene image is not a float image";
+    } else if (plan.IsScaled() && plan.render != resolution::Size{.width = width, .height = height}) {
+      cause = "the scene is not at the planned render size";
+    } else {
+      const auto camera = camera_state::GetForCapture();
+      record = Record::SCENE_ONLY;
+      if (!rendering::native_velocity::WasRecorded(owner)) {
+        cause = "the engine drew no motion vectors for the view";
+      } else if (camera.scene != owner.scene || camera.owner_generation != owner.generation || !camera.valid
+                 || camera.reset_generation != camera_state::reset_generation.load(std::memory_order_acquire)) {
+        cause = "no camera was recorded for the view";
+      } else if (!camera.camera_matrix_valid || camera.width != width || camera.height != height) {
+        cause = "the recorded camera does not match the scene size";
+      } else {
+        record = Record::COMPLETE;
+      }
+      *output = {
+          .cmd_list = cmd_list,
+          .device = device,
+          .color_srv = color_srv,
+          .color_resource = color_resource,
+          .color_description = color_description,
+          .color_format = color_format,
+          .velocity_srv = {reinterpret_cast<uintptr_t>(velocity.shader_view.Get())},
+          .velocity_resource = {reinterpret_cast<uintptr_t>(velocity.texture.Get())},
+          .depth_srv = depth_srv,
+          .depth_resource = {reinterpret_cast<uintptr_t>(depth.texture.Get())},
+          .depth_format = GetTypedViewFormat(device, depth_srv),
+          .object_velocity_srv = {reinterpret_cast<uintptr_t>(object_velocity.shader_view.Get())},
+          .camera = camera,
+          .frame_token = (record == Record::COMPLETE ? camera.frame_token : state::CurrentFrameToken()),
+          .sample_index = camera.sample_index,
+          .render_width = width,
+          .render_height = height,
+          // A scaled request has no destination until the coordinator allocates
+          // the output route. Never describe the smaller source as that target.
+          .output = {
+              .resource = (plan.IsScaled() ? reshade::api::resource{0u} : color_resource),
+              .width = (plan.IsScaled() ? plan.output.width : width),
+              .height = (plan.IsScaled() ? plan.output.height : height),
+              .format = color_format,
+          },
+      };
     }
-    return false;
   }
-  if (plan.IsScaled()
-      && (plan.render != resolution::Size{.width = width, .height = height}
-          || (std::strcmp(insertion_name, "BeforeBloom") != 0 && std::strcmp(insertion_name, "DOF_ScatterBakeFirst") != 0))) return false;
-  // Only qualified inputs count toward the missing-dispatch watchdog.
-  state::frame_state.full_resolution_candidate_seen = true;
-  if (plan.IsScaled()) {
-    state::frame_state.scaled_inputs_valid = true;
+  if (record == Record::COMPLETE && probe_fill_only.load(std::memory_order_acquire)) {
+    record = Record::SCENE_ONLY;
+    cause = "the probe asked for fill only";
   }
-  output = {
-      .cmd_list = cmd_list,
-      .device = device,
-      .color_srv = color_srv,
-      .color_resource = color_resource,
-      .color_description = color_description,
-      .color_format = color_format,
-      .velocity_srv = velocity_srv,
-      .velocity_resource = motion.velocity_resource,
-      .depth_srv = depth_srv,
-      .depth_resource = depth_resource,
-      .depth_format = GetTypedViewFormat(device, depth_srv),
-      .object_velocity_srv = object_velocity_srv,
-      .camera = resources.camera,
-      .frame_token = resources.camera.frame_token,
-      .sample_index = sample_index,
-      .render_width = width,
-      .render_height = height,
-      // A scaled request has no destination until the coordinator allocates
-      // the output route. Never describe the smaller source as that target.
-      .output = {
-          .resource = (plan.IsScaled() ? reshade::api::resource{0u} : color_resource),
-          .width = (plan.IsScaled() ? plan.output.width : width),
-          .height = (plan.IsScaled() ? plan.output.height : height),
-          .format = color_format,
-      },
-      .insertion_name = insertion_name,
-  };
-  return true;
+  if (cause != reported_cause) {
+    reported_cause = cause;
+    if (cause == nullptr) {
+      logging::Info("reconstruction inputs are complete scene=", owner.scene);
+    } else {
+      logging::Warn("reconstruction inputs are incomplete: ", cause, " scene=", owner.scene);
+    }
+  }
+  if (record == Record::COMPLETE) {
+    state::frame_state.complete_record_seen = true;
+  }
+  return record;
 }
 
 }  // namespace mgsv::reconstruction::input_capture

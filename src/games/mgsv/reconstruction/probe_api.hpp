@@ -18,6 +18,17 @@ struct Request {
   bool restore = false;
 };
 
+// What the hook on the engine's post-processing start has counted for the
+// presented main view. In a healthy run starts and cuts are equal and the
+// other three stay zero.
+struct PostFilterStatus {
+  uint64_t starts = 0u;
+  uint64_t cuts = 0u;
+  uint64_t lists_open_at_start = 0u;
+  uint64_t unused_starts = 0u;
+  uint64_t repeated_starts = 0u;
+};
+
 struct Status {
   uint64_t revision = 0u;
   uint64_t active_revision = 0u;
@@ -25,6 +36,7 @@ struct Status {
   bool pending = false;
   bool live = false;
   std::array<char, 256> error = {};
+  PostFilterStatus post_filter;
 };
 
 // Requests copy borrowed bytecode before returning. No owning containers or

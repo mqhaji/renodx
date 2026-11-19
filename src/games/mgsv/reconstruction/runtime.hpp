@@ -39,210 +39,54 @@ namespace mgsv::game::reconstruction {
 
 namespace runtime = ::mgsv::reconstruction;
 
-inline bool logged_tonemap = false;
-inline bool logged_tonemap_lut = false;
-inline bool logged_bloom_reduction = false;
-inline bool logged_scatter_bake = false;
-inline bool logged_dof_gate = false;
-inline bool logged_mb_gate = false;
-inline bool logged_camera_velocity = false;
-inline bool logged_gbuffer_velocity = false;
-inline bool logged_gbuffer_masked_velocity = false;
-
-namespace shader_hashes {
-
-// The first reduction of the completed scene prepares bloom. The source must
-// have the scene-color role; this shader also reduces unrelated images.
-inline constexpr uint32_t COPY_REDUCTION_X4_PS = 0x72C1D157u;
-
-// First fallback. MGSV can issue this shader with both scene color and smaller
-// DoF inputs, so validation still checks t0 against captured depth and motion.
-inline constexpr uint32_t DOF_SCATTER_BAKE_FIRST_PS = 0xFE1DC3F8u;
-
-// CopyRenderBuffer is a fallback after DoF composition or motion-blur tile
-// preparation. Sequence markers distinguish these uses from unrelated copies.
-inline constexpr uint32_t COPY_RENDER_BUFFER_PS = 0x83272BCBu;
-
-// Late grading is the last fallback when no earlier scene insertion ran.
-inline constexpr uint32_t TONEMAP_PS = 0xE04D1471u;
-inline constexpr uint32_t TONEMAP_1DLUT_PS = 0xC0C26E46u;
-
-// Other post-effects observed but not used as insertion points. They
-// operate on half-res downsamples that are already produced by the time
-// they run; inserting at them would be too late.
-inline constexpr uint32_t DOF_NEAR_PS = 0xE2D609B1u;
-inline constexpr uint32_t DOF_FAR_PS = 0x7C017264u;
-inline constexpr uint32_t DOF_FINAL_PS = 0xFC5542BBu;
-
-inline constexpr uint32_t MB_TILE_MAX_PS = 0xF05DCBFDu;
-inline constexpr uint32_t MB_TILE_REFINE_PS = 0x512E2B48u;
-
-}  // namespace shader_hashes
-
+// The engine's camera-velocity draw records the motion and camera that the
+// lighting history uses. Reconstruction takes its own inputs where
+// post-processing starts and does not need this draw. Never replaces the draw.
 inline bool HandleDraw(reshade::api::command_list* cmd_list, [[maybe_unused]] const ShaderInjectData* shader_injection = nullptr) {
-  if (cmd_list == nullptr) return false;
+  if (cmd_list == nullptr || !lighting::temporal_inputs::enabled.load(std::memory_order_acquire)) return false;
   auto* device = cmd_list->get_device();
   if (device == nullptr || device->get_api() != reshade::api::device_api::d3d11) return false;
-
-  namespace draw_roles = ::mgsv::rendering::draw_roles;
-  using draw_roles::VelocityProducer;
-
   // MGSV issues thousands of draws per frame. Classify first so unrelated
-  // draws never touch TAA command-list state or contend on the resolve lock.
+  // draws return before taking any lock.
   renodx::utils::state::CommandListStateCache state_cache;
   const uint32_t vertex_hash = renodx::utils::state::GetCurrentShaderHash(
       cmd_list, reshade::api::pipeline_stage::vertex_shader, &state_cache);
   const uint32_t pixel_hash = renodx::utils::state::GetCurrentShaderHash(
       cmd_list, reshade::api::pipeline_stage::pixel_shader, &state_cache);
-  const auto velocity_producer = draw_roles::IdentifyVelocityProducer(vertex_hash, pixel_hash);
-  const bool is_dof_marker = pixel_hash == shader_hashes::DOF_NEAR_PS
-                             || pixel_hash == shader_hashes::DOF_FAR_PS
-                             || pixel_hash == shader_hashes::DOF_FINAL_PS;
-  const bool is_mb_marker = pixel_hash == shader_hashes::MB_TILE_MAX_PS
-                            || pixel_hash == shader_hashes::MB_TILE_REFINE_PS;
-  const bool is_insertion = pixel_hash == shader_hashes::COPY_REDUCTION_X4_PS
-                            || pixel_hash == shader_hashes::DOF_SCATTER_BAKE_FIRST_PS
-                            || pixel_hash == shader_hashes::COPY_RENDER_BUFFER_PS
-                            || pixel_hash == shader_hashes::TONEMAP_PS
-                            || pixel_hash == shader_hashes::TONEMAP_1DLUT_PS;
-  if (velocity_producer == VelocityProducer::NONE
-      && !is_dof_marker
-      && !is_mb_marker
-      && !is_insertion) {
-    return false;
-  }
-
-  if (velocity_producer == VelocityProducer::NONE && !runtime::state::IsEnabled()) return false;
+  if (::mgsv::rendering::draw_roles::IdentifyVelocityProducer(vertex_hash, pixel_hash) != ::mgsv::rendering::draw_roles::VelocityProducer::CAMERA) return false;
 
   const runtime::coordinator::ExecutionGuard execution_guard;
-
-  const auto log_observed_shader = [](const char* stage, const char* name, uint32_t hash, bool* logged) {
-    if (*logged) return;
-    *logged = true;
-    runtime::logging::Info("observed ", stage, " shader ", name, " hash=", runtime::logging::Hex{hash});
-  };
-  if (velocity_producer == VelocityProducer::CAMERA && runtime::state::IsEnabled()) {
-    log_observed_shader("pixel", "MotionBlurCameraVelocity", pixel_hash, &logged_camera_velocity);
-  }
-
-  reshade::api::resource_view velocity_rtv = {0};
-  if (velocity_producer != VelocityProducer::NONE) {
-    velocity_rtv = renodx::utils::state::GetRenderTarget(cmd_list, 0u);
-  }
-
-  const bool lighting_motion_needed = velocity_producer == VelocityProducer::CAMERA
-                                      && lighting::temporal_inputs::enabled.load(std::memory_order_acquire);
-  const auto record_lighting_motion = [&](inputs::Motion motion, const runtime::camera_state::CameraFrame& camera) {
-    // This observation has its own submission ledger. It never promotes the
-    // old lighting_motion compatibility cache or enables projection jitter.
-    const bool reconstruction_enabled = runtime::state::IsEnabled();
-    const uint64_t generation = motion.generation;
+  const auto velocity_rtv = renodx::utils::state::GetRenderTarget(cmd_list, 0u);
+  // This observation has its own submission ledger. Without reconstruction the
+  // scene has no jitter, so no camera is attached to it.
+  if (!runtime::state::IsEnabled()) {
+    auto motion = inputs::CaptureMotion(cmd_list, velocity_rtv, false);
     lighting::temporal_inputs::Record(cmd_list, {
                                                     .device = device,
-                                                    .generation = generation,
+                                                    .generation = motion.generation,
                                                     .motion = std::move(motion),
-                                                    .motion_jitter_uv = (reconstruction_enabled
-                                                                             ? std::array<float, 2>{camera.jitter_uv_x, camera.jitter_uv_y}
-                                                                             : std::array<float, 2>{}),
-                                                    .velocity_projection_jitter_scale = (reconstruction_enabled
-                                                                                             ? 1.f
-                                                                                             : 0.f),
-                                                    .camera_publication = (reconstruction_enabled ? camera.publication_sequence : 0u),
-                                                    .camera_generation = (reconstruction_enabled ? camera.reset_generation : 0u),
-                                                    .camera_sample = (reconstruction_enabled ? camera.sample_index : 0u),
-                                                    .jitter_valid = !reconstruction_enabled || (camera.valid && camera.camera_matrix_valid),
+                                                    .velocity_projection_jitter_scale = 0.f,
+                                                    .jitter_valid = true,
                                                     .kind = lighting::temporal_inputs::ProducerKind::MOTION,
                                                 });
-  };
-  if (lighting_motion_needed && !runtime::state::IsEnabled()) {
-    record_lighting_motion(inputs::CaptureMotion(cmd_list, velocity_rtv, false), {});
+    return false;
   }
-
-  // Velocity precision and GI producer observation remain active with scene reconstruction Off.
-  if (!runtime::state::IsEnabled()) return false;
   auto* data = ::mgsv::inputs::descriptor_tracker::Get(cmd_list);
   if (data == nullptr) return false;
-
-  if (velocity_producer == VelocityProducer::GBUFFER) {
-    log_observed_shader("vertex", "GBufferVelocity", vertex_hash, &logged_gbuffer_velocity);
-  }
-  if (velocity_producer == VelocityProducer::GBUFFER_MASKED) {
-    log_observed_shader("vertex", "GBufferMaskedVelocity", vertex_hash, &logged_gbuffer_masked_velocity);
-  }
-
-  // MotionBlurCameraVelocity exposes pixel b2 and writes RTV0; capture stays at this pre-draw boundary.
-  if (velocity_producer == VelocityProducer::CAMERA) {
-    auto captured = runtime::input_capture::CaptureCameraMotionLocked(cmd_list, *data, velocity_rtv);
-    if (lighting_motion_needed) {
-      record_lighting_motion(std::move(captured.motion), captured.camera);
-    }
-  }
-
-  // Sequence markers arm the later CopyRenderBuffer fallbacks. The DoF
-  // composite passes follow the ScatterBakeFirst fallback;
-  // motion-blur tile preparation follows the DoF sequence. The next eligible
-  // copy after either marker becomes that path's fallback. BeginFrame clears
-  // both flags.
-  if (is_dof_marker) {
-    runtime::state::frame_state.dof_fired = true;
-  }
-  if (is_mb_marker) {
-    runtime::state::frame_state.mb_tile_prep_fired = true;
-  }
-
-  // Reconstruct the source before bloom downsamples it. Role and frame-input
-  // checks reject unrelated reductions and the subsequent smaller bloom images.
-  if (pixel_hash == shader_hashes::COPY_REDUCTION_X4_PS) {
-    if (draw_roles::PixelShaderInputIsSceneImage(cmd_list)) {
-      log_observed_shader("pixel", "scene reduction before bloom", pixel_hash, &logged_bloom_reduction);
-      runtime::coordinator::MaybeRunLocked(cmd_list, *data, "BeforeBloom");
-    }
-    return false;
-  }
-
-  // The first DoF preparation remains a fallback for scenes without the bloom
-  // reduction. Validation leaves smaller inputs to the later candidates.
-  if (pixel_hash == shader_hashes::DOF_SCATTER_BAKE_FIRST_PS) {
-    log_observed_shader("pixel", "DOF_ScatterBakeFirst", pixel_hash, &logged_scatter_bake);
-    runtime::coordinator::MaybeRunLocked(cmd_list, *data, "DOF_ScatterBakeFirst");
-    return false;
-  }
-
-  // Later CRB fallbacks if neither early insertion ran.
-  // After a DoF pass fires or after MB tile prep fires,
-  // the next eligible CopyRenderBuffer is a valid insertion point.
-  // Both gates run TAA on the same pixel SRV t0.
-  if (pixel_hash == shader_hashes::COPY_RENDER_BUFFER_PS) {
-    if (runtime::state::frame_state.dof_fired) {
-      log_observed_shader("pixel", "CRB after DoF", pixel_hash, &logged_dof_gate);
-      runtime::coordinator::MaybeRunLocked(cmd_list, *data, "CopyRenderBufferAfterDoF");
-      return false;
-    }
-    if (runtime::state::frame_state.mb_tile_prep_fired) {
-      log_observed_shader("pixel", "CRB after MB tile prep", pixel_hash, &logged_mb_gate);
-      runtime::coordinator::MaybeRunLocked(cmd_list, *data, "CopyRenderBufferAfterMBTilePrep");
-      return false;
-    }
-  }
-
-  // Last fallback: tonemap. Used when none of the above
-  // fired — e.g. menu screens, cutscene transitions, or graphics settings
-  // with both DoF and motion blur disabled.
-  const bool is_tonemap = pixel_hash == shader_hashes::TONEMAP_PS;
-  const bool is_tonemap_lut = pixel_hash == shader_hashes::TONEMAP_1DLUT_PS;
-  if (is_tonemap) {
-    log_observed_shader("pixel", "Tonemap", pixel_hash, &logged_tonemap);
-  }
-  if (is_tonemap_lut) {
-    log_observed_shader("pixel", "Tonemap_1DLUT", pixel_hash, &logged_tonemap_lut);
-  }
-
-  if (is_tonemap || is_tonemap_lut) {
-    runtime::coordinator::MaybeRunLocked(cmd_list, *data, is_tonemap ? "Tonemap" : "Tonemap_1DLUT");
-  }
-
-  // Always return false: we never replace the original game draw, we just
-  // schedule the compute resolve in front of it.
+  auto captured = runtime::input_capture::CaptureCameraMotionLocked(cmd_list, *data, velocity_rtv);
+  const auto& camera = captured.camera;
+  lighting::temporal_inputs::Record(cmd_list, {
+                                                  .device = device,
+                                                  .generation = captured.motion.generation,
+                                                  .motion = std::move(captured.motion),
+                                                  .motion_jitter_uv = {camera.jitter_uv_x, camera.jitter_uv_y},
+                                                  .velocity_projection_jitter_scale = 1.f,
+                                                  .camera_publication = camera.publication_sequence,
+                                                  .camera_generation = camera.reset_generation,
+                                                  .camera_sample = camera.sample_index,
+                                                  .jitter_valid = camera.valid && camera.camera_matrix_valid,
+                                                  .kind = lighting::temporal_inputs::ProducerKind::MOTION,
+                                              });
   return false;
 }
 
@@ -718,28 +562,38 @@ inline void OnPresent(
     logged_mip_bias = mip_bias;
     logging::Info("texture mip bias adjustment=", mip_bias, " jitter_phases=", jitter_phases);
   }
-  static uint32_t missed_scaled_dispatches = 0u;
-  if (!plan.IsScaled() || !state::frame_state.scaled_inputs_valid
-      || state::frame_state.reconstruction_scheduled || state::frame_state.reconstruction_completed) {
-    missed_scaled_dispatches = 0u;
-  }
-  if (mode != state::TemporalMode::OFF
-      && state::frame_state.full_resolution_candidate_seen
-      && !state::frame_state.reconstruction_scheduled
-      && !state::frame_state.reconstruction_completed) {
-    // Missing camera/motion during startup is not a permanent upscale failure.
-    // Only count frames where checked scene inputs were actually available.
-    if (plan.IsScaled() && state::frame_state.scaled_inputs_valid) {
-      if (++missed_scaled_dispatches >= 8u) {
-        resolution::Fail("qualified early reconstruction repeatedly could not execute");
-      }
-    } else {
-      missed_scaled_dispatches = 0u;
-    }
+  // Eight consecutive upscaled frames whose scene record was complete but
+  // which were not reconstructed end upscaling. A frame with an incomplete
+  // record never counts, so startup screens and size transitions cannot.
+  static uint32_t missed_reconstructions = 0u;
+  const bool missed = mode != state::TemporalMode::OFF && plan.IsScaled() && state::frame_state.complete_record_seen
+                      && !state::frame_state.reconstruction_scheduled && !state::frame_state.reconstruction_completed;
+  missed_reconstructions = (missed ? missed_reconstructions + 1u : 0u);
+  if (missed_reconstructions >= 8u) {
+    resolution::Fail("reconstruction repeatedly could not run on a complete scene record");
   }
   // Check history continuity at submission. A worker can cross Present while
   // retaining the jitter and inputs recorded for its native scene.
   state::BeginFrame();
+}
+
+// Called by native_post_filter at each cut: schedules the presented main
+// view's reconstruction in the list the engine has just begun for its
+// post-processing.
+inline void OnPostFilterStart(ID3D11DeviceContext* context) {
+  if (!state::IsEnabled()) return;
+  try {
+    auto* cmd_list = coordinator::FindRecordingList(context);
+    if (cmd_list == nullptr) return;
+    const coordinator::ExecutionGuard execution_guard;
+    coordinator::ScheduleSceneLocked(cmd_list);
+  } catch (const std::exception& error) {
+    // The engine continues its post-processing; this scene is not reconstructed.
+    static std::atomic_flag reported;
+    if (!reported.test_and_set(std::memory_order_relaxed)) {
+      logging::Warn("scheduling reconstruction failed: ", error.what());
+    }
+  }
 }
 
 inline void Use(DWORD fdw_reason, const settings::State& settings_state) {

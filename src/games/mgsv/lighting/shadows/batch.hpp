@@ -344,7 +344,7 @@ inline void BeginLocalLights() {
     reconstruction::coordinator::shadow_batch_requested.store(true, std::memory_order_release);
     const auto scope = rendering::native_context::GetScope();
     if (scope.owner.scene == 0u) return;
-    const auto context = native_lights::Unwrap(rendering::native_context::GetRecording().d3d_context);
+    const auto context = rendering::native_context::Unwrap(rendering::native_context::GetRecording().d3d_context);
     // On an immediate context the dispatch would run now, before any light exists.
     if (context == nullptr || context->GetType() != D3D11_DEVICE_CONTEXT_DEFERRED) return;
     auto* cmd_list = reconstruction::coordinator::FindRecordingList(context.Get());

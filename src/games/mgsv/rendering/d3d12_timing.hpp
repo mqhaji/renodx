@@ -2,8 +2,9 @@
 #ifndef RENODX_GAMES_MGSV_RENDERING_D3D12_TIMING_HPP_
 #define RENODX_GAMES_MGSV_RENDERING_D3D12_TIMING_HPP_
 
-// GPU timestamps for the private D3D12 work, recorded only while a diagnostic
-// client has asked for them. Ordinary rendering issues no queries.
+// GPU timestamps for the private D3D12 work, and the CPU time spent submitting
+// it, recorded only while a diagnostic client has asked for them. Ordinary
+// rendering issues no queries and reads no clock.
 
 #include <d3d12.h>
 #include <wrl/client.h>
@@ -11,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -29,6 +31,7 @@ enum class Stream : uint8_t {
 };
 inline constexpr size_t STREAM_COUNT = static_cast<size_t>(Stream::COUNT);
 inline constexpr uint32_t MAX_SPANS = 47u;
+inline constexpr uint32_t MAX_CPU_PARTS = 16u;
 
 // Plain data copied to the client. No pointers or owning objects cross modules.
 struct Span {
@@ -43,6 +46,11 @@ struct StreamReport {
   // First to last timestamp of each submission.
   Span total;
   std::array<Span, MAX_SPANS> spans;
+  // CPU time of the submitting thread, by part, in the order the parts ran.
+  // The last part is the whole submission.
+  uint32_t cpu_submissions = 0u;
+  uint32_t cpu_part_count = 0u;
+  std::array<Span, MAX_CPU_PARTS> cpu_parts;
 };
 struct Report {
   std::array<StreamReport, STREAM_COUNT> streams;
@@ -101,6 +109,77 @@ inline void Read(Report* report) {
     report->remaining[stream] = internal::remaining[stream].load(std::memory_order_acquire);
   }
 }
+
+// Brackets the CPU work of one submission on the calling thread. It does
+// nothing unless a client is timing its stream when it begins. Declare it
+// before any guard whose release belongs to the submission.
+class CpuSubmission {
+ public:
+  explicit CpuSubmission(Stream stream) : stream(stream) {
+    if (internal::remaining[static_cast<size_t>(stream)].load(std::memory_order_acquire) == 0u) return;
+    enclosing = active_;
+    active_ = this;
+    started = std::chrono::steady_clock::now();
+    part_started = started;
+  }
+
+  CpuSubmission(const CpuSubmission&) = delete;
+  CpuSubmission& operator=(const CpuSubmission&) = delete;
+
+  ~CpuSubmission() {
+    if (active_ != this) return;
+    active_ = enclosing;
+    Add("whole submission", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
+    const std::unique_lock lock(internal::state.mutex);
+    auto& report = internal::state.report.streams[static_cast<size_t>(stream)];
+    // A submission that took another path has other parts; keep the sums comparable.
+    if (report.cpu_submissions != 0u && report.cpu_part_count != part_count) return;
+    report.cpu_part_count = part_count;
+    for (uint32_t part = 0u; part < part_count; ++part) {
+      auto& total = report.cpu_parts[part];
+      const double milliseconds = parts[part].sum_ms;
+      total.name = parts[part].name;
+      total.sum_ms += milliseconds;
+      total.min_ms = (report.cpu_submissions == 0u ? milliseconds : std::min(total.min_ms, milliseconds));
+      total.max_ms = std::max(total.max_ms, milliseconds);
+    }
+    ++report.cpu_submissions;
+  }
+
+  // Ends a named part covering the calling thread's time since the previous
+  // part of the submission being timed on it, if any.
+  static void EndPart(const char* name) {
+    if (active_ == nullptr) return;
+    const auto now = std::chrono::steady_clock::now();
+    active_->Add(name, std::chrono::duration<double, std::milli>(now - active_->part_started).count());
+    active_->part_started = now;
+  }
+
+  // Adds a part measured elsewhere and restarts the clock of the next part.
+  static void AddPart(const char* name, double milliseconds) {
+    if (active_ == nullptr) return;
+    active_->Add(name, milliseconds);
+    active_->part_started = std::chrono::steady_clock::now();
+  }
+
+  [[nodiscard]] static bool IsTiming() { return active_ != nullptr; }
+
+ private:
+  void Add(const char* name, double milliseconds) {
+    if (part_count == MAX_CPU_PARTS) return;
+    auto& part = parts[part_count++];
+    std::snprintf(part.name.data(), part.name.size(), "%s", name);
+    part.sum_ms = milliseconds;
+  }
+
+  inline static thread_local CpuSubmission* active_ = nullptr;
+  Stream stream;
+  CpuSubmission* enclosing = nullptr;
+  std::chrono::steady_clock::time_point started;
+  std::chrono::steady_clock::time_point part_started;
+  uint32_t part_count = 0u;
+  std::array<Span, MAX_CPU_PARTS> parts;
+};
 
 // Brackets one recorded command list. It does nothing unless its stream has
 // timed submissions left and a query range is free.

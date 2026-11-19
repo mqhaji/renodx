@@ -40,9 +40,26 @@ inline constexpr GUID BLOOM_IMAGE_GUID = {
 inline constexpr uint8_t BLOOM_IMAGE_NEW = 1u;
 inline constexpr uint8_t BLOOM_IMAGE_CLEARED = 2u;
 // Scene roles ReadSceneRole reports: the engine's scene color and its
-// TEMPORARY_OUTPUT copy, or the image DoF and motion blur copy the scene into.
+// TEMPORARY_OUTPUT copy, the image DoF and motion blur copy the scene into, or
+// the image the exposure meter copies its source into.
 inline constexpr uint8_t SCENE_IMAGE = 1u;
 inline constexpr uint8_t SCENE_COPY = 2u;
+inline constexpr uint8_t EXPOSURE_SOURCE = 3u;
+
+// The engine targets temporal reconstruction reads, in the order
+// ReadFrameImages returns them.
+enum class FrameTarget : uint8_t {
+  SCENE_COLOR,
+  DEPTH,
+  VELOCITY,
+  OBJECT_VELOCITY,
+};
+
+// A frame target's texture and the shader view the engine itself binds for it.
+struct FrameImage {
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shader_view;
+};
 
 namespace internal {
 
@@ -81,6 +98,9 @@ inline constexpr uint32_t RENDER_TARGET_HANDLE = 0x0Bu;
 // RenderTargetDx11 keeps its gn texture at +0x40, which keeps the D3D texture at +0x10.
 inline constexpr size_t TARGET_TEXTURE_OFFSET = 0x40u;
 inline constexpr size_t TEXTURE_RESOURCE_OFFSET = 0x10u;
+// It keeps its gn shader view at +0x50, which keeps the D3D view at +0x08.
+inline constexpr size_t TARGET_SHADER_VIEW_OFFSET = 0x50u;
+inline constexpr size_t VIEW_OBJECT_OFFSET = 0x08u;
 // Code 1 is a B8G8R8A8 typeless texture with UNORM or sRGB views. Code 6 is
 // R16G16B16A16 with FLOAT views; it ignores the sRGB flags, so shaders convert
 // where a game view was sRGB (FIX_UNORM_SRGB).
@@ -114,6 +134,22 @@ inline constexpr std::array<FloatTarget, 16> FLOAT_TARGETS = {{
     {.name = 0x67B86CEA6100ull},                             // RENODX_MOTION_BLUR_1.
     {.name = 0x1DDB85A4EE59ull, .scene_role = SCENE_COPY},   // RENODX_SCENE_COPY: DoF's and motion blur's own full-size scene copy.
 }};
+// The exposure meter's first image. It is float already and keeps its format.
+inline constexpr uint64_t EXPOSURE_SOURCE_NAME = 0x80726D23BE27ull;
+// The frame targets by name hash, in FrameTarget order.
+inline constexpr std::array<uint64_t, 4> FRAME_TARGETS = {
+    0x90EBFD910903ull,  // PRIMARY_COLOR_BUFFER: scene color. Post passes bind this entry's view.
+    0x5DD84A404FCBull,  // DEPTH_BUFFER: the G-buffer depth. Its read-only alias has no shader view.
+    0x803A4617E25Dull,  // MotionBlurCameraVelocity's target.
+    0xFE772C3902FDull,  // GBUFFER_MATERIAL: object motion.
+};
+// Each frame target's image, kept from the call that creates it until the
+// engine creates it again or the device ends.
+struct FrameImages {
+  std::shared_mutex mutex;
+  std::array<FrameImage, FRAME_TARGETS.size()> images;
+};
+static FrameImages frame_images;
 // Private data on the D3D texture of an image with a scene role; it lives and dies with the texture.
 inline constexpr GUID SCENE_ROLE_GUID = {
     .Data1 = 0x3E8C1D54u, .Data2 = 0x7A21u, .Data3 = 0x4F0Bu, .Data4 = {0x9C, 0x35, 0x6D, 0x1E, 0xB2, 0x40, 0x8A, 0x17}};
@@ -193,23 +229,39 @@ inline const FloatTarget* FindFloatTarget(uint64_t name) {
 inline void __fastcall HookInitialize(void* target, const Parameter* parameter, uint32_t texture_handle) {
   const CallScope scope;
   const auto* float_target = FindFloatTarget(parameter->name);
+  const auto frame_target = std::ranges::find(FRAME_TARGETS, parameter->name & NAME_MASK);
+  const bool is_exposure_source = (parameter->name & NAME_MASK) == EXPOSURE_SOURCE_NAME;
   // A private image already asks for the float code; it still gets its tags below.
-  if (float_target == nullptr || (parameter->format_code != BGRA8_CODE && parameter->format_code != FLOAT_CODE)) {
+  const bool is_float = float_target != nullptr && (parameter->format_code == BGRA8_CODE || parameter->format_code == FLOAT_CODE);
+  if (is_float) {
+    // Callers reuse one parameter for several targets, and the manager compares
+    // its stored copy when a name is created twice. Only this call sees the
+    // float code; an _SRGB alias entry is listed too, so both sides match.
+    Parameter float_parameter = *parameter;
+    float_parameter.format_code = FLOAT_CODE;
+    hooks.initialize(target, &float_parameter, texture_handle);
+  } else {
     hooks.initialize(target, parameter, texture_handle);
-    return;
   }
-  // Callers reuse one parameter for several targets, and the manager compares
-  // its stored copy when a name is created twice. Only this call sees the
-  // float code; an _SRGB alias entry is listed too, so both sides match.
-  Parameter float_parameter = *parameter;
-  float_parameter.format_code = FLOAT_CODE;
-  hooks.initialize(target, &float_parameter, texture_handle);
+  if (!is_float && frame_target == FRAME_TARGETS.end() && !is_exposure_source) return;
 
   const auto* texture = *reinterpret_cast<const uint8_t* const*>(static_cast<const uint8_t*>(target) + TARGET_TEXTURE_OFFSET);
   if (texture == nullptr) return;
   auto* resource = *reinterpret_cast<ID3D11Resource* const*>(texture + TEXTURE_RESOURCE_OFFSET);
   Microsoft::WRL::ComPtr<ID3D11Texture2D> created;
   if (resource == nullptr || FAILED(resource->QueryInterface(IID_PPV_ARGS(&created)))) return;
+  if (frame_target != FRAME_TARGETS.end()) {
+    const auto* shader_view = *reinterpret_cast<const uint8_t* const*>(static_cast<const uint8_t*>(target) + TARGET_SHADER_VIEW_OFFSET);
+    const std::unique_lock lock(frame_images.mutex);
+    frame_images.images[static_cast<size_t>(frame_target - FRAME_TARGETS.begin())] = {
+        .texture = created,
+        .shader_view = (shader_view != nullptr ? *reinterpret_cast<ID3D11ShaderResourceView* const*>(shader_view + VIEW_OBJECT_OFFSET) : nullptr),
+    };
+  }
+  if (is_exposure_source) {
+    resource->SetPrivateData(SCENE_ROLE_GUID, sizeof(EXPOSURE_SOURCE), &EXPOSURE_SOURCE);
+  }
+  if (!is_float) return;
   D3D11_TEXTURE2D_DESC description;
   created->GetDesc(&description);
   if (description.Format != DXGI_FORMAT_R16G16B16A16_FLOAT) {
@@ -299,12 +351,19 @@ inline auto HookedFunctions() {
 
 }  // namespace internal
 
-// SCENE_IMAGE or SCENE_COPY for an engine texture with that role, otherwise 0.
+// The scene role of an engine texture that has one, otherwise 0.
 inline uint8_t ReadSceneRole(ID3D11Resource* resource) {
   uint8_t role = 0u;
   UINT size = sizeof(role);
   if (resource == nullptr || FAILED(resource->GetPrivateData(internal::SCENE_ROLE_GUID, &size, &role)) || size != sizeof(role)) return 0u;
   return role;
+}
+
+// The engine's current frame images, indexed by FrameTarget. An image is empty
+// until the engine has created it under these hooks.
+inline std::array<FrameImage, internal::FRAME_TARGETS.size()> ReadFrameImages() {
+  const std::shared_lock lock(internal::frame_images.mutex);
+  return internal::frame_images.images;
 }
 
 // Call before the engine creates its render targets, and balance each
@@ -404,6 +463,10 @@ inline bool Detach() {
   for (auto& target : internal::private_targets) {
     target.shared_handle = 0u;
     target.handle = 0u;
+  }
+  {
+    const std::unique_lock images_lock(internal::frame_images.mutex);
+    internal::frame_images.images = {};
   }
   internal::hooks.registrations = 0u;
   return true;
