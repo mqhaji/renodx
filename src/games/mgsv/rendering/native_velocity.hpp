@@ -15,6 +15,8 @@
 #include <include/reshade.hpp>
 
 #include "../../../utils/detour.hpp"
+#include "../engine/build.hpp"
+#include "../engine/image.hpp"
 #include "native_context.hpp"
 
 // The engine draws object and camera motion vectors in
@@ -28,10 +30,11 @@ namespace mgsv::rendering::native_velocity {
 // lighting is on.
 inline std::atomic<bool> wanted = false;
 
+inline constexpr std::array REQUIRED_ENTRIES = {engine::Entry::DEFERRED_GEOMETRY_POST_EXEC, engine::Entry::DG_END_SCREEN_SPACE_VELOCITY};
+inline constexpr engine::Requirement REQUIREMENT = {.feature = "Motion vectors with the game's motion blur off", .entries = REQUIRED_ENTRIES};
+
 namespace internal {
 
-inline constexpr uintptr_t POST_EXEC_RVA = 0x1C54D0u;
-inline constexpr uintptr_t END_SCREEN_SPACE_VELOCITY_RVA = 0x2BF7A0u;
 // Render keeps a pointer to the build's frame flags at +0xD0. Bit 0 of the
 // first word asks for motion vectors: PluginMotionBlur::InitRender is its only
 // writer and PostExec its only reader. The motion blur draw has its own test.
@@ -116,27 +119,11 @@ inline bool Install() {
     }
     return false;
   };
-  auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-  if (base == nullptr) return fail("MgsvVelocity: native executable is unavailable; motion vectors follow the game's motion blur.");
-  const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-  if (dos->e_magic != IMAGE_DOS_SIGNATURE) return fail("MgsvVelocity: native executable header validation failed; motion vectors follow the game's motion blur.");
-  const auto* pe = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-  if (pe->Signature != IMAGE_NT_SIGNATURE || pe->FileHeader.TimeDateStamp != native_context::IMAGE_TIMESTAMP
-      || pe->OptionalHeader.SizeOfImage != native_context::IMAGE_SIZE) {
-    return fail("MgsvVelocity: unsupported native executable; motion vectors follow the game's motion blur.");
+  if (!engine::Verified(REQUIRED_ENTRIES)) {
+    return fail("MgsvVelocity: the velocity pass entries did not verify; motion vectors follow the game's motion blur.");
   }
-  // Installed-executable bytes. The second function begins like its neighbors,
-  // so its signature includes the operand that addresses the G-buffer.
-  constexpr std::array<uint8_t, 25> post_exec = {0x48, 0x8B, 0xC4, 0x53, 0x55, 0x56, 0x57, 0x41, 0x56, 0x48, 0x81, 0xEC, 0x40,
-                                                 0x01, 0x00, 0x00, 0x48, 0xC7, 0x44, 0x24, 0x40, 0xFE, 0xFF, 0xFF, 0xFF};
-  constexpr std::array<uint8_t, 16> end_screen_space_velocity = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B,
-                                                                 0xD9, 0x48, 0x8B, 0x0D, 0x10, 0x49, 0x8D, 0x02};
-  if (std::memcmp(base + internal::POST_EXEC_RVA, post_exec.data(), post_exec.size()) != 0
-      || std::memcmp(base + internal::END_SCREEN_SPACE_VELOCITY_RVA, end_screen_space_velocity.data(), end_screen_space_velocity.size()) != 0) {
-    return fail("MgsvVelocity: native velocity pass validation failed; motion vectors follow the game's motion blur.");
-  }
-  internal::hooks.post_exec = reinterpret_cast<internal::PostExec>(base + internal::POST_EXEC_RVA);
-  internal::hooks.end_screen_space_velocity = reinterpret_cast<internal::EndScreenSpaceVelocity>(base + internal::END_SCREEN_SPACE_VELOCITY_RVA);
+  internal::hooks.post_exec = reinterpret_cast<internal::PostExec>(engine::Address(engine::Entry::DEFERRED_GEOMETRY_POST_EXEC));
+  internal::hooks.end_screen_space_velocity = reinterpret_cast<internal::EndScreenSpaceVelocity>(engine::Address(engine::Entry::DG_END_SCREEN_SPACE_VELOCITY));
   try {
     renodx::utils::detour::Install(internal::HookedFunctions());
   } catch (const std::system_error&) {

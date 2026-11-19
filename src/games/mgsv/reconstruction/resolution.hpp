@@ -22,6 +22,8 @@
 #include <detours.h>
 #include <include/reshade.hpp>
 
+#include "../engine/build.hpp"
+#include "../engine/image.hpp"
 #include "../rendering/native_context.hpp"
 #include "logging.hpp"
 #include "state.hpp"
@@ -138,6 +140,19 @@ inline DofDraw dof_draw = nullptr;
 inline DofDimensions dof_dimensions = nullptr;
 inline DofSprites dof_sprites = nullptr;
 inline uintptr_t backend_step_entry = 0u;
+
+// The hooks, and the constants the native depth-of-field scatter is
+// rescaled around at output size.
+inline constexpr std::array REQUIRED_ENTRIES = {
+    engine::Entry::DG_START,
+    engine::Entry::DEPTH_OF_FIELD_DRAW,
+    engine::Entry::DEPTH_OF_FIELD_SET_RENDER_AREA,
+    engine::Entry::DEPTH_OF_FIELD_DRAW_SPRITE_SUB,
+    engine::Entry::DEPTH_OF_FIELD_NEAR_RADIUS_CAP,
+    engine::Entry::DEPTH_OF_FIELD_SCATTER_SCALE,
+    engine::Entry::DEPTH_OF_FIELD_REFERENCE_WIDTH,
+};
+inline constexpr engine::Requirement REQUIREMENT = {.feature = "Upscaling (DLSS and FSR below native resolution)", .entries = REQUIRED_ENTRIES};
 
 // These fields belong to the shared Dg backend. Its Start call applies size
 // requests before the game begins building views for the next render.
@@ -293,31 +308,15 @@ inline void __fastcall HookDofSprites(void* effect, uint32_t width, uint32_t hei
 
 inline void OnInitDevice(reshade::api::device* device) {
   if (device->get_api() != reshade::api::device_api::d3d11 || installed.load(std::memory_order_acquire)) return;
-  auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-  const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-  if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
-  const auto* pe = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-  if (pe->Signature != IMAGE_NT_SIGNATURE || pe->FileHeader.TimeDateStamp != 0x6A4CB898u
-      || pe->OptionalHeader.SizeOfImage != 0xA01D000u) return;
-  constexpr std::array<uint8_t, 15> step = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0x8B, 0x89, 0x98, 0x01, 0x00, 0x00};
-  constexpr std::array<uint8_t, 16> draw = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48};
-  constexpr std::array<uint8_t, 16> dimensions = {0x48, 0x89, 0x5C, 0x24, 0x20, 0x48, 0x89, 0x4C, 0x24, 0x08, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41};
-  constexpr std::array<uint8_t, 16> sprites = {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x08, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56};
-  if (std::memcmp(base + 0x24C220u, step.data(), step.size()) != 0
-      || std::memcmp(base + 0x2F1780u, draw.data(), draw.size()) != 0
-      || std::memcmp(base + 0x2F64A0u, dimensions.data(), dimensions.size()) != 0
-      || std::memcmp(base + 0x2F5D70u, sprites.data(), sprites.size()) != 0
-      || *reinterpret_cast<const float*>(base + 0x20AAE50u) != 6.f
-      || *reinterpret_cast<const float*>(base + 0x211E04Cu) != 0.85f
-      || *reinterpret_cast<const float*>(base + 0x211E048u) != (1.f / 1920.f)) {
-    logging::Warn("native upscaling executable validation failed");
+  if (!engine::Verified(REQUIRED_ENTRIES)) {
+    logging::Warn("the upscaling entries did not verify; upscaling is off");
     return;
   }
-  backend_step = reinterpret_cast<BackendStep>(base + 0x24C220u);
-  backend_step_entry = reinterpret_cast<uintptr_t>(base + 0x24C220u);
-  dof_draw = reinterpret_cast<DofDraw>(base + 0x2F1780u);
-  dof_dimensions = reinterpret_cast<DofDimensions>(base + 0x2F64A0u);
-  dof_sprites = reinterpret_cast<DofSprites>(base + 0x2F5D70u);
+  backend_step = reinterpret_cast<BackendStep>(engine::Address(engine::Entry::DG_START));
+  backend_step_entry = reinterpret_cast<uintptr_t>(engine::Address(engine::Entry::DG_START));
+  dof_draw = reinterpret_cast<DofDraw>(engine::Address(engine::Entry::DEPTH_OF_FIELD_DRAW));
+  dof_dimensions = reinterpret_cast<DofDimensions>(engine::Address(engine::Entry::DEPTH_OF_FIELD_SET_RENDER_AREA));
+  dof_sprites = reinterpret_cast<DofSprites>(engine::Address(engine::Entry::DEPTH_OF_FIELD_DRAW_SPRITE_SUB));
   HMODULE pinned = nullptr;
   if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
                          reinterpret_cast<LPCWSTR>(&HookBackendStep), &pinned)

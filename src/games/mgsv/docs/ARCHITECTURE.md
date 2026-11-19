@@ -12,6 +12,7 @@ The [render map](render-map.html) follows these owners through the native frame,
 | `shared.h` | The single CPU/HLSL settings layout |
 | `settings.hpp` and feature settings headers | Controls, Reset All, and Preset Off policy |
 | `shaders.hpp` | Explicit shader registrations and draw/dispatch callbacks |
+| `engine/build.hpp`, `engine/image.hpp` | Every address in the game's executable the mod relies on, with the bytes that identify it and the references between entries, verified once against the executable file; features take their addresses from here and stay off, named in the menu, when an entry they need does not verify |
 | `rendering/inputs.hpp` | Selected device/swapchain, reset versions, and retained native material/motion views |
 | `rendering/producer_records.hpp` | Camera/exposure, motion, diffuse-copy, prepared-source, and material-table records published in submission order |
 | `rendering/native_context.hpp` | Native renderer/view ownership, worker handoff, and copied scopes for submitted addon work |

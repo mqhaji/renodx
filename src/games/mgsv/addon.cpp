@@ -11,6 +11,7 @@
 // #define DEBUG_LEVEL_2
 // #define DEBUG_LEVEL_3
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -18,6 +19,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <span>
+#include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -48,6 +50,8 @@
 #include "../../utils/shader.hpp"
 #include "../../utils/state.hpp"
 #include "../../utils/swapchain.hpp"
+#include "engine/build.hpp"
+#include "engine/image.hpp"
 #include "lighting/environment_specular.hpp"
 #include "lighting/indirect/ambient_diffuse.hpp"
 #include "lighting/indirect/runtime.hpp"
@@ -55,6 +59,7 @@
 #include "lighting/indirect_lighting_mode.hpp"
 #include "lighting/reflections/native_chain.hpp"
 #include "lighting/reflections/runtime.hpp"
+#include "lighting/shadows/native_lights.hpp"
 #include "lighting/shadows/screen_space_shadows.hpp"
 #include "lighting/shadows/settings.hpp"
 #include "materials/capture.hpp"
@@ -67,6 +72,7 @@
 #include "reconstruction/native_post_filter.hpp"
 #include "reconstruction/postprocess/resources.hpp"
 #include "reconstruction/postprocess/runtime.hpp"
+#include "reconstruction/projection_jitter.hpp"
 #include "reconstruction/resolution.hpp"
 #include "reconstruction/runtime.hpp"
 #include "reconstruction/settings.hpp"
@@ -509,6 +515,34 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       mgsv::reconstruction::settings::AppendSettings(&settings, &shader_injection, &reconstruction_settings);
       mgsv::lighting::AppendSettings(&settings, &shader_injection);
 
+      // Name, before the menu is ever drawn, the features whose engine entries
+      // did not verify in the running executable.
+      if (std::ranges::none_of(settings, [](auto* setting) { return setting->section == "Game Version"; })) {
+        std::string unavailable;
+        for (const auto& requirement : {
+                 mgsv::rendering::native_context::REQUIREMENT,
+                 mgsv::rendering::engine_targets::REQUIREMENT,
+                 mgsv::rendering::native_velocity::REQUIREMENT,
+                 mgsv::reconstruction::native_post_filter::REQUIREMENT,
+                 mgsv::reconstruction::projection_jitter::REQUIREMENT,
+                 mgsv::reconstruction::resolution::REQUIREMENT,
+                 mgsv::shadows::native_lights::REQUIREMENT,
+             }) {
+          if (mgsv::engine::Verified(requirement.entries)) continue;
+          unavailable.append(unavailable.empty() ? "" : ", ").append(requirement.feature);
+        }
+        if (!unavailable.empty()) {
+          settings.insert(
+              settings.begin(),
+              new renodx::utils::settings::Setting{
+                  .value_type = renodx::utils::settings::SettingValueType::TEXT,
+                  .label = "This version of the game is not supported by: " + unavailable + ". They stay off; the ReShade log lists what did not match.",
+                  .section = "Game Version",
+                  .tint = 0xFF0000,
+              });
+        }
+      }
+
       if (!initialized) {
         renodx::mods::swapchain::v2::force_borderless = true;
         renodx::mods::swapchain::v2::prevent_full_screen = true;
@@ -534,6 +568,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
         // Every other section stays expanded, so only the "(Advanced)" groups start collapsed.
         renodx::utils::settings::open_sections_by_default = false;
         renodx::utils::settings::default_open_sections = {
+            "Game Version",
             "Temporal Anti-Aliasing",
             "Presets",
             "Output",

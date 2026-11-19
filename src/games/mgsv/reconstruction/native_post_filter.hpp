@@ -15,6 +15,8 @@
 #include <system_error>
 
 #include "../../../utils/detour.hpp"
+#include "../engine/build.hpp"
+#include "../engine/image.hpp"
 #include "../rendering/native_context.hpp"
 #include "logging.hpp"
 #include "probe_api.hpp"
@@ -32,9 +34,11 @@ namespace mgsv::reconstruction::native_post_filter {
 // throw, and it may take the coordinator's execution lock.
 using CutCallback = void (*)(ID3D11DeviceContext* context);
 
+inline constexpr std::array REQUIRED_ENTRIES = {engine::Entry::DG_START_POST_FILTER};
+inline constexpr engine::Requirement REQUIREMENT = {.feature = "Temporal reconstruction (DLSS, FSR and Analytical TAA)", .entries = REQUIRED_ENTRIES};
+
 namespace internal {
 
-inline constexpr uintptr_t START_POST_FILTER_RVA = 0x2C2D90u;
 using StartPostFilter = void(__fastcall*)(void* dg);
 
 struct HookState {
@@ -171,21 +175,10 @@ inline bool Install(CutCallback on_cut) {
       }
       return false;
     };
-    auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-    if (base == nullptr) return fail("native executable is unavailable; reconstruction cannot be scheduled");
-    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return fail("native executable header validation failed; reconstruction cannot be scheduled");
-    const auto* pe = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-    if (pe->Signature != IMAGE_NT_SIGNATURE || pe->FileHeader.TimeDateStamp != rendering::native_context::IMAGE_TIMESTAMP
-        || pe->OptionalHeader.SizeOfImage != rendering::native_context::IMAGE_SIZE) {
-      return fail("unsupported native executable; reconstruction cannot be scheduled");
+    if (!engine::Verified(REQUIRED_ENTRIES)) {
+      return fail("the post-processing start entry did not verify; reconstruction cannot be scheduled");
     }
-    // Installed-executable bytes up to the function's first relative operand.
-    constexpr std::array<uint8_t, 13> start_post_filter = {0x48, 0x89, 0x5C, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x40, 0x48, 0x8B, 0x05};
-    if (std::memcmp(base + internal::START_POST_FILTER_RVA, start_post_filter.data(), start_post_filter.size()) != 0) {
-      return fail("native post-processing start validation failed; reconstruction cannot be scheduled");
-    }
-    internal::hooks.start_post_filter = reinterpret_cast<internal::StartPostFilter>(base + internal::START_POST_FILTER_RVA);
+    internal::hooks.start_post_filter = reinterpret_cast<internal::StartPostFilter>(engine::Address(engine::Entry::DG_START_POST_FILTER));
     try {
       renodx::utils::detour::Install(std::array{renodx::utils::detour::Function(&internal::hooks.start_post_filter, internal::HookStartPostFilter)});
     } catch (const std::system_error&) {

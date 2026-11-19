@@ -23,6 +23,8 @@
 #include <include/reshade.hpp>
 
 #include "../../../utils/detour.hpp"
+#include "../engine/build.hpp"
+#include "../engine/image.hpp"
 #include "native_context.hpp"
 
 // The engine creates every render target in RenderTargetDx11::Initialize, on
@@ -32,6 +34,19 @@
 // directly and RenoDX keeps no clone of it. A plugin that keeps scene color in
 // an 8-bit temporary other plugins share gets float images of its own instead.
 namespace mgsv::rendering::engine_targets {
+
+inline constexpr std::array REQUIRED_ENTRIES = {
+    engine::Entry::RENDER_TARGET_INITIALIZE,
+    engine::Entry::GET_BUFFER_FORMAT_FROM_PARAMETER,
+    engine::Entry::RESIDENT_RESOURCE_GET_HANDLE,
+    engine::Entry::MOTION_BLUR_WORK_BUFFER_CONSTRUCTOR,
+    engine::Entry::DEPTH_OF_FIELD_RESOURCES_CONSTRUCTOR,
+    engine::Entry::RESTORE_TEMPORARY_RENDER_TARGET,
+    engine::Entry::RENDER_TARGET_CREATE_RESOURCE,
+    engine::Entry::RENDER_TARGET_RESTORE_WITH_RESIZE,
+    engine::Entry::RENDER_TARGET_MANAGER,
+};
+inline constexpr engine::Requirement REQUIREMENT = {.feature = "Float render targets (HDR precision)", .entries = REQUIRED_ENTRIES};
 
 // Private data on the D3D texture of each bloom image: NEW until the bloom
 // chain has cleared it once, because the chain writes only a working region.
@@ -76,22 +91,10 @@ struct Parameter {
 };
 static_assert(sizeof(Parameter) == 0x40u && offsetof(Parameter, format_code) == 0x14u);
 
-inline constexpr uintptr_t INITIALIZE_RVA = 0x2B2F90u;
-inline constexpr uintptr_t TEXTURE_FORMAT_RVA = 0x2B29D0u;
-// ResidentResourceManager::GetResourceHandle: a resident target's handle by name.
-inline constexpr uintptr_t LOOKUP_RVA = 0x23BBE0u;
-// The constructors of motion blur's WorkBuffer and DoF's resources, which look
-// up the temporaries those plugins draw into.
-inline constexpr uintptr_t MOTION_BLUR_BUFFER_RVA = 0x2C2E10u;
-inline constexpr uintptr_t DEPTH_OF_FIELD_RESOURCES_RVA = 0x2EFE50u;
-// restoreTemporaryRenderTarget: resizes the resident temporaries.
-inline constexpr uintptr_t RESTORE_TEMPORARIES_RVA = 0x27D330u;
-// RenderTargetManager::CreateResource and RestoreHandleWithResize.
-inline constexpr uintptr_t CREATE_RVA = 0x242620u;
-inline constexpr uintptr_t RESIZE_RVA = 0x242AC0u;
-// ResourceManagerBase<RenderTargetResource>::m_instance: +0x08 points to its
-// 0x70-byte entries, each with its parameter at +0x28; +0x14 counts live targets.
-inline constexpr uintptr_t MANAGER_RVA = 0x2B73428u;
+// The render target manager instance: +0x08 points to its 0x70-byte entries,
+// each with its parameter at +0x28; +0x14 counts live targets. The two
+// constructors look up the temporaries motion blur and DoF draw into, and
+// restoreTemporaryRenderTarget resizes the resident temporaries.
 // A render target handle is its entry's index above bit 17 and this type below.
 inline constexpr uint32_t HANDLE_TYPE_MASK = 0x7Fu;
 inline constexpr uint32_t RENDER_TARGET_HANDLE = 0x0Bu;
@@ -382,51 +385,18 @@ inline bool Install() {
     }
     return false;
   };
-  auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-  if (base == nullptr) return fail("MgsvTargets: native executable is unavailable; render targets stay 8-bit.");
-  const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-  if (dos->e_magic != IMAGE_DOS_SIGNATURE) return fail("MgsvTargets: native executable header validation failed; render targets stay 8-bit.");
-  const auto* pe = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-  if (pe->Signature != IMAGE_NT_SIGNATURE || pe->FileHeader.TimeDateStamp != native_context::IMAGE_TIMESTAMP
-      || pe->OptionalHeader.SizeOfImage != native_context::IMAGE_SIZE) {
-    return fail("MgsvTargets: unsupported native executable; render targets stay 8-bit and HDR output will be wrong.");
+  if (!engine::Verified(REQUIRED_ENTRIES)) {
+    return fail("MgsvTargets: the render target creation entries did not verify; render targets stay 8-bit and HDR output will be wrong.");
   }
-
-  // Installed-executable bytes up to the first relative operand of each function.
-  constexpr std::array<uint8_t, 28> initialize = {0x48, 0x89, 0x5C, 0x24, 0x18, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56,
-                                                  0x41, 0x57, 0x48, 0x8D, 0x6C, 0x24, 0xD9, 0x48, 0x81, 0xEC, 0xF0, 0x00, 0x00, 0x00};
-  constexpr std::array<uint8_t, 9> read_texture_format = {0x48, 0x63, 0x41, 0x14, 0x83, 0xF8, 0x0D, 0x77, 0x49};
-  constexpr std::array<uint8_t, 6> lookup = {0x48, 0x8B, 0xD1, 0x48, 0x8B, 0x0D};
-  constexpr std::array<uint8_t, 33> motion_blur_buffer = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x48,
-                                                          0x89, 0x7C, 0x24, 0x18, 0x4C, 0x89, 0x74, 0x24, 0x20, 0x55, 0x48,
-                                                          0x8D, 0x6C, 0x24, 0xA9, 0x48, 0x81, 0xEC, 0xB0, 0x00, 0x00, 0x00};
-  constexpr std::array<uint8_t, 26> depth_of_field_resources = {0x48, 0x8B, 0xC4, 0x55, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48,
-                                                                0x8D, 0xA8, 0x08, 0xFE, 0xFF, 0xFF, 0x48, 0x81, 0xEC, 0xD0, 0x02, 0x00, 0x00};
-  constexpr std::array<uint8_t, 22> restore_temporaries = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48,
-                                                           0x8B, 0x01, 0x48, 0x8B, 0xD9, 0xFF, 0x90, 0xF8, 0x04, 0x00, 0x00};
-  constexpr std::array<uint8_t, 32> create = {0x48, 0x8B, 0xC4, 0x55, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x40, 0x48, 0xC7,
-                                              0x40, 0xB8, 0xFE, 0xFF, 0xFF, 0xFF, 0x48, 0x89, 0x58, 0x18, 0x4C, 0x8B, 0xF1, 0x48, 0x8B, 0x35};
-  constexpr std::array<uint8_t, 9> resize = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x60, 0x4C, 0x8B, 0x0D};
-  if (std::memcmp(base + internal::INITIALIZE_RVA, initialize.data(), initialize.size()) != 0
-      || std::memcmp(base + internal::TEXTURE_FORMAT_RVA, read_texture_format.data(), read_texture_format.size()) != 0
-      || std::memcmp(base + internal::LOOKUP_RVA, lookup.data(), lookup.size()) != 0
-      || std::memcmp(base + internal::MOTION_BLUR_BUFFER_RVA, motion_blur_buffer.data(), motion_blur_buffer.size()) != 0
-      || std::memcmp(base + internal::DEPTH_OF_FIELD_RESOURCES_RVA, depth_of_field_resources.data(), depth_of_field_resources.size()) != 0
-      || std::memcmp(base + internal::RESTORE_TEMPORARIES_RVA, restore_temporaries.data(), restore_temporaries.size()) != 0
-      || std::memcmp(base + internal::CREATE_RVA, create.data(), create.size()) != 0
-      || std::memcmp(base + internal::RESIZE_RVA, resize.data(), resize.size()) != 0) {
-    return fail("MgsvTargets: render target creation validation failed; render targets stay 8-bit and HDR output will be wrong.");
-  }
-
-  internal::hooks.initialize = reinterpret_cast<internal::Initialize>(base + internal::INITIALIZE_RVA);
-  internal::hooks.read_texture_format = reinterpret_cast<internal::ReadTextureFormat>(base + internal::TEXTURE_FORMAT_RVA);
-  internal::hooks.lookup = reinterpret_cast<internal::Lookup>(base + internal::LOOKUP_RVA);
-  internal::hooks.construct_motion_blur = reinterpret_cast<internal::ConstructResources>(base + internal::MOTION_BLUR_BUFFER_RVA);
-  internal::hooks.construct_depth_of_field = reinterpret_cast<internal::ConstructResources>(base + internal::DEPTH_OF_FIELD_RESOURCES_RVA);
-  internal::hooks.restore_temporaries = reinterpret_cast<internal::RestoreTemporaries>(base + internal::RESTORE_TEMPORARIES_RVA);
-  internal::hooks.create = reinterpret_cast<internal::Create>(base + internal::CREATE_RVA);
-  internal::hooks.resize = reinterpret_cast<internal::Resize>(base + internal::RESIZE_RVA);
-  internal::hooks.manager = reinterpret_cast<const uint8_t* const*>(base + internal::MANAGER_RVA);
+  internal::hooks.initialize = reinterpret_cast<internal::Initialize>(engine::Address(engine::Entry::RENDER_TARGET_INITIALIZE));
+  internal::hooks.read_texture_format = reinterpret_cast<internal::ReadTextureFormat>(engine::Address(engine::Entry::GET_BUFFER_FORMAT_FROM_PARAMETER));
+  internal::hooks.lookup = reinterpret_cast<internal::Lookup>(engine::Address(engine::Entry::RESIDENT_RESOURCE_GET_HANDLE));
+  internal::hooks.construct_motion_blur = reinterpret_cast<internal::ConstructResources>(engine::Address(engine::Entry::MOTION_BLUR_WORK_BUFFER_CONSTRUCTOR));
+  internal::hooks.construct_depth_of_field = reinterpret_cast<internal::ConstructResources>(engine::Address(engine::Entry::DEPTH_OF_FIELD_RESOURCES_CONSTRUCTOR));
+  internal::hooks.restore_temporaries = reinterpret_cast<internal::RestoreTemporaries>(engine::Address(engine::Entry::RESTORE_TEMPORARY_RENDER_TARGET));
+  internal::hooks.create = reinterpret_cast<internal::Create>(engine::Address(engine::Entry::RENDER_TARGET_CREATE_RESOURCE));
+  internal::hooks.resize = reinterpret_cast<internal::Resize>(engine::Address(engine::Entry::RENDER_TARGET_RESTORE_WITH_RESIZE));
+  internal::hooks.manager = reinterpret_cast<const uint8_t* const*>(engine::Address(engine::Entry::RENDER_TARGET_MANAGER));
   try {
     renodx::utils::detour::Install(internal::HookedFunctions());
   } catch (const std::system_error&) {

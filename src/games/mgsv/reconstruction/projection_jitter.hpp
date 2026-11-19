@@ -35,6 +35,8 @@
 #include <include/reshade.hpp>
 
 #include "../../../utils/hash.hpp"
+#include "../engine/build.hpp"
+#include "../engine/image.hpp"
 #include "camera_state.hpp"
 #include "logging.hpp"
 #include "resolution.hpp"
@@ -58,22 +60,6 @@ using RequestLocalLightDraws = void(__fastcall*)(
     void* renderer, void* packet, void* visible_lights, void* shadow_ready,
     void* input_context, void* output_context, const void* viewport, void* jobs);
 
-inline constexpr uintptr_t VELOCITY_SET_VIEW_RETURN_RVA = 0x1C57C8u;
-inline constexpr uintptr_t MODEL_SET_VIEW_RETURN_RVA = 0x1CD63Au;
-inline constexpr uintptr_t ALPHA_MODEL_SET_VIEW_RETURN_RVA = 0x1CFA0Du;
-inline constexpr uintptr_t OVERLAY_MODEL_SET_VIEW_RETURN_RVA = 0x208D9Cu;
-// "NewThermography" is the game's name for its mode-2 branch.
-inline constexpr uintptr_t NEW_THERMOGRAPHY_SET_VIEW_RETURN_RVA = 0x214531u;
-inline constexpr uintptr_t THERMOGRAPHY_SET_VIEW_RETURN_RVA = 0x214AC3u;
-inline constexpr uintptr_t FORWARD_RENDERING_RVA = 0x1CD460u;
-inline constexpr uintptr_t LOCAL_LIGHT_REQUEST_RVA = 0x2A43E0u;
-inline constexpr uintptr_t LOCAL_LIGHT_REQUEST_RETURN_RVA = 0x20B8A3u;
-inline constexpr uintptr_t LOCAL_LIGHT_REQUEST_VTABLE_RVA = 0x211E8D8u;
-inline constexpr uintptr_t LOCAL_LIGHT_VIEWPORT_280_COPY_RVA = 0x20B48Cu;
-inline constexpr uintptr_t FLUSH_CONSTANTS_RVA = 0x2C5A10u;
-inline constexpr uintptr_t MODEL_CONSTANT_UPLOAD_RETURN_RVA = 0x2D664Fu;
-inline constexpr uintptr_t UPLOAD_CONSTANTS_RVA = 0x311E40u;
-inline constexpr uintptr_t SCATTER_UPLOAD_RETURN_RVA = 0x30E7EFu;
 // Native scene constants occupy thirty float4 registers in bank 2. Register 28
 // carries the projection center used to reconstruct camera rays from depth.
 inline constexpr int SCENE_CAMERA_CENTER_REGISTER = 28;
@@ -92,191 +78,48 @@ enum class VelocityShaderKind : uint8_t {
   MASKED_MOTION,
 };
 
-inline constexpr std::array<uint8_t, 16> FORWARD_RENDERING_PROLOGUE = {
-    0x40,
-    0x53,
-    0x48,
-    0x83,
-    0xEC,
-    0x20,
-    0x8B,
-    0x0D,
-    0x4C,
-    0x7D,
-    0x81,
-    0x02,
-    0x49,
-    0x8B,
-    0xD8,
-    0xE8,
+// Every hook and return address below, the calls between them, and the
+// engine's spherical-harmonic volume table these hooks index.
+inline constexpr std::array REQUIRED_ENTRIES = {
+    engine::Entry::FORWARD_RENDERING_PRE_EXEC,
+    engine::Entry::REQUEST_DRAW_ALL_LOCAL_LIGHT_ON_JOB,
+    engine::Entry::LOCAL_LIGHT_REQUEST_SLOT,
+    engine::Entry::LOCAL_LIGHT_REQUEST_RETURN,
+    engine::Entry::LOCAL_LIGHT_VIEWPORT_COPY,
+    engine::Entry::SHADOW_CONSTANT_REGISTER_FLUSH,
+    engine::Entry::CONSTANT_BUFFER_MAP_DATA,
+    engine::Entry::COMMAND_BUFFER_FLUSH_RENDER_RESOURCE,
+    engine::Entry::COMMAND_BUFFER_FLUSH_CONSTANT_REGISTER,
+    engine::Entry::MODEL_FLUSH_RENDER_RESOURCE_CALL,
+    engine::Entry::MODEL_CONSTANT_UPLOAD_RETURN,
+    engine::Entry::SCATTER_UPLOAD_RETURN,
+    engine::Entry::PROJECTION_COMMIT,
+    engine::Entry::RENDER_SET_VIEW_RETURN,
+    engine::Entry::SHADER_MANAGER_SET_VIEW_MATRIX,
+    engine::Entry::SHADER_MANAGER,
+    engine::Entry::DEFERRED_GEOMETRY_SET_VIEW_RETURN,
+    engine::Entry::MODEL_SET_VIEW_RETURN,
+    engine::Entry::ALPHA_MODEL_SET_VIEW_RETURN,
+    engine::Entry::OVERLAY_MODEL_SET_VIEW_RETURN,
+    engine::Entry::NEW_THERMOGRAPHY_SET_VIEW_RETURN,
+    engine::Entry::THERMOGRAPHY_SET_VIEW_RETURN,
+    engine::Entry::SUN_LIGHT_DRAW,
+    engine::Entry::DRAW_SHADOW_BOX,
+    engine::Entry::SUN_SHADOW_BOX_RETURN,
+    engine::Entry::SPHERICAL_HARMONICS_CALCULATE_LIGHT_VOLUME,
+    engine::Entry::SPHERICAL_HARMONICS_LIGHT_VOLUME_RETURN,
+    engine::Entry::SPHERICAL_HARMONICS_REGISTER_DRAW_ON_JOB,
+    engine::Entry::SPHERICAL_HARMONICS_SET_OUTPUT,
+    engine::Entry::SPHERICAL_HARMONICS_SET_OUTPUT_RETURN,
+    engine::Entry::SPHERICAL_HARMONICS_VOLUME_VERTEX_COUNTS,
+    engine::Entry::SKY_CALC_SHADER_PARAMETERS,
+    engine::Entry::SKY_PARAMETERS_RETURN,
+    engine::Entry::TERRAIN_DECAL_DRAW_ON_JOB,
+    engine::Entry::TERRAIN_DECAL_SET_INPUT,
+    engine::Entry::TERRAIN_DECAL_SET_INPUT_RETURN,
 };
-inline constexpr std::array<uint8_t, 16> LOCAL_LIGHT_REQUEST_PROLOGUE = {
-    0x40,
-    0x57,
-    0x41,
-    0x56,
-    0x41,
-    0x57,
-    0x48,
-    0x83,
-    0xEC,
-    0x40,
-    0x48,
-    0xC7,
-    0x44,
-    0x24,
-    0x30,
-    0xFE,
-};
-// MainExec passes its completed packet in RDX and viewport as argument seven.
-inline constexpr std::array<uint8_t, 38> LOCAL_LIGHT_REQUEST_CALL_PATTERN = {
-    0x48,
-    0x89,
-    0x5C,
-    0x24,
-    0x38,
-    0x4C,
-    0x89,
-    0x7C,
-    0x24,
-    0x30,
-    0x48,
-    0x89,
-    0x44,
-    0x24,
-    0x28,
-    0x48,
-    0x89,
-    0x54,
-    0x24,
-    0x20,
-    0x4C,
-    0x8B,
-    0x4C,
-    0x24,
-    0x78,
-    0x4C,
-    0x8B,
-    0x45,
-    0x88,
-    0x48,
-    0x8B,
-    0x54,
-    0x24,
-    0x58,
-    0x41,
-    0xFF,
-    0x52,
-    0x48,
-};
-inline constexpr std::array<uint8_t, 16> LOCAL_LIGHT_VIEWPORT_280_COPY_PATTERN = {
-    0x41,
-    0x0F,
-    0x28,
-    0x87,
-    0x80,
-    0x02,
-    0x00,
-    0x00,
-    0x41,
-    0x0F,
-    0x29,
-    0x86,
-    0xA0,
-    0x01,
-    0x00,
-    0x00,
-};
+inline constexpr engine::Requirement REQUIREMENT = {.feature = "Camera jitter for temporal reconstruction", .entries = REQUIRED_ENTRIES};
 
-inline constexpr std::array<uint8_t, 26> PROJECTION_COMMIT_PATTERN = {
-    0x83,
-    0x88,
-    0x90,
-    0x08,
-    0x00,
-    0x00,
-    0x09,
-    0x83,
-    0x88,
-    0x94,
-    0x08,
-    0x00,
-    0x00,
-    0x08,
-    0x48,
-    0x8D,
-    0x8F,
-    0xC0,
-    0x02,
-    0x00,
-    0x00,
-    0xE8,
-    0x00,
-    0x00,
-    0x00,
-    0x00,
-};
-inline constexpr size_t RELATIVE_CALL_OFFSET = 0x15u;
-inline constexpr size_t SHADER_MANAGER_LOAD_BACK_OFFSET = 0x3Fu;
-inline constexpr size_t PROJECTION_COPY_BACK_OFFSET = 0x38u;
-inline constexpr std::array<uint8_t, 56> PROJECTION_COPY_PATTERN = {
-    0x0F,
-    0x28,
-    0x87,
-    0x80,
-    0x02,
-    0x00,
-    0x00,
-    0x0F,
-    0x29,
-    0x80,
-    0x80,
-    0x06,
-    0x00,
-    0x00,
-    0x0F,
-    0x28,
-    0x8F,
-    0x90,
-    0x02,
-    0x00,
-    0x00,
-    0x0F,
-    0x29,
-    0x88,
-    0x90,
-    0x06,
-    0x00,
-    0x00,
-    0x0F,
-    0x28,
-    0x87,
-    0xA0,
-    0x02,
-    0x00,
-    0x00,
-    0x0F,
-    0x29,
-    0x80,
-    0xA0,
-    0x06,
-    0x00,
-    0x00,
-    0x0F,
-    0x28,
-    0x8F,
-    0xB0,
-    0x02,
-    0x00,
-    0x00,
-    0x0F,
-    0x29,
-    0x88,
-    0xB0,
-    0x06,
-    0x00,
-    0x00,
-};
 inline constexpr uint32_t REQUIRED_RESTORATION_HITS = 3u;
 
 inline SetViewMatrixState set_view_matrix_state = nullptr;
@@ -315,134 +158,6 @@ inline void BeginProductionRestorationCheck() {
 
 inline void CancelProductionRestorationCheck() {
   production_awaiting_restoration.store(false, std::memory_order_release);
-}
-
-inline bool MatchesProjectionCommit(const uint8_t* candidate) {
-  const auto* shader_manager_load = candidate - SHADER_MANAGER_LOAD_BACK_OFFSET;
-  if (shader_manager_load[0] != 0x48u
-      || shader_manager_load[1] != 0x8Bu
-      || shader_manager_load[2] != 0x05u) {
-    return false;
-  }
-  if (std::memcmp(
-          candidate - PROJECTION_COPY_BACK_OFFSET,
-          PROJECTION_COPY_PATTERN.data(),
-          PROJECTION_COPY_PATTERN.size())
-      != 0) {
-    return false;
-  }
-  for (size_t index = 0u; index < PROJECTION_COMMIT_PATTERN.size(); ++index) {
-    if (index > RELATIVE_CALL_OFFSET && index < RELATIVE_CALL_OFFSET + 5u) continue;
-    if (candidate[index] != PROJECTION_COMMIT_PATTERN[index]) return false;
-  }
-  return true;
-}
-
-inline uint8_t* FindProjectionCommit(HMODULE module) {
-  if (module == nullptr) return nullptr;
-
-  auto* base = reinterpret_cast<uint8_t*>(module);
-  const auto* dos_header = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-  if (dos_header->e_magic != IMAGE_DOS_SIGNATURE) return nullptr;
-
-  const auto* nt_headers = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos_header->e_lfanew);
-  if (nt_headers->Signature != IMAGE_NT_SIGNATURE) return nullptr;
-
-  const auto* section = IMAGE_FIRST_SECTION(nt_headers);
-  uint8_t* match = nullptr;
-  uint32_t match_count = 0u;
-  for (uint16_t index = 0u; index < nt_headers->FileHeader.NumberOfSections; ++index, ++section) {
-    const bool executable_code = (section->Characteristics & IMAGE_SCN_CNT_CODE) != 0u
-                                 && (section->Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0u;
-    if (!executable_code || section->Misc.VirtualSize < PROJECTION_COMMIT_PATTERN.size()) continue;
-
-    auto* section_begin = base + section->VirtualAddress;
-    const size_t section_size = section->Misc.VirtualSize;
-    for (size_t offset = SHADER_MANAGER_LOAD_BACK_OFFSET;
-         offset <= section_size - PROJECTION_COMMIT_PATTERN.size();
-         ++offset) {
-      if (!MatchesProjectionCommit(section_begin + offset)) continue;
-      match = section_begin + offset;
-      if (++match_count > 1u) break;
-    }
-    if (match_count > 1u) break;
-  }
-
-  if (match_count != 1u) {
-    logging::Warn("projection commit AOB expected one match, found ", match_count);
-    return nullptr;
-  }
-  return match;
-}
-
-inline uint8_t* DecodeRelativeCall(uint8_t* instruction) {
-  if (instruction == nullptr || instruction[0] != 0xE8u) return nullptr;
-  int32_t displacement = 0;
-  std::memcpy(&displacement, instruction + 1u, sizeof(displacement));
-  return instruction + 5u + displacement;
-}
-
-inline void** DecodeShaderManagerGlobal(uint8_t* commit) {
-  if (commit == nullptr) return nullptr;
-  auto* load = commit - SHADER_MANAGER_LOAD_BACK_OFFSET;
-  if (load[0] != 0x48u || load[1] != 0x8Bu || load[2] != 0x05u) return nullptr;
-
-  int32_t displacement = 0;
-  std::memcpy(&displacement, load + 3u, sizeof(displacement));
-  return reinterpret_cast<void**>(load + 7u + displacement);
-}
-
-template <size_t Size>
-inline bool MatchesBytes(const uint8_t* address, const std::array<uint8_t, Size>& expected) {
-  return address != nullptr && std::memcmp(address, expected.data(), expected.size()) == 0;
-}
-
-inline bool InitializeAdditionalHookAddresses(HMODULE module, const uint8_t* helper_entry_address) {
-  if (module == nullptr || helper_entry_address == nullptr) return false;
-  auto* base = reinterpret_cast<uint8_t*>(module);
-
-  auto* velocity_return = base + VELOCITY_SET_VIEW_RETURN_RVA;
-  auto* model_return = base + MODEL_SET_VIEW_RETURN_RVA;
-  auto* alpha_return = base + ALPHA_MODEL_SET_VIEW_RETURN_RVA;
-  auto* overlay_return = base + OVERLAY_MODEL_SET_VIEW_RETURN_RVA;
-  auto* new_thermography_return = base + NEW_THERMOGRAPHY_SET_VIEW_RETURN_RVA;
-  auto* thermography_return = base + THERMOGRAPHY_SET_VIEW_RETURN_RVA;
-  if (DecodeRelativeCall(velocity_return - 5u) != helper_entry_address
-      || DecodeRelativeCall(model_return - 5u) != helper_entry_address
-      || DecodeRelativeCall(alpha_return - 5u) != helper_entry_address
-      || DecodeRelativeCall(overlay_return - 5u) != helper_entry_address
-      || DecodeRelativeCall(new_thermography_return - 5u) != helper_entry_address
-      || DecodeRelativeCall(thermography_return - 5u) != helper_entry_address
-      || !MatchesBytes(base + FORWARD_RENDERING_RVA, FORWARD_RENDERING_PROLOGUE)
-      || !MatchesBytes(base + LOCAL_LIGHT_REQUEST_RVA, LOCAL_LIGHT_REQUEST_PROLOGUE)
-      || !MatchesBytes(base + LOCAL_LIGHT_REQUEST_RETURN_RVA - LOCAL_LIGHT_REQUEST_CALL_PATTERN.size(), LOCAL_LIGHT_REQUEST_CALL_PATTERN)
-      || *reinterpret_cast<const uintptr_t*>(base + LOCAL_LIGHT_REQUEST_VTABLE_RVA) != reinterpret_cast<uintptr_t>(base + LOCAL_LIGHT_REQUEST_RVA)
-      || !MatchesBytes(base + LOCAL_LIGHT_VIEWPORT_280_COPY_RVA, LOCAL_LIGHT_VIEWPORT_280_COPY_PATTERN)
-      || !MatchesBytes(base + FLUSH_CONSTANTS_RVA, std::array<uint8_t, 16>{0x48, 0x89, 0x4C, 0x24, 0x08, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57})
-      // The model worker flushes shader bindings, then constants. The latter
-      // helper tail-calls this upload, preserving the model worker's return site.
-      || DecodeRelativeCall(base + 0x2D6642u) != base + 0x2D73D0u
-      || DecodeRelativeCall(base + MODEL_CONSTANT_UPLOAD_RETURN_RVA - 5u) != base + 0x2D7390u
-      || !MatchesBytes(base + UPLOAD_CONSTANTS_RVA, std::array<uint8_t, 16>{0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57})
-      || DecodeRelativeCall(base + SCATTER_UPLOAD_RETURN_RVA - 5u) != base + UPLOAD_CONSTANTS_RVA) {
-    logging::Warn("known additional projection jitter paths failed executable validation");
-    return false;
-  }
-
-  velocity_return_address = velocity_return;
-  model_return_address = model_return;
-  alpha_model_return_address = alpha_return;
-  overlay_model_return_address = overlay_return;
-  new_thermography_return_address = new_thermography_return;
-  thermography_return_address = thermography_return;
-  forward_rendering = reinterpret_cast<RenderPluginCallback>(base + FORWARD_RENDERING_RVA);
-  request_local_light_draws = reinterpret_cast<RequestLocalLightDraws>(base + LOCAL_LIGHT_REQUEST_RVA);
-  local_light_request_return_address = base + LOCAL_LIGHT_REQUEST_RETURN_RVA;
-  flush_constants = reinterpret_cast<FlushConstants>(base + FLUSH_CONSTANTS_RVA);
-  motion_upload_return_address = base + MODEL_CONSTANT_UPLOAD_RETURN_RVA;
-  upload_constants = reinterpret_cast<UploadConstants>(base + UPLOAD_CONSTANTS_RVA);
-  scatter_upload_return_address = base + SCATTER_UPLOAD_RETURN_RVA;
-  return true;
 }
 
 inline bool LooksLikeGameplayProjection(
@@ -889,7 +604,11 @@ inline AttachPacket sh_attach = nullptr;
 inline SkyParameters sky_parameters = nullptr;
 inline TerrainProducer terrain_producer = nullptr;
 inline AttachPacket terrain_attach = nullptr;
-inline uint8_t* native_base = nullptr;
+inline const void* sun_shadow_box_return_address = nullptr;
+inline const void* sh_light_volume_return_address = nullptr;
+inline const void* sh_set_output_return_address = nullptr;
+inline const void* sky_parameters_return_address = nullptr;
+inline const void* terrain_set_input_return_address = nullptr;
 inline constexpr std::array<uint32_t, 4> SH_VERTEX_COUNTS = {8u, 6u, 18u, 8u};
 
 // The scope constructor links to this thread-local head of its own type.
@@ -1023,7 +742,7 @@ inline void __fastcall HookSunPass(void* renderer, void* viewport, uint32_t a, u
 inline void __fastcall HookSunVolume(void* context, const float* vp, const void* volume, const void* color,
                                      void* vertices, void* indices) {
   alignas(16) std::array<float, 16> copy = {};
-  if (_ReturnAddress() == native_base + 0x30B07Du && native_scope != nullptr
+  if (_ReturnAddress() == sun_shadow_box_return_address && native_scope != nullptr
       && native_scope->path == ProjectionPath::SUN_VOLUME && vp != nullptr) {
     std::memcpy(copy.data(), vp, 64u);
     if (CorrectNativeMatrix(copy.data(), *native_scope)) vp = copy.data();
@@ -1034,7 +753,7 @@ inline void __fastcall HookSunVolume(void* context, const float* vp, const void*
 
 inline uint32_t __fastcall HookShFallback(void* renderer, uint32_t kind, float* output, float* min_w,
                                           float* max_w, void* shape, void* viewport) {
-  const bool qualified = _ReturnAddress() == native_base + 0x1F2529u && kind < SH_VERTEX_COUNTS.size();
+  const bool qualified = _ReturnAddress() == sh_light_volume_return_address && kind < SH_VERTEX_COUNTS.size();
   const NativeProjectionScope scope(ProjectionPath::SH_LIGHTING, qualified ? viewport : nullptr);
   const uint32_t success = sh_fallback(renderer, kind, output, min_w, max_w, shape, viewport);
   if (success != 0u && scope.valid) {
@@ -1052,7 +771,7 @@ inline void __fastcall HookShProducer(void* renderer, void* scene, void* viewpor
 }
 
 inline void __fastcall HookShAttach(void* job, void* packet, uint64_t c, uint64_t d) {
-  if (_ReturnAddress() == native_base + 0x282A8Bu && packet != nullptr && native_scope != nullptr
+  if (_ReturnAddress() == sh_set_output_return_address && packet != nullptr && native_scope != nullptr
       && native_scope->path == ProjectionPath::SH_LIGHTING
       && std::memcmp(static_cast<const uint8_t*>(packet) + 0x120u, native_scope->view.data(), 64u) == 0) {
     // Both SH workers retain this packet. ExecuteDrawLight derives its clip
@@ -1064,7 +783,7 @@ inline void __fastcall HookShAttach(void* job, void* packet, uint64_t c, uint64_
 }
 
 inline void* __fastcall HookSkyParameters(void* plugin, uint32_t* result, void* viewport, void* parameters) {
-  const bool qualified = _ReturnAddress() == native_base + 0x1F5990u && result != nullptr && parameters != nullptr;
+  const bool qualified = _ReturnAddress() == sky_parameters_return_address && result != nullptr && parameters != nullptr;
   const NativeProjectionScope scope(ProjectionPath::SKY, qualified ? viewport : nullptr);
   void* returned = sky_parameters(plugin, result, viewport, parameters);
   if (!scope.valid || *result == UINT32_MAX) return returned;
@@ -1103,131 +822,12 @@ inline void __fastcall HookTerrainProducer(void* a, void* b, void* scene, void* 
 }
 
 inline void __fastcall HookTerrainAttach(void* command, void* packet, uint64_t c, uint64_t d) {
-  if (_ReturnAddress() == native_base + 0x2755CAu && packet != nullptr && native_scope != nullptr
+  if (_ReturnAddress() == terrain_set_input_return_address && packet != nullptr && native_scope != nullptr
       && native_scope->path == ProjectionPath::TERRAIN_DECAL) {
     CorrectNativeMatrix(reinterpret_cast<float*>(static_cast<uint8_t*>(packet) + 0x160u), *native_scope, true);
   }
   // Original native object/header is retained; no borrowed/stack packet escapes.
   terrain_attach(command, packet, c, d);
-}
-
-inline bool InitializeNativeProjectionAddresses(HMODULE module) {
-  auto* base = reinterpret_cast<uint8_t*>(module);
-  const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-  const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-  if (nt->OptionalHeader.SizeOfImage != 0xA01D000u) return false;
-  // The SH output packet is still producer-owned at this call. The sky helper
-  // finishes its inverse matrices before MainExec uploads them for the draw.
-  if (!MatchesBytes(base + 0x281EF0u, std::array<uint8_t, 15>{0x48, 0x8B, 0xC4, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57})
-      || !MatchesBytes(base + 0x283B90u, std::array<uint8_t, 16>{0x40, 0x57, 0x48, 0x83, 0xEC, 0x30, 0x48, 0xC7, 0x44, 0x24, 0x20, 0xFE, 0xFF, 0xFF, 0xFF, 0x48})
-      || !MatchesBytes(base + 0x1F50D0u, std::array<uint8_t, 16>{0x48, 0x8B, 0xC4, 0x53, 0x55, 0x56, 0x57, 0x41, 0x56, 0x48, 0x81, 0xEC, 0x30, 0x01, 0x00, 0x00})
-      || DecodeRelativeCall(base + 0x282A86u) != base + 0x283B90u
-      || DecodeRelativeCall(base + 0x1F598Bu) != base + 0x1F50D0u) return false;
-  // All checked RVAs (including the four-entry table) are below SizeOfImage.
-  // Exact prologues include RIP displacements: other EXE builds fail closed.
-  if (!MatchesBytes(base + 0x30AC50u, std::array<uint8_t, 16>{
-                                          0x48,
-                                          0x89,
-                                          0x5C,
-                                          0x24,
-                                          0x08,
-                                          0x44,
-                                          0x89,
-                                          0x4C,
-                                          0x24,
-                                          0x20,
-                                          0x44,
-                                          0x89,
-                                          0x44,
-                                          0x24,
-                                          0x18,
-                                          0x48,
-                                      })
-      || !MatchesBytes(base + 0x30B680u, std::array<uint8_t, 16>{
-                                             0x48,
-                                             0x8B,
-                                             0xC4,
-                                             0x48,
-                                             0x89,
-                                             0x58,
-                                             0x10,
-                                             0x48,
-                                             0x89,
-                                             0x70,
-                                             0x18,
-                                             0x48,
-                                             0x89,
-                                             0x78,
-                                             0x20,
-                                             0x55,
-                                         })
-      || !MatchesBytes(base + 0x27EF80u, std::array<uint8_t, 16>{
-                                             0x48,
-                                             0x89,
-                                             0x5C,
-                                             0x24,
-                                             0x08,
-                                             0x55,
-                                             0x56,
-                                             0x57,
-                                             0x41,
-                                             0x56,
-                                             0x41,
-                                             0x57,
-                                             0x48,
-                                             0x81,
-                                             0xEC,
-                                             0x80,
-                                         })
-      || !MatchesBytes(base + 0x275280u, std::array<uint8_t, 16>{
-                                             0x40,
-                                             0x53,
-                                             0x55,
-                                             0x56,
-                                             0x57,
-                                             0x41,
-                                             0x54,
-                                             0x41,
-                                             0x55,
-                                             0x41,
-                                             0x56,
-                                             0x41,
-                                             0x57,
-                                             0x48,
-                                             0x81,
-                                             0xEC,
-                                         })
-      || !MatchesBytes(base + 0x2D18D0u, std::array<uint8_t, 16>{
-                                             0x40,
-                                             0x57,
-                                             0x48,
-                                             0x83,
-                                             0xEC,
-                                             0x30,
-                                             0x48,
-                                             0xC7,
-                                             0x44,
-                                             0x24,
-                                             0x20,
-                                             0xFE,
-                                             0xFF,
-                                             0xFF,
-                                             0xFF,
-                                             0x48,
-                                         })
-      || DecodeRelativeCall(base + 0x30B078u) != base + 0x30B680u || DecodeRelativeCall(base + 0x1F2524u) != base + 0x27EF80u || DecodeRelativeCall(base + 0x2755C5u) != base + 0x2D18D0u || std::memcmp(base + 0x21102B8u, SH_VERTEX_COUNTS.data(), sizeof(SH_VERTEX_COUNTS)) != 0) {
-    return false;
-  }
-  native_base = base;
-  sun_pass = reinterpret_cast<SunPass>(base + 0x30AC50u);
-  sun_volume = reinterpret_cast<SunVolume>(base + 0x30B680u);
-  sh_fallback = reinterpret_cast<ShFallback>(base + 0x27EF80u);
-  sh_producer = reinterpret_cast<ShProducer>(base + 0x281EF0u);
-  sh_attach = reinterpret_cast<AttachPacket>(base + 0x283B90u);
-  sky_parameters = reinterpret_cast<SkyParameters>(base + 0x1F50D0u);
-  terrain_producer = reinterpret_cast<TerrainProducer>(base + 0x275280u);
-  terrain_attach = reinterpret_cast<AttachPacket>(base + 0x2D18D0u);
-  return true;
 }
 
 inline bool Attach() {
@@ -1236,29 +836,43 @@ inline bool Attach() {
 
   camera_state::Invalidate();
 
-  HMODULE module = GetModuleHandleW(nullptr);
-  auto* projection_commit_address = FindProjectionCommit(module);
-  if (projection_commit_address == nullptr) return false;
-
-  auto* call = projection_commit_address + RELATIVE_CALL_OFFSET;
-  expected_return_address = call + 5u;
-  auto* helper_entry_address = DecodeRelativeCall(call);
-  set_view_matrix_state = reinterpret_cast<SetViewMatrixState>(helper_entry_address);
-  shader_manager_global = DecodeShaderManagerGlobal(projection_commit_address);
-  if (set_view_matrix_state == nullptr
-      || shader_manager_global == nullptr
-      || !InitializeAdditionalHookAddresses(module, helper_entry_address)) {
-    logging::Warn("failed to decode native projection hook addresses");
-    set_view_matrix_state = nullptr;
-    forward_rendering = nullptr;
-    request_local_light_draws = nullptr;
+  if (!engine::Verified(REQUIRED_ENTRIES)) {
+    logging::Warn("the native projection entries did not verify; camera jitter is off");
     return false;
   }
-
-  if (!InitializeNativeProjectionAddresses(module)) {
-    logging::Warn("native projection executable validation failed");
-    return false;
-  }
+  using engine::Address;
+  using engine::Entry;
+  set_view_matrix_state = reinterpret_cast<SetViewMatrixState>(Address(Entry::SHADER_MANAGER_SET_VIEW_MATRIX));
+  shader_manager_global = reinterpret_cast<void**>(Address(Entry::SHADER_MANAGER));
+  expected_return_address = Address(Entry::RENDER_SET_VIEW_RETURN);
+  velocity_return_address = Address(Entry::DEFERRED_GEOMETRY_SET_VIEW_RETURN);
+  model_return_address = Address(Entry::MODEL_SET_VIEW_RETURN);
+  alpha_model_return_address = Address(Entry::ALPHA_MODEL_SET_VIEW_RETURN);
+  overlay_model_return_address = Address(Entry::OVERLAY_MODEL_SET_VIEW_RETURN);
+  new_thermography_return_address = Address(Entry::NEW_THERMOGRAPHY_SET_VIEW_RETURN);
+  thermography_return_address = Address(Entry::THERMOGRAPHY_SET_VIEW_RETURN);
+  forward_rendering = reinterpret_cast<RenderPluginCallback>(Address(Entry::FORWARD_RENDERING_PRE_EXEC));
+  request_local_light_draws = reinterpret_cast<RequestLocalLightDraws>(Address(Entry::REQUEST_DRAW_ALL_LOCAL_LIGHT_ON_JOB));
+  local_light_request_return_address = Address(Entry::LOCAL_LIGHT_REQUEST_RETURN);
+  flush_constants = reinterpret_cast<FlushConstants>(Address(Entry::SHADOW_CONSTANT_REGISTER_FLUSH));
+  motion_upload_return_address = Address(Entry::MODEL_CONSTANT_UPLOAD_RETURN);
+  upload_constants = reinterpret_cast<UploadConstants>(Address(Entry::CONSTANT_BUFFER_MAP_DATA));
+  scatter_upload_return_address = Address(Entry::SCATTER_UPLOAD_RETURN);
+  // The SH output packet is still producer-owned at its call. The sky helper
+  // finishes its inverse matrices before MainExec uploads them for the draw.
+  sun_pass = reinterpret_cast<SunPass>(Address(Entry::SUN_LIGHT_DRAW));
+  sun_volume = reinterpret_cast<SunVolume>(Address(Entry::DRAW_SHADOW_BOX));
+  sun_shadow_box_return_address = Address(Entry::SUN_SHADOW_BOX_RETURN);
+  sh_fallback = reinterpret_cast<ShFallback>(Address(Entry::SPHERICAL_HARMONICS_CALCULATE_LIGHT_VOLUME));
+  sh_light_volume_return_address = Address(Entry::SPHERICAL_HARMONICS_LIGHT_VOLUME_RETURN);
+  sh_producer = reinterpret_cast<ShProducer>(Address(Entry::SPHERICAL_HARMONICS_REGISTER_DRAW_ON_JOB));
+  sh_attach = reinterpret_cast<AttachPacket>(Address(Entry::SPHERICAL_HARMONICS_SET_OUTPUT));
+  sh_set_output_return_address = Address(Entry::SPHERICAL_HARMONICS_SET_OUTPUT_RETURN);
+  sky_parameters = reinterpret_cast<SkyParameters>(Address(Entry::SKY_CALC_SHADER_PARAMETERS));
+  sky_parameters_return_address = Address(Entry::SKY_PARAMETERS_RETURN);
+  terrain_producer = reinterpret_cast<TerrainProducer>(Address(Entry::TERRAIN_DECAL_DRAW_ON_JOB));
+  terrain_attach = reinterpret_cast<AttachPacket>(Address(Entry::TERRAIN_DECAL_SET_INPUT));
+  terrain_set_input_return_address = Address(Entry::TERRAIN_DECAL_SET_INPUT_RETURN);
   // Never reclaim trampolines while native callers can still enter. Pin the
   // addon as well: device destruction/FreeLibrary is not native quiescence.
   // Installation remains at initial device creation, before scene rendering.
@@ -1317,9 +931,9 @@ inline bool Attach() {
   }
 
   installed.store(true, std::memory_order_release);
-  logging::Info("installed native projection hook aob=",
-                logging::Hex{reinterpret_cast<uintptr_t>(projection_commit_address)},
-                " helper=", logging::Hex{reinterpret_cast<uintptr_t>(helper_entry_address)},
+  logging::Info("installed native projection hook commit=",
+                logging::Hex{reinterpret_cast<uintptr_t>(engine::Address(engine::Entry::PROJECTION_COMMIT))},
+                " helper=", logging::Hex{reinterpret_cast<uintptr_t>(engine::Address(engine::Entry::SHADER_MANAGER_SET_VIEW_MATRIX))},
                 " return=", logging::Hex{reinterpret_cast<uintptr_t>(expected_return_address)},
                 " forward=", logging::Hex{reinterpret_cast<uintptr_t>(forward_rendering)},
                 " local_light_packets=", logging::Hex{reinterpret_cast<uintptr_t>(request_local_light_draws)},

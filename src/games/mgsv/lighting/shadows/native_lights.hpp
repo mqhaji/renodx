@@ -19,6 +19,8 @@
 #include <include/reshade.hpp>
 
 #include "../../../../utils/detour.hpp"
+#include "../../engine/build.hpp"
+#include "../../engine/image.hpp"
 #include "../../rendering/native_context.hpp"
 
 // The engine side of contact shadows: where local lighting begins on the build
@@ -36,9 +38,17 @@ struct Constants {
 // plugin branches its light jobs. It must not throw.
 using LocalLightsCallback = void (*)();
 
+// The hook, and the engine's CPU constant banks the batch reads light records from.
+inline constexpr std::array REQUIRED_ENTRIES = {
+    engine::Entry::LOCAL_LIGHT_MAIN_EXEC,
+    engine::Entry::COMMAND_BUFFER_SET_VECTOR,
+    engine::Entry::SHADOW_CONSTANT_REGISTER_SET_VECTOR,
+    engine::Entry::SHADOW_CONSTANT_REGISTER_FLUSH,
+};
+inline constexpr engine::Requirement REQUIREMENT = {.feature = "Contact shadows", .entries = REQUIRED_ENTRIES};
+
 namespace internal {
 
-inline constexpr uintptr_t MAIN_EXEC_RVA = 0x20AA00u;
 using MainExec = void(__fastcall*)(void*, void*, void*);
 
 struct HookState {
@@ -105,31 +115,10 @@ inline bool Install(LocalLightsCallback on_local_lights) {
     }
     return false;
   };
-  auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-  if (base == nullptr) return fail("MgsvShadows: native executable is unavailable; contact shadows are off.");
-  const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-  if (dos->e_magic != IMAGE_DOS_SIGNATURE) return fail("MgsvShadows: native executable header validation failed; contact shadows are off.");
-  const auto* pe = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-  if (pe->Signature != IMAGE_NT_SIGNATURE || pe->FileHeader.TimeDateStamp != rendering::native_context::IMAGE_TIMESTAMP
-      || pe->OptionalHeader.SizeOfImage != rendering::native_context::IMAGE_SIZE) {
-    return fail("MgsvShadows: unsupported native executable; contact shadows are off.");
+  if (!engine::Verified(REQUIRED_ENTRIES)) {
+    return fail("MgsvShadows: the local-light entries did not verify; contact shadows are off.");
   }
-
-  // These installed-executable signatures contain no relative operands, so all
-  // bytes are significant. Validate the CPU constant layout as well as the hook.
-  constexpr std::array<uint8_t, 28> main_exec = {0x48, 0x8B, 0xC4, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57,
-                                                 0x48, 0x8D, 0xA8, 0x18, 0xFF, 0xFF, 0xFF, 0x48, 0x81, 0xEC, 0xB0, 0x01, 0x00, 0x00};
-  constexpr std::array<uint8_t, 16> set_vector = {0x48, 0x83, 0xEC, 0x38, 0x48, 0x8B, 0x49, 0x28, 0x4D, 0x8B, 0xD0, 0x8B, 0xC2, 0xC1, 0xF8, 0x04};
-  constexpr std::array<uint8_t, 18> set_bank_vector = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xF9, 0xBB, 0x01, 0x00, 0x00, 0x00};
-  constexpr std::array<uint8_t, 29> flush_bank = {0x48, 0x89, 0x4C, 0x24, 0x08, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x81, 0xEC, 0xB0, 0x00, 0x00, 0x00, 0x8B, 0x81, 0x14, 0x01, 0x00, 0x00};
-  if (std::memcmp(base + internal::MAIN_EXEC_RVA, main_exec.data(), main_exec.size()) != 0
-      || std::memcmp(base + 0x2D8B70u, set_vector.data(), set_vector.size()) != 0
-      || std::memcmp(base + 0x2C5F30u, set_bank_vector.data(), set_bank_vector.size()) != 0
-      || std::memcmp(base + 0x2C5A10u, flush_bank.data(), flush_bank.size()) != 0) {
-    return fail("MgsvShadows: native local-light validation failed; contact shadows are off.");
-  }
-
-  internal::hooks.main_exec = reinterpret_cast<internal::MainExec>(base + internal::MAIN_EXEC_RVA);
+  internal::hooks.main_exec = reinterpret_cast<internal::MainExec>(engine::Address(engine::Entry::LOCAL_LIGHT_MAIN_EXEC));
   try {
     renodx::utils::detour::Install(std::array{renodx::utils::detour::Function(&internal::hooks.main_exec, internal::HookMainExec)});
   } catch (const std::system_error&) {

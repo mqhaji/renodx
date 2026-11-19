@@ -30,15 +30,32 @@
 #include "../../../utils/cross_addon.hpp"
 #include "../../../utils/data.hpp"
 #include "../../../utils/detour.hpp"
+#include "../engine/build.hpp"
+#include "../engine/image.hpp"
 
 namespace mgsv::rendering::native_context {
 
-// These offsets describe the verified retail executable. Native pointers are
-// read only while their native owner is executing. Recorded data contains copies.
-inline constexpr uint32_t IMAGE_TIMESTAMP = 0x6A4CB898u;
-inline constexpr uint32_t IMAGE_SIZE = 0xA01D000u;
-inline constexpr size_t MAIN_VIEW_ACCESSOR_RVA = 0x6AD870u;
-inline constexpr std::array<uint8_t, 8> MAIN_VIEW_ACCESSOR_BYTES = {0x48, 0x8B, 0x05, 0x09, 0x3A, 0x53, 0x02, 0xC3};
+inline constexpr std::array REQUIRED_ENTRIES = {
+    engine::Entry::RENDER_BUILD_RENDERING,
+    engine::Entry::DG_INIT_RENDER,
+    engine::Entry::DG_INIT_VIEWPORT,
+    engine::Entry::DG_END_VIEWPORT,
+    engine::Entry::DG_BRANCH,
+    engine::Entry::COMMAND_BUFFER_BRANCH,
+    engine::Entry::COMMAND_BUFFER_CONSTRUCTOR,
+    engine::Entry::COMMAND_BUFFER_DESTRUCTOR,
+    engine::Entry::ALLOCATE_COMMAND_LIST_NODE,
+    engine::Entry::COMMAND_LIST_NODE_BEGIN_RECORD,
+    engine::Entry::COMMAND_LIST_NODE_END_RECORD,
+    engine::Entry::VIEWPORT_DESTRUCTOR,
+    engine::Entry::RENDER_DESTRUCTOR,
+    engine::Entry::RENDER_UPDATE_VIEWPORT_LIST,
+    engine::Entry::DEPTH_OF_FIELD_MAIN_EXEC,
+    engine::Entry::GET_MAIN_VIEWPORT,
+};
+inline constexpr engine::Requirement REQUIREMENT = {.feature = "View tracking (needed by enhanced lighting and reconstruction)", .entries = REQUIRED_ENTRIES};
+// Native pointers are read only while their native owner is executing.
+// Recorded data contains copies.
 // Bound native pool bookkeeping and linked-list traversal if the layout changes.
 inline constexpr size_t MAX_RECORDS = 32768u;
 inline constexpr size_t MAX_ACTIVE_VIEWS = 256u;
@@ -736,61 +753,38 @@ inline bool Install() {
   if (shared.data->consumers == 0u) {
     const std::unique_lock hook_lock(hook_mutex);
     if (!installed) {
-      auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-      const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-      if (dos == nullptr || dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
-      const auto* pe = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-      if (pe->Signature != IMAGE_NT_SIGNATURE || pe->FileHeader.TimeDateStamp != IMAGE_TIMESTAMP || pe->OptionalHeader.SizeOfImage != IMAGE_SIZE) {
-        installation_status = "Native ownership requires the verified MGSV executable";
+      if (!engine::Verified(REQUIRED_ENTRIES)) {
+        installation_status = "Native ownership needs engine entries that did not verify; see the log";
         return false;
       }
-      struct Signature {
-        size_t rva;
-        std::string_view bytes;
-        renodx::utils::detour::Function function;
+      const std::array hooked = {
+          std::pair{engine::Entry::RENDER_BUILD_RENDERING, renodx::utils::detour::Function{&build_render, BuildRender}},
+          std::pair{engine::Entry::DG_INIT_RENDER, renodx::utils::detour::Function{&init_render, InitRender}},
+          std::pair{engine::Entry::DG_INIT_VIEWPORT, renodx::utils::detour::Function{&init_view, InitView}},
+          std::pair{engine::Entry::DG_END_VIEWPORT, renodx::utils::detour::Function{&end_view, EndView}},
+          std::pair{engine::Entry::DG_BRANCH, renodx::utils::detour::Function{&branch, BranchContext}},
+          std::pair{engine::Entry::COMMAND_BUFFER_BRANCH, renodx::utils::detour::Function{&worker_branch, BranchWorker}},
+          std::pair{engine::Entry::COMMAND_BUFFER_CONSTRUCTOR, renodx::utils::detour::Function{&worker_begin, WorkerBegin}},
+          std::pair{engine::Entry::COMMAND_BUFFER_DESTRUCTOR, renodx::utils::detour::Function{&worker_end, WorkerEnd}},
+          std::pair{engine::Entry::ALLOCATE_COMMAND_LIST_NODE, renodx::utils::detour::Function{&allocate_node, AllocateNode}},
+          std::pair{engine::Entry::COMMAND_LIST_NODE_BEGIN_RECORD, renodx::utils::detour::Function{&begin_record, BeginRecord}},
+          std::pair{engine::Entry::COMMAND_LIST_NODE_END_RECORD, renodx::utils::detour::Function{&end_record, EndRecord}},
+          std::pair{engine::Entry::VIEWPORT_DESTRUCTOR, renodx::utils::detour::Function{&destroy_view, DestroyView}},
+          std::pair{engine::Entry::RENDER_DESTRUCTOR, renodx::utils::detour::Function{&destroy_render, DestroyRender}},
+          std::pair{engine::Entry::RENDER_UPDATE_VIEWPORT_LIST, renodx::utils::detour::Function{&update_views, UpdateViews}},
+          std::pair{engine::Entry::DEPTH_OF_FIELD_MAIN_EXEC, renodx::utils::detour::Function{&dof_main, DofMainExec}},
       };
-      const std::array signatures = {
-          Signature{.rva = 0x1BEEC0u, .bytes = "405556574154415541564157488d6c24", .function = {&build_render, BuildRender}},
-          Signature{.rva = 0x2496A0u, .bytes = "405556574154415541564157488d6c24", .function = {&init_render, InitRender}},
-          Signature{.rva = 0x249BE0u, .bytes = "40555657415641574881ec8000000048", .function = {&init_view, InitView}},
-          Signature{.rva = 0x247EB0u, .bytes = "40535556415641574881ec8000000048", .function = {&end_view, EndView}},
-          Signature{.rva = 0x2C5220u, .bytes = "48895c2410574883ec20f68158010000", .function = {&branch, BranchContext}},
-          Signature{.rva = 0x2D6F50u, .bytes = "48895c2410574883ec20f641100148", .function = {&worker_branch, BranchWorker}},
-          Signature{.rva = 0x2D6B80u, .bytes = "488bc4574883ec6048c740c0feffffff", .function = {&worker_begin, WorkerBegin}},
-          Signature{.rva = 0x2D6E80u, .bytes = "48894c2408534883ec3048c7442420fe", .function = {&worker_end, WorkerEnd}},
-          Signature{.rva = 0x2C8130u, .bytes = "48895c2420574883ec208b4120488974", .function = {&allocate_node, AllocateNode}},
-          Signature{.rva = 0x2C7C30u, .bytes = "836118fe488bc2488b5110488bc8e92d", .function = {&begin_record, BeginRecord}},
-          Signature{.rva = 0x2C7D70u, .bytes = "40534883ec20488bd9488bcae8ffca72", .function = {&end_record, EndRecord}},
-          Signature{.rva = 0x1B8600u, .bytes = "48894c2408574883ec3048c7442420fe", .function = {&destroy_view, DestroyView}},
-          Signature{.rva = 0x1BCA60u, .bytes = "48894c2408574883ec3048c7442420fe", .function = {&destroy_render, DestroyRender}},
-          Signature{.rva = 0x1BEA90u, .bytes = "488bc455574156488bec4883ec6048c7", .function = {&update_views, UpdateViews}},
-          Signature{.rva = 0x1DD1F0u, .bytes = "48895c240848896c2410488974241857415641574883ec30", .function = {&dof_main, DofMainExec}},
-      };
-      for (const auto& signature : signatures) {
-        for (size_t index = 0u; index < signature.bytes.size() / 2u; ++index) {
-          const auto digit = [](char value) { return static_cast<uint8_t>(value <= '9' ? value - '0' : value - 'a' + 10); };
-          const auto expected = static_cast<uint8_t>((digit(signature.bytes[index * 2u]) << 4u) | digit(signature.bytes[(index * 2u) + 1u]));
-          if (base[signature.rva + index] != expected) {
-            installation_status = "Native ownership hook bytes differ at RVA " + std::to_string(signature.rva);
-            return false;
-          }
-        }
-      }
-      if (std::memcmp(base + MAIN_VIEW_ACCESSOR_RVA, MAIN_VIEW_ACCESSOR_BYTES.data(), MAIN_VIEW_ACCESSOR_BYTES.size()) != 0) {
-        installation_status = "Native main-view accessor differs from the verified executable";
-        return false;
-      }
-      get_main_view = reinterpret_cast<Accessor>(base + MAIN_VIEW_ACCESSOR_RVA);
+      get_main_view = reinterpret_cast<Accessor>(engine::Address(engine::Entry::GET_MAIN_VIEWPORT));
       // A native job can still return through a detour during device teardown.
       // Pin its code for the process lifetime, as the existing native size hook does.
       HMODULE module = nullptr;
       if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
                              reinterpret_cast<LPCWSTR>(&BuildRender), &module)
           == FALSE) return false;
-      hooks.reserve(signatures.size());
-      for (const auto& signature : signatures) {
-        *signature.function.original = base + signature.rva;
-        hooks.push_back(signature.function);
+      hooks.reserve(hooked.size());
+      for (const auto& [entry, function] : hooked) {
+        *function.original = engine::Address(entry);
+        hooks.push_back(function);
       }
       try {
         renodx::utils::detour::Install(hooks);
