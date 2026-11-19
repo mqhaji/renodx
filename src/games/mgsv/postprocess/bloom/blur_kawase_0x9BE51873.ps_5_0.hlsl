@@ -1,3 +1,5 @@
+// Port of the native Kawase bloom blur. Enhanced bloom averages four taps a quarter
+// pixel from the center in linear light.
 #include "bloom_native.hlsli"
 
 // The native UNORM blend clamped each texel before the first blur sampled it.

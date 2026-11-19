@@ -32,7 +32,7 @@
 // the target and gives its format code. These hooks make the engine create
 // selected 8-bit targets as RGBA16F itself, so the game binds the float texture
 // directly and RenoDX keeps no clone of it. A plugin that keeps scene color in
-// an 8-bit temporary other plugins share gets float images of its own instead.
+// an 8-bit temporary other plugins share gets separate float images instead.
 namespace mgsv::engine::render_targets {
 
 inline constexpr std::array REQUIRED_ENTRIES = {
@@ -98,10 +98,11 @@ static_assert(sizeof(Parameter) == 0x40u && offsetof(Parameter, format_code) == 
 // A render target handle is its entry's index above bit 17 and this type below.
 inline constexpr uint32_t HANDLE_TYPE_MASK = 0x7Fu;
 inline constexpr uint32_t RENDER_TARGET_HANDLE = 0x0Bu;
-// RenderTargetDx11 keeps its gn texture at +0x40, which keeps the D3D texture at +0x10.
+// RenderTargetDx11 keeps its engine ("gn") texture object at +0x40, and that
+// object keeps the D3D texture at +0x10.
 inline constexpr size_t TARGET_TEXTURE_OFFSET = 0x40u;
 inline constexpr size_t TEXTURE_RESOURCE_OFFSET = 0x10u;
-// It keeps its gn shader view at +0x50, which keeps the D3D view at +0x08.
+// Its engine shader view object is at +0x50, and that keeps the D3D view at +0x08.
 inline constexpr size_t TARGET_SHADER_VIEW_OFFSET = 0x50u;
 inline constexpr size_t VIEW_OBJECT_OFFSET = 0x08u;
 // Code 1 is a B8G8R8A8 typeless texture with UNORM or sRGB views. Code 6 is
@@ -133,9 +134,9 @@ inline constexpr std::array<FloatTarget, 16> FLOAT_TARGETS = {{
     {.name = 0x95727B067FABull, .is_bloom_image = true},     // Second bloom working image; DoF reuses it for control data.
     {.name = 0x084C86FE904Eull, .is_bloom_image = true},     // Its _SRGB entry.
     {.name = 0x2B60105D25B4ull, .is_bloom_image = true},     // Bloom result the late Tonemap pass reads.
-    {.name = 0x5DB5220066EDull},                             // RENODX_MOTION_BLUR_0: motion blur's own half-size working image.
+    {.name = 0x5DB5220066EDull},                             // RENODX_MOTION_BLUR_0: motion blur's half-size working image.
     {.name = 0x67B86CEA6100ull},                             // RENODX_MOTION_BLUR_1.
-    {.name = 0x1DDB85A4EE59ull, .scene_role = SCENE_COPY},   // RENODX_SCENE_COPY: DoF's and motion blur's own full-size scene copy.
+    {.name = 0x1DDB85A4EE59ull, .scene_role = SCENE_COPY},   // RENODX_SCENE_COPY: DoF's and motion blur's full-size scene copy.
 }};
 // The exposure meter's first image. It is float already and keeps its format.
 inline constexpr uint64_t EXPOSURE_SOURCE_NAME = 0x80726D23BE27ull;
@@ -295,9 +296,9 @@ inline const Parameter* ReadStoredParameter(uint32_t handle) {
   return reinterpret_cast<const Parameter*>(entries + (static_cast<size_t>(handle >> 17u) * 0x70u) + 0x28u);
 }
 
-// The engine also calls this lookup while recording draws, on several threads,
-// so every other caller passes straight through. The constructor's hook holds
-// the call scope for the remaining path.
+// The engine also calls this lookup on several threads while recording draws,
+// so any call outside a hooked constructor passes straight through. The
+// constructor's hook already holds the CallScope for the rest of this path.
 inline uint32_t __fastcall HookLookup(const uint64_t* name) {
   if (constructing_plugin == 0u) return hooks.lookup(name);
   const uint32_t shared = hooks.lookup(name);

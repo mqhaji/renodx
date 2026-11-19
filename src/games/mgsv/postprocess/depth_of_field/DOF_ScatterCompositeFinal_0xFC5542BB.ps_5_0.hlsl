@@ -1,3 +1,4 @@
+// Port of the native depth-of-field final composite. The mod clamps negative output.
 #include "../../common.hlsli"
 
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:35 2026
@@ -84,6 +85,6 @@ void main(
   r0.w = r0.w;
   o0.xyzw = r0.xyzw;
 
-  o0 = max(0, o0);  // fixes black dots
+  o0 = max(0, o0);  // Negative values, possible in float targets, show up as black dots.
   return;
 }

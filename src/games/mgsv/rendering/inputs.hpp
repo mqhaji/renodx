@@ -16,10 +16,12 @@
 #include "../../../utils/bitwise.hpp"
 #include "../../../utils/descriptor.hpp"
 
+// Records the pixel shader views bound at t0, t2 and t3 on each command list, so
+// the camera-velocity draw can find its depth and object-velocity inputs.
 namespace mgsv::inputs::descriptor_tracker {
 
 struct __declspec(uuid("9F1A3A38-9D2A-4E5B-B5A3-3F2D0F38CD33")) CommandListData {
-  // Draw-time pixel SRVs used by the TAA router.
+  // The pixel shader views most recently bound on this command list.
   reshade::api::resource_view pixel_srv_t0 = {0};  // HDR color at insertion draws
   reshade::api::resource_view pixel_srv_t2 = {0};  // Depth at MotionBlurCameraVelocity
   reshade::api::resource_view pixel_srv_t3 = {0};  // Object velocity at MotionBlurCameraVelocity
@@ -58,7 +60,7 @@ inline void OnPushDescriptors(
   if (data == nullptr) return;
 
   for (uint32_t i = 0u; i < update.count; ++i) {
-    // Native D3D11 notifications already use shader register numbers.
+    // For D3D11, ReShade reports bindings as shader register numbers.
     const uint32_t slot = update.binding + i;
     if (slot != 0u && slot != 2u && slot != 3u) continue;
 
@@ -74,10 +76,16 @@ inline void OnPushDescriptors(
 
 }  // namespace mgsv::inputs::descriptor_tracker
 
+// Selects the game's device and swapchain (the first D3D11 swapchain to present)
+// and keeps the native views later passes read: depth and velocity from the
+// camera-velocity draw, and the albedo and specular views from deferred
+// composition. The generation changes whenever the swapchain or device retires,
+// so a capture that finishes after that is rejected.
 namespace mgsv::inputs {
 
-// Retains the views and underlying resources, not the pixels stored in them.
-// Neither a nonempty Snapshot nor Motion proves current contents or GPU execution order.
+// Holds references to views and their resources, not their contents. A filled-in
+// Motion or Snapshot does not mean the contents are current or that the GPU has
+// run the draw that writes them.
 struct Motion {
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> velocity;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
@@ -99,11 +107,11 @@ struct Materials {
 };
 
 struct Snapshot {
-  reshade::api::swapchain* swapchain = nullptr;  // Borrowed selection, including during resize retirement.
+  reshade::api::swapchain* swapchain = nullptr;  // Borrowed; stays selected across a resize.
   reshade::api::device* device = nullptr;
   uint64_t generation = 0;
   Motion motion;
-  Motion lighting_motion;  // Only the existing AA capture path may change this compatibility selection.
+  Motion lighting_motion;  // Updated only by captures made with reconstruction on (publish_lighting).
   Materials materials;
 };
 
@@ -120,7 +128,8 @@ struct State {
   bool accepting = false;
   bool generation_exhausted = false;
   uint64_t next_observation = 0;
-  // Keep selection watermarks after a failed creation clears its observation; old captures cannot refill it.
+  // The newest capture ticket published to each slot. A ticket stays raised after a failed view
+  // creation clears its slot, so an older capture cannot fill the slot again.
   uint64_t motion_ticket = 0;
   uint64_t lighting_ticket = 0;
   uint64_t materials_ticket = 0;
@@ -128,7 +137,7 @@ struct State {
 
 static State state;
 
-// These borrowed native contexts are used only within the caller's callback lifetime.
+// The returned context is borrowed; use it only inside the caller's callback.
 inline ID3D11DeviceContext* GetContext(reshade::api::command_list* cmd_list, reshade::api::device* device) {
   if (cmd_list == nullptr || device == nullptr || device->get_api() != reshade::api::device_api::d3d11) return nullptr;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
@@ -155,7 +164,7 @@ inline Microsoft::WRL::ComPtr<ID3D11Texture2D> ReadTexture(
 
 }  // namespace internal
 
-// Selection identity remains visible while captures are stopped for retirement or resize.
+// The selected device and swapchain stay visible while capture is paused for a resize or retirement.
 inline bool IsSelectedDevice(reshade::api::device* device) {
   const std::shared_lock lock(internal::state.mutex);
   return device != nullptr && internal::state.snapshot.device == device;
@@ -169,7 +178,7 @@ inline bool IsSelectedSwapchain(reshade::api::swapchain* swapchain) {
 inline Snapshot Read(reshade::api::device* device) {
   const std::shared_lock lock(internal::state.mutex);
   if (!internal::state.accepting || device == nullptr || internal::state.snapshot.device != device) return {};
-  // Copying owned ComPtrs under this leaf lock is the only permitted native reference acquisition here.
+  // This is a leaf lock: copying the ComPtrs is the only work done while it is held.
   return internal::state.snapshot;
 }
 
@@ -190,9 +199,9 @@ inline void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
   internal::state.accepting = true;
 }
 
-// Composition calls this before reconstruction's Present callback, and OnInitSwapchain at init.
-// Like the existing reconstruction selector, this is a first-present, single-device contract,
-// not proof that the selected swapchain belongs to an engine scene rather than auxiliary rendering.
+// addon.cpp calls this from its Present callback, which ReShade runs before reconstruction's.
+// The first D3D11 swapchain to present is selected, and only one device is ever selected. This
+// does not prove that the swapchain shows the game's scene rather than other rendering.
 inline void OnPresent(
     reshade::api::command_queue* queue,
     reshade::api::swapchain* swapchain,
@@ -228,8 +237,8 @@ inline void OnPresent(
                         ("MgsvInputs: device bound; generation=" + std::to_string(generation)).c_str());
 }
 
-// Composition must call this before native ResizeBuffers, not wait for retained resources to be destroyed.
-// Consumers must also release their copied snapshots before resize; no waiting is performed here.
+// addon.cpp calls this from destroy_swapchain, which runs before the native ResizeBuffers.
+// Consumers must release their copied snapshots before the resize; nothing here waits for them.
 inline void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool resize) {
   if (!IsSelectedSwapchain(swapchain)) return;
   Snapshot retired;
@@ -278,8 +287,10 @@ inline void OnDestroyDevice(reshade::api::device* device) {
                         ("MgsvInputs: device retired; generation=" + std::to_string(generation)).c_str());
 }
 
-// Composition keeps the existing execution gate across both motion capture paths.
-// Generation checks reject late publication; they do not synchronize native context use or device destruction.
+// Called at the camera-velocity draw; both callers hold the reconstruction ExecutionGuard.
+// publish_lighting also updates lighting_motion. Generation checks reject a capture that
+// finishes after its selection retired; they do not synchronize native context use or
+// device destruction.
 inline Motion CaptureMotion(
     reshade::api::command_list* cmd_list,
     reshade::api::resource_view expected_velocity_rtv,
@@ -305,10 +316,10 @@ inline Motion CaptureMotion(
   Motion motion;
   motion.depth.Attach(pixel_views[0]);
   motion.object_velocity.Attach(pixel_views[1]);
-  // Missing bindings preserve the previous observation, as in the original capture path.
+  // Missing bindings leave the previous capture in place.
   if (producer == nullptr || motion.depth == nullptr || motion.object_velocity == nullptr) return {};
-  // Only retain the expected target through the live getter.
-  // A nonzero expected identity is never converted directly into an owning COM pointer.
+  // Compare the expected target only by address. The reference kept is the one the
+  // getter returned; the expected handle is never turned into an owning COM pointer.
   if (expected_velocity_rtv.handle != 0
       && expected_velocity_rtv.handle != reinterpret_cast<uintptr_t>(producer.Get())) return {};
 
@@ -323,8 +334,8 @@ inline Motion CaptureMotion(
 
   D3D11_RENDER_TARGET_VIEW_DESC producer_description = {};
   producer->GetDesc(&producer_description);
-  // Reconstruction checks matching extents and single-mip/sample layouts at insertion.
-  // Those temporal requirements must not restrict the existing GI velocity-cache selection.
+  // Reconstruction checks sizes and single-mip, single-sample layouts itself when it runs.
+  // Lighting also uses this capture, so those checks do not belong here.
 
   motion.velocity_resource = {reinterpret_cast<uintptr_t>(velocity_texture.Get())};
   motion.velocity_format = static_cast<reshade::api::format>(producer_description.Format);
@@ -339,7 +350,8 @@ inline Motion CaptureMotion(
   motion.context = reinterpret_cast<uintptr_t>(context);
   motion.producer_rtv = reinterpret_cast<uintptr_t>(producer.Get());
 
-  // The velocity SRV always covers mip 0 / slice 0, as in the original cache.
+  // The velocity SRV covers mip 0 and slice 0. Reuse the cached one while the texture and
+  // format are unchanged.
   if (previous.motion.velocity != nullptr
       && previous.motion.velocity_resource.handle == motion.velocity_resource.handle
       && previous.motion.velocity_format == motion.velocity_format) {
@@ -376,8 +388,8 @@ inline Motion CaptureMotion(
           }
         }
       }
-      // A creation failure drops the old latest cache, and AA also drops its compatibility selection.
-      // Off-mode observation failures never alter lighting's compatibility selection.
+      // A failed view creation clears the cached capture, and lighting_motion too when
+      // publish_lighting is set. Captures made with reconstruction off never touch lighting_motion.
       if (cleared) {
         reshade::log::message(reshade::log::level::warning,
                               "MgsvInputs: velocity SRV creation failed; previous selection retired");
@@ -417,6 +429,8 @@ inline Motion CaptureMotion(
   return motion;
 }
 
+// Called at each deferred composition draw to keep the G-buffer albedo (t8) and
+// specular (t10) views for the lighting passes.
 inline void CaptureCompositeInputs(reshade::api::command_list* cmd_list) {
   if (cmd_list == nullptr) return;
   auto* device = cmd_list->get_device();
@@ -446,7 +460,8 @@ inline void CaptureCompositeInputs(reshade::api::command_list* cmd_list) {
       || specular_description.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D
       || internal::ReadTexture(materials.albedo.Get(), native_device, &description) == nullptr
       || internal::ReadTexture(materials.specular.Get(), native_device, &description) == nullptr) return;
-  // Preserve the native pair without requiring matching material base extents or motion demand.
+  // Keep the albedo and specular views as a pair. Their sizes need not match, and they are
+  // captured whether or not any feature needs motion.
   materials.generation = generation;
   materials.observation = ticket;
   materials.context = reinterpret_cast<uintptr_t>(context);

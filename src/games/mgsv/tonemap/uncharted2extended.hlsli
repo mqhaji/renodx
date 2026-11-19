@@ -1,5 +1,7 @@
 #include "../shared.h"
 
+// Uncharted 2 filmic curve, extended for HDR: past its inflection point, it
+// continues as a straight line with the curve's slope there instead of flattening.
 namespace Uncharted2 {
 
 float Derivative(
@@ -17,7 +19,7 @@ float Derivative(
 }
 
 float FindSecondDerivativeRoot(float a, float b, float c, float d, float e, float f) {
-  // Coefficients of the numerator of f''(x):
+  // Solve for the inflection point. Coefficients of the numerator of f''(x):
   // num(x) = A3 x^3 + A2 x^2 + A1 x + A0
 
   float A3 = a * a * b * (c - 1.0f);
@@ -25,7 +27,7 @@ float FindSecondDerivativeRoot(float a, float b, float c, float d, float e, floa
   float A1 = 3.0f * a * b * d * (e - c * f);
   float A0 = a * d * d * (f * f - e * f) + b * b * d * (e - c * f);
 
-  // If A3 = 0, curve is degenerate → no inflection
+  // If A3 is zero, the curve has no inflection point.
   if (abs(A3) < 1e-12f)
     return 0.f;
 
@@ -43,7 +45,6 @@ float FindSecondDerivativeRoot(float a, float b, float c, float d, float e, floa
   float half_q = 0.5f * q;
   float Delta = half_q * half_q + (p / 3.0f) * (p / 3.0f) * (p / 3.0f);
 
-  // Real root output
   float t;
 
   if (Delta >= 0.f) {
@@ -51,12 +52,11 @@ float FindSecondDerivativeRoot(float a, float b, float c, float d, float e, floa
     float u = (-half_q + sqrtD);
     float v = (-half_q - sqrtD);
 
-    // Use signed cube root
     float u_c = renodx::math::SignPow(u, 1.0f / 3.0f);
     float v_c = renodx::math::SignPow(v, 1.0f / 3.0f);
     t = u_c + v_c;
   } else {
-    // 3 real roots → trig branch
+    // Three real roots: use the trigonometric solution.
     float m = 2.0f * sqrt(-p / 3.0f);
     float angle = acos((-half_q) / sqrt(-(p * p * p) / 27.0f));
     t = m * cos(angle / 3.0f);
@@ -64,7 +64,7 @@ float FindSecondDerivativeRoot(float a, float b, float c, float d, float e, floa
 
   float x = t - an_3;
 
-  // Only meaningful inflection is positive
+  // Only a positive inflection point is meaningful.
   return max(x, 0.f);
 }
 
@@ -89,7 +89,6 @@ Uncharted2ExtendedConfig CreateUncharted2ExtendedConfig(
 
 Uncharted2ExtendedConfig CreateUncharted2ExtendedConfig(float coeffs[6], float white_precompute) {
   float pivot_point = FindSecondDerivativeRoot(coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5]);
-  // pivot_point = (pivot_point + FindSecondDerivativeRoot(coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5])) / 2.f;
 
   return CreateUncharted2ExtendedConfig(pivot_point, coeffs, white_precompute);
 }

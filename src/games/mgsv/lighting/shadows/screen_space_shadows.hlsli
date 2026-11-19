@@ -5,11 +5,17 @@
 #include "../../shared.h"
 #include "pcss.hlsli"
 
+// Contact-shadow lookup for the native light shader replacements.
+// bend_shadow_mask is the atlas written by contact/bend_trace: R is visibility,
+// G is 0.25 + 0.75 * r / (1 + r) for a soft-edge radius r in pixels (or a debug
+// value), and G below 0.24 means no data. bend_shadow_data is this light's
+// setup record (layout in contact/bend_common.hlsli).
 Texture2D<float4> bend_shadow_mask : register(t18);
 ByteAddressBuffer bend_shadow_data : register(t19);
 
-// Setup stores these five floats in unused space after the indirect arguments.
-// State 2 still has valid light data even when contact tracing was budgeted out.
+// Setup caches these five floats in the record, after the indirect arguments.
+// It fills them for every light with a state (1 traced, 2 not traced), so a
+// light skipped by the contact budget still has them.
 PcssProjection ReadPcssProjection(float4x4 projection, float4x4 cascades, bool directional) {
   if (bend_shadow_data.Load(40) != 0u) {
     float4 values = asfloat(bend_shadow_data.Load4(PCSS_PROJECTION_OFFSET));
@@ -71,7 +77,8 @@ BendShadow ReadBendShadow(float2 pixel, uint light_type, Texture2D<float4> depth
   const bool inside_bounds = all(position >= bounds.xy) && all(position < bounds.zw);
   bool supported = inside_bounds;
   float2 sample = supported ? ReadBendMask(int2(position), bounds, atlas) : float2(1.0, 0.0);
-  // Whole unlit regions can retain their neutral clear value without a trace.
+  // For local lights, pixels outside the receiver bounds or left unwritten by
+  // the trace are outside the light's reach. Treat them as unshadowed.
   if (!directional && (!supported || sample.y < 0.24)) {
     supported = true;
     sample = float2(1.0, 0.25);
@@ -155,6 +162,7 @@ BendShadow ReadBendShadow(float2 pixel, uint light_type, Texture2D<float4> depth
   }
   result.debug_value = debug == 1 ? result.visibility : saturate((sample.y - 0.25) / 0.75);
   if (debug == 6 && result.valid) {
+    // The Toward Light view draws a grid of arrows pointing at the light.
     // Behind-camera sources project to the opposite side. W restores the
     // physical direction toward the light, including MGSV's signed X axis.
     const float4 light = asfloat(bend_shadow_data.Load4(0));

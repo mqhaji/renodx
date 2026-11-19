@@ -1,3 +1,6 @@
+// Port of a native sky draw shader. The mod replaces its TppTonemap curve with
+// ApplyTppTonemap, which skips the curve when RenoDX tone mapping is on, and
+// applies the Boost Sun Brightness setting to the sun and moon texture.
 #include "../../tonemap/tonemap.hlsli"
 
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:30 2026

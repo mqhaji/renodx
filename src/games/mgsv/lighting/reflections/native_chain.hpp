@@ -14,11 +14,14 @@
 #include "../indirect_lighting_mode.hpp"
 #include "result.hpp"
 
+// With Enhanced reflections, skip the game's screen-space reflection traces and
+// the blur, reduction, and copy work that only feeds them. The GGX reflections
+// replace their result at the native reflection composite.
 namespace mgsv::lighting::reflections::native_chain {
 
-// Gaussian and reduction shaders also serve other effects. Skip them only
-// when their input descends from a skipped reflection trace in this recording.
-// Keep allocations alive until reset so native pointer reuse cannot match one.
+// The blur and reduction shaders also serve other effects. Skip them only when
+// their input comes from a skipped reflection trace in this command list. Keep
+// the textures alive until reset so a reused native pointer cannot match one.
 struct __declspec(uuid("f8459b18-f389-4996-bc13-aa10037afc29")) Recording {
   std::vector<Microsoft::WRL::ComPtr<ID3D11Resource>> skipped;
 };
@@ -45,16 +48,16 @@ inline void MarkOutput(reshade::api::command_list* cmd_list, Recording* recordin
 
 inline bool OnTrace(reshade::api::command_list* cmd_list) {
   if (!UsesEnhancedIndirectLighting()) return true;
-  // Both native traces search the same screen depth. Enhanced uses the GGX
-  // estimator for either path, including the sortie floor. Clear readiness in
-  // execution order so a skipped submission retains only native environment light.
+  // The general and sortie-floor traces search the same screen depth, so the
+  // GGX estimator replaces both. Clear readiness here, in GPU order, so if the
+  // reflection work is not submitted the composite keeps native environment light.
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> material;
   Microsoft::WRL::ComPtr<ID3D11Resource> resource;
   context->PSGetShaderResources(3u, 1u, &material);
   if (material != nullptr) material->GetResource(&resource);
-  // The compositor takes the replacement path only when this result's readiness
-  // is bound. Without a result, keep the native trace that it will composite.
+  // The composite takes the replacement path only when this result's readiness
+  // is bound. Without a result, keep the native trace for it to composite.
   const auto result = specular_result::Read(cmd_list->get_device(), resource.Get());
   if (result == nullptr) return true;
   const std::array<float, 4> status = {};

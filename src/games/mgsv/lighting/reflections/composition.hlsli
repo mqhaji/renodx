@@ -5,6 +5,10 @@
 #include "../../../../shaders/color/srgb.hlsl"
 #include "../../common.hlsli"
 
+// Composes the enhanced reflection result in the game's reflection compositors
+// (LocalReflectionAddBuffer and LocalReflectionComposite). reflection_ready
+// holds a per-pixel status byte; the other three images come from
+// sssr_resolve and the saved environment.
 Texture2D<float4> reflection_light : register(t18);
 Texture2D<float4> reflection_environment_weight : register(t19);
 Texture2D<float4> reflection_environment : register(t20);
@@ -21,8 +25,9 @@ struct ReflectionResult {
   bool replaces_native;
 };
 
-// Load the result once for both routing and composition. The GPU-written mode
-// belongs to this submitted scene, rather than the worker's current CPU state.
+// Loads the result once; callers use it both to choose the path and to
+// compose. The status is written on the GPU for this submitted scene, so it
+// does not depend on the CPU's current state.
 ReflectionResult LoadReflectionResult(float2 uv) {
   ReflectionResult result = (ReflectionResult)0;
   uint width, height, ready_width, ready_height;
@@ -31,7 +36,7 @@ ReflectionResult LoadReflectionResult(float2 uv) {
   result.replaces_native = true;
   const int2 pixel = clamp(int2(uv * float2(ready_width, ready_height)), 0, int2(ready_width, ready_height) - 1);
   result.status = (int)round(reflection_ready.Load(int3(pixel, 0)) * 255.0);
-  // Native-only and unavailable states must not sample stale enhanced images.
+  // Any other status means the enhanced images may be stale; do not read them.
   if (result.status != MGSV_REFLECTION_ENHANCED) return result;
   reflection_light.GetDimensions(width, height);
   if (width != ready_width || height != ready_height) return result;
@@ -43,9 +48,10 @@ ReflectionResult LoadReflectionResult(float2 uv) {
   return result;
 }
 
-// Both native compositors read extended sRGB and write extended sRGB in our
-// float views. Perform only the replacement in linear light. Scene alpha and
-// the compositor's native destination remain the caller's responsibility.
+// Both native compositors read and write extended sRGB in the FP16 targets.
+// Only the replacement happens in linear light. Scene alpha and the native
+// destination are left to the caller. Debug views 11 to 17 show the
+// reflection inputs; magenta marks a pixel without valid reflection data.
 float3 ComposeReflections(float3 encoded_scene, ReflectionResult result) {
   const int debug_view = (int)CUSTOM_MGSV_LIGHTING_DEBUG_VIEW;
   float3 scene = renodx::color::srgb::Decode(max(encoded_scene, 0.0));
@@ -68,12 +74,11 @@ float3 ComposeReflections(float3 encoded_scene, ReflectionResult result) {
     else if (debug_view == 17)
       scene = environment_weight.rgb;
     else {
-      // Visibility and fallback selection were part of the complete estimator
-      // before denoising. Restore receiver fog transmission once, then replace
-      // only the saved specular term. Direct light, diffuse and fog scatter stay.
+      // Visibility and the environment fallback are already in the estimate.
+      // Restore receiver fog transmission (environment alpha) once, then swap
+      // the saved environment specular for the new result. Direct light,
+      // diffuse light, and fog in-scattering in the scene stay.
       const float3 reflected = light.rgb * environment.a;
-      // Replace the captured environment once, preserving direct/diffuse light
-      // and fog in-scattering already present in the rest of the scene.
       scene += CUSTOM_MGSV_REFLECTION_STRENGTH * (reflected - environment.rgb);
     }
   } else if (debug_view >= 11 && debug_view <= 17) {

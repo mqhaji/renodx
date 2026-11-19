@@ -3,10 +3,14 @@
 
 #include "../../materials/material_source.hlsli"
 
-// RGB is outgoing diffuse radiance in linear, pre-exposed scene units. Alpha
-// is 1 where the color has no baked material cube in it and 0 where a changed
-// cube surface falls back to native albedo.
-// Zero RGB is a valid black source; finiteness is checked by the consumer.
+// Outgoing diffuse radiance of one source pixel for GT-VBGI: material color
+// times the pixel's diffuse light. With use_clean, materials that bake a cube
+// map into albedo use their recorded cube-free color (materials/README.md).
+//
+// RGB is linear and pre-exposed. Alpha is 1 where the color has no baked cube
+// in it and 0 where native albedo had to stand in (a cube surface changed
+// after its draw, or use_clean is false). Zero RGB is a valid black source;
+// the caller checks finiteness.
 float4 LoadSourceRadiance(Texture2D<float4> diffuse, Texture2D<float4> albedo,
                           Texture2D<float4> material, Texture2D<float4> clean, Texture2D<uint4> owner,
                           int2 pixel, uint2 size, float4 normal, float depth, bool use_clean) {

@@ -1,3 +1,5 @@
+// Port of the native render-buffer copy used for bloom and scene copies. The mod
+// clamps negative output, which float targets allow.
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:28 2026
 
 cbuffer cPSObject : register(b5)

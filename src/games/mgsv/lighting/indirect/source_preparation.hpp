@@ -21,23 +21,28 @@
 #include "../../rendering/inputs.hpp"
 #include "../environment_specular.hpp"
 
+// Prepared source light for the diffuse GI trace. During the native diffuse
+// copy, a replacement shader also writes outgoing diffuse radiance to an extra
+// FP32 target, so the trace reads one prepared image instead of decoding the
+// G-buffer itself. This adds no dispatch.
 namespace mgsv::lighting::source_preparation {
 
 struct Target {
   uint64_t generation = 0u;
   uint32_t width = 0u;
   uint32_t height = 0u;
-  // Original diffuse, material, albedo, normal, depth, then the cube records'
-  // clean color and owner, which are null when no cube material was captured.
-  // These are immutable binding identities, not snapshots of their contents.
+  // Native diffuse, material, albedo, normal, depth, then the material records'
+  // clean color and owner, which are null when no cube-map material was
+  // captured. These identify the bound views; they do not snapshot contents.
   std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 7> inputs;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
   Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
 };
 
-// The copy allocation is a weak key. Targets do not retain that allocation,
-// so native destruction can retire preparation without an ownership cycle.
+// Keyed by the native copy's destination texture, which Target does not hold,
+// so destroying that texture releases its preparation without an ownership
+// cycle.
 inline renodx::utils::data::ParallelFlatHashMap<ID3D11Resource*, std::shared_ptr<Target>, std::shared_mutex> targets;
 
 struct __declspec(uuid("2F9198D3-B6CC-42D7-8DD2-9048B09840F8")) DrawState {
@@ -145,8 +150,9 @@ inline bool Begin(reshade::api::command_list* cmd_list) {
   sources[2] = selected.materials.albedo;
   sources[3] = environment->normal;
   sources[4] = environment->depth_view;
-  // Records exist only where a cube material drew into this G-buffer. Without
-  // any, the shader reads native albedo as free of a baked cube.
+  // Material records exist only where a material that bakes a cube map into
+  // albedo drew into this G-buffer. Without them, the shader treats native
+  // albedo as having no baked cube map.
   if (clean != nullptr) {
     sources[5] = clean->color_srv;
     sources[6] = clean->owner_srv;
@@ -159,8 +165,8 @@ inline bool Begin(reshade::api::command_list* cmd_list) {
   outputs[0]->GetDesc(&output_view);
   if (output_view.ViewDimension != D3D11_RTV_DIMENSION_TEXTURE2D || output_view.Texture2D.MipSlice != 0u
       || output_view.Format != DXGI_FORMAT_R16G16B16A16_FLOAT) return true;
-  // Native view descriptors cannot change. Qualify the seven-input set only
-  // when a binding changes; draw coverage and submission still need live checks.
+  // View descriptions cannot change, so check the seven inputs only when a
+  // binding changes. The viewport, scissor, and blend checks run on every draw.
   if (!same_inputs) {
     D3D11_SHADER_RESOURCE_VIEW_DESC albedo_view = {};
     sources[2]->GetDesc(&albedo_view);
@@ -199,13 +205,13 @@ inline bool Begin(reshade::api::command_list* cmd_list) {
           || scissor.right < static_cast<LONG>(description.Width) || scissor.bottom < static_cast<LONG>(description.Height)) return true;
     }
   }
-  // The native copy must replace both outputs. Do not reinterpret additive or
+  // The native copy must overwrite its whole output. Do not treat additive or
   // partial writes as a complete source-light image.
   context->OMGetBlendState(&state.blend, state.blend_factor.data(), &state.sample_mask);
   Microsoft::WRL::ComPtr<ID3D11BlendState> capture_blend;
   if (state.blend != nullptr) {
-    // Reuse the material-capture blend cache. Only RT0 belongs to this native
-    // draw; the extra attachment always receives a complete replacement.
+    // Reuse the material capture's blend cache. Target 1 copies target 0's
+    // opaque blend, so the extra attachment is fully overwritten as well.
     auto* device_state = selected.device->get_private_data<material_inputs::DeviceState>();
     if (device_state == nullptr) return true;
     {
@@ -261,8 +267,9 @@ inline bool Begin(reshade::api::command_list* cmd_list) {
     }
   }
 
-  // 3. Add one attachment to the existing draw and restore its bindings after
-  // replacement. The native output, geometry, depth, and blend state stay intact.
+  // 3. Add the prepared image as target 1 and bind the extra inputs at t18-t22.
+  // End restores the render targets, blend state, inputs, and pixel shader; the
+  // native output, geometry, and depth are unchanged.
   std::array<ID3D11ShaderResourceView*, 5> displaced = {};
   context->PSGetShaderResources(18u, static_cast<UINT>(displaced.size()), displaced.data());
   for (size_t index = 0u; index < displaced.size(); ++index) {
@@ -279,6 +286,7 @@ inline bool Begin(reshade::api::command_list* cmd_list) {
   return true;
 }
 
+// Returns the prepared image for ambient_diffuse::OnDiffuseCopied to publish.
 inline Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> End(reshade::api::command_list* cmd_list) {
   auto* saved = cmd_list->get_private_data<DrawState>();
   if (saved == nullptr || saved->target == nullptr) return {};

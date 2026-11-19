@@ -1,5 +1,9 @@
-// Separate native material color from the cubemap approximation without
-// changing the game's G-buffer. Native outputs remain the complete fallback.
+// Records for the materials that bake a cube map into albedo. Their ported
+// shaders keep the native G-buffer outputs and also write two extra targets:
+// the color without the cube (clean color) and an owner record (the values the
+// draw wrote and its depth). Diffuse GI, source preparation, and reflections
+// read them. The G-buffer itself is never changed, so native output remains
+// the complete fallback.
 #ifndef MGSV_MATERIAL_INPUTS_HPP_
 #define MGSV_MATERIAL_INPUTS_HPP_
 
@@ -46,8 +50,8 @@ struct Target {
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> owner_srv;
 };
 
-// The key is weak. The extra images retain neither the native albedo allocation
-// nor its RTV, so destroying that allocation can retire its captured inputs.
+// Keyed by the native albedo texture. Target holds neither that texture nor its
+// RTV, so destroying the texture releases its records (OnDestroyResource).
 inline renodx::utils::data::ParallelFlatHashMap<ID3D11Resource*, std::shared_ptr<Target>, std::shared_mutex> targets;
 
 struct Blend {
@@ -57,9 +61,10 @@ struct Blend {
   uint32_t native_count = 0u;
 };
 
-// Store immutable layout checks on the view itself. Its lifetime protects the
-// borrowed resource pointer and prevents a reused address from hitting an old
-// cache entry. DrawState retains the live views while these pointers are used.
+// Layout check results, stored as private data on the view itself. The view's
+// lifetime protects the borrowed resource pointer and keeps a reused address
+// from matching an old entry. DrawState holds the views while the pointers are
+// in use.
 struct __declspec(uuid("7A79EC50-FB6E-46C9-9DF5-71AEE74E86B2")) RenderTargetLayout {
   uint64_t generation = 0u;
   ID3D11Resource* resource = nullptr;
@@ -76,6 +81,8 @@ struct __declspec(uuid("BA690226-89E3-47D9-BF21-7521D7558E67")) DepthTargetLayou
 struct __declspec(uuid("45157F10-3393-4BC7-ADB1-197E2C1781AF")) DeviceState {
   std::shared_mutex mutex;
   std::vector<Blend> blends;
+  // The capture flag: a 1x1 texture holding 1, bound at t20. It lets a port
+  // record its clean color.
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> parameter_view;
 };
 
@@ -147,7 +154,7 @@ inline void OnResetCommandList(reshade::api::command_list* cmd_list) {
   }
 }
 
-// Called only for registered G-buffer or wet-material draws.
+// Called only for the registered cube-material ports and the two rain ports.
 inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
   if (!UsesEnhancedIndirectLighting() || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return true;
   const auto selected = inputs::ReadSelection(cmd_list->get_device());
@@ -158,8 +165,8 @@ inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());        // NOLINT(performance-no-int-to-ptr)
   auto* device = reinterpret_cast<ID3D11Device*>(cmd_list->get_device()->get_native());  // NOLINT(performance-no-int-to-ptr)
 
-  // 1. Qualify the real G-buffer layout. A shader hash alone cannot establish
-  // which scene, dimensions, output formats, or depth target it is drawing into.
+  // 1. Check the actual G-buffer layout. A shader hash alone does not show which
+  // scene, dimensions, output formats, or depth target the draw writes to.
   const uint32_t native_count = (rain ? 2u : 3u);
   DrawState state;
   std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> bound = {};
@@ -234,8 +241,9 @@ inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
   context->PSGetShader(&state.shader, nullptr, &class_count);
   if (state.shader == nullptr || class_count != 0u) return true;
 
-  // 2. Preserve native blending. Only a full opaque write can publish clean
-  // material data; decals and partial writes explicitly invalidate their pixels.
+  // 2. Keep native blending on the native targets; the record targets are
+  // written without blending. Only a full opaque write can publish clean
+  // material data; blended or partial writes leave their color unknown (step 4).
   context->OMGetBlendState(&state.blend, state.blend_factor.data(), &state.sample_mask);
   Blend blend;
   {
@@ -279,7 +287,7 @@ inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
     }
   };
 
-  // 3. Reuse two attachments per native albedo allocation. Each record keeps
+  // 3. Reuse two attachments per native albedo texture. Each record keeps
   // the albedo its cube material wrote and that draw's depth, so a consumer can
   // tell a changed or covered surface from the one the record describes.
   auto target = Read(cmd_list->get_device(), resources[0]);
@@ -375,15 +383,17 @@ inline bool BeginCapture(reshade::api::command_list* cmd_list, bool rain) {
     context->CopyResource(owner_copy.Get(), target->owner.Get());
   }
 
-  // 4. Blended decals invalidate their captured inputs instead of treating
-  // their unblended source as the final material. Native blending stays intact.
+  // 4. A blended draw's unblended color is not the final material. Bind a null
+  // capture flag, which reads as zero, so the port records only its depth and
+  // leaves the color unknown. Native blending stays intact.
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> parameters = device_state->parameter_view;
   if (!blend.opaque) {
-    parameters.Reset();  // Null reads zero: publish invalid guides for this draw.
+    parameters.Reset();
   }
 
-  // 5. Attach the extra outputs without disturbing native RGB, alpha, blending,
-  // depth, or shader resources. Restore every displaced binding after the draw.
+  // 5. Bind the two record targets after the native targets, and the inputs at
+  // t18-t20. Native outputs, blending, and depth are unchanged. EndCapture
+  // restores the targets, blend state, inputs, and pixel shader after the draw.
   std::array<ID3D11ShaderResourceView*, 3> previous = {};
   context->PSGetShaderResources(18u, static_cast<UINT>(previous.size()), previous.data());
   for (size_t index = 0u; index < previous.size(); ++index) {
@@ -437,7 +447,8 @@ inline bool OnClearRenderTarget(reshade::api::command_list* cmd_list, reshade::a
   if (rtv.handle == 0u || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return false;
   Microsoft::WRL::ComPtr<ID3D11Resource> resource;
   reinterpret_cast<ID3D11RenderTargetView*>(rtv.handle)->GetResource(&resource);  // NOLINT(performance-no-int-to-ptr)
-  // An albedo clear invalidates clean color beside the native command.
+  // When the game clears an albedo target, clear its records in the same
+  // command stream.
   const auto target = Read(cmd_list->get_device(), resource.Get());
   if (target != nullptr) {
     const std::array<float, 4> invalid = {0.f, 0.f, 0.f, -1.f};

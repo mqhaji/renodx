@@ -1,8 +1,11 @@
 #include "copy_constants.hlsli"
 
+// Restores one stencil bit in the output-sized depth/stencil target. The draw's
+// stencil state writes that bit wherever this shader does not discard, so eight
+// draws restore all eight bits.
 Texture2D<uint2> input_stencil : register(t0);
 
-// Each draw selects one fixed bit; dimensions and jitter stay shared in b0.
+// The bit this draw restores; dimensions and jitter come from b0.
 cbuffer StencilCopyBit : register(b1) {
   uint copy_bit;
 }

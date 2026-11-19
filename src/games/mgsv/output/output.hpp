@@ -14,7 +14,8 @@
 
 namespace mgsv::output {
 
-// The addon owns this state. Core settings populate its borrowed descriptor pointers before use.
+// Output mode (SDR or HDR) and the brightness settings it controls. addon.cpp owns
+// this state; settings.hpp fills in the setting pointers when it builds the menu.
 struct State {
   float mode = 1.f;
   renodx::utils::settings::Setting* peak_nits_setting = nullptr;
@@ -41,6 +42,8 @@ inline void SyncOutputMode(ShaderInjectData* shader_injection, const State& stat
   }
 }
 
+// The first swapchain sets the Peak Brightness default: the display's reported
+// peak, or 100 nits when RenoDX upgraded the swapchain.
 inline void OnInitSwapchain(State* state, reshade::api::swapchain* swapchain) {
   if (state->peak_detected) return;
   state->peak_detected = true;

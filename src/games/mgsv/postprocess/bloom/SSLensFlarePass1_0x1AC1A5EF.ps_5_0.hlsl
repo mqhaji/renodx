@@ -1,6 +1,9 @@
+// Port of the native first lens flare pass. Enhanced bloom keeps its shape and
+// reads only the bloom working region.
 #include "bloom_native.hlsli"
 
-// Clip the source before weighting, then bound the native flare signal.
+// Clamp the source color, scale it by the brightness in alpha, and clamp the result
+// to the native flare signal's range.
 float3 PrepareFlareSource(float4 color) {
   return saturate(saturate(color.rgb) * color.a);
 }

@@ -1,3 +1,6 @@
+// Port of the game's CopyBuffer, which copies diffuse light for the two
+// skin-scattering passes and marks skin in alpha. The mod adds target 1: FP32
+// source radiance that the GT-VBGI trace reads.
 #include "source_radiance.hlsli"
 
 cbuffer cPSSystem : register(b0) {
@@ -20,15 +23,16 @@ Texture2D<uint4> material_owner : register(t22);
 
 void main(float4 position : SV_Position0, out float4 native_copy : SV_Target0,
           out float4 source_radiance : SV_Target1) {
-  // 1. Preserve the native copy and its skin mask. These values still feed
-  // both original scattering passes; source validity has a separate alpha.
+  // 1. Native output: the diffuse copy, with alpha 1 for skin materials
+  // (IDs 10 and 110). Both scattering passes read it unchanged.
   const float2 uv = position.xy * g_psSystem.m_renderBuffer.zw;
   const int material_id = (int)(255.0 * inMaterialIDBuffer.Sample(g_samplerPoint_Clamp_s, uv).z);
   native_copy = float4(inLightBuffer.Sample(g_samplerPoint_Clamp_s, uv).rgb,
                        material_id == 10 || material_id == 110 ? 1.0 : 0.0);
 
-  // 2. Validate source material once for every scene pixel. Both diffuse GI
-  // and focused/broad specular GI reuse this FP32 result during their search.
+  // 2. Added output: source radiance computed once per pixel (see
+  // source_radiance.hlsli), so the GT-VBGI trace does not repeat the
+  // cube-material lookup for every sample.
   uint width, height;
   source_albedo.GetDimensions(width, height);
   const int2 pixel = int2(position.xy);

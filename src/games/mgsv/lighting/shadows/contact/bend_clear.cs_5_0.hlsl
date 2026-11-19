@@ -1,12 +1,13 @@
 // Copyright 2023 Sony Interactive Entertainment.
 // SPDX-License-Identifier: Apache-2.0
-// MGSV dispatch preparation for Bend shadows. See ../BEND_LICENSE.md.
+// MGSV mask clear for Bend shadows. See ../BEND_LICENSE.md.
 
 #include "bend_common.hlsli"
 
 [numthreads(BEND_GROUP_SIZE, 1, 1)]
 void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
-  // One dispatch clears every admitted light's packed receiver rectangle.
+  // One dispatch clears every admitted light's packed receiver rectangle to
+  // visibility 1 with G = 0 (no data), so pixels the trace skips stay unread.
   const uint light_count = asuint(bend_lights.Load(0u).x);
   const uint work_pixel = (group.x + (group.y << BEND_TILE_ROW_BITS)) * BEND_GROUP_SIZE + lane;
   const uint light_index = FindBendLight(work_pixel, light_count, BEND_CLEAR_END_OFFSET);

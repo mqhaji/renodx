@@ -89,8 +89,8 @@ inline constexpr GUID SCENE_DEPTH_GUID = {
     .Data4 = {0x9Eu, 0x64u, 0xF2u, 0x25u, 0xC6u, 0xE1u, 0x99u, 0x43u},
 };
 
-// Stores the most recent full clear, so an alias created later starts with
-// the same color and alpha as the native target.
+// The most recent full clear of a native target, so an output-sized copy
+// created later starts with the same color and alpha.
 struct ClearColor {
   std::array<float, 4> color;
   uint64_t scene = 0u;
@@ -171,9 +171,9 @@ struct Surface {
   std::vector<SampleView> samples;
 };
 
-// One draw's target lookup. A previous role is valid only when the write check
-// succeeds, including the dedicated flare-layer rule in GetSurface. Recheck
-// that association when another scene uses this allocation.
+// One draw's target lookup. previous_role counts only when has_previous_write
+// is true; GetSurface decides that, including its flare-layer exception. Each
+// draw looks its targets up again because another scene can reuse an allocation.
 struct MappedTarget {
   Microsoft::WRL::ComPtr<ID3D11Resource> original;
   Microsoft::WRL::ComPtr<ID3D11RenderTargetView> view;
@@ -182,8 +182,8 @@ struct MappedTarget {
   bool has_previous_write = false;
 };
 
-// A sampled view and its qualified purpose belong to the same lookup. Keep
-// the role even when a native scene view's encoding prevents replacement.
+// One sampled view's replacement and the role its texture was written with.
+// The role is reported even when no replacement view is returned.
 struct MappedInput {
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
   Surface::Role role = Surface::Role::DATA;
@@ -309,7 +309,8 @@ struct Output {
   std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>, MAX_SURFACE_REDUCTION + 1u> size_patches;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> source_view;
   Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> fallback_uav;
-  // Saved-state support and dimensions/jitter shared by the copy shaders.
+  // An empty context state for ContextScope, and the dimensions and jitter
+  // shared by the copy shaders.
   Microsoft::WRL::ComPtr<ID3DDeviceContextState> empty_state;
   Microsoft::WRL::ComPtr<ID3D11Buffer> copy_constants;
   // Geometry depth is sampled by scene effects. Align it to the reconstructed
@@ -487,8 +488,10 @@ struct Output {
     return native_depth == current_depth;
   }
 
-  // Canceled reconstruction still has a native remainder that reads this
-  // target. Fill it from this submission's native prefix, never old output.
+  // Used when a scene is not reconstructed: a fill, a canceled or failed
+  // dispatch, or a replay. The game's commands after the cut still read this
+  // target, so fill it from this frame's native scene, never an old output.
+  // The scaled fill reads the copy constants PrepareDepth writes.
   void CopyNative(ID3D11DeviceContext* context) const {
     if (!IsScaled()) {
       context->CopyResource(color.Get(), source.Get());
@@ -506,8 +509,9 @@ struct Output {
     context->Dispatch((target.width + 7u) / 8u, (target.height + 7u) / 8u, 1u);
   }
 
-  // Called on the immediate context after the native prefix has executed.
-  // Always rebuild current depth/masks on replay; CPU recording cannot seed it.
+  // Called on the immediate context after the game's commands before the cut
+  // have run. Depth and stencil are rebuilt on every replay because they come
+  // from this frame's GPU data, which CPU recording cannot fill in ahead of time.
   bool PrepareDepth(ID3D11DeviceContext* context, float jitter_x, float jitter_y) const {
     if (!IsScaled()) return true;
     const ContextScope restore(context, empty_state.Get());
@@ -515,8 +519,8 @@ struct Output {
       resolution::Fail("cannot preserve the output depth copy state");
       return false;
     }
-    // The first row stores integer input/output dimensions. The second stores
-    // a reserved mode, two float jitter values as raw bits, and padding.
+    // Layout of copy_constants.hlsli: integer input and output dimensions, an
+    // unused field, the two float jitter values as raw bits, and padding.
     const std::array<uint32_t, 8> values = {render_width, render_height, target.width, target.height,
                                             0u, std::bit_cast<uint32_t>(jitter_x), std::bit_cast<uint32_t>(jitter_y), 0u};
     context->UpdateSubresource(copy_constants.Get(), 0u, nullptr, values.data(), 0u, 0u);
@@ -604,9 +608,10 @@ struct Output {
     return buffer;
   }
 
-  // Lookup can require a producer from this recording, not just cached storage.
-  // create permits allocation lookup without claiming that pixels were written;
-  // MapTarget or CopySurface records that producer separately.
+  // Finds the output-sized texture for a native intermediate. Without create,
+  // it is returned only if this recording wrote it (by producer, or during
+  // recording_frame when there is no producer). create allocates it without
+  // marking it written; Begin in runtime.hpp or CopySurface records the writer.
   std::shared_ptr<Surface> GetSurface(ID3D11Resource* original, bool create,
                                       uint64_t recording_frame = reconstruction::state::CurrentFrameToken(),
                                       const OutputProducer* producer = nullptr, Surface::Role* role = nullptr,
@@ -681,8 +686,9 @@ struct Output {
       }
       surface->size_patch = GetSizePatch(level);
     } else {
-      // Native-AA output still needs to recognize intermediate color layers
-      // before they composite into the separate scene. Reuse their storage.
+      // At native output size, keep the game's storage. The surface is still
+      // tracked so color layers are recognized before they composite into the
+      // separate scene output.
       surface->texture = texture;
     }
     surfaces.push_back(surface);
@@ -748,8 +754,9 @@ struct Output {
     if (IsSceneTarget(original.Get())) {
       result.role = Surface::Role::SCENE_COLOR;
     }
-    // Every view of the float scene carries encoded color; shaders decode
-    // where the game's view was sRGB. Each reads this frame's reconstructed image.
+    // Every read of the scene gets this frame's reconstructed image. Both
+    // textures hold the game's encoded color in float storage, so the output's
+    // default view stands in for any of the game's scene views.
     if (original == source) {
       result.view = srv;
       return result;
@@ -811,8 +818,8 @@ struct Output {
     return result;
   }
 
-  // Mirror a qualified full-resource copy using matching output-sized storage.
-  // An intermediate destination inherits the source's role after size/format checks.
+  // Repeats a native full-resource copy on the output-sized textures. A
+  // destination intermediate takes the source's role once size and format match.
   bool CopySurface(ID3D11DeviceContext* context, ID3D11Resource* from, ID3D11Resource* to,
                    uint64_t recording_frame = reconstruction::state::CurrentFrameToken(), OutputProducer* producer = nullptr) {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> copied;
@@ -855,9 +862,10 @@ struct Output {
   }
 };
 
-// Keep one destination and producer for an unfinished deferred recording.
-// Successful FinishCommandList releases this reference; the wider sequence
-// below can retain the same route until display conversion. Reset retires both.
+// The output and producer used by one deferred recording, or one scene's route
+// in State. A successful FinishCommandList releases the recording's reference;
+// State::sequences can keep the same route until display conversion. Reset
+// retires both.
 struct __declspec(uuid("71618f64-fc26-4a78-91de-6e20f879a85a")) Recording {
   std::shared_ptr<Output> output;
   std::shared_ptr<OutputProducer> producer;
@@ -869,6 +877,7 @@ struct __declspec(uuid("71618f64-fc26-4a78-91de-6e20f879a85a")) Recording {
   std::vector<std::shared_ptr<Output>> retained_outputs;
 };
 
+// Private-data key that attaches RetainedOutputs to a finished command list.
 inline constexpr GUID OUTPUT_LEASE_GUID = {
     .Data1 = 0x5241c06eu,
     .Data2 = 0x5925u,
@@ -876,8 +885,9 @@ inline constexpr GUID OUTPUT_LEASE_GUID = {
     .Data4 = {0x96, 0xab, 0x68, 0x31, 0xed, 0xbc, 0x5d, 0xf0},
 };
 
-// The native list owns this object. It owns no list reference, so destroying
-// the last recorded user makes its output available to the pool again.
+// The outputs a finished native command list reads. The list owns this object,
+// which holds no reference back to the list, so destroying the list releases
+// the outputs and the pool can reuse them.
 struct RetainedOutputs : Microsoft::WRL::RuntimeClass<Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>, IUnknown> {
   std::vector<std::shared_ptr<Output>> outputs;
 };
@@ -943,9 +953,10 @@ inline std::optional<ClearColor> GetRecordedClear(ID3D11Resource* resource, uint
   return existing->value;
 }
 
-// Pool ownership alone means no recording or finished native list can still
-// read these textures. A second worker for the same scene shares its route.
-// D3D11 orders subsequent GPU writes after earlier immediate submissions.
+// Returns this scene's output, allocating or reusing one on its first use. An
+// allocation referenced only by the pool is no longer read by any recording or
+// finished list, so it can be reused. A second worker for the same scene shares
+// its route. D3D11 orders new GPU writes after earlier submitted reads.
 inline std::shared_ptr<Output> AcquireOutput(const ValidatedFrameInputs& inputs) {
   auto owner = engine::views::GetScope().owner;
   if (owner.scene == 0u) {

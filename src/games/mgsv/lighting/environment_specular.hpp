@@ -26,6 +26,12 @@
 #include "indirect_lighting_mode.hpp"
 #include "reflections/result.hpp"
 
+// Environment specular capture and export for Enhanced reflections.
+// During the sun light draws, extra render targets collect the environment
+// (image-based) specular light the game adds and reset reflection readiness.
+// During deferred composition, the composite shader reads that capture and
+// writes the exact environment term and receiver fog to the reflection result,
+// so the later reflection pass can replace that term with GGX reflections.
 namespace mgsv::lighting::environment_specular {
 
 struct MaterialPaletteCopy {
@@ -35,8 +41,10 @@ struct MaterialPaletteCopy {
   D3D11_SHADER_RESOURCE_VIEW_DESC view_description = {};
 };
 
-// Cache descriptions on the native view that owns this borrowed resource.
-// Descriptions cannot change; mutable pixels still need an ordered snapshot.
+// Stored as private data on the game's palette view, so the palette's texture
+// and view descriptions are read once per device generation. Descriptions
+// cannot change, but a mutable palette's pixels can, so those still need a
+// snapshot taken in GPU order.
 struct __declspec(uuid("F0CF4550-49D1-447D-BC41-51D410CCF54E")) MaterialPaletteLayout {
   uint64_t generation = 0u;
   ID3D11Resource* resource = nullptr;
@@ -45,9 +53,10 @@ struct __declspec(uuid("F0CF4550-49D1-447D-BC41-51D410CCF54E")) MaterialPaletteL
   bool qualified = false;
 };
 
-// Keep captured environment color and material inputs paired with one
-// native specular target. Deferred composition must use that pair, rather than
-// whichever camera was most recently observed on the CPU.
+// The environment light captured for one native specular target, paired with
+// the G-buffer views the same light draw read. Deferred composition looks it up
+// by that specular target, so it uses the pair the light pass wrote rather than
+// whichever camera was recorded most recently on the CPU.
 struct Target {
   std::shared_mutex material_mutex;
   uint64_t generation = 0u;
@@ -58,15 +67,19 @@ struct Target {
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> normal;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_view;
   Microsoft::WRL::ComPtr<ID3D11Resource> depth;
-  // Mutable palettes need pixel snapshots. Immutable palettes are retained directly
-  // in the producer record, so they never allocate or update these copies.
+  // Snapshot of a mutable palette. Immutable palettes are kept directly in the
+  // producer record, so they never allocate or update this copy.
   MaterialPaletteCopy material_palette_copy;
 };
 
-// The key is the native specular accumulation allocation, not a frame or context
-// ID. Native clears reset the extra attachment in the same GPU command stream.
+// Keyed by the native specular accumulation texture, not by a frame or context
+// ID. When the game clears that texture, its capture is cleared in the same GPU
+// command stream (see OnClearRenderTarget).
 inline renodx::utils::data::ParallelFlatHashMap<ID3D11Resource*, std::shared_ptr<Target>, std::shared_mutex> targets;
 
+// Per-command-list state saved by a Begin callback and restored by the matching
+// End callback: the light-draw capture (BeginCapture/EndCapture) and the
+// deferred composition inputs (BeginComposite/EndComposite).
 struct __declspec(uuid("E86B6354-AF43-4D25-9CDE-C72A331B8D91")) DrawState {
   std::array<Microsoft::WRL::ComPtr<ID3D11RenderTargetView>, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> render_targets;
   Microsoft::WRL::ComPtr<ID3D11DepthStencilView> depth;
@@ -90,6 +103,8 @@ struct CaptureBlend {
   Microsoft::WRL::ComPtr<ID3D11BlendState> capture;
 };
 
+// Per-device cache of the derived blend states, keyed by the game's blend
+// state, and of the sun capture pixel shader.
 struct __declspec(uuid("A71B9530-42A6-4E39-8635-19ECA852BD70")) DeviceState {
   std::shared_mutex mutex;
   std::vector<CaptureBlend> blends;
@@ -138,8 +153,9 @@ inline void OnResetCommandList(reshade::api::command_list* cmd_list) {
 }
 
 inline void BeginCapture(reshade::api::command_list* cmd_list, bool lighting_enabled) {
-  // 1. Qualify the existing light draw before adding an attachment. Native
-  // diffuse/specular outputs and their additive blend must remain unchanged.
+  // 1. Accept only the expected sun light draw: diffuse at target 0 and specular
+  // at target 1, both additive, with no other targets or UAVs. The added
+  // attachments must leave those native outputs and their blend unchanged.
   if (!lighting_enabled) return;
   const auto selected = inputs::ReadSelection(cmd_list->get_device());
   if (selected.device == nullptr) return;
@@ -215,8 +231,9 @@ inline void BeginCapture(reshade::api::command_list* cmd_list, bool lighting_ena
   if (material == nullptr || depth == nullptr) return;
   Microsoft::WRL::ComPtr<ID3D11Resource> depth_resource;
   depth->GetResource(&depth_resource);
-  // 2. Reuse a full-size capture tied to this native specular allocation.
-  // Capture RGB is linear pre-exposed environment light; alpha marks validity.
+  // 2. Reuse or create the full-size capture tied to this native specular
+  // texture. Its RGB is linear, pre-exposed environment light; alpha marks valid
+  // pixels.
   auto target = Read(selected.device, specular.Get());
   if (target == nullptr) {
     auto created = std::make_shared<Target>();
@@ -260,8 +277,9 @@ inline void BeginCapture(reshade::api::command_list* cmd_list, bool lighting_ena
   if (target->generation != selected.generation || target->depth.Get() != depth_resource.Get()
       || target->material.Get() != material.Get()) return;
 
-  // GGX reads the native palette at t10. The original light shaders still use
-  // their Fresnel lookup, but the custom path does not retain or copy it.
+  // Record the native material palette bound at t10 for the reflection pass's
+  // GGX response. The original light shaders also read a Fresnel lookup; the
+  // custom path does not use it, so it is neither kept nor copied.
   state.capture_generation = selected.generation;
   state.material_palette.specular = std::move(specular);
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> palette;
@@ -330,8 +348,9 @@ inline void BeginCapture(reshade::api::command_list* cmd_list, bool lighting_ena
           }
           copy = std::move(reused);
         }
-        // Keep the copy in every recording so replay restores this producer's
-        // pixels too. A previous CPU observation cannot establish those contents.
+        // Record the copy in every command list, so a replayed list also
+        // snapshots the palette as it is at this draw. A copy recorded earlier
+        // on the CPU says nothing about the palette's contents now.
         context->CopyResource(copy.texture.Get(), layout.resource);
         state.material_palette.view = std::move(copy.view);
         return true;
@@ -349,9 +368,10 @@ inline void BeginCapture(reshade::api::command_list* cmd_list, bool lighting_ena
     }
   }
 
-  // 3. Add environment RGB at target 2 while replacing its validity alpha.
-  // Targets 0/1 retain their native blend. EndCapture restores every displaced
-  // render target, depth view, blend state, and pixel shader after this draw.
+  // 3. Bind the capture at target 2, adding environment RGB and replacing the
+  // validity alpha, and the reflection readiness at target 3, written without
+  // blending. Targets 0 and 1 keep their native blend. EndCapture restores the
+  // render targets, depth view, blend state, and pixel shader after this draw.
   if (capture_blend == nullptr) {
     if (blend_description.IndependentBlendEnable == FALSE) {
       for (auto& blend : blend_description.RenderTarget) {
@@ -393,9 +413,9 @@ inline void BeginCapture(reshade::api::command_list* cmd_list, bool lighting_ena
   material->GetResource(&material_resource);
   auto result = specular_result::Read(selected.device, material_resource.Get());
   if (result == nullptr) {
-    // The reflection result belongs to this material target. This draw is the
-    // first place the lighting pass names it, so reflections do not depend on
-    // any particular material draw having been captured.
+    // The reflection result is keyed by the G-buffer material target. This
+    // light draw is the first pass that binds it, so creating the result here
+    // means reflections do not depend on capturing any particular material draw.
     auto created = std::make_shared<specular_result::Target>();
     created->generation = selected.generation;
     created->width = description.Width;
@@ -491,10 +511,12 @@ inline void EndCapture(reshade::api::command_list* cmd_list) {
   }
   context->OMSetRenderTargets(static_cast<UINT>(render_targets.size()), render_targets.data(), saved->depth.Get());
   context->OMSetBlendState(saved->blend.Get(), saved->blend_factor.data(), saved->sample_mask);
-  // The next draw can reject capture without rebinding its native pixel shader.
+  // The capture shader replaced the game's pixel shader for this draw. Restore
+  // it, because the next draw may skip capture and reuse the bound shader.
   context->PSSetShader(saved->original_shader.Get(), nullptr, 0u);
   if (saved->material_palette.specular != nullptr) {
-    // Keep this draw's palette selection with its submitted native commands.
+    // Publish this draw's palette in the command list, so consumers see it in
+    // submission order.
     temporal_inputs::Record(cmd_list, {
                                           .device = cmd_list->get_device(),
                                           .generation = saved->capture_generation,
@@ -505,6 +527,9 @@ inline void EndCapture(reshade::api::command_list* cmd_list) {
   *saved = {};
 }
 
+// Returns the sun capture pixel shader to replace an accepted sun draw's shader,
+// creating it once per device. If it cannot be created, the capture ends and
+// the native shader runs.
 inline reshade::api::pipeline GetShadowedCapturePipeline(reshade::api::command_list* cmd_list, std::span<const uint8_t> bytecode) {
   auto* saved = cmd_list->get_private_data<DrawState>();
   if (saved == nullptr || !saved->active) return {0u};
@@ -538,9 +563,11 @@ inline reshade::api::pipeline GetShadowedCapturePipeline(reshade::api::command_l
 }
 
 inline void BeginComposite(reshade::api::command_list* cmd_list) {
-  // 4. Match the native specular/depth inputs. The existing deferred draw
-  // exports its environment contribution for replacement by the later SSR.
-  // EndComposite restores both attachments and displaced shader inputs.
+  // 4. Deferred composition. Find the capture that matches the specular (t10)
+  // and depth (t11) inputs, bind it with the material inputs at t16-t20, and add
+  // the reflection result's environment image as target 1. The composite shader
+  // writes its environment term there so the later GGX reflections can replace
+  // it. EndComposite restores the render targets, blend state, and inputs.
   auto* saved = cmd_list->get_private_data<DrawState>();
   if (saved == nullptr || saved->composite_active) return;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
@@ -586,16 +613,17 @@ inline void BeginComposite(reshade::api::command_list* cmd_list) {
     const auto material = material_inputs::Read(cmd_list->get_device(), albedo_resource.Get());
     const auto result = specular_result::Read(cmd_list->get_device(), material_resource.Get());
     if (result != nullptr) {
-      // Records exist only where a cube material drew into this G-buffer.
-      // Without any, the shader reads every surface as free of a baked cube.
+      // Material records exist only where a material that bakes a cube map into
+      // albedo drew into this G-buffer. Without them, the shader treats every
+      // surface as having no baked cube map.
       if (material != nullptr) {
         inputs[1] = material->owner_srv.Get();
         inputs[2] = target->normal.Get();
         inputs[3] = target->material.Get();
         inputs[4] = material->color_srv.Get();
       }
-      // Carry only the replaceable environment and receiver fog to the later
-      // reflection stage. This attachment is written by the existing draw.
+      // The composite shader writes the replaceable environment term and the
+      // receiver fog transmission to this extra target for the reflection pass.
       std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> targets = {};
       context->OMGetRenderTargets(static_cast<UINT>(targets.size()), targets.data(), &saved->depth);
       for (size_t index = 0u; index < targets.size(); ++index) {
@@ -667,7 +695,8 @@ inline void BeginComposite(reshade::api::command_list* cmd_list) {
       reshade::log::message(reshade::log::level::info, "MgsvLighting: deferred environment inputs matched for late reflections");
     }
   }
-  // Missing capture binds null inputs, never arbitrary displaced game textures.
+  // Without a matching capture, t16-t21 are bound as null rather than left
+  // holding whatever game textures were there.
   context->PSSetShaderResources(16u, static_cast<UINT>(inputs.size()), inputs.data());
   saved->composite_active = true;
 }
@@ -690,7 +719,7 @@ inline void EndComposite(reshade::api::command_list* cmd_list) {
   // Remove the extra render target before restoring any SRV that reads it.
   context->PSSetShaderResources(16u, static_cast<UINT>(previous.size()), previous.data());
   if (saved->composite_replacement_safe) {
-    // A following draw can reject replacement without rebinding its shader.
+    // Restore the game's shader; the next draw may reuse it without rebinding.
     context->PSSetShader(saved->original_shader.Get(), nullptr, 0u);
   }
   *saved = {};
@@ -709,11 +738,11 @@ inline bool OnClearRenderTarget(reshade::api::command_list* cmd_list, reshade::a
   const std::array<float, 4> empty = {};
   const auto target = Read(cmd_list->get_device(), resource.Get());
   if (target != nullptr) {
-    // Invalidate color beside the native clear in GPU order.
-    // An old capture must not survive a new lighting accumulation or replay.
+    // Clear the capture next to the game's clear, in GPU order, so an old
+    // capture never survives into a new lighting accumulation or a replay.
     context->ClearRenderTargetView(target->rtv.Get(), empty.data());
   }
-  // A material clear retires reflection readiness beside the native command.
+  // Clearing a G-buffer material target also resets its reflection readiness.
   if (const auto result = specular_result::Read(cmd_list->get_device(), resource.Get())) {
     context->ClearRenderTargetView(result->ready.rtv.Get(), empty.data());
   }
@@ -722,6 +751,8 @@ inline bool OnClearRenderTarget(reshade::api::command_list* cmd_list, reshade::a
 
 inline void OnDestroyResource(reshade::api::device* device, reshade::api::resource resource) {
   (void)device;
+  // Move entries out so their COM objects are released after the map locks are
+  // dropped; a release can trigger callbacks that take those locks again.
   std::shared_ptr<Target> retired;
   targets.erase_if(reinterpret_cast<ID3D11Resource*>(resource.handle), [&](auto& entry) {  // NOLINT(performance-no-int-to-ptr)
     auto& [native_specular, capture] = entry;

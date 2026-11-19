@@ -33,6 +33,10 @@
 #include "build.hpp"
 #include "image.hpp"
 
+// Tracks which renderer and view (camera viewport) each piece of the game's
+// rendering belongs to. Hooks record an Owner when a view starts, copy it into
+// each job the engine hands to a worker thread, and restore it while that worker
+// records, so D3D11 callbacks can tell which scene they are drawing.
 namespace mgsv::engine::views {
 
 inline constexpr std::array REQUIRED_ENTRIES = {
@@ -54,14 +58,16 @@ inline constexpr std::array REQUIRED_ENTRIES = {
     engine::Entry::GET_MAIN_VIEWPORT,
 };
 inline constexpr engine::Requirement REQUIREMENT = {.feature = "View tracking (needed by enhanced lighting and reconstruction)", .entries = REQUIRED_ENTRIES};
-// Native pointers are read only while their native owner is executing.
-// Recorded data contains copies.
-// Bound native pool bookkeeping and linked-list traversal if the layout changes.
+// Engine pointers are read only while the engine call that owns them is running;
+// everything kept afterward is a copy. These limits cap the node and branch tables
+// and the active-view list walk, so an unexpected layout stops tracking instead of
+// growing without bound.
 inline constexpr size_t MAX_RECORDS = 32768u;
 inline constexpr size_t MAX_ACTIVE_VIEWS = 256u;
 inline constexpr GUID UNWRAPPED_OBJECT = {.Data1 = 0x7F2C9A11, .Data2 = 0x3B4E, .Data3 = 0x4D6A, .Data4 = {0x81, 0x2F, 0x5E, 0x9C, 0xD3, 0x7A, 0x1B, 0x42}};
 
-// Offsets belong to the object named by each constant. Dg is the shared backend.
+// Byte offsets into engine objects. Dg is the engine's rendering backend, shared
+// by every renderer; it holds the render and output sizes.
 inline constexpr size_t RENDER_INFO_OFFSET = 0x98u;
 inline constexpr size_t ACTIVE_VIEWS_OFFSET = 0xA0u;
 inline constexpr size_t OUTPUT_SIZE_OFFSET = 0x180u;
@@ -101,10 +107,10 @@ enum class Kind : uint8_t {
 inline constexpr std::array KIND_NAMES = {"render", "view", "end_view", "branch", "worker_branch", "worker", "end_worker", "begin_recording", "end_recording", "finish", "execute", "merge", "destroy_view", "destroy_render", "membership", "presentation", "dof", "end_dof"};
 
 struct Owner {
-  // scene identifies one InitView invocation. generation changes when the
-  // selected presentation changes, so resized output cannot reuse an old scene.
-  // IDs identify lifetimes until the presentation changes. Addresses only explain where
-  // the copied values came from and are never used to reopen a finished owner.
+  // scene is unique to one InitView call. generation changes whenever the
+  // selected swapchain changes, so a resized output never matches an old scene.
+  // The other IDs stay stable until then. Addresses only record where the copied
+  // values came from; they are never used to reopen a finished owner.
   uint64_t generation = 0u;
   uint64_t render_id = 0u;
   uint64_t view_id = 0u;
@@ -123,8 +129,8 @@ struct Owner {
   bool presentation_matches = false;
   bool presentation_unwrapped = false;
   bool presentation_by_buffer = false;
-  // Final display work is recorded by the enclosing renderer after EndView.
-  // Keep the main scene from this build available to that continuation.
+  // The renderer records final display work after EndView, outside any view.
+  // This keeps the main view's scene from the same build available to it.
   uint64_t presentation_scene = 0u;
   bool operator==(const Owner&) const = default;
 };
@@ -141,8 +147,8 @@ struct Renderer {
 };
 
 struct Branch {
-  // Both branch paths fill this before the game releases work to another thread.
-  // The node serial prevents a reused pool address from selecting an old view.
+  // Both branch hooks fill this before the game hands the job to a worker thread.
+  // The node serial stops a reused node address from matching an older view.
   Node node;
   uintptr_t node_address = 0u;
   uintptr_t target = 0u;
@@ -171,8 +177,9 @@ struct Scope {
   uint64_t node = 0u;
 };
 
-// MainExec supplies the actual viewport and effect before the low-level draw.
-// Keep this association local to the invocation, including nested effects.
+// Depth of field's MainExec receives the real viewport and effect before its
+// low-level draws. The scope is saved and restored around each call, so nested
+// effects keep their own.
 struct DofScope {
   Scope scope;
   uintptr_t effect = 0u;
@@ -187,16 +194,17 @@ using RecordingBegan = void (*)();
 // The native objects recording on the calling thread. Both are borrowed: read
 // them only inside the native call that is using them.
 struct Recording {
-  // The D3D context of the engine context between BeginRecord and EndRecord.
-  // It can be a ReShade proxy; UNWRAPPED_OBJECT gives the native context.
+  // The D3D11 context the engine records into between BeginRecord and EndRecord.
+  // It can be a ReShade proxy; Unwrap() returns the native context.
   uintptr_t d3d_context = 0u;
   // The innermost worker CommandBuffer, which holds its CPU constant banks.
   uintptr_t command_buffer = 0u;
 };
 
-// One module owns the hooks and all native bookkeeping. Other addons exchange
-// copied scopes through these entry points. No allocator-owned object crosses
-// the DLL boundary. The provider is pinned while native jobs can return to it.
+// Shared by every add-on in the process that uses view tracking. The first one to
+// install owns the hooks and all bookkeeping; the others read copied scopes
+// through these function pointers, so no heap object crosses a DLL boundary.
+// The owning DLL stays pinned because engine jobs can return through its hooks.
 struct __declspec(uuid("e9ee935e-2efd-4613-9cad-15e506da643c")) Shared {
   std::shared_mutex mutex;
   std::atomic<Scope (*)()> read = nullptr;
@@ -260,8 +268,9 @@ inline void Emit(Event event) {
   }
 }
 
-// Failure to track a native job disables qualification. Native calls still run,
-// and consumers can use their existing fallback without borrowing another view.
+// If tracking throws, it stops until the hooks are installed again. Engine calls
+// still run and scopes read as empty, so features fall back to the native path
+// instead of using another view's data.
 template <typename Callback>
 inline void Track(Callback&& callback) noexcept {
   if (runtime.failed.load(std::memory_order_relaxed)) return;
@@ -318,8 +327,9 @@ inline Microsoft::WRL::ComPtr<ID3D11DeviceContext> Unwrap(uintptr_t stored_conte
   return context;
 }
 
-// A submitted addon dispatch runs on the immediate context, after the native
-// worker has returned. Give it the scene copied into its recorded job.
+// Add-on work submitted later on the immediate context runs after the engine
+// worker has returned. This sets the thread's scope to the one copied into the
+// recorded job for the guard's lifetime.
 class ScopedOwner {
  public:
   explicit ScopedOwner(Scope selected) {
@@ -484,8 +494,9 @@ inline void __fastcall InitView(uintptr_t backend, uintptr_t viewport) {
       owner.membership = render->second.membership;
       owner.active_member = std::ranges::find(render->second.views, owner.view_id) != render->second.views.end();
     }
-    // Start runs before this frame's views. The next native size update can
-    // use this verified backend instead of choosing one by matching dimensions.
+    // Dg Start (reconstruction/resolution.hpp) runs before this frame's views,
+    // so it reads this owner on the next frame. That gives it the verified
+    // backend instead of guessing one by matching sizes.
     if (owner.main_view && owner.active_member && owner.presentation_matches) {
       runtime.presentation_owner = owner;
     }
@@ -550,8 +561,8 @@ inline uintptr_t __fastcall AllocateNode(uintptr_t pool) {
 }
 
 inline void CaptureBranch(uintptr_t subcontext, Kind kind) {
-  // Dg and CommandBuffer both produce this layout. Copy the owner at the point
-  // each job is created, including jobs created by an already running worker.
+  // Dg and CommandBuffer branches share this subcontext layout. Copy the owner
+  // when each job is created, including jobs created by a running worker.
   Track([&] {
     Branch captured = {.node_address = Read<uintptr_t>(subcontext, BRANCH_NODE_OFFSET), .target = Read<uintptr_t>(subcontext, BRANCH_TARGET_OFFSET), .matrices = Read<std::array<float, 32>>(subcontext, BRANCH_MATRICES_OFFSET)};
     const std::unique_lock lock(runtime.mutex);
@@ -582,8 +593,9 @@ inline void __fastcall BranchWorker(uintptr_t object, uintptr_t subcontext) {
 }
 
 inline void __fastcall WorkerBegin(uintptr_t object, uintptr_t subcontext) {
-  // Worker threads can serve several views. Start with an empty association and
-  // accept only the branch whose native node still has the recorded generation.
+  // Worker threads can serve several views. Start with no owner and accept the
+  // recorded branch only if its node serial is still current and its matrices
+  // match this job's.
   Track([&] {
     const std::unique_lock lock(runtime.mutex);
     if (runtime.failed.load(std::memory_order_relaxed)) return;
@@ -637,8 +649,8 @@ inline void __fastcall BeginRecord(uintptr_t node, uintptr_t context) {
         found->second.owner = owner;
       }
     }
-    // The GN pointer may contain a ReShade proxy. The finish/work hooks record
-    // the actual D3D context separately so the report can prove their crosswalk.
+    // The stored context can be a ReShade proxy. Observers record the real D3D11
+    // context from their own hooks, so they can match the two.
     Emit({.kind = Kind::BEGIN_RECORDING, .owner = owner, .subject = node, .related = native_context, .node = node_serial});
   });
   recording_d3d_context = Read<uintptr_t>(context, D3D_CONTEXT_OFFSET);
@@ -705,8 +717,8 @@ inline void __fastcall UpdateViews(uintptr_t renderer) {
       render->second.serial = ++runtime.next_id;
     }
     std::vector<uint64_t> members;
-    // This call applies the game's queued additions and removals. Each entry is
-    // a live Viewport linked through +0x30, separate from the pending queues.
+    // The native call has applied the queued additions and removals. Walk the
+    // live viewport list (linked through NEXT_VIEW_OFFSET), not the queues.
     auto view = Read<uintptr_t>(renderer, ACTIVE_VIEWS_OFFSET);
     while (view != 0u && members.size() < MAX_ACTIVE_VIEWS) {
       auto [entry, new_view] = runtime.views.try_emplace(view, 0u);
@@ -775,8 +787,8 @@ inline bool Install() {
           std::pair{engine::Entry::DEPTH_OF_FIELD_MAIN_EXEC, renodx::utils::detour::Function{&dof_main, DofMainExec}},
       };
       get_main_view = reinterpret_cast<Accessor>(engine::Address(engine::Entry::GET_MAIN_VIEWPORT));
-      // A native job can still return through a detour during device teardown.
-      // Pin its code for the process lifetime, as the existing native size hook does.
+      // An engine job can still return through a detour during device teardown,
+      // so pin this DLL for the life of the process.
       HMODULE module = nullptr;
       if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
                              reinterpret_cast<LPCWSTR>(&BuildRender), &module)

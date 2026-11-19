@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: MIT
  */
 
+// Native constant buffers and bindings shared by the bloom and lens flare ports.
+// The bloom images are RGBA16F, so each vanilla path clamps its output to the
+// 0-1 range the game's original UNORM images had.
 #ifndef RENODX_GAMES_MGSV_BLOOM_NATIVE_HLSLI_
 #define RENODX_GAMES_MGSV_BLOOM_NATIVE_HLSLI_
 

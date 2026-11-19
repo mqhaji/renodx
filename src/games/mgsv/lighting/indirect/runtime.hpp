@@ -39,9 +39,12 @@
 #include "ambient_diffuse.hpp"
 #include "source_preparation.hpp"
 
-// The scatter hook at the end of this file validates native inputs and schedules
-// one submitted lighting chain. ao::Apply records its trace and application
-// stages. The shared types here own the resources they reuse.
+// Diffuse AO and GI with GT-VBGI, a visibility-bitmask screen-space method.
+// ApplyLightPasses, at the end of this file, runs at the first native skin
+// scatter: it checks the native inputs and schedules one lighting chain for
+// submission. ao::Apply then records the trace and the application pass that
+// updates native diffuse lighting before both scatters read it. The shared
+// types here own the resources the chain reuses.
 namespace mgsv::lighting {
 
 template <typename... Args>
@@ -60,7 +63,7 @@ inline void LogLightOnce(std::atomic_flag* reported, reshade::log::level level, 
   LogLight(level, std::forward<Args>(args)...);
 }
 
-// Views borrowed from this callback. Keeping a view alive does not keep its pixels unchanged.
+// Views borrowed for one chain invocation. Holding a view does not keep its pixels unchanged.
 struct LightFrame {
   reshade::api::resource_view depth = {0};
   reshade::api::resource_view normal = {0};
@@ -106,8 +109,9 @@ struct NativeLightView {
   Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> view;
 };
 
-// Two native images are used per invocation. A small bounded cache also covers
-// alternating scene targets without retaining every texture seen by the addon.
+// UAVs for the native diffuse images the chain writes, two per invocation. A
+// small fixed cache with round-robin eviction also covers scene targets that
+// alternate between frames, without holding every texture the addon has seen.
 struct NativeLightViews {
   std::shared_mutex mutex;
   std::array<NativeLightView, NATIVE_LIGHT_VIEW_CACHE_SIZE> entries;
@@ -132,8 +136,9 @@ inline void ResetNativeLightViews(reshade::api::device* device) {
   // destruction callbacks cannot reenter a locked cache.
 }
 
-// Soft shadows and GT-VBGI share the same immutable texture and frame phase.
-// Return an owned view so device retirement cannot invalidate a borrowed handle.
+// PCSS soft shadows and GT-VBGI share this IS-FAST noise texture and its frame
+// phase. Return an owned reference, so destroying the device's lighting
+// resources cannot invalidate a handle a caller still holds.
 inline Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> GetNoiseView(reshade::api::device* device) {
   if (inputs::ReadSelection(device).device == nullptr) return {};
   {
@@ -263,7 +268,7 @@ inline bool EnsureLightPassLayout(reshade::api::device* device) {
 
 inline bool EnsureLightPass(reshade::api::device* device, LightPass* pass, const char* name,
                             std::span<const uint8_t> code) {
-  // Each pass uses fixed bytecode and layout on its owning device until teardown.
+  // Created once per device; the bytecode and layout do not change before teardown.
   if (pass->pipeline.handle != 0) return true;
   if (!EnsureLightPassLayout(device)) return false;
 
@@ -430,8 +435,8 @@ inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* p
             .descriptors = inputs.data(),
         });
   };
-  // Retire prior reads before binding this pass's outputs as writable.
-  // The surrounding game state is restored once after the complete chain.
+  // Clear the previous pass's inputs before binding this pass's outputs, so no
+  // texture is bound for reading and writing at the same time.
   bind_sources({});
   const std::array<reshade::api::resource_view, 3> targets = {
       target,  // u0
@@ -457,8 +462,8 @@ inline void DispatchLightPass(reshade::api::command_list* cmd_list, LightPass* p
 
 }  // namespace mgsv::lighting
 
-// Optional depth reductions for the diffuse geometry search.
-// AO itself travels in the alpha channel of il's diffuse-lighting targets.
+// Optional depth mips for the diffuse geometry search. AO itself is stored in
+// the alpha channel of il::indirect_diffuse_target.
 namespace mgsv::ao {
 
 using lighting::DestroyLightPass;
@@ -472,9 +477,10 @@ using lighting::LightTarget;
 using lighting::LogLight;
 using lighting::LogLightOnce;
 
-// Reverse-Z reductions keep the nearest depth in each footprint. Distant trace
-// steps can then detect thin geometry between their samples. Odd edge pixels
-// join the last footprint; the trace finds its full-resolution color owner.
+// With reverse-Z, each mip keeps the nearest depth in its footprint, so distant
+// trace steps can detect thin geometry between their samples. Odd edge pixels
+// join the last footprint; the trace then finds the matching full-resolution
+// pixel to read color from.
 constexpr uint32_t DEPTH_MIP_LEVELS = 4;
 
 struct DepthMipChain {
@@ -887,8 +893,8 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
       LogLight(reshade::log::level::info, setting->label, " = ", state, " (", setting->key, ")");
     };
   }
-  // The vanilla tone curve is applied before the late reflection stage, so the mode is off under it.
-  // Say so above the disabled controls instead of leaving them unexplained.
+  // The Vanilla tone mapper applies its curve before the reflection composite, so the mode is off
+  // under it. Explain that above the disabled controls.
   additions.insert(additions.begin(), new renodx::utils::settings::Setting{
                                           .value_type = renodx::utils::settings::SettingValueType::TEXT,
                                           .label = "Global Illumination needs the RenoDX tone mapper. Set Tone Mapper to RenoDX to use these settings.",
@@ -960,8 +966,9 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
                  "Lighting debug texture unavailable; normal lighting remains enabled");
   }
 
-  // 2. Match the environment capture to this specular/depth pair. Its material
-  // input identifies the matching material guide for clean diffuse radiance.
+  // 2. Find the environment capture for this specular and depth pair. Its
+  // material view is the G-buffer material input the trace uses for clean
+  // diffuse radiance.
   Microsoft::WRL::ComPtr<ID3D11Resource> specular_resource;
   Microsoft::WRL::ComPtr<ID3D11Resource> depth_resource;
   reinterpret_cast<ID3D11ShaderResourceView*>(frame.specular.handle)->GetResource(&specular_resource);  // NOLINT(performance-no-int-to-ptr)
@@ -973,7 +980,7 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   const bool depth_mips_requested = constants.lighting_depth_mips_enabled != 0.f;
   const bool depth_mips_ready = BuildDepthMips(cmd_list, frame.depth, depth_mips_requested);
   constants.lighting_depth_mips_enabled = (depth_mips_ready ? 1.f : 0.f);
-  // Setup above qualifies these handles once for the complete chain.
+  // EnsureFallbackViews above created these placeholders for the whole chain.
   const auto fallback_input = lighting::fallback_srv;
   const auto fallback_outputs = lighting::fallback_uavs;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
@@ -986,8 +993,8 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   const auto clean_owner = (clean_material != nullptr
                                 ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(clean_material->owner_srv.Get())}
                                 : reshade::api::resource_view{0u});
-  // 3. Trace AO and diffuse GI together. Specular tracing runs separately,
-  // after skin scattering, and does not allocate work in this chain.
+  // 3. Trace AO and diffuse GI together. Reflections are traced separately,
+  // later in the frame, and add no work to this chain.
   const std::array<reshade::api::resource_view, lighting::LIGHT_INPUT_COUNT> sources = {
       frame.depth,
       frame.normal,
@@ -1009,9 +1016,10 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
                     diagnostic_ready ? il::diagnostic_target.uav : fallback_outputs[1],
                     width, height);
 
-  // 4. Reconstruct the captured native ambient separately from our lighting.
-  // Its exact sampler, phase weights, and b5 range are needed to subtract only
-  // ambient from total diffuse. Missing capture skips diffuse AO, not GI.
+  // 4. Apply. The application shader rebuilds the captured native ambient term
+  // with its exact sampler, phase weights, and native b5 constants (bound here
+  // at s0 and b3), so AO darkens only the ambient part of total diffuse. A
+  // missing capture skips diffuse AO but not GI.
   Microsoft::WRL::ComPtr<ID3D11Resource> diffuse_resource;
   reinterpret_cast<ID3D11UnorderedAccessView*>(frame.light.handle)->GetResource(&diffuse_resource);  // NOLINT(performance-no-int-to-ptr)
   auto ambient = lighting::ambient_diffuse::Read(device, diffuse_resource.Get());
@@ -1075,12 +1083,13 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
 
 }  // namespace mgsv::ao
 
-// Native composite inputs and pre-scatter lighting orchestration.
+// Scheduling of the lighting chain at the first skin scatter.
 namespace mgsv::lighting {
 
-// Called before the first scatter, with its native inputs still bound. Recording
-// collects owned references and GPU constant copies. The scheduled callback runs
-// after the native prefix is submitted and before either skin scatter consumes it.
+// Called from the first skin scatter's shader callback, with its native inputs
+// still bound. Recording keeps owned references and copies constants on the
+// GPU. The scheduled callback runs when the command list recorded up to this
+// point is submitted, before either skin scatter reads diffuse lighting.
 inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderInjectData& shader_injection) {
   if (cmd_list == nullptr || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return;
   if (!UsesEnhancedIndirectLighting()) return;
@@ -1092,16 +1101,15 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
     constants.lighting_debug_view = std::clamp(constants.lighting_debug_view, 0.f, 17.f);
   }
 
-  // Allocation and teardown share the first-present device contract. No lighting work is admitted during resize.
+  // Lighting runs only on the device selected at the first Present, and not during a resize.
   const auto shared_inputs = inputs::Read(cmd_list->get_device());
   if (shared_inputs.device == nullptr) return;
 
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   if (context == nullptr) return;
 
-  // Reuse UAVs for the two native destinations instead of creating them at each
-  // hook. Four entries cover alternating pairs; round-robin eviction is bounded
-  // and cheaper to maintain than an unbounded map of rarely reused textures.
+  // Reuse cached UAVs for the native diffuse images instead of creating them on
+  // every scatter (see NativeLightViews).
   const auto get_light_view = [](reshade::api::device* device, uint64_t generation, ID3D11Resource* resource) {
     {
       const std::shared_lock lock(native_light_views.mutex);
@@ -1198,6 +1206,7 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
 
   // 2. Reject incompatible size, device, encoding, or read/write aliases before
   // touching native lighting. A float format by itself does not prove linear RGB.
+  // These checks cover layouts and ownership, not whether the pixels are current.
   const auto input_error = [&](ID3D11ShaderResourceView* view, DXGI_FORMAT expected_format = DXGI_FORMAT_UNKNOWN) -> const char* {
     if (view == nullptr) return "missing view";
     D3D11_SHADER_RESOURCE_VIEW_DESC view_desc = {};
@@ -1253,8 +1262,9 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
     }
   }
   if (!generation_matches || source_error != nullptr || specular_error != nullptr || albedo_error != nullptr) {
-    // Report startup absence separately so it cannot hide a later rejection
-    // after both material views have been captured. At most two reports/load.
+    // Report missing views at startup separately, so that report cannot hide a
+    // later rejection once both material views exist. At most two reports per
+    // load.
     static std::atomic_flag missing_materials = {};
     static std::atomic_flag rejected_inputs = {};
     mgsv::lighting::LogLightOnce(
@@ -1269,9 +1279,9 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
         "; skipping custom lighting");
     return;
   }
-  // 3. Snapshot the scatter's projection constants in GPU order. Retaining the
-  // native buffer alone is insufficient: another recorded draw can overwrite it.
-  // These checks qualify layouts and ownership, not fresh pixels or GPU order.
+  // 3. Copy the scatter's geometry constant buffer (b0, 64 bytes used) on the
+  // GPU, here in command order. Holding the native buffer is not enough: a
+  // later recorded draw can overwrite it.
   Microsoft::WRL::ComPtr<ID3D11Buffer> native_geometry;
   Microsoft::WRL::ComPtr<ID3D11Buffer> geometry;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext1> context1;
@@ -1300,18 +1310,17 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
       }
     }
   }
-  // 4. Resolve the original diffuse destination only after the copy's prefix is
-  // submitted. Its association is consumed once, preventing repeated application.
-  // Every deferred reference outlives its recorded work. The native geometry
-  // constants are copied on the GPU at this insertion, not read back by the CPU.
+  // 4. At submission, find the native diffuse image the copy was made from,
+  // using the producer record published with the copy. The lambda holds
+  // references to everything the deferred work uses.
   const auto apply = [width = light_desc.Width, height = light_desc.Height, constants, geometry, geometry_first, geometry_count,
                       depth, normal, light_source, scattering_copy,
                       albedo = shared_inputs.materials.albedo,
                       specular = shared_inputs.materials.specular,
                       generation = shared_inputs.generation, get_light_view](reshade::api::command_list* submitted, bool first_submission) {
     if (!first_submission) {
-      // Cached native work may replay, but custom AO/GI must not compound on a
-      // lighting image that was already corrected by this recorded insertion.
+      // A replayed command list must not apply AO/GI again to diffuse lighting
+      // that this insertion already corrected.
       Microsoft::WRL::ComPtr<ID3D11Resource> copied;
       light_source->GetResource(&copied);
       copied->SetPrivateDataInterface(temporal_inputs::DIFFUSE_SOURCE_GUID, nullptr);
@@ -1332,8 +1341,8 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
       LogLightOnce(&reported, reshade::log::level::warning, "skipping lighting: diffuse copy has no qualified submitted source");
       return;
     }
-    // A submitted native copy admits one lighting application, not one per
-    // Present or every repeated interception of the same scattering input.
+    // Consume the association: each submitted native copy allows exactly one
+    // lighting application.
     copied->SetPrivateDataInterface(temporal_inputs::DIFFUSE_SOURCE_GUID, nullptr);
     D3D11_TEXTURE2D_DESC description = {};
     diffuse_texture->GetDesc(&description);
@@ -1341,8 +1350,9 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
         || description.ArraySize != 1u || description.MipLevels != 1u || description.SampleDesc.Count != 1u) return;
     light = get_light_view(submitted->get_device(), generation, diffuse.Get());
     if (light == nullptr) return;
-    // Preparation is eligible only beside the submitted copy that wrote it.
-    // Compare surface identities too: matching dimensions do not identify a view.
+    // Use the prepared source only if this submitted copy wrote it from the
+    // same diffuse, albedo, normal, and depth inputs. Compare the underlying
+    // textures and formats, since matching dimensions do not identify a view.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> prepared;
     bytes = sizeof(ID3D11ShaderResourceView*);
     copied->GetPrivateData(temporal_inputs::PREPARED_SOURCE_GUID, &bytes, prepared.GetAddressOf());
@@ -1411,7 +1421,8 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
   };
   if (geometry != nullptr && mgsv::reconstruction::coordinator::ScheduleLighting(cmd_list, apply)) return;
 
-  // Missing safe submission support keeps the existing same-context chain.
+  // Without a constants copy or a free submission slot, record the chain
+  // directly on this context.
   const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
   apply(cmd_list, true);
 }

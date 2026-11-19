@@ -3,6 +3,12 @@
 #include "prepare_constants.hlsli"
 #include "../rendering/motion.hlsli"
 
+// Input preparation shared by every reconstruction method. Runs at render size
+// on the game's D3D11 immediate context, when the coordinator executes the cut.
+// Reads the engine's encoded scene color, composed motion, depth, and object
+// motion (only its mask in .r). Writes the shared D3D12 inputs: linear color
+// with the game's alpha, jitter-free motion, a depth copy, and for Analytical
+// TAA only, a diagnostic motion image.
 Texture2D<float4> encoded_color_texture : register(t0);
 Texture2D<float4> native_velocity_texture : register(t1);
 Texture2D<float> depth_texture : register(t2);
@@ -27,6 +33,8 @@ RWTexture2D<float4> motion_debug_output : register(u3);
   depth_output[pixel] = depth;
 
   const float2 native_velocity = DecodeNativeMotion(native_velocity_texture.Load(int3(pixel, 0)).ba, reciprocal_render_size);
+  // Static pixels use camera motion from depth and the unjittered camera
+  // matrices when camera history is valid, and the game's motion otherwise.
   float2 camera_velocity = native_velocity;
   if (camera_reprojection_valid > 0.f) {
     if (!GetCameraVelocity(uv, depth, current_jitter_uv,
@@ -34,8 +42,8 @@ RWTexture2D<float4> motion_debug_output : register(u3);
                                     current_to_previous_clip_row_2, current_to_previous_clip_row_3), camera_velocity)) camera_velocity = native_velocity;
   }
   const float4 object_sample = object_velocity_texture.Load(int3(pixel, 0));
-  // Native object motion contains current projection jitter; matrix camera
-  // motion is already unjittered. Preserve deformation motion on object pixels.
+  // Object pixels keep the game's motion, so bone and object movement survive,
+  // minus the current projection jitter that motion contains.
   const float2 object_velocity = native_velocity - current_jitter_uv;
   if (analytical_taa > 0.f) {
     motion_debug_output[pixel] = float4(native_velocity, object_sample.r, 0.f);

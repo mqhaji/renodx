@@ -3,8 +3,8 @@
 
 #define FIX_UNORM_SRGB 1
 
-// Stored as bytes in the R8 readiness image; shader loads divide by 255.
-// Both APIs use these values to select the result from the submitted scene.
+// Reflection readiness values, stored as bytes in an R8 image, so shaders scale
+// the loaded value by 255 before comparing. D3D11 and D3D12 passes both use them.
 static const int MGSV_REFLECTION_UNAVAILABLE = 0;
 static const int MGSV_REFLECTION_ENHANCED = 255;
 static const int MGSV_REFLECTION_MAX_RAYS_PER_PIXEL = 4;
@@ -62,7 +62,7 @@ struct ShaderInjectData {
   float gi_reject_backfaces;
   float lighting_debug_view;
 
-  // Dispatch-local values, separate from user controls.
+  // Set by the host for each lighting dispatch, not by the menu.
   float lighting_resolution_divisor;  // Full-resolution pixels per trace pixel along each axis: 1, 2, 4, or 8.
   float lighting_noise_frame;         // Changes the FAST sample sequence; does not prove history is valid.
 
@@ -74,7 +74,7 @@ struct ShaderInjectData {
   // Local-light contact work limits.
   float spot_contact_shadow_budget;  // Maximum spotlight evaluations per lighting-buffer fill; 0 = unlimited.
 
-  // Shared IS-FAST frame phase.
+  // IS-FAST noise layer (0-31) for shadows, advanced once per Present.
   float shadow_noise_frame;
 
   float bloom_type;                   // 0 = Vanilla, 1 = Enhanced.
@@ -129,8 +129,9 @@ cbuffer RenoDXSettings : register(b13) {
 
 #define CUSTOM_SPOT_CONTACT_SHADOW_BUDGET shader_injection.spot_contact_shadow_budget
 
-// The vanilla tone curve runs inside deferred composition, before late reflections could exchange
-// linear light, so Enhanced needs the RenoDX tone mapper. OnPresent in addon.cpp applies the same rule.
+// The vanilla tone curve runs inside deferred composition, before the late reflection pass could
+// swap in linear light, so Enhanced needs the RenoDX tone mapper. OnPresent in addon.cpp applies
+// the same rule on the host side.
 #define CUSTOM_MGSV_ENHANCED_INDIRECT_LIGHTING    (shader_injection.indirect_lighting_mode >= 0.5 && RENODX_TONE_MAP_TYPE != 0.0)
 #define CUSTOM_MGSV_AO_STRENGTH                   shader_injection.ao_strength
 #define CUSTOM_MGSV_DIFFUSE_GI_STRENGTH           shader_injection.diffuse_gi_strength

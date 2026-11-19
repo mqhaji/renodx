@@ -7,6 +7,12 @@
 
 #include "../../../shared.h"
 
+// Shared declarations for the Bend Studio screen-space (contact) shadow passes.
+// Setup builds one record per light and admits lights into a shared mask
+// atlas; clear resets each admitted light's rectangle; trace sweeps rays from
+// the projected light through the depth buffer and writes the mask that the
+// light shaders read (../screen_space_shadows.hlsli).
+
 // Native distance variants share the same light geometry but use a different
 // attenuation curve. Keep this classification common to setup and tracing.
 bool IsBendPointLight(float light_type) {
@@ -19,6 +25,16 @@ bool IsBendDistanceLight(float light_type) {
 
 // The reference sweep and its integer tile arithmetic use 64-thread groups.
 // Header/record sizes are bytes and match the host's indirect argument buffer.
+// Each light's record holds, by byte offset:
+//   0   projected light: pixel x and y, depth, and the sign of clip W
+//   16  receiver bounds in pixels (min xy, max xy)
+//   32  output width and height, state (0 no work, 1 traced, 2 not traced),
+//       and the number of sweeps
+//   48  up to eight sweep dispatches, BEND_DISPATCH_STRIDE bytes each
+//   348 cached PCSS projection (PCSS_PROJECTION_OFFSET)
+//   368 first atlas texel and atlas width
+//   380 and 384 running totals of trace tiles and atlas texels
+// The indirect arguments for clear and trace follow the last record.
 #define BEND_GROUP_SIZE          64
 #define BEND_MAX_SAMPLES         256
 #define BEND_DISPATCH_HEADER     48

@@ -1,7 +1,10 @@
 #ifndef RENODX_GAMES_MGSV_RECONSTRUCTION_RUNTIME_HPP_
 #define RENODX_GAMES_MGSV_RECONSTRUCTION_RUNTIME_HPP_
 
-/* MGSV draw routing, settings transitions, and ReShade lifecycle for temporal reconstruction. */
+/* ReShade event handlers and method changes for temporal reconstruction.
+ * Present applies settings, plans the render size and checks the frame that
+ * just ended. The post-processing cut schedules each scene. Method and setting
+ * changes reset history. HandleDraw only serves the lighting history. */
 
 #include <windows.h>
 
@@ -41,7 +44,8 @@ namespace runtime = ::mgsv::reconstruction;
 
 // The engine's camera-velocity draw records the motion and camera that the
 // lighting history uses. Reconstruction takes its own inputs where
-// post-processing starts and does not need this draw. Never replaces the draw.
+// post-processing starts and does not need this draw. Always returns false,
+// so the draw runs unchanged.
 inline bool HandleDraw(reshade::api::command_list* cmd_list, [[maybe_unused]] const ShaderInjectData* shader_injection = nullptr) {
   if (cmd_list == nullptr || !lighting::temporal_inputs::enabled.load(std::memory_order_acquire)) return false;
   auto* device = cmd_list->get_device();
@@ -57,8 +61,8 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list, [[maybe_unused]] co
 
   const runtime::coordinator::ExecutionGuard execution_guard;
   const auto velocity_rtv = renodx::utils::state::GetRenderTarget(cmd_list, 0u);
-  // This observation has its own submission ledger. Without reconstruction the
-  // scene has no jitter, so no camera is attached to it.
+  // The lighting history tracks this capture through its own submissions.
+  // Without reconstruction the scene has no jitter, so no camera is attached.
   if (!runtime::state::IsEnabled()) {
     auto motion = inputs::CaptureMotion(cmd_list, velocity_rtv, false);
     lighting::temporal_inputs::Record(cmd_list, {
@@ -94,13 +98,15 @@ inline bool HandleDraw(reshade::api::command_list* cmd_list, [[maybe_unused]] co
 
 namespace mgsv::reconstruction::settings {
 
-// Addon-owned storage must stay at a fixed address while its one registry borrows bindings.
-// Descriptor pointers borrow from that same registry and are valid only during its lifetime; do not rebind them.
+// Owned by the addon at a fixed address, because the settings registry keeps
+// pointers to these fields as bindings. The Setting pointers belong to that
+// registry and stay valid while it exists; they are set once, never replaced.
 struct State {
   renodx::utils::settings::Setting* temporal_mode_setting = nullptr;
   renodx::utils::settings::Setting* dlss_model_setting = nullptr;
   renodx::utils::settings::Setting* upscaling_quality_setting = nullptr;
-  // Float-backed CPU preferences adapt Setting::binding's float*; runtime normalizes enum choices.
+  // Setting::binding points to a float, so choices are stored as floats and
+  // converted to enums where they are read.
   float dlss_model = static_cast<float>(dlss::DEFAULT_MODEL);
 
 #if ENABLE_TAA_MOTION_JITTER_DIAGNOSTICS
@@ -166,6 +172,8 @@ inline const TemporalModeOption* FindTemporalModeOption(state::TemporalMode mode
 }
 
 // Settings callbacks and preset changes can arrive on different threads.
+// Lock order: settings mutex, this lock, the execution lock, then the camera
+// publication lock.
 struct RuntimeTransitionGuard {
   RuntimeTransitionGuard() {
     while (runtime_transition_lock.test_and_set(std::memory_order_acquire)) {
@@ -182,6 +190,10 @@ struct RuntimeTransitionGuard {
   }
 };
 
+// Makes `value` the active method and resets history. force_reset resets even
+// when the method is unchanged and skips the stale-request check; failures and
+// teardown use it. verify_restoration confirms that turning jitter off gave
+// the game back its unmodified projection.
 inline void TransitionTemporalMode(
     const settings::State& settings_state,
     float value,
@@ -228,9 +240,10 @@ inline void TransitionTemporalMode(
   const uint64_t transition_frame = state::CurrentFrameToken();
   const uint32_t reserved_samples = state::CurrentSampleIndex();
 
-  // Disable projection writes before waiting for an in-flight resolve. Enable
-  // only after history/sample state is reset, so the native hook cannot publish
-  // a sample from the previous temporal sequence.
+  // Turn jitter off before waiting for the execution lock, which a running
+  // reconstruction may hold. Turn a method on only after history and samples
+  // are reset, so the projection hook cannot publish a sample from the old
+  // sequence.
   if (!enabled && was_enabled) {
     const camera_state::PublicationWriterGuard publication_guard;
     state::SetTemporalMode(state::TemporalMode::OFF);
@@ -244,6 +257,7 @@ inline void TransitionTemporalMode(
   }
 
   const coordinator::ExecutionGuard execution_guard;
+  // Present calls this again once the DLSS runtime is ready.
   if (mode == state::TemporalMode::NVIDIA_DLSS && !dlss::runtime_ready.load(std::memory_order_acquire)) return;
   const camera_state::PublicationWriterGuard publication_guard;
   coordinator::ResetTemporalStateWithPublicationLocked(reason);
@@ -286,6 +300,8 @@ inline void InvalidateHistoryForSetting(const char* reason) {
   coordinator::ResetTemporalState(reason);
 }
 
+// Copies the saved settings under the settings mutex, then applies them. Runs
+// at attach and at every Present, so preset loads also reach the runtime.
 inline void ApplySettingsSnapshot(const settings::State& settings_state) {
   struct BindingSnapshot {
     float temporal_mode = 0.f;
@@ -322,7 +338,7 @@ inline void ApplySettingsSnapshot(const settings::State& settings_state) {
   TransitionDlssModel(snapshot.dlss_model, "DLSS model synchronized");
   TransitionTemporalMode(settings_state, snapshot.temporal_mode, "temporal mode synchronized");
 
-  // Keep settings callbacks and temporal resets in their established lock order.
+  // Take the locks in the order documented on RuntimeTransitionGuard.
   const std::unique_lock settings_lock(renodx::utils::mutex::global_mutex);
   const RuntimeTransitionGuard transition_guard;
   const coordinator::ExecutionGuard execution_guard;
@@ -400,6 +416,9 @@ inline void OnDestroyDevice(reshade::api::device* device) noexcept {
   }
 }
 
+// Runs between frames: applies settings and reported failures, finishes DLSS
+// activation, releases inactive methods, plans the next render size, and
+// checks whether the frame that just ended missed a reconstruction.
 inline void OnPresent(
     reshade::api::command_queue* queue,
     reshade::api::swapchain* swapchain,
@@ -460,7 +479,8 @@ inline void OnPresent(
       activation_serviced = true;
       logging::Info("servicing requested NVIDIA DLSS activation");
       if (dlss::ProbeDevice(device)) {
-        // NGX activation remains selection-driven; submission tracking is shared by all methods.
+        // DLSS loads only when selected. It also needs the submission bridge,
+        // which every method shares.
         if (dlss::activation_requested.load(std::memory_order_acquire)) {
           if (bridge_ready) {
             dlss::runtime_ready.store(true, std::memory_order_release);
@@ -481,8 +501,8 @@ inline void OnPresent(
   const coordinator::ExecutionGuard execution_guard;
   const auto mode = state::GetTemporalMode();
   // Initialization can finish after the user cancels or selects another method.
-  // Retire resources for the committed mode, never for a pending UI request.
-  // The replacement's GPU history is allocated at its first dispatch.
+  // Release resources based on the active method, never a pending UI request.
+  // The new method allocates its GPU history at its first dispatch.
   try {
     coordinator::ReleaseInactiveResources(device, mode);
   } catch (const std::exception& error) {
@@ -562,9 +582,9 @@ inline void OnPresent(
     logged_mip_bias = mip_bias;
     logging::Info("texture mip bias adjustment=", mip_bias, " jitter_phases=", jitter_phases);
   }
-  // Eight consecutive upscaled frames whose scene record was complete but
-  // which were not reconstructed end upscaling. A frame with an incomplete
-  // record never counts, so startup screens and size transitions cannot.
+  // Eight upscaled frames in a row that had a complete scene record but were
+  // not reconstructed end upscaling. A frame with an incomplete record never
+  // counts, so startup screens and size changes cannot trigger it.
   static uint32_t missed_reconstructions = 0u;
   const bool missed = mode != state::TemporalMode::OFF && plan.IsScaled() && state::frame_state.complete_record_seen
                       && !state::frame_state.reconstruction_scheduled && !state::frame_state.reconstruction_completed;
@@ -572,8 +592,8 @@ inline void OnPresent(
   if (missed_reconstructions >= 8u) {
     resolution::Fail("reconstruction repeatedly could not run on a complete scene record");
   }
-  // Check history continuity at submission. A worker can cross Present while
-  // retaining the jitter and inputs recorded for its native scene.
+  // History continuity is checked at submission, not here: a scene recorded
+  // before this Present keeps its jitter and inputs.
   state::BeginFrame();
 }
 
@@ -613,7 +633,8 @@ inline void Use(DWORD fdw_reason, const settings::State& settings_state) {
       resolution::Use(fdw_reason);
       mip_bias::Use(fdw_reason);
 
-      // These return before QI/locks until a temporal method installs the shared bridge.
+      // Until the submission bridge is installed, the coordinator's handlers
+      // return before any QueryInterface call or coordinator lock.
       reshade::register_event<reshade::addon_event::init_command_list>(coordinator::OnInitCommandList);
       reshade::register_event<reshade::addon_event::destroy_command_list>(coordinator::OnDestroyCommandList);
       reshade::register_event<reshade::addon_event::execute_secondary_command_list>(

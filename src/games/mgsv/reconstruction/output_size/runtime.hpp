@@ -43,14 +43,18 @@
 #include "../state.hpp"
 #include "resources.hpp"
 
+// Routes the game's post-processing draws, copies, and clears that follow
+// reconstruction to the output textures in resources.hpp, and restores the
+// native bindings after each draw. It runs in ReShade callbacks on the game's
+// recording threads.
 namespace mgsv::reconstruction::output_size {
 
-// Settings publish this independent flag to native UI recording workers.
-// Hiding draws does not disable menu input or the RenoDX overlay.
+// Set by the settings and read by the game's UI recording workers. Hiding UI
+// draws does not disable menu input or the RenoDX overlay.
 static std::atomic_bool ui_visible = true;
 
-// Native constant buffers that contain dimensions or sampling offsets we adjust.
-// These are the game's draw parameters, separate from injected user settings.
+// Native pixel-shader constant buffers that hold dimensions or sampling offsets
+// this file adjusts for output-sized targets.
 struct ConstantBinding {
   UINT slot;           // Shader register: b0 system, b2 scene, or b5 object data.
   UINT minimum_bytes;  // Minimum supported native layout size within the bound range.
@@ -61,8 +65,8 @@ inline constexpr auto CONSTANT_BINDINGS = std::to_array<ConstantBinding>({
     {.slot = 5u, .minimum_bytes = 208u},
 });
 inline constexpr uint32_t CONSTANT_BINDINGS_MASK = (1u << CONSTANT_BINDINGS.size()) - 1u;
-// This adapter saves t0..t15. Keep their full saved bindings so
-// restoring a draw also restores unused slots displaced by target changes.
+// Begin saves all of t0..t15, so End also restores unused slots that a target
+// change displaced.
 inline constexpr uint32_t PIXEL_INPUT_COUNT = 16u;
 inline constexpr uint32_t PIXEL_INPUT_MASK = (1u << PIXEL_INPUT_COUNT) - 1u;
 // Native DoF sprites also read their baked color and mask through VS t0/t1.
@@ -83,7 +87,7 @@ inline constexpr UINT SCENE_VIEWPORT_SIZE_OFFSET = 352u;
 inline constexpr UINT OBJECT_LOCAL_PARAM_OFFSET = 144u;
 inline constexpr UINT OBJECT_LAST_PARAM_OFFSET = 192u;
 
-// Routing rules for an existing native draw, not a request to add a new pass.
+// How one existing native draw is routed to output-sized textures.
 struct Pass {
   uint32_t shader_hash;
   uint32_t observation_bit;  // Groups related draws under one success log message.
@@ -91,7 +95,7 @@ struct Pass {
   bool resize_targets = false;               // Allow a qualified draw to create enlarged targets.
   bool require_scene_input = false;          // Require a redirected t0 before changing this draw.
   bool display_output = false;               // Read our scene, but keep the game's final output target.
-  bool keep_scene_size = false;              // Keep native b2 dimensions for motion preparation.
+  bool keep_scene_size = false;              // Keep native b2 dimensions (motion-blur input bake).
   bool dof_pass = false;                     // Require the matching native DoF call when scaling.
   Surface::Role role = Surface::Role::DATA;  // Purpose assigned to intermediate writes.
 };
@@ -210,7 +214,6 @@ inline void OnInitPipeline(reshade::api::device* device, reshade::api::pipeline_
     const size_t bindings = read_word(definition, 8u);
     const size_t offset = read_word(definition, 12u);
     if (offset > definition.size() || bindings > (definition.size() - offset) / RESOURCE_BINDING_BYTES) return;
-    // Low bits identify native constant slots; high bits identify sampled SRVs.
     uint32_t flags = PIXEL_INPUTS_KNOWN_FLAG;
     for (size_t i = 0u; i < bindings; ++i) {
       const size_t binding = offset + (i * RESOURCE_BINDING_BYTES);
@@ -340,9 +343,10 @@ inline void OnBindTargets(reshade::api::command_list* command_list, uint32_t cou
   resource->SetPrivateDataInterface(SCENE_DEPTH_GUID, native_depth);
 }
 
-// Loading and independently recorded UI acquire storage for their native scene.
-// Their clears and draws can run before any reconstruction insertion exists.
-// Callers qualify bound scene/depth identities before redirecting them.
+// Loading screens and UI recorded on other workers get output storage for their
+// scene here. Their clears and draws can run before reconstruction is scheduled
+// for that scene, or with none at all. Callers still check the bound scene and
+// depth resources before redirecting them.
 inline Recording GetUiRoute(reshade::api::command_list* command_list) {
   Recording route;
   if (GetActive(command_list, &route, true) != nullptr) return route;
@@ -364,8 +368,8 @@ inline Recording GetUiRoute(reshade::api::command_list* command_list) {
   if (!owner.presentation_matches || (owner.scene == 0u && owner.presentation_scene == 0u)) return {};
   auto inputs = cached->allocation_inputs;
   inputs.frame_token = reconstruction::state::CurrentFrameToken();
-  // Keep the source layout alive until its views have been retained by the
-  // new output. Native UI clears and draws initialize the acquired storage.
+  // cached keeps these inputs' views alive until the new output holds them.
+  // The game's UI clears and draws initialize the acquired storage.
   try {
     AcquireOutput(inputs);
   } catch (const std::exception& error) {
@@ -389,8 +393,9 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
     output = route.output;
   }
   if (output == nullptr) {
-    // A missed late route otherwise looks like a successful native draw.
-    // Report only known scene inputs, at most once per 600 recording intervals.
+    // Otherwise a late pass (tonemap, FXAA, display) that misses its route
+    // looks like a normal native draw. Warn only when it reads the cached scene,
+    // at most once every 600 recording intervals.
     if (pass != nullptr && (pass->observation_bit & (8u | 16u | 32u)) != 0u) {
       const auto plan = resolution::Read();
       std::shared_ptr<Output> cached;
@@ -443,8 +448,9 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
   }
   auto* saved = &draw->bindings;
   std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> targets = {};
-  // Inspect the shader actually bound after replacement. Unknown metadata uses
-  // conservative saved bindings; known texture reads avoid remapping stale slots.
+  // Read the metadata of the pixel shader actually bound, after any RenoDX
+  // replacement. Without metadata, every constant buffer and texture slot is
+  // treated as read; with it, slots the shader never reads are not remapped.
   uint32_t constant_mask = CONSTANT_BINDINGS_MASK;
   bool constant_reads_known = false;
   uint32_t pixel_inputs = PIXEL_INPUT_MASK;
@@ -559,7 +565,7 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
                                  && (fixed_bloom_reduction || (input_role == Surface::Role::BLOOM_FIXED_GRID && (pass->shader_hash == 0x1AC1A5EFu || pass->shader_hash == 0x265053A6u || pass->shader_hash == 0x83272BCBu)));
   if (pass != nullptr && pass->shader_hash == 0xD05F5ABCu && output->IsScaled()) {
     // Native DoF sprites fetch their prepared color and mask in the VS.
-    // Their output-sized grid must sample the same aliases the bake wrote.
+    // Their output-sized grid must sample the output-sized textures the bake wrote.
     context->VSGetShaderResources(0u, static_cast<UINT>(vertex_inputs.size()), vertex_inputs.data());
     for (size_t index = 0u; index < vertex_inputs.size(); ++index) {
       saved->vertex_srvs[index].Attach(vertex_inputs[index]);
@@ -587,8 +593,9 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
       saved->inputs_changed = true;
     }
   }
-  // CopyRenderBuffer reads only t0. Unused slots can retain scene/depth views
-  // from an earlier draw and must not claim an unrelated copy's destination.
+  // These passes must read a redirected t0. Other slots can still hold scene or
+  // depth views from an earlier draw, and CopyRenderBuffer reads only t0, so
+  // those slots must not qualify an unrelated copy's destination.
   if (pass != nullptr && pass->require_scene_input && inputs[0] == saved->srvs[0].Get()) {
     *saved = {};
     return false;
@@ -625,7 +632,7 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
     if (mapped.view != nullptr) {
       if (first_color_write) {
         // Cropped bloom and blended flare layers need their native initial
-        // color and alpha, including clears recorded before alias activation.
+        // color and alpha, including clears recorded before this texture existed.
         bool already_cleared = false;
         {
           const std::shared_lock lock(output->surface_mutex);
@@ -775,7 +782,7 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
         output_size = surface->output_size;
       } else {
         // Scene and display targets can follow separate allocation paths.
-        // Read their actual extents, including native aliases and utility views.
+        // Read their actual extents, including native-size and utility targets.
         Microsoft::WRL::ComPtr<ID3D11Resource> resource;
         Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
         D3D11_TEXTURE2D_DESC description = {};
@@ -1087,7 +1094,10 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
   }
   if (saved->output->IsScaled() && input_role == Surface::Role::SCENE_COLOR && pass != nullptr
       && (pass->shader_hash == 0x72C1D157u || pass->shader_hash == 0xFE1DC3F8u)) {
-    // Release replaced views after unlocking; their callbacks can reenter here.
+    // A bloom or DoF pass reading the scene publishes this route as the scene's
+    // open sequence, so other workers find it. retired is declared before the
+    // lock so the replaced route is released after unlocking; destroying its
+    // resources can call back into the addon.
     Recording retired;
     const std::unique_lock lock(state.mutex);
     const auto sequence = std::ranges::find_if(state.sequences, [&](const Recording& candidate) {
@@ -1099,6 +1109,8 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
       retired = std::exchange(*sequence, route);
     }
   }
+  // A deferred recording keeps its current route and every output it used;
+  // a successful FinishCommandList hands those outputs to the finished list.
   if (context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED) {
     if (auto* recording = command_list->get_private_data<Recording>(); recording != nullptr) {
       RetainOutput(command_list, recording->output);
@@ -1164,7 +1176,8 @@ inline void End(reshade::api::command_list* command_list) {
 }
 
 // Forward qualified clears to the enlarged target and remember full clears for
-// aliases created later. Return false so the native target is cleared as usual.
+// output-sized textures created later. Return false so the native target is
+// cleared as usual.
 inline bool OnClearRenderTarget(reshade::api::command_list* command_list, reshade::api::resource_view view,
                                 const float* color, uint32_t rect_count, const reshade::api::rect* rects) {
   const auto owner = engine::views::GetScope().owner;
@@ -1331,9 +1344,9 @@ inline constexpr auto DRAW_CALLBACK = [](auto& command) {
   if (pass.shader_hash == 0u && (draw == nullptr || !draw->draw_2d || draw->flare_sprite)) return renodx::utils::command_action::CallbackResult<Context>{};
   if (pass.shader_hash == 0u && resolution::active_dof.IsScaled()) return renodx::utils::command_action::CallbackResult<Context>{};
   if (pass.shader_hash == 0u && draw->ui_draw && !ui_visible.load(std::memory_order_relaxed)) {
-    // Reuse the native UI shader classification already needed for output
-    // routing. DoF and flare sprites were excluded above; the ReShade overlay
-    // does not use these game shaders. Cancel before changing native bindings.
+    // Hide the game's UI by skipping the draw before any binding changes. DoF
+    // and flare sprites were excluded above; the ReShade overlay does not use
+    // these game shaders.
     return renodx::utils::command_action::CallbackResult<Context>{.bypass = true};
   }
   if (pass.dof_pass && draw != nullptr) {
@@ -1372,8 +1385,7 @@ inline constexpr auto DRAW_CALLBACK = [](auto& command) {
     Recording retired;
     std::vector<RecordedClear> retired_clears;
     const std::unique_lock lock(state.mutex);
-    // Lookup records have no ordering requirement. Group completed entries so
-    // removing several clears does not repeatedly shift the remaining records.
+    // Clear records are unordered, so remove this scene's in one pass.
     const auto completed = std::ranges::partition(state.clears, [&](const RecordedClear& clear) {
       return clear.value.scene != scene || clear.value.generation != owner.generation;
     });

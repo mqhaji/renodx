@@ -1,3 +1,5 @@
+// Port of the native depth-of-field near-field composite. The mod clamps negative
+// samples and output.
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:34 2026
 
 cbuffer cPSObject : register(b5)
@@ -57,6 +59,8 @@ void main(
   r3.xyzw = inTexture2.Sample(g_samplerLinear_Clamp_s, r0.xy).xyzw;
   r4.xyzw = inTexture3.Sample(g_samplerLinear_Clamp_s, r0.xy).xyzw;
 
+  // The mod clamps each sample at zero. Negative values, possible in float
+  // targets, show up as black dots.
   r1 = max(0, r1);
   r2 = max(0, r2);
   r3 = max(0, r3);
@@ -173,6 +177,6 @@ void main(
   r1.w = r1.w;
   o0.xyzw = r1.xyzw;
 
-  o0 = max(0, o0); // fixes black dots
+  o0 = max(0, o0); // Negative values, possible in float targets, show up as black dots.
   return;
 }

@@ -1,5 +1,8 @@
 #include "../common.hlsli"
 
+// Scene access for the FXAA port. Reads undo the diffuse-to-graphics-white scale
+// that ApplyFinalTonemap applies, so FXAA sees the levels the game designed it for;
+// ApplySceneScale restores that scale on output.
 namespace renodx_game {
 namespace antialiasing {
 

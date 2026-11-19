@@ -1,4 +1,7 @@
 #include "../../common.hlsli"
+// Port of the game's LocalReflectionTPP, the sortie-floor reflection trace. It
+// searches the camera depth along a mirror direction about a fixed floor plane.
+// The host skips this draw when enhanced reflections replace it.
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:30 2026
 
 cbuffer cPSScene : register(b2)
@@ -372,8 +375,9 @@ void main(
             r1.xy = g_psObject.m_localParam[2].xy * r1.xy;
             r1.xyw = inColorImage.SampleLevel(g_samplerLinear_Clamp_s, r1.xy, 0).xyz;
 #if FIX_UNORM_SRGB
-            // The upgraded scene is extended sRGB without automatic decoding.
-            // Decode before weighting; the native sRGB target encodes the result.
+            // Mod edit: the FP16 scene target holds extended sRGB and has no sRGB
+            // view to decode it. Decode before weighting, as the game's view
+            // did; the native sRGB target encodes the result.
             r1.xyw = renodx::color::srgb::Decode(max(r1.xyw, 0.0));
 #endif
             r1.xyw = r1.xyw;

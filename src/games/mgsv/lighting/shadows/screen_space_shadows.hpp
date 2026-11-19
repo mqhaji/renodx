@@ -21,20 +21,24 @@
 #include "../../shared.h"
 #include "batch.hpp"
 
+// Per-draw setup for Enhanced shadows. Begin runs before each native sun, spot,
+// or point light draw: it checks the draw and binds its contact-shadow mask and
+// light record at t18-t19 for the replacement light shader, which also does the
+// PCSS filtering. End restores the displaced inputs after the draw.
 namespace mgsv::shadows::screen_space {
 
 inline constexpr GUID SPOT_BUDGET_ID = {
     .Data1 = 0xcdb408ed, .Data2 = 0xcba8, .Data3 = 0x44e8, .Data4 = {0xa6, 0xc8, 0xfb, 0x38, 0x81, 0xd4, 0xd5, 0xa1}};
 
 // A view's resource description never changes. Cache it on the view itself to
-// avoid keeping retired textures alive or maintaining a separate global map.
+// avoid keeping destroyed textures alive or maintaining a separate global map.
 struct __declspec(uuid("A079A897-0A5A-4823-BBC7-080019D8A9B8")) ViewDescription {
   D3D11_TEXTURE2D_DESC texture = {};
   bool compatible = false;
 };
 
 // Per recording context: the native inputs a light draw displaced, and what
-// the context has already qualified.
+// the context has already checked.
 struct __declspec(uuid("F5591171-16BF-4AC9-B341-D74C1F56BDE2")) DrawState {
   std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 2> displaced;
   std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>, 2> qualified_buffers;
@@ -122,14 +126,14 @@ inline bool OnClearRenderTarget(reshade::api::command_list* cmd_list, reshade::a
   if (FAILED(stored.As(&budget))) return false;
   const std::array<UINT, 4> zero = {};
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
-  // Record the reset beside the native clear. Deferred recording and replay
-  // therefore use GPU order instead of a CPU Present counter.
+  // Reset the spot budget next to the game's clear of its lighting target, so
+  // recording and replay follow GPU order instead of a CPU Present counter.
   context->ClearUnorderedAccessViewUint(budget.Get(), zero.data());
   return false;
 }
 
-// Qualifies one native light draw and gives it its contact-shadow inputs: a
-// place in its lighting pass's batch, or a batch of its own recorded here.
+// Checks one native light draw and gives it its contact-shadow inputs: a place
+// in its lighting pass's batch, or a separate batch recorded here.
 inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& settings, uint32_t light_type, bool has_shadow_map) {
   if (cmd_list == nullptr || light_type >= 5u || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return;
   if (settings.shadows_mode < 0.5f) return;
@@ -180,8 +184,9 @@ inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& 
     // still runs; its unchanged alpha does not need a screen-space shadow mask.
     if (!writes_lighting) return;
   }
-  // Once a lighting draw qualifies, reserve its inputs until End. Any later
-  // failure leaves null contact inputs and restores the displaced native views.
+  // Once a lighting draw passes these checks, take over its t18-t19 until End.
+  // Any later failure leaves null contact inputs, and End restores the native
+  // views.
   std::array<ID3D11ShaderResourceView*, 2> previous = {};
   context->PSGetShaderResources(18u, static_cast<UINT>(previous.size()), previous.data());
   for (size_t index = 0u; index < previous.size(); ++index) {
@@ -266,8 +271,8 @@ inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& 
 
   ID3D11UnorderedAccessView* budget = nullptr;
   if ((light_type == 1u || light_type == 3u) && settings.spot_contact_shadow_budget >= 1.f) {
-    // Contexts writing the same native lighting allocation share its counter.
-    // Resetting it beside the native clear makes replay follow GPU order.
+    // Contexts writing the same native lighting texture share its counter,
+    // which OnClearRenderTarget resets next to the game's clear.
     if (state->budget_target.Get() != targets[0].Get()) {
       Microsoft::WRL::ComPtr<ID3D11Resource> resource;
       targets[0]->GetResource(&resource);
@@ -328,8 +333,9 @@ inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& 
     }
   }
   context->PSSetShaderResources(18u, static_cast<UINT>(result.size()), result.data());
-  // The extended sun output is safe only when the game has no third target.
-  // Failed or stencil-only draws keep their original shader and skip injection.
+  // Replace the shader only when the game binds no third target, because the
+  // sun replacements write extra outputs there. Failed or stencil-only draws
+  // keep their original shader and skip settings injection.
   state->replacement_safe = targets[2] == nullptr;
 }
 

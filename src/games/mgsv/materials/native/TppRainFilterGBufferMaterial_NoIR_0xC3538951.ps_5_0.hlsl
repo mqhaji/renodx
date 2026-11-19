@@ -1,3 +1,5 @@
+// Port of the native rain pass that scales albedo and adjusts roughness for wet
+// surfaces. The mod carries the cube-free material record through the same change.
 #include "../../common.hlsli"
 #include "../rain_material_capture.hlsli"
 
@@ -92,6 +94,7 @@ void main(
   r1.xyz = min(float3(1, 1, 1), r0.zzz);
   r1.xyz = r1.xyz;
   r1.xyz = r1.xyz;
+  // The native wet albedo is albedo * rain_multiplier; the record applies the same factor.
   const float3 rain_multiplier = 1.0 + (g_psMaterial.m_materials[0].x - 1.0) * r1.xyz;
   r2.xyzw = inAlbedoMap.Sample(g_samplerLinear_Wrap_s, r0.xy).xyzw;
 
@@ -156,6 +159,7 @@ void main(
   r2.xyzw = r2.xyzw;
   o0.xyzw = r2.xyzw;
   o1.xyzw = r0.xyzw;
+  // Update the material record to match the wet values this pass wrote.
   const int2 material_pixel = (int2)v1.xy;
   CaptureRainMaterial(material_pixel, inAlbedoMap.Load(int3(material_pixel, 0)), rain_multiplier, o0, o1,
                       clean_color, clean_owner);

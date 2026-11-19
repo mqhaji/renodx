@@ -1,6 +1,7 @@
 #pragma once
 
-/* Immutable game-native inputs accepted for one temporal reconstruction. */
+/* The engine images, camera and output target that one scene's reconstruction
+ * reads, after input_capture.hpp has checked them. */
 
 #include <array>
 #include <cstdint>
@@ -13,9 +14,8 @@
 
 namespace mgsv::reconstruction {
 
-// These are the scene formats the DX12 transport can read and write without
-// changing their encoding or precision. Other full-size images are not proof
-// that we have reached the reconstruction input.
+// Scene color formats the D3D12 transport can read and write without changing
+// their encoding or precision. Both the scene image and the output must pass.
 inline bool IsReconstructionColorTexture(const reshade::api::resource_desc& description) {
   return description.type == reshade::api::resource_type::texture_2d
          && description.texture.depth_or_layers == 1u
@@ -25,6 +25,7 @@ inline bool IsReconstructionColorTexture(const reshade::api::resource_desc& desc
              || description.texture.format == reshade::api::format::r32g32b32a32_float);
 }
 
+// Layout matches prepare_constants.hlsli.
 struct alignas(16) PrepareConstants {
   std::array<float, 2> current_jitter_uv = {};
   float camera_reprojection_valid = 0.f;
@@ -42,7 +43,7 @@ struct ColorTarget {
   uint32_t height = 0u;
   reshade::api::format format = reshade::api::format::unknown;
   reshade::api::resource_usage usage = reshade::api::resource_usage::shader_resource;
-  // Optional shared allocation and its cached D3D12 import.
+  // Set when the target is a shared texture; holds its cached D3D12 import.
   std::shared_ptr<rendering::SharedTexture> shared_texture;
 };
 
@@ -71,8 +72,8 @@ struct ValidatedFrameInputs {
   uint32_t render_height = 0u;
   ColorTarget output = {};
 
-  // Analytical TAA keeps native resolution. SDK backends can use a distinct,
-  // larger destination when the output-sized post-processing route is active.
+  // Analytical TAA always needs equal sizes. FSR and DLSS write a separate,
+  // larger output while upscaling.
   [[nodiscard]] bool HasNativeOutputSize() const {
     return render_width != 0u && render_height != 0u
            && render_width == output.width && render_height == output.height;

@@ -120,7 +120,8 @@ inline bool IsBloomChainDraw(reshade::api::command_list* cmd_list, bool reductio
   if (FAILED(bloom_image->GetPrivateData(engine::render_targets::BLOOM_IMAGE_GUID, &image_state_size, &image_state))
       || image_state_size != sizeof(image_state)) return false;
   if (image_state == engine::render_targets::BLOOM_IMAGE_NEW) {
-    // Clear new padding before the cropped reduction writes its working region.
+    // The chain writes only a working region. Clear the whole image the first
+    // time the chain uses it, so the unwritten border stays black.
     constexpr std::array<float, 4> black = {};
     cmd_list->clear_render_target_view(targets[0], black.data(), 0u, nullptr);
     bloom_image->SetPrivateData(engine::render_targets::BLOOM_IMAGE_GUID, sizeof(engine::render_targets::BLOOM_IMAGE_CLEARED), &engine::render_targets::BLOOM_IMAGE_CLEARED);
@@ -131,8 +132,9 @@ inline bool IsBloomChainDraw(reshade::api::command_list* cmd_list, bool reductio
   return true;
 }
 
-// The engine copies scene color into TEMPORARY_OUTPUT itself. An upscaled
-// scene also needs that copy at output size; the native copy still runs.
+// The engine copies scene color into TEMPORARY_OUTPUT itself. When the scene is
+// upscaled, output_size makes the same copy at output size; the native copy
+// always runs too. A scaled scene copy it cannot make turns upscaling off.
 inline bool OnCopySceneResource(
     reshade::api::command_list* cmd_list,
     reshade::api::resource source,
@@ -147,7 +149,8 @@ inline bool OnCopySceneResource(
   return false;
 }
 
-// CopyRenderBuffer is generic. Its copy of the bloom result ends the chain.
+// CopyRenderBuffer is a generic copy shader. When it copies a bloom image, the
+// bloom chain is finished for this command list.
 inline bool OnCopyRenderBufferDraw(reshade::api::command_list* cmd_list) {
   if (IsBloomChainDraw(cmd_list, false)) {
     cmd_list->get_private_data<BloomChainScope>()->working = {};

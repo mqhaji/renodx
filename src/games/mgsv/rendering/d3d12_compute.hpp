@@ -1,8 +1,9 @@
 #ifndef RENODX_GAMES_MGSV_RENDERING_D3D12_COMPUTE_HPP_
 #define RENODX_GAMES_MGSV_RENDERING_D3D12_COMPUTE_HPP_
 
-// Small building blocks for private compute passes. The bridge owns submission
-// and retirement; these objects only describe resources and record commands.
+// Building blocks for the mod's D3D12 compute passes: barriers, textures,
+// per-slot descriptor and upload arenas, and a simple pipeline. The bridge owns
+// submission and slot retirement; these only create resources and record commands.
 
 #include <array>
 #include <cstdint>
@@ -58,8 +59,8 @@ inline Microsoft::WRL::ComPtr<ID3D12Resource> CreateTexture(
   return texture;
 }
 
-// One arena belongs to one retired bridge slot. Descriptors and uploaded bytes
-// remain untouched until both APIs have finished that slot's previous use.
+// Each bridge slot owns one Frame. Its descriptors and uploaded bytes stay
+// untouched until both APIs have finished the slot's previous use.
 struct Frame {
   static constexpr UINT DESCRIPTOR_COUNT = 1024u;
   static constexpr UINT UPLOAD_BYTES = 256u * 1024u;
@@ -130,8 +131,9 @@ struct Frame {
   }
 };
 
-// A fixed SRV/UAV table and root CBVs cover reconstruction and the pinned FSR
-// shaders. Point and linear clamp samplers are immutable and cost no heap slots.
+// One SRV/UAV descriptor table plus root constant buffers covers reconstruction
+// and the FSR shaders of the pinned SDK version. The point and linear clamp
+// samplers (s0, s1) are static, so they use no heap slots.
 struct Pipeline {
   Microsoft::WRL::ComPtr<ID3D12RootSignature> root;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> state;

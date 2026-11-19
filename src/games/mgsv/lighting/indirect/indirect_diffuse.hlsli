@@ -4,11 +4,12 @@
 #ifndef SRC_GAMES_MGSV_GTVBGI_INDIRECT_DIFFUSE_HLSLI_
 #define SRC_GAMES_MGSV_GTVBGI_INDIRECT_DIFFUSE_HLSLI_
 
-// One RGBA16F image carries GI in RGB and ambient visibility in alpha. Both
-// signals are nonnegative. A negative R marks missing GI; a negative alpha
-// marks missing AO. Valid black GI and fully blocked AO remain valid zeros.
-// The flags are independent, and neither consumes precision from a valid value.
-// Use point loads, then normalize each signal over its own valid filter taps.
+// Packing of the GT-VBGI trace result, shared by the trace and application
+// passes. One RGBA16F image carries GI in RGB and ambient visibility in alpha.
+// Both signals are nonnegative, so a negative R marks missing GI and a negative
+// alpha marks missing AO. Black GI and fully blocked AO are valid zeros. The
+// two flags are independent and cost no precision in valid values. Readers use
+// point loads and normalize each signal over its own valid filter taps.
 bool HasDiffuseGI(float4 sample) {
   return sample.r >= 0.0 && all(isfinite(sample.rgb));
 }

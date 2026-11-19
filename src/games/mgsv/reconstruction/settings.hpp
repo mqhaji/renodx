@@ -16,6 +16,10 @@
 #include "runtime.hpp"
 #include "state.hpp"
 
+// The Temporal Anti-Aliasing settings. The method, DLSS model and quality are
+// stored in hidden settings and drawn with custom combo boxes, so unavailable
+// choices can be explained and method and model changes go through the
+// transitions in runtime.hpp.
 namespace mgsv::reconstruction::settings {
 
 inline void AppendSettings(
@@ -23,7 +27,7 @@ inline void AppendSettings(
     ShaderInjectData* shader_injection,
     State* settings_state) {
   if (registry == nullptr || shader_injection == nullptr || settings_state == nullptr) return;
-  // Existing descriptors capture this state and its bindings. Never rebind it.
+  // Settings already created hold pointers into this state; never create them twice.
   if (settings_state->temporal_mode_setting != nullptr || settings_state->dlss_model_setting != nullptr) return;
   if (std::ranges::any_of(*registry, [](auto* setting) {
         return setting->key == "FxTemporalReconstructionMode";
@@ -37,9 +41,9 @@ inline void AppendSettings(
       .label = "Temporal Reconstruction Mode",
       .section = "Temporal Anti-Aliasing",
       .max = static_cast<float>(transitions::TEMPORAL_MODE_OPTIONS.size()) - 1.f,
-      // Setting::Write must not expose requested DLSS to shaders before the
-      // coordinator has activated it. TransitionTemporalMode publishes the
-      // effective binding after readiness and history are synchronized.
+      // The shader binding holds the active method, not the requested one, so
+      // shaders never see DLSS before it is ready. TransitionTemporalMode
+      // writes the binding once the method has actually switched.
       .parse = [](float) { return static_cast<float>(state::GetTemporalMode()); },
       .is_visible = [] { return false; },
   };
@@ -64,6 +68,7 @@ inline void AppendSettings(
       .max = static_cast<float>(resolution::QUALITY_LABELS.size() - 1u),
       .parse = [](float value) {
         const auto selected = static_cast<resolution::Quality>(static_cast<uint32_t>(std::clamp(value, 0.f, static_cast<float>(resolution::QUALITY_LABELS.size() - 1u))));
+        // A different quality clears an earlier upscaling failure, so it retries.
         if (resolution::quality.exchange(selected, std::memory_order_acq_rel) != selected) {
           resolution::failed.store(false, std::memory_order_release);
           logging::Info("upscaling quality selected ", resolution::QUALITY_LABELS[static_cast<size_t>(selected)]);

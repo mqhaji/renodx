@@ -1,3 +1,4 @@
+// Port of the native subtitle text shader. The mod clamps the output to 0-1.
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:21 2026
 
 cbuffer cPSObject : register(b5)

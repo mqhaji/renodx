@@ -115,7 +115,7 @@ inline constexpr size_t ENTRY_COUNT = static_cast<size_t>(Entry::COUNT);
 
 struct EntryInfo {
   Entry entry = Entry::COUNT;
-  // The engine's own name where the community decompile has one, otherwise
+  // The engine's name where the community decompile has one, otherwise
   // the containing function and what the entry is inside it.
   std::string_view name;
   // Address in the known build, relative to the executable's base.

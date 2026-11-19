@@ -17,6 +17,7 @@
 
 namespace mgsv::reconstruction::analytical {
 
+// Matches TaaResolveConstants (b1) in mgsv_taa.cs_6_0.hlsl.
 struct alignas(16) ResolveConstants {
   float diagnostic_view = state::DEFAULT_DIAGNOSTIC_VIEW;
   float velocity_visualization_range = state::DEFAULT_VELOCITY_VISUALIZATION_RANGE;
@@ -83,8 +84,8 @@ inline bool Dispatch(const ValidatedFrameInputs& inputs) {
       resources.initialized = false;
     }
     const UINT first = evaluation.frame->Allocate(7u);
-    // A cold resolve reads the current linear input as history, matching the
-    // old seed operation without two full-image copies.
+    // Without history, the resolve reads the current linear input as its
+    // history, which seeds it without copying an image.
     auto* previous = resources.initialized ? resources.history[1u - resources.index].Get() : evaluation.color;
     auto* current = resources.history[resources.index].Get();
     const std::array<ID3D12Resource*, 5> srvs = {

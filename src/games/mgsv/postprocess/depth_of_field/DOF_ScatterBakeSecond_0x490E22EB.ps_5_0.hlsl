@@ -1,3 +1,5 @@
+// Port of the native depth-of-field scatter bake (second pass). The mod clamps the
+// DoF control output to its native range.
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:24 2026
 
 cbuffer cPSObject : register(b5) {
@@ -157,7 +159,7 @@ void main(
   r5.w = r5.w;
   o0.xyzw = r1.xyzw;
   o1.xyzw = r2.xyzw;
-  // This float target is reused for DoF controls; preserve their native UNORM range.
+  // This target is float and holds DoF controls; clamp them to their native 0-1 range.
   o2.xyzw = saturate(r5.xyzw);
   return;
 }

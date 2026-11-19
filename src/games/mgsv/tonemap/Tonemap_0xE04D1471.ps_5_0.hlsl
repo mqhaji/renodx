@@ -1,3 +1,5 @@
+// Port of the native final tonemap pass: bloom, color LUT, and output. The mod adds
+// the enhanced bloom mode and keeps HDR through the SDR LUT for RenoDX tone mapping.
 #include "../postprocess/bloom/bloom.hlsli"
 #include "tonemap.hlsli"
 
@@ -56,7 +58,8 @@ void main(
     bloom_color = inBloom.Sample(g_samplerLinear_Clamp_s, r0.zw + 2.f * g_psSystem.m_renderBuffer.zw).rgb;
   }
 
-  // Run bloom through a per-channel SDR proxy so its white blend reconstructs without max-channel amplification.
+  // The native bloom blends toward white and expects SDR input. With RenoDX tone
+  // mapping, compress each channel into SDR first; the scale is undone below.
   float3 perch_scale = 1.f;
   float maxch_scale = 1.f;
   if (RENODX_TONE_MAP_TYPE != 0.f && !enhanced) {
@@ -76,7 +79,8 @@ void main(
     r0.xyz = lerp(r1.xyz, with_bloom, CUSTOM_BLOOM_STRENGTH);
   }
 
-  // Reconstruct bloom in HDR, then use a hue-preserving SDR proxy for the LUT.
+  // Undo the per-channel compression, then scale all channels by one factor so the
+  // LUT receives an SDR color with the same hue.
   if (RENODX_TONE_MAP_TYPE != 0.f) {
     if (!enhanced) {
       r0.rgb /= perch_scale;
@@ -87,7 +91,8 @@ void main(
 
   r0.rgb = Sample2DLUTWithScaling(r0.rgb, inColorLUT, g_samplerLinear_Clamp_s);
 
-  // Restore the LUT result to HDR and return to the gamma domain expected by ApplyFinalTonemap.
+  // Undo that scale on the LUT result, then return to the gamma domain that
+  // ApplyFinalTonemap expects.
   r0.rgb = max(0, r0.rgb);
   if (RENODX_TONE_MAP_TYPE != 0.f) {
     r0.rgb *= r0.rgb;

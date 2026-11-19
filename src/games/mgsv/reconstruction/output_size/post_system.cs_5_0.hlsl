@@ -9,10 +9,13 @@ cbuffer OutputDimensions : register(b1) {
 
 RWByteAddressBuffer output_system : register(u0);
 
-// Copy the full native prefix so the caller can install it in one operation.
-// Integer copies preserve all unrelated fields, including packed values.
+// Adjusts the game's system constants (b0 of the draw) for an output-sized
+// target: c2 receives the output buffer size and its reciprocal, and the view
+// size in c1.xy is scaled to keep its ratio to the buffer. Writes all 64 bytes
+// to scratch so the caller installs them with one copy. Unrelated fields are
+// copied as raw bits.
 [numthreads(1, 1, 1)] void main() {
-  // Preserve the view-to-buffer ratio for cropped and subview draws.
+  // Keeps cropped and partial-view draws covering the same share of the buffer.
   const float2 view = asfloat(native_system[1].xy) * (output_buffer_size / asfloat(native_system[2].xy));
   const float4 buffer = float4(output_buffer_size, rcp(output_buffer_size));
   output_system.Store4(0u, native_system[0]);

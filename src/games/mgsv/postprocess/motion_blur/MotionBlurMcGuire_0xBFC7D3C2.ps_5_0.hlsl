@@ -1,3 +1,5 @@
+// Port of the native McGuire motion blur gather. The mod adds the motion blur
+// strength setting.
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:32 2026
 
 #include "../../shared.h"
@@ -55,7 +57,8 @@ void main(
   r0.xy = g_psSystem.m_renderInfo.xy * r0.xy;
   r0.xy = g_psSystem.m_renderBuffer.zw * r0.xy;
   r1.zw = g_psObject.m_localParam[1].zw;
-  // Scale only this pass's blur radius; temporal motion-vector inputs remain unchanged.
+  // The strength setting scales only this pass's blur radius; the motion vectors
+  // that temporal passes read are unchanged.
   r0.w = g_psObject.m_localParam[0].w * CUSTOM_MOTION_BLUR_STRENGTH;
   r2.x = g_psObject.m_localParam[0].z;
   r2.yz = float2(64,64) * r0.ww;

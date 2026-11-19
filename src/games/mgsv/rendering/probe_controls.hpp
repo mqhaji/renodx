@@ -41,7 +41,7 @@ inline void UseProbe(bool attach) {
       if (key == nullptr || !std::isfinite(value) || renodx::utils::settings::settings == nullptr) return false;
       const std::string_view name = key;
       if (!name.starts_with("DirectLighting") && !name.starts_with("IndirectLighting")) {
-        // Other settings change only through their feature's own transition.
+        // Other settings change only through their feature's transition.
         const auto apply = transition.load(std::memory_order_acquire);
         return apply != nullptr && apply(name, value);
       }

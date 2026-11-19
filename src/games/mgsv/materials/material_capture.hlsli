@@ -1,5 +1,5 @@
-// Material color before the native cubemap approximation is added. The game
-// still receives its original three outputs; these helpers serve extra outputs.
+// Helpers for the material ports in native/. Each port also publishes its color
+// without the baked cube map. The game still receives its original three outputs.
 #ifndef MGSV_MATERIAL_CAPTURE_HLSLI_
 #define MGSV_MATERIAL_CAPTURE_HLSLI_
 
@@ -7,9 +7,9 @@
 
 Texture2D<uint> material_capture_parameters : register(t20);
 
-// This is a per-pixel compiler temporary, not shared mutable GPU state. Native
-// material code is evaluated with its cube, then with cube RGB set to zero.
-// The compiler can reuse the common texture and geometry work between them.
+// A per-pixel temporary, not shared GPU state. Each port runs the native material
+// code with its cube, then again with the cube's RGB set to zero. The compiler can
+// share the common texture and geometry work between the two runs.
 static bool material_clean_pass = false;
 
 float4 SampleMaterialCube(TextureCube<float4> image, SamplerState image_sampler, float3 direction) {

@@ -1,7 +1,9 @@
 #pragma once
 
-/* The scene record reconstruction reads where post-processing starts, and the
- * capture at the camera-velocity draw that feeds the lighting history. */
+/* BuildFrameInputsLocked builds the record reconstruction reads where a
+ * scene's post-processing starts. CaptureCameraMotionLocked captures the
+ * camera-velocity draw for the lighting history; reconstruction does not
+ * use it. */
 
 #include <d3d11.h>
 
@@ -91,7 +93,7 @@ inline const char* reported_cause = nullptr;
 inline std::atomic<bool> probe_fill_only = false;
 
 // Builds the inputs of one scene's reconstruction where its post-processing
-// starts, from the engine's own targets and the camera recorded for the view.
+// starts, from the engine's targets and the camera recorded for the view.
 // The caller holds the execution lock and keeps `images` alive while it uses
 // the result. Every check a record must pass is in this one list.
 inline Record BuildFrameInputsLocked(
@@ -129,7 +131,7 @@ inline Record BuildFrameInputsLocked(
     if (!std::ranges::all_of(images, matches_scene)) {
       cause = "the scene, depth and velocity targets are not single-sample images of one size";
     } else if (plan.mode != state::GetTemporalMode()) {
-      // Native resize and SDK activation can overlap recording.
+      // A native resize or an SDK activation can overlap this scene's recording.
       cause = "the size plan still belongs to another method";
     } else if (!IsReconstructionColorTexture(color_description) || color_format != color_description.texture.format
                || (plan.IsScaled() && color_format != reshade::api::format::r16g16b16a16_float)) {
@@ -167,8 +169,8 @@ inline Record BuildFrameInputsLocked(
           .sample_index = camera.sample_index,
           .render_width = width,
           .render_height = height,
-          // A scaled request has no destination until the coordinator allocates
-          // the output route. Never describe the smaller source as that target.
+          // While upscaling, the output does not exist until the coordinator
+          // allocates it. Leave it empty rather than naming the smaller scene.
           .output = {
               .resource = (plan.IsScaled() ? reshade::api::resource{0u} : color_resource),
               .width = (plan.IsScaled() ? plan.output.width : width),

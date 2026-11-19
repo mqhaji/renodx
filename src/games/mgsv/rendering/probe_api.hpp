@@ -8,8 +8,8 @@
 #include "../../../utils/cross_addon.hpp"
 #include "d3d12_timing.hpp"
 
-// What the local development probe may ask of the addon beyond a feature's own
-// interface: its settings, and timing of its private D3D12 work.
+// What the local development probe add-on may ask of the mod beyond each
+// feature's interface: its settings, and timing of its D3D12 work.
 namespace mgsv::rendering::probe {
 
 // Callbacks only copy values. Hold this lock while calling them so unloading

@@ -20,6 +20,9 @@
 #include "sdk/api/include/dx12/ffx_api_dx12.h"
 #include "sdk/upscalers/include/ffx_upscale.h"
 
+// AMD FSR through AMD's signed loader and upscaler DLLs beside mgsvtpp.exe. It
+// uses the same D3D12 device, queue, prepared inputs, and output encoder as the
+// other methods; the DLL owns its shaders, scratch memory, and history.
 namespace mgsv::reconstruction::fsr {
 
 // Present and the menu read this independently of the serialized SDK state.
@@ -130,6 +133,8 @@ inline void InvalidateHistory() {
   resources.initialized = false;
 }
 
+// Runs once per reconstructed scene. Loads the DLLs on first use, then records
+// FSR and the shared encoder into the coordinator's single D3D12 submission.
 inline bool Dispatch(const ValidatedFrameInputs& inputs) {
   if (const char* reason = UnavailableReason(); reason != nullptr) throw std::runtime_error(reason);
   if (library.create == nullptr) {

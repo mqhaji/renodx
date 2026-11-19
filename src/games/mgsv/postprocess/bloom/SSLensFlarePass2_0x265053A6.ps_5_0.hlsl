@@ -1,3 +1,5 @@
+// Port of the native second lens flare pass, which adds five tinted ghosts.
+// Enhanced bloom keeps them and fades samples to zero outside the working region.
 #include "bloom_native.hlsli"
 
 void main(

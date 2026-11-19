@@ -1,3 +1,5 @@
+// Port of the native bloom 4x reduction. Enhanced bloom box-filters the decoded
+// scene in the first reduction and uses a cubic B-spline filter in later ones.
 #include "bloom_native.hlsli"
 
 void main(
@@ -16,7 +18,7 @@ void main(
     if (scene_input) {
       const float2 begin = floor(v0.xy) * scale;
       const float2 end = (floor(v0.xy) + 1.f) * scale;
-      [loop]  // Include fractional odd-resolution edges.
+      [loop]  // Include partly covered source pixels at odd-resolution edges.
       for (int y = int(floor(begin.y)); y < int(ceil(end.y)); ++y) {
         const float row_weight = max(0.f, min(end.y, float(y + 1)) - max(begin.y, float(y)));
         [loop]  // The footprint width is known only at runtime.
@@ -33,7 +35,8 @@ void main(
       return;
     }
 
-    // Share moving lights smoothly across the working grid in linear light.
+    // Later reductions integrate a cubic B-spline over each source pixel, so small
+    // moving lights spread smoothly across the working grid.
     const float2 center = (floor(v0.xy) + 0.5f) * scale;
     const float2 begin = center - 2.f * scale;
     const float2 end = center + 2.f * scale;

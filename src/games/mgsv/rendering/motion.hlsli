@@ -1,12 +1,15 @@
 #ifndef RENODX_GAMES_MGSV_RENDERING_MOTION_HLSLI_
 #define RENODX_GAMES_MGSV_RENDERING_MOTION_HLSLI_
 
-// Native BA stores current-minus-previous motion in units of 64 input pixels.
-// This is data, not color: neither decoding nor reprojection uses a gamma curve.
+// The engine stores motion (current minus previous position) in the B and A
+// channels, mapping -64..64 render pixels to 0..1. This returns it in UV units.
+// It is data, not color, so no gamma curve applies.
 float2 DecodeNativeMotion(float2 encoded, float2 reciprocal_size) {
   return (encoded * 2.0 - 1.0) * 64.0 * reciprocal_size;
 }
 
+// Camera-only motion for one pixel: remove the current jitter, then reproject its
+// depth with the current-to-previous clip matrix. Returns false if unusable.
 bool GetCameraVelocity(float2 uv, float depth, float2 jitter, float4x4 current_to_previous, out float2 velocity) {
   const float2 current_ndc = uv * float2(2.0, -2.0) + float2(-1.0, 1.0) - jitter * float2(2.0, -2.0);
   const float4 previous_clip = mul(current_to_previous, float4(current_ndc, depth, 1.0));

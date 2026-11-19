@@ -1,6 +1,9 @@
 #pragma once
 
-/* Coherent camera publication and temporal matrix history shared by all methods. */
+/* The camera each scene was set up with, and the previous camera that every
+ * reconstruction method reprojects against. The projection hook in
+ * projection_jitter.hpp writes the camera when a scene's projection is set;
+ * input capture, the native draw hooks and the coordinator read it later. */
 
 #include <intrin.h>
 
@@ -40,31 +43,41 @@ struct CameraFrame {
   uint64_t reset_generation = 0u;
   uintptr_t viewport_identity = 0u;
   uintptr_t camera_identity = 0u;
+  // The engine view build (engine::views::Owner) this camera belongs to:
+  // its scene ID and its presentation generation.
   uint64_t scene = 0u;
   uint64_t owner_generation = 0u;
-  // Assigned when this scene first records geometry. Present and submission
-  // cannot change the sample already used by its recorded draws.
+  // Numbers scenes in the order their projection was first set up. It is
+  // assigned once, so Present and submission cannot change the sample the
+  // scene's draws already used. Consecutive numbers let history continue.
   uint64_t reservation = 0u;
   Matrix4d inverse_view_projection = {};
   std::array<float, 16> projection = {};
   std::array<float, 16> view = {};
-  // Native object velocity uses this endpoint. It is distinct from the last
-  // successfully reconstructed or denoised camera and is retained for auditing.
+  // The engine's previous projection and view, which its motion vectors
+  // are drawn against. They can differ from the last camera this mod
+  // reconstructed with. Only the reflections probe capture reads them.
   std::array<float, 16> native_previous_projection = {};
   std::array<float, 16> native_previous_view = {};
   bool native_history_available = false;
 };
 
-// Pending reconstruction jobs keep their own copies. This small CPU cache
-// connects camera publication to later motion recording for the same view build.
+// The camera of each recent scene, found by scene ID and generation. Worker
+// threads record a scene after its projection was set up, sometimes while a
+// newer scene is already being set up, so they look up their own scene here.
+// Scheduled reconstruction jobs keep their own copies.
 inline constexpr size_t MAX_SCENE_PUBLICATIONS = 64u;
 inline std::array<CameraFrame, MAX_SCENE_PUBLICATIONS> scene_publications;
 inline size_t next_scene_publication = 0u;
 inline uint64_t next_reservation = 0u;
 inline CameraFrame committed_camera;
 
+// Advances on every history reset. A camera saved with an older value is stale.
 inline std::atomic<uint64_t> reset_generation = 0u;
 
+// The latest publication, readable without a lock. Writers hold
+// publication_write_lock and make published_sequence odd while they store the
+// fields. Get retries until it sees the same even value before and after.
 inline std::atomic<uint64_t> published_sequence = 0u;
 inline std::atomic<bool> published_valid = false;
 inline std::atomic<uint64_t> published_reset_generation = 0u;
@@ -84,15 +97,17 @@ inline std::array<std::atomic<float>, 4> published_device_to_view_depth = {};
 inline std::array<std::atomic<float>, 16> published_current_to_previous_clip = {};
 inline std::atomic_flag publication_write_lock = ATOMIC_FLAG_INIT;
 
-// Protected by publication_write_lock. The native hook stages the current
-// no-jitter matrix; only a successful reconstruction promotes it to previous.
+// Protected by publication_write_lock. The projection hook stages the current
+// unjittered view-projection matrix; only a successful reconstruction (Commit)
+// makes it the previous matrix.
 inline Matrix4d staged_current_view_projection = {};
 inline Matrix4d committed_previous_view_projection = {};
 inline std::array<float, 2> committed_previous_jitter_uv = {0.f, 0.f};
 inline bool staged_current_view_projection_valid = false;
 inline bool committed_previous_view_projection_valid = false;
-// Native camera provenance, read only while holding publication_write_lock.
-// Addresses are identities, never retained for later dereference.
+// The engine viewport and camera the staged matrices came from, read only
+// under publication_write_lock. The addresses identify objects; code reads
+// through one only after matching it against a live viewport.
 inline const void* staged_viewport = nullptr;
 inline const void* staged_camera = nullptr;
 inline std::array<float, 16> staged_projection = {};
@@ -240,6 +255,8 @@ inline void PublishLocked(const CameraFrame& frame) {
   }
   published_valid.store(frame.valid, std::memory_order_relaxed);
   published_sequence.fetch_add(1u, std::memory_order_release);
+  // Also save the camera per scene, but only for the presented main view whose
+  // viewport and camera are the ones just staged.
   const auto owner = engine::views::GetScope().owner;
   if (owner.scene != 0u && owner.main_view && owner.presentation_matches
       && owner.viewport == reinterpret_cast<uintptr_t>(staged_viewport)
@@ -297,7 +314,9 @@ inline CameraFrame Get() {
   return result;
 }
 
-// Callers hold the publication lock through any native projection write.
+// Inside a scene's view build, returns that scene's saved camera, or an
+// invalid one. Outside a scene, returns the latest publication. Callers hold
+// publication_write_lock and keep it through any projection write based on it.
 inline CameraFrame GetForSceneLocked() {
   const auto owner = engine::views::GetScope().owner;
   if (owner.scene != 0u) {
@@ -334,8 +353,8 @@ inline bool Commit(const CameraFrame& frame) {
         frame.jitter_uv_y,
     };
     committed_previous_view_projection_valid = true;
-    // The projection sample was reserved during recording. Only the history
-    // endpoint advances here, after the reconstructed output has been installed.
+    // The jitter sample was reserved when the scene was set up. Only the
+    // history endpoint moves here, after the reconstructed output is installed.
     state::CommitTemporalFrame();
   }
   return valid;

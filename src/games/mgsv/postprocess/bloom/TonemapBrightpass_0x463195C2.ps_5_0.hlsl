@@ -1,3 +1,5 @@
+// Port of the native bloom bright pass. Enhanced bloom passes linear HDR color
+// through without a threshold and keeps the native flare brightness in alpha.
 #include "bloom_native.hlsli"
 
 void main(
@@ -8,7 +10,7 @@ void main(
     uint width, height;
     inImage.GetDimensions(width, height);
     const uint2 work_size = min(uint2(width, height), BLOOM_WORK_SIZE);
-    // Retain the native working rectangle for the unchanged final copy.
+    // Write only the native working rectangle, which the unchanged final copy reads.
     if (any(v1.xy >= float2(work_size))) {
       o0 = float4(0.f, 0.f, 0.f, 1.f);
       return;

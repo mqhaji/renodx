@@ -1,6 +1,6 @@
-// Directional lighting, ported from native shader 0x5AFD2E17 with 3Dmigoto.
-// PCSS replaces only shadow-map filtering. Native lighting, cloud shadows,
-// distance fades, and output packing retain their original calculations.
+// Port of the native shadowed sun light. The mod adds PCSS shadow-map filtering
+// and Bend Studio's contact shadows on direct light. Native lighting, cloud
+// shadows, distance fades, and output packing are unchanged.
 #include "../../shared.h"
 #include "../shadows/pcss.hlsli"
 #include "../shadows/screen_space_shadows.hlsli"
@@ -266,7 +266,7 @@ void main(
                                  ReadPcssProjection(g_psScene.m_shadowProjection, g_psScene.m_shadowProjection2, true),
                                  g_psScene.m_shadowProjection2, PcssNoise(v0.xy));
     }
-    // Only evaluate native taps when the custom filter could not supply visibility.
+    // Use the native shadow-map taps only when PCSS is off or could not filter.
     [branch]
     if (sun_pcss.filtered) {
       map_visibility = sun_pcss.visibility;
@@ -447,7 +447,7 @@ void main(
   r2.xyz = float3(-0, -0, -0) + r2.xyz;
   r1.xyz = r1.xyz * r0.xxx;
 #ifdef MGSV_CAPTURE_ENVIRONMENT_SPECULAR
-  // Exact environment contribution, before it is added to direct specular.
+  // The environment specular term alone, before it is added to direct specular.
   const float3 environment_specular = r1.xyz;
 #endif
   ApplyBendDebug(contact_shadow, r2.xyz, r0.yzw);
@@ -456,7 +456,8 @@ void main(
   r2.w = 1;
   o0.xyzw = r2.xyzw;
   o1.xyzw = r0.xyzw;
-  // Only replace diffuse RGB. Preserve alpha and the captured environment term.
+  // The shadow-map debug view replaces diffuse RGB only, keeping alpha and the
+  // captured environment term.
   if (map_debug) {
     o0.rgb = PcssDebug(sun_pcss, uint(CUSTOM_SHADOW_MAP_DEBUG_VIEW), PCSS_MAX_RADIUS);
   }

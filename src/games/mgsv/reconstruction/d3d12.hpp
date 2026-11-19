@@ -1,9 +1,11 @@
 #ifndef RENODX_GAMES_MGSV_RECONSTRUCTION_D3D12_HPP_
 #define RENODX_GAMES_MGSV_RECONSTRUCTION_D3D12_HPP_
 
-// Shared reconstruction transport. Native inputs stay on D3D11 until one
-// preparation dispatch decodes color and writes the shared color/motion/depth.
-// Evaluation and output encoding then run together on the bridge's D3D12 queue.
+// Moves a scene's inputs from D3D11 to D3D12 for every reconstruction method.
+// One D3D11 compute dispatch (prepare_reconstruction) decodes the scene color
+// and writes color, motion and depth into textures shared with D3D12. The
+// method's evaluation and the output encoding (encode_reconstruction) then run
+// together on the D3D12 bridge's queue.
 
 #include <array>
 #include <atomic>
@@ -58,11 +60,15 @@ struct Runtime {
   UINT height = 0u;
 };
 
-// Access is serialized by the reconstruction coordinator, including Present
-// transitions and NGX discovery. The D3D11 wait from each submission also keeps
-// the next input preparation from overwriting images D3D12 is still reading.
+// Used only under the coordinator's execution lock, including at Present and
+// while DLSS probes the device. Each submission queues a D3D11 wait on the
+// D3D12 work, so the next preparation cannot overwrite inputs D3D12 is still
+// reading.
 static Runtime runtime;
 
+// Live replacement of the preparation shader for the lighting probe
+// (probe_api.hpp). QueueProbeReload stores a request; the coordinator applies
+// it before the next reconstruction.
 struct ProbeUpdate {
   std::vector<uint8_t> code;
   uint64_t revision = 0u;
@@ -72,8 +78,9 @@ struct ProbeState {
   std::shared_mutex mutex;
   ProbeUpdate pending;
   probe::Status status;
-  // Only the rendering thread changes active bytes. Backend recreation can
-  // rebuild the selected shader without retaining an old graphics device.
+  // The probe bytecode in use, empty for the built-in shader. Kept as bytes so
+  // the shader can be rebuilt on a new device. Changed only during submission,
+  // under the execution lock.
   std::vector<uint8_t> active_code;
   bool report_submission = false;
 };
@@ -132,8 +139,9 @@ inline rendering::d3d12_bridge::Bridge& GetBridge(ID3D11Device* device) {
   return *runtime.bridge;
 }
 
-// Size/model/method changes and teardown may wait; ordinary frames never wait on the
-// CPU. Do not release SDK histories until their last queued use has completed.
+// Waits on the CPU until all queued D3D12 work is done. Only size, model and
+// method changes and teardown wait; ordinary frames never do. Release SDK
+// history only after its last queued use has completed.
 inline void Drain() {
   rendering::d3d12_bridge::Drain();
 }
@@ -167,6 +175,8 @@ inline InputTexture CreateInput(DXGI_FORMAT format, UINT width, UINT height) {
   return input;
 }
 
+// What a method's record callback gets for one scene: the D3D12 command list
+// and the shared inputs and output, already in shader-readable states.
 struct Evaluation {
   ID3D12Device* device;
   ID3D12GraphicsCommandList* commands;
@@ -181,14 +191,16 @@ struct Evaluation {
   rendering::d3d12_timing::Scope* timing;
 };
 
+// Writes an SDK's linear result to the output in the game's encoded scene
+// format, with alpha from the native scene.
 inline void Encode(const Evaluation& evaluation, ID3D12Resource* linear_output) {
   if (evaluation.timing != nullptr) {
     evaluation.timing->Mark("evaluate");
   }
   const UINT first = evaluation.frame->Allocate(3u);
   evaluation.device->CreateShaderResourceView(linear_output, nullptr, evaluation.frame->Cpu(first));
-  // Only alpha is read from this input. Its RGB is already linear, so there is
-  // no second scene import or copy just to preserve the game's DoF mask.
+  // Only alpha is read from the shared color input. The game's depth of field
+  // reads that alpha, and this avoids a second copy of the scene to keep it.
   evaluation.device->CreateShaderResourceView(evaluation.color, nullptr, evaluation.frame->Cpu(first + 1u));
   evaluation.device->CreateUnorderedAccessView(evaluation.output, nullptr, nullptr, evaluation.frame->Cpu(first + 2u));
   runtime.encode.Bind(evaluation.commands, *evaluation.frame, first);
@@ -197,6 +209,9 @@ inline void Encode(const Evaluation& evaluation, ID3D12Resource* linear_output) 
   evaluation.commands->Dispatch((static_cast<UINT>(target.Width) + 7u) / 8u, (target.Height + 7u) / 8u, 1u);
 }
 
+// Prepares the scene's inputs on D3D11, then records `record` (the method's
+// evaluation) on D3D12 and submits it. `reset` starts fresh history for this
+// scene. Returns false when the bridge rejects the submission.
 template <typename Record>
 [[nodiscard]] bool Execute(const ValidatedFrameInputs& inputs, bool reset, Record record) {
   auto* device = reinterpret_cast<ID3D11Device*>(inputs.device->get_native());            // NOLINT(performance-no-int-to-ptr)
@@ -204,7 +219,6 @@ template <typename Record>
   const bool analytical = state::GetTemporalMode() == state::TemporalMode::ANALYTICAL_TAA;
   const UINT width = inputs.render_width;
   const UINT height = inputs.render_height;
-  // Reuse the complete input bundle until the render dimensions change.
   auto& bridge = GetBridge(device);
   if (runtime.prepare == nullptr) {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> prepare;
@@ -224,9 +238,10 @@ template <typename Record>
     runtime.constants = std::move(constants);
     runtime.encode = std::move(encode);
   }
+  // The shared inputs are reused until the render size changes.
   if (runtime.width != width || runtime.height != height) {
     Drain();
-    // Construct all inputs before replacing the last usable set.
+    // Create all three before replacing the old set, so a failure keeps it.
     auto color = CreateInput(DXGI_FORMAT_R16G16B16A16_FLOAT, width, height);
     auto motion = CreateInput(DXGI_FORMAT_R16G16_FLOAT, width, height);
     auto depth = CreateInput(DXGI_FORMAT_R32_FLOAT, width, height);
@@ -250,7 +265,8 @@ template <typename Record>
       .reciprocal_render_size = {1.f / static_cast<float>(inputs.render_width), 1.f / static_cast<float>(inputs.render_height)},
       .current_to_previous_clip = inputs.camera.current_to_previous_clip,
   };
-  // Decode and prepare directly into shared textures, without a transfer copy.
+  // The preparation shader writes straight into the shared textures; there is
+  // no extra copy.
   D3D11_MAPPED_SUBRESOURCE mapped = {};
   Check(context->Map(runtime.constants.Get(), 0u, D3D11_MAP_WRITE_DISCARD, 0u, &mapped), "Map reconstruction constants");
   std::memcpy(mapped.pData, &constants, sizeof(constants));
@@ -325,8 +341,10 @@ template <typename Record>
   // Mostly the D3D11 signal, which makes the driver submit what the frame has queued so far.
   rendering::d3d12_timing::CpuSubmission::AddPart("queue calls", submission_timing.queue_us / 1000.);
   if (!succeeded && runtime.bridge->rejection != nullptr) {
-    // Rejected bindings never reach the SDK callback. They invalidate this
-    // scene's history, not the installed SDK. A partial GPU submission is fatal.
+    // A rejected submission never reached the method's callback, so only this
+    // scene fails and its history restarts. If the bridge is marked failed
+    // because a submission stopped partway, throw: the caller treats that as
+    // a method failure.
     if (runtime.bridge->failed) throw std::runtime_error(runtime.bridge->rejection);
     static uint64_t last_rejection_log = std::numeric_limits<uint64_t>::max();
     if (logging::ShouldLogFrame(state::CurrentFrameToken(), last_rejection_log)) {

@@ -1,4 +1,5 @@
-// Native environment-only lighting; capture its existing specular output separately.
+// Port of the native environment-only sun pass. The mod copies its specular
+// output to an extra target and clears reflection readiness.
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:23 2026
 
 cbuffer cPSScene : register(b2) {

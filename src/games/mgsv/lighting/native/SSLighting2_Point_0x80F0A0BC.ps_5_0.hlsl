@@ -1,4 +1,5 @@
-// Native point lighting with PCSS shadow-map filtering and Bend contact shadows.
+// Port of the native shadowed point light. The mod adds PCSS shadow-map filtering
+// and Bend Studio's screen-space contact shadows.
 #include "../../shared.h"
 #include "../shadows/pcss.hlsli"
 #include "../shadows/screen_space_shadows.hlsli"
@@ -188,7 +189,7 @@ void main(
                                      point_shadow_position, point_shadow_dx, point_shadow_dy,
                                      g_psLight.m_lightParams[7].z, PcssNoise(v0.xy));
     }
-    // Only evaluate native taps when the custom filter could not supply visibility.
+    // Use the native shadow-map taps only when PCSS is off or could not filter.
     [branch]
     if (point_pcss.filtered) {
       map_visibility = point_pcss.visibility;
@@ -212,8 +213,9 @@ void main(
   r0.y = r0.y * r0.z;
   r0.x = r0.x + r0.y;
   const float shadow_visibility = (1.0 + (r0.x - 1.0) * g_psLight.m_lightParams[8].z) * contact_shadow.visibility;
-  // Derivatives above must run for the entire quad before any pixel exits.
-  // Native material and BRDF lookup textures have one mip level.
+  // Skip fully shadowed pixels. The ddx/ddy above must run for the whole quad
+  // before any pixel exits; the material and BRDF lookups below need no
+  // derivatives because those textures have one mip level.
   [branch]
   if (shadow_visibility == 0.0 && !contact_shadow.diagnostic && !map_debug) {
     o0 = float4(0.0, 0.0, 0.0, 1.0);

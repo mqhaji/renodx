@@ -1,4 +1,5 @@
-// Native spot lighting with PCSS shadow-map filtering and Bend contact shadows.
+// Port of a native shadowed spot light. The mod adds PCSS shadow-map filtering
+// and Bend Studio's screen-space contact shadows.
 #include "../../shared.h"
 #include "../shadows/pcss.hlsli"
 #include "../shadows/screen_space_shadows.hlsli"
@@ -107,8 +108,8 @@ void main(
   r1.w = max(r6.w, r1.w);
   r6.xyz = r6.xyz * r4.www;
   r6.w = g_psMaterial.m_materials[7].w;
-  // This variant uses 1 - m_lightParams[6].z * distance^16 before inverse-square
-  // falloff. Bend's bounds must use this cutoff rather than the other spot's.
+  // This variant's falloff is (1 - m_lightParams[6].z * distance^16) / distance^2.
+  // The contact-shadow setup must use this cutoff, not the other spot variant's.
   r2.w = r2.w * r2.w;
   r2.w = r2.w * r2.w;
   r2.w = r2.w * r2.w;
@@ -178,7 +179,7 @@ void main(
                                    r9, shadow_projected_dx, shadow_projected_dy,
                                    ReadPcssProjection(g_psScene.m_shadowProjection, (float4x4)0, false), PcssNoise(v0.xy));
     }
-    // Only evaluate native taps when the custom filter could not supply visibility.
+    // Use the native shadow-map taps only when PCSS is off or could not filter.
     [branch]
     if (spot_pcss.filtered) {
       map_visibility = spot_pcss.visibility;
@@ -189,7 +190,7 @@ void main(
     }
   }
   spot_pcss.visibility = map_visibility;
-  // Preserve the native cone mask before its squared response and distance fade.
+  // Native order: the cone mask scales the shadow, then it is squared and faded.
   float masked_visibility = 1.0 - (1.0 - map_visibility) * r2.w;
   r0.x = masked_visibility * masked_visibility;
   r0.y = -r0.x;
@@ -197,8 +198,9 @@ void main(
   r0.y = r1.w * r0.y;
   r0.x = r0.x + r0.y;
   const float shadow_visibility = (1.0 + (r0.x - 1.0) * g_psLight.m_lightParams[8].z) * contact_shadow.visibility;
-  // Derivatives above must run for the entire quad before any pixel exits.
-  // Native material and BRDF lookup textures have one mip level.
+  // Skip fully shadowed pixels. The ddx/ddy above must run for the whole quad
+  // before any pixel exits; the material and BRDF lookups below need no
+  // derivatives because those textures have one mip level.
   [branch]
   if (shadow_visibility == 0.0 && !contact_shadow.diagnostic && !map_debug) {
     o0 = float4(0.0, 0.0, 0.0, 1.0);

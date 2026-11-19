@@ -1,5 +1,6 @@
-// A baked material cube can be separated from albedo only while its record
-// still describes the albedo that is visible.
+// Reads the material records that cube-map material ports write, for the
+// reflection, indirect lighting, and composition passes. A cube baked into albedo
+// can be removed only while its record still describes the visible albedo.
 #ifndef MGSV_MATERIAL_SOURCE_HLSLI_
 #define MGSV_MATERIAL_SOURCE_HLSLI_
 
@@ -10,8 +11,8 @@ uint PackMaterialUNorm(float4 value) {
   return bytes.x | (bytes.y << 8u) | (bytes.z << 16u) | (bytes.w << 24u);
 }
 
-// UNORM render-target conversion can choose the adjacent code at a rounding
-// boundary, and shader round() need not resolve ties the same way.
+// Allow one step per byte: the render target's UNORM conversion and shader
+// round() can round a value at a tie in different directions.
 bool MatchMaterialUNorm(uint stored, uint current) {
   const uint4 shift = uint4(0u, 8u, 16u, 24u);
   return all(abs(int4((stored >> shift) & 255u) - int4((current >> shift) & 255u)) <= 1);
@@ -30,8 +31,9 @@ bool MatchAlbedoUNorm(uint stored, uint current) {
 // - No record, or a record that is not the visible surface: that surface never
 //   had a cube, so its albedo is the answer.
 // - A record whose albedo still matches: the capture's cube-free color.
-// - A record whose albedo no longer matches: a later writer, such as a decal,
-//   changed this surface, and the cube's remaining share is unknown.
+// - A record whose albedo no longer matches, or that has no captured color: a
+//   later writer such as a decal changed this surface, or the draw was blended,
+//   so the cube's remaining share is unknown.
 //
 // A record is the visible surface when it was written at this depth. A cube
 // draw that does not write depth leaves a record at another depth; it is the

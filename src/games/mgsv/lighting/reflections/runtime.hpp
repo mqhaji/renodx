@@ -33,6 +33,11 @@
 #include "../indirect_lighting_mode.hpp"
 #include "probe_api.hpp"
 
+// Enhanced reflections. At deferred composition, Capture records the scene's
+// reflection inputs. At the native reflection composite, BeginComposite
+// schedules Execute just before the draw. Execute prepares shared inputs with
+// one D3D11 compute pass, then records on D3D12: depth mips, the GGX trace, NRD
+// denoising, and the resolve into the shared result, which the composite reads.
 namespace mgsv::lighting::reflections {
 
 namespace bridge_api = rendering::d3d12_bridge;
@@ -71,15 +76,15 @@ struct ImageView {
 
 struct Frame {
   compute::Frame arena;
-  // Descriptors do not retain COM objects. Keep shared outputs alive until the
-  // bridge retires this slot, including outputs superseded by a native resize.
+  // Descriptors do not hold COM references. Keep the shared outputs alive until
+  // this slot's GPU work completes, even after a native resize replaces them.
   std::shared_ptr<specular_result::Target> result;
   std::array<bridge_api::SharedImage, 2> outputs;
   bridge_api::SharedImage environment;
 };
 
-// Keep preparation and every DX12 stage in one set. A reload either creates
-// this entire set successfully or leaves the current set intact.
+// The D3D11 preparation shader and every D3D12 stage, kept as one set. A probe
+// reload either creates the entire set or leaves the current set intact.
 struct Pipelines {
   Microsoft::WRL::ComPtr<ID3D11ComputeShader> prepare;
   compute::Pipeline mips;
@@ -103,6 +108,8 @@ struct Pipelines {
   }
 };
 
+// Probe requests and status. The probe callbacks below only queue requests;
+// Execute applies them at the next reflection submission.
 struct ReloadState {
   std::shared_mutex mutex;
   std::array<std::vector<uint8_t>, probe::PASS_COUNT> shaders;
@@ -227,8 +234,9 @@ struct Runtime {
   bool report_probe_submission = false;
 };
 
-// The existing coordinator serializes this runtime with reconstruction. Both
-// consumers share one device, queue and fence pair, but have separate slots.
+// The reconstruction coordinator never runs this and reconstruction at the same
+// time. Both share one D3D12 device, queue, and fence pair, but have separate
+// command slots.
 static Runtime runtime;
 
 // Report changes, including missing native inputs, without writing every frame.
@@ -276,13 +284,14 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
     Report("MgsvReflections: missing material palette; retaining environment lighting");
     return;
   }
-  // The submitted camera owns the noise phase, motion and history. A worker's
-  // latest publication or a Present counter cannot identify this scene.
+  // Take the noise phase, motion, and history from the camera record submitted
+  // with this scene. A worker's latest camera or a Present counter could belong
+  // to another scene.
   const auto scene = temporal_inputs::Read(cmd_list->get_device(), {reinterpret_cast<uintptr_t>(views[4].Get())});
   const auto camera = reconstruction::camera_state::GetForCapture();
   views[8] = scene.motion.velocity;
   views[11] = scene.motion.object_velocity;
-  // Allocate on the first scene or a resize; steady frames reuse pipelines,
+  // Allocate on the first scene or a resize. Other frames reuse the pipelines,
   // shared inputs, descriptors, and private ray outputs.
   const UINT width = inputs.result->width;
   const UINT height = inputs.result->height;
@@ -312,8 +321,8 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
     return input;
   };
   if (runtime.device != bridge.device12) {
-    // Backend teardown drains its queue before releasing it. A replacement
-    // device cannot consume descriptors or images from the previous one.
+    // The bridge drains its queue before releasing an old device. A new device
+    // cannot use descriptors or images from the previous one, so start over.
     runtime = {};
     runtime.device = bridge.device12;
     const std::unique_lock lock(reload.mutex);
@@ -328,9 +337,9 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
     const D3D11_BUFFER_DESC description = {.ByteWidth = sizeof(Constants), .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_CONSTANT_BUFFER};
     Check(bridge.device11->CreateBuffer(&description, nullptr, &runtime.constants), "Create reflection controls");
     runtime.brdf = compute::CreateTexture(bridge.device12.Get(), 128u, 128u, DXGI_FORMAT_R16G16B16A16_FLOAT);
-    // Upload the existing sampling data once, then read the same allocation
-    // directly from DX12. This small atlas needs no per-frame copy or dispatch.
-    // Flattening its layers keeps all reflection inputs ordinary 2D views.
+    // Upload the sampling noise once into a shared texture that D3D12 reads
+    // directly, with no per-frame copy or dispatch. Its 32 layers are stacked
+    // vertically, so every reflection input is an ordinary 2D view.
     const D3D11_SUBRESOURCE_DATA noise_data = {.pSysMem = FAST_NOISE_RG8.data(), .SysMemPitch = 128u * 2u};
     runtime.sampling_noise = create_input(128u, 128u * 32u, DXGI_FORMAT_R8G8_UNORM, 1u, &noise_data);
     const D3D12_HEAP_PROPERTIES heap = {.Type = D3D12_HEAP_TYPE_DEFAULT};
@@ -345,9 +354,9 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
     try {
       Pipelines replacement;
       replacement.Create(bridge.device11.Get(), bridge.device12.Get(), reload.shaders);
-      // This explicit development operation may stall once. Drain before
-      // releasing old PSOs or rebuilding the lookup table; steady frames do
-      // not wait on the CPU, inspect files, or compile shaders.
+      // A probe reload may stall once: drain before releasing the old
+      // pipelines or rebuilding the BRDF table. Normal frames never wait on the
+      // CPU, read files, or compile shaders.
       bridge_api::Drain();
       runtime.pipelines = std::move(replacement);
       runtime.brdf_ready = false;
@@ -376,8 +385,8 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
     runtime.inputs[5] = create_input(width, height, DXGI_FORMAT_R16G16_FLOAT);
     runtime.inputs[6] = create_input(width, height, DXGI_FORMAT_R10G10B10A2_UNORM);
     runtime.inputs[7] = create_input(width, height, DXGI_FORMAT_R32_FLOAT);
-    // Preparation writes directly into the shared source and depth. Only depth
-    // needs a hierarchy; source radiance keeps its original pixel footprint.
+    // Preparation writes directly into the shared source color and depth. Only
+    // depth needs a mip chain; source color keeps its original pixel footprint.
     runtime.depth = runtime.inputs[3].image.resource;
     runtime.color = runtime.inputs[0].image.resource;
     for (auto& texture : runtime.raw) {
@@ -387,8 +396,8 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
     runtime.filtered = compute::CreateTexture(bridge.device12.Get(), width, height, DXGI_FORMAT_R16G16B16A16_FLOAT);
     runtime.history_valid = false;
   }
-  // Load the SDK once. Missing or incompatible DLLs keep the complete raw
-  // estimator available and produce a useful warning without retrying per frame.
+  // Load NRD once. If its DLL is missing or incompatible, log a warning once and
+  // use the raw, undenoised estimate instead of retrying every frame.
   if (!runtime.denoiser_attempted) {
     runtime.denoiser_attempted = true;
     try {
@@ -446,8 +455,8 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
       reshade::log::message(reshade::log::level::warning, error.what());
     }
     runtime.history_valid = false;
-    // These are explicit diagnostic requests, not saved gameplay settings.
-    // Constants are copied per submission, so changing them needs no queue drain.
+    // These are diagnostic requests, not saved settings. The settings reach
+    // the GPU as per-submission constants, so changing them needs no queue drain.
   }
   // Every private pass begins and ends in COMMON. The views name exact mip
   // subresources, so a reduction can read one level while writing the next.
@@ -506,9 +515,10 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
                           && occlusion_strength == runtime.previous_occlusion_strength
                           && rays_per_pixel == runtime.previous_rays_per_pixel;
   if (same_scene) {
-    // This output is still the last submitted result for this exact view build.
-    // Its bridge wait is already in the immediate stream; replay needs neither
-    // another denoiser update nor another cross-API handoff.
+    // The result already holds the last submission for this exact view build,
+    // as when a cached command list is replayed, and the D3D11 wait for it is
+    // already queued. Mark it ready again without another denoiser update or
+    // cross-API handoff.
     const std::array<float, 4> ready = {1.f, 0.f, 0.f, 0.f};
     context->ClearUnorderedAccessViewFloat(inputs.result->ready.uav.Get(), ready.data());
     return;
@@ -577,8 +587,8 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
   if (!use_denoiser) constants.flags &= ~2u;
   std::optional<probe::CameraSnapshot> camera_capture;
   if (use_denoiser && camera_capture_pending.load(std::memory_order_acquire)) {
-    // This is a bounded CPU snapshot, with no GPU readback or desktop capture.
-    // Its scene sample joins it to preparation's GPU-captured native constants.
+    // A bounded CPU snapshot with no GPU readback. Its scene sample matches it
+    // with the native scene constants that preparation copies on the GPU.
     camera_capture.emplace();
     camera_capture->scene = owner.scene;
     camera_capture->owner_generation = owner.generation;
@@ -625,8 +635,9 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
                                                     D3D11_BIND_SHADER_RESOURCE, environment.shared.get(), &bridge.statistics.image_imports);
         if (!frame.environment.direct) throw std::runtime_error("Reflection environment must be directly shared");
       }
-      // Import the prepared source and exact native scene bytes. All later
-      // intermediate images stay private to DX12 until the final resolve.
+      // Copy the native scene constants, which preparation wrote to a shared
+      // texture, into a D3D12 constant buffer. Intermediate images stay private
+      // to D3D12 until the resolve writes the shared result.
       auto* scene_texture = runtime.inputs[4].image.resource.Get();
       compute::Transition(dispatch.commands, scene_texture, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
       compute::Transition(dispatch.commands, runtime.scene.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -702,8 +713,9 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
     succeeded = bridge.ExecuteWork(context, {.id = owner.scene, .generation = owner.generation},
                                    &runtime.commands, record_reflections, prepare_inputs, publish_output, false);
   } catch (...) {
-    // A partially recorded SDK sequence must not reuse its CPU-side pool
-    // states. Retain allocations until retirement, but use raw light afterward.
+    // After a partially recorded NRD sequence, its CPU-side pool state cannot
+    // be trusted. Keep its allocations until the slot completes, and use the
+    // raw estimate from then on.
     runtime.denoiser_usable = false;
     runtime.history_valid = false;
     rendering::d3d11_compute_state::Restore(cmd_list, saved);
@@ -767,8 +779,9 @@ inline void OnResetCommandList(reshade::api::command_list* cmd_list) {
 
 inline void Capture(reshade::api::command_list* cmd_list) {
   if (!UsesEnhancedIndirectLighting() || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return;
-  // A failed capture must invalidate an earlier association for this owner.
-  // Publish this beside the draw, so worker recording order cannot select it.
+  // Publish an empty record first, in this command list, so a capture that
+  // fails below replaces this view's earlier inputs instead of leaving them
+  // selected.
   temporal_inputs::Record(cmd_list, {
                                         .device = cmd_list->get_device(),
                                         .generation = mgsv::inputs::ReadSelection(cmd_list->get_device()).generation,
@@ -807,8 +820,9 @@ inline void Capture(reshade::api::command_list* cmd_list) {
   }
   inputs.views[2] = environment->normal;
   inputs.views[3] = environment->material;
-  // Records exist only where a cube material drew into this G-buffer. Without
-  // any, preparation reads every surface as free of a baked cube.
+  // Material records exist only where a material that bakes a cube map into
+  // albedo drew into this G-buffer. Without them, preparation treats every
+  // surface as having no baked cube map.
   if (material != nullptr) {
     inputs.views[5] = material->color_srv;
     inputs.views[6] = material->owner_srv;
@@ -816,8 +830,9 @@ inline void Capture(reshade::api::command_list* cmd_list) {
   inputs.views[9] = environment->srv;
   inputs.generation = environment->generation;
 
-  // Freeze the bound range, not the worker's mutable backing buffer. Copying
-  // it here places its bytes before the insertion in the same native list.
+  // Copy the bound 480-byte range of the scene constants at b2, because the
+  // game rewrites that buffer. The copy is recorded in this command list, so it
+  // runs before the reflection work that reads it.
   Microsoft::WRL::ComPtr<ID3D11DeviceContext1> ranged;
   Microsoft::WRL::ComPtr<ID3D11Buffer> scene;
   UINT first = 0u;
@@ -844,8 +859,9 @@ inline void Capture(reshade::api::command_list* cmd_list) {
                                     });
 }
 
-// The native compositor still performs the scene-target change. Insert the
-// trace immediately before it, after sky and forward lighting have contributed.
+// Runs at the native reflection composite, which still writes the scene. Insert
+// the reflection work just before it, after sky and forward lighting have
+// drawn, and bind the result at t18-t21 for the composite to read.
 inline bool BeginComposite(reshade::api::command_list* cmd_list) {
   if (!UsesEnhancedIndirectLighting()) return true;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
@@ -878,7 +894,7 @@ inline bool BeginComposite(reshade::api::command_list* cmd_list) {
   if (state == nullptr) return true;
   std::array<ID3D11ShaderResourceView*, 4> outputs = {};
   if (result != nullptr) {
-    // Bound readiness tells the compositor this view's native trace was
+    // Bound readiness tells the composite this view's native trace was
     // canceled. If the late scene is unusable, readiness stays unavailable and
     // the scene is left unchanged instead of exposing the canceled trace.
     outputs[3] = result->ready.srv.Get();
@@ -887,8 +903,8 @@ inline bool BeginComposite(reshade::api::command_list* cmd_list) {
     outputs = {result->images[0].srv.Get(), result->images[1].srv.Get(), result->environment.srv.Get(), result->ready.srv.Get()};
     const auto trace_scene = [source, material_resource, result](auto* submitted, bool) {
       try {
-        // Read the association at submission, not worker recording time.
-        // Different scenes can record into the same pooled material target.
+        // Look up this scene's inputs at submission, not at worker recording
+        // time. Different scenes can record into the same pooled material target.
         const auto owner = engine::views::GetScope().owner;
         std::shared_ptr<const Inputs> captured;
         {
@@ -903,8 +919,8 @@ inline bool BeginComposite(reshade::api::command_list* cmd_list) {
           }
         }
         auto* context = reinterpret_cast<ID3D11DeviceContext*>(submitted->get_native());  // NOLINT(performance-no-int-to-ptr)
-        // Failed or unavailable work keeps native environment light. The
-        // canceled native trace must never expose its old pooled texture.
+        // Clear readiness first, so failed or unavailable work keeps native
+        // environment light and never exposes the canceled trace's old texture.
         const std::array<float, 4> fallback = {};
         context->ClearUnorderedAccessViewFloat(result->ready.uav.Get(), fallback.data());
         if (captured == nullptr || captured->result != result) {
@@ -921,15 +937,16 @@ inline bool BeginComposite(reshade::api::command_list* cmd_list) {
       }
     };
     if (!reconstruction::coordinator::ScheduleLighting(cmd_list, trace_scene)) {
-      // Native trace selection already wrote the fallback marker in order.
-      // Preserve it when the late insertion cannot be scheduled.
+      // native_chain::OnTrace already cleared readiness in GPU order, so the
+      // composite keeps environment light.
       Report("MgsvReflections: could not insert work at native reflection composition");
     }
   } else {
     Report("MgsvReflections: missing late scene or reflection material target");
   }
-  // Scheduling can finish the prefix and reset recording-local private data.
-  // Save displaced inputs afterward, so EndComposite can always restore them.
+  // Scheduling can close the command list recorded so far and reset its
+  // private data. Save the displaced inputs afterward, so EndComposite can
+  // always restore them.
   std::array<ID3D11ShaderResourceView*, 4> previous = {};
   context->PSGetShaderResources(18u, static_cast<UINT>(previous.size()), previous.data());
   for (size_t index = 0u; index < previous.size(); ++index) state->previous[index].Attach(previous[index]);

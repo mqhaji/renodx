@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: MIT
 #include "common.hlsli"
 
+// Enhanced reflection trace. For each receiver, sample 1 to 4 GGX reflection
+// directions and march each through the nearest-depth pyramid. A hit gathers
+// linear scene radiance; the rest falls back to the saved environment.
+// reflected_light holds the averaged demodulated light (material response
+// divided out) and normalized hit distance in NRD REBLUR packing.
+// environment_weight holds the importance weight left for the environment in
+// RGB and, in alpha, the fraction of rays not blocked by geometry.
+
 Texture2D<float> depth_pyramid : register(t0);
 Texture2D<float4> source_radiance : register(t1);
 Texture2D<float4> normals : register(t2);
@@ -14,8 +22,9 @@ SamplerState linear_clamp : register(s1);
 
 static const uint MAX_TRACE_STEPS = 128u;
 
-// Trace the projected segment through nearest-depth cells. Reciprocal view
-// depth is linear along this segment; view depth itself is not.
+// Trace the projected segment through nearest-depth cells, moving up a level
+// after an empty cell and down when a cell may hold a hit. Reciprocal view
+// depth is linear along the screen-space segment; view depth itself is not.
 bool TraceReflection(float3 origin, float3 direction, int2 receiver, out float2 hit_uv, out float distance) {
   hit_uv = 0.0;
   distance = 0.0;
@@ -106,18 +115,20 @@ bool TraceReflection(float3 origin, float3 direction, int2 receiver, out float2 
   const float4 material = materials.Load(int3(pixel, 0));
   if (guide.a < 0.0 || material.a <= 0.0) return;
 
-  // Reuse the receiver, material response and tangent frame for all rays.
-  // The GGX proposal also keeps each tracking distance in the specular lobe;
-  // the radiance estimate still evaluates both scattering terms below.
+  // The receiver, material response and tangent frame are shared by all rays.
+  // Directions are sampled from the GGX lobe, so each hit distance tracks the
+  // specular reflection; the radiance estimate still evaluates both single
+  // and multiple scattering below.
   const float3 position = GetReflectionPosition(float2(pixel) + 0.5, depth_pyramid.Load(int3(pixel, 0)));
   const float3 view = normalize(-position);
   const float3 normal = guide.xyz * (dot(guide.xyz, view) < 0.0 ? -1.0 : 1.0);
   const float3 tangent = normalize(cross(abs(normal.z) < 0.999 ? float3(0.0, 0.0, 1.0) : float3(0.0, 1.0, 0.0), normal));
   const float3 bitangent = cross(normal, tangent);
   const float3 local_view = float3(dot(view, tangent), dot(view, bitangent), dot(view, normal));
-  // Read the existing FAST sequence on this pass's pixel grid. The 32 layers
-  // are stored vertically; scene samples, not Present calls, choose the layer.
-  // Decode each byte at its bin center to keep the GGX input strictly in (0, 1).
+  // Read the FAST noise atlas on this pass's pixel grid. Its 32 layers are
+  // stacked vertically; the scene's camera sample, not Present, picks the
+  // layer. Decode each byte at its bin center to keep the GGX input strictly
+  // inside (0, 1).
   const uint2 noise_pixel = uint2(id.x & 127u, (id.y & 127u) + (reflection_sample & 31u) * 128u);
   const float2 noise = (sampling_noise.Load(int3(noise_pixel, 0)) * 255.0 + 0.5) / 256.0;
   const float no_v = saturate(local_view.z);
@@ -139,21 +150,22 @@ bool TraceReflection(float3 origin, float3 direction, int2 receiver, out float2 
   float visibility_sum = 0.0;
   float tracking_distance = NRD_FrontEnd_SpecHitDistAveraging_Begin();
   [loop] for (uint ray = 0u; ray < reflection_rays_per_pixel; ++ray) {
-    // Add up to four strata in the original 2x2 pattern. Shifting uniform
-    // noise keeps each proposal uniform at every count; no bright samples or
-    // BRDF tails are cut.
+    // Rays 1 to 4 shift the noise by half a period in a 2x2 pattern. A shifted
+    // uniform sample is still uniform, so no bright samples or BRDF tails are
+    // cut at any ray count.
     const float2 sample = frac(noise + float2(ray & 1u, ray >> 1u) * 0.5);
     const float3 local_half = SampleSpecularVisibleNormal(local_view, alpha, sample);
     const float3 sampled_half = tangent * local_half.x + bitangent * local_half.y + normal * local_half.z;
     const float3 direction = reflect(-view, sampled_half);
     const float no_l = dot(normal, direction);
     if (no_l <= 0.0) {
-      // A below-surface proposal contributes zero radiance and no tracking hit.
+      // A direction below the surface contributes zero radiance and no hit.
       visibility_sum += 1.0;
       continue;
     }
 
-    // Evaluate the complete reciprocal BRDF over the visible-GGX proposal PDF.
+    // Evaluate the full BRDF (single plus reciprocal multiple scattering) over
+    // the visible-normal GGX sampling PDF.
     const float3 half_vector = normalize(view + direction);
     const float no_h = saturate(dot(normal, half_vector));
     const float light_root = sqrt(a2 + (1.0 - a2) * no_l * no_l);
@@ -189,6 +201,8 @@ bool TraceReflection(float3 origin, float3 direction, int2 receiver, out float2 
       if (sky_hit || (all(isfinite(hit_normal.xyz)) && dot(hit_normal.xyz, -direction) > 0.0)) {
         const float4 source = source_radiance.SampleLevel(linear_clamp, hit_uv, 0.0);
         if (source.a > 0.0 && all(isfinite(source))) {
+          // Fade screen light out near the screen edge; the rest of the
+          // weight falls back to the environment.
           const float edge = min(min(hit_uv.x, hit_uv.y), min(1.0 - hit_uv.x, 1.0 - hit_uv.y));
           const float confidence = smoothstep(0.0, 0.025, edge);
           light = source.rgb * weight * confidence;

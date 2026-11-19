@@ -7,6 +7,11 @@
 
 #include "../pcss.hlsli"
 
+// Runs as a single group for one batch of lights. Builds each light's record
+// (projected light, receiver bounds, and up to eight sweep dispatches), admits
+// lights in draw order while atlas space and the spot budget last, then writes
+// the indirect arguments for the clear and trace dispatches.
+
 struct BendDispatch {
   int3 groups;
   int2 offset;
@@ -256,8 +261,10 @@ void main(uint thread : SV_GroupIndex) {
     // Admit lights in the order their draws execute, which the host supplies
     // because parallel jobs append their lights in any order. The atlas space
     // and the spot budget go to the first lights in that order; a light that
-    // does not fit, or a spot past the budget, keeps native shadows. Each
-    // budgeted spot that fits counts, as the GPU-ordered counter always has.
+    // does not fit, or a spot past the budget, keeps native shadows. Every
+    // budgeted spot that fits the atlas counts toward the budget, including one
+    // the budget then rejects. The count lives in bend_spot_budget, which the
+    // host shares across the lighting pass.
     const uint spot_budget = spot_budget_enabled ? uint(min(CUSTOM_SPOT_CONTACT_SHADOW_BUDGET, 2147483520.0)) : 0u;
     uint spots = spot_budget_enabled ? bend_spot_budget.Load(0) : 0u;
     uint atlas_free = batch.y * batch.z;

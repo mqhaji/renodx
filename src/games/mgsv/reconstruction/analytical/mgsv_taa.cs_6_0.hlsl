@@ -1,9 +1,12 @@
 #include "../../shared.h"
 #include "../../rendering/motion.hlsli"
 
-// Resolve in linear light. Shared input preparation already removed gamma and
-// decoded motion. History stays private to D3D12; this pass also encodes the
-// completed scene directly into the shared game destination.
+// Analytical TAA resolve: one D3D12 compute dispatch per reconstructed scene,
+// at native output size. Reads the linear color, motion, and depth that
+// prepare_reconstruction wrote, plus last frame's linear history. Writes the new
+// linear history and the game-encoded scene into the shared output, so this
+// method needs no separate encode pass. b0 (the shared preparation constants)
+// is bound but not read here.
 
 Texture2D<float4> current_color_texture : register(t0);
 Texture2D<float4> previous_history_texture : register(t1);
@@ -116,14 +119,15 @@ Neighborhood BuildCurrentNeighborhood(uint2 group_thread, float3 center_color) {
   return neighborhood;
 }
 
-// The optional diagnostic input preserves native UV motion and object coverage.
+// The game's decoded motion (current minus previous UV). The diagnostic
+// input stores it in .rg and the object mask in .b.
 float2 DecodeVelocity(float2 uv) {
   return motion_debug_texture.SampleLevel(point_sampler, uv, 0).rg;
 }
 
-// MGSV uses positive reverse-Z here, so the largest raw depth identifies the
-// nearest visible surface. This selection preserves thin foreground geometry
-// that was lost when the farther, smallest-absolute-depth sample supplied motion.
+// Picks the nearest of the center and four diagonal pixels, so thin foreground
+// edges take their motion from the foreground surface. With reverse-Z the
+// largest raw depth is nearest; on a tie the later tap wins.
 VelocitySelection SelectNearestVelocity(
     float2 uv,
     float2 inv_screen_size,
@@ -168,9 +172,10 @@ float4 CatmullRomWeights(float fraction) {
       0.5f * (fraction_cubed - fraction_squared));
 }
 
-// Interpolate linear history directly. Keep point reads for the sixteen taps:
-// hardware bilinear weights can move a sample across a narrow clipping bound.
-// The signed outer lobes preserve detail without decoding each history tap.
+// Catmull-Rom filter over sixteen point reads of the linear history. History is
+// stored linear, so no tap needs decoding. Point reads keep every weight exact,
+// where hardware bilinear filtering could move a sample across a narrow clipping
+// bound. The negative outer lobes keep detail sharp.
 float3 SampleHistoryCatmullRom(float2 uv, float2 screen_size) {
   const float2 position = uv * screen_size - 0.5f;
   const int2 base = int2(floor(position));
@@ -257,9 +262,10 @@ float ComputeHistoryBlend(float3 history_color, float3 clip_min, float3 clip_max
   }
 
   const float2 velocity = -velocity_texture.SampleLevel(point_sampler, velocity_selection.uv, 0).xy;
-  // Do not add previous-current jitter here. That follows the current jittered
-  // scene sample instead of accumulating the selected jitter phases at a fixed output
-  // pixel, which makes the projection pattern visible as whole-screen shake.
+  // The prepared motion excludes jitter. Do not add the jitter change between
+  // frames here: history would then follow each jittered sample instead of
+  // accumulating samples at a fixed output pixel, and the jitter pattern would
+  // show as whole-screen shake.
   const float2 history_uv = uv - velocity;
 
   const float3 history_color = IsInsideScreen(history_uv)
@@ -282,6 +288,7 @@ float ComputeHistoryBlend(float3 history_color, float3 clip_min, float3 clip_max
   const float3 resolved = lerp(clipped_history, neighborhood.filtered_color, blend);
   float3 output_color = resolved;
   bool exact_raw_current = false;
+  // The TAA Diagnostic View setting replaces the output; 0 is the normal resolve.
   if (diagnostic_view >= 0.5f && diagnostic_view < 1.5f) {
     exact_raw_current = true;
   } else if (diagnostic_view >= 1.5f && diagnostic_view < 2.5f) {

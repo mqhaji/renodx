@@ -1,5 +1,6 @@
-// Shared native geometry constants, view-depth/position reconstruction, and
-// packed-normal decoding for the screen-space lighting trace and filters.
+// The engine's geometry constants (bound at b0 for the skin-scatter passes),
+// view depth and position reconstruction, and packed-normal decoding, shared by
+// the screen-space lighting trace and its filters.
 
 #pragma once
 
@@ -16,16 +17,16 @@ cbuffer MGSVGeometryConstants : register(b0) {
   float padding : packoffset(c3.w);
 }
 
-// Linear view depth, the same expression the retail passes use.
+// Linear view depth, using the same expression as the game's passes.
 float LinearZ(float depth) {
   return projection_parameters.z / max(depth - projection_parameters.w, 1e-6);
 }
 
 // View position from the integer coordinates used to load a full-resolution texel.
-// Native scatter2 (0xB2601810) divides those coordinates by the buffer size without
-// adding a half pixel. Flip screen Y before subtracting the camera-center offset;
-// keep the signed projection factors, including the native negative X scale.
-// The native upload hook includes this scene's projection jitter in the center.
+// Like the native second skin-scatter pass (0xB2601810), divide them by the buffer
+// size without adding a half pixel. Flip screen Y before subtracting the camera
+// center offset, and keep the signed projection factors, including the engine's
+// negative X scale. The center offset already includes this scene's jitter.
 float3 ViewPos(float2 pixel, float z) {
   const float2 ndc = pixel / float2(buffer_width, buffer_height) * 2.0 - 1.0;
   return float3((float2(ndc.x, -ndc.y) - camera_center_offset.xy)
@@ -33,9 +34,9 @@ float3 ViewPos(float2 pixel, float z) {
                 z);
 }
 
-// Native UNORM view-space packing: enc.xy = normal.xy * 0.5 + 0.5 and
-// enc.z = sqrt(normal.z * 0.5 + 0.5). Reconstruct XY with the retail decoder's
-// epsilon, then normalize as native scatter2 does for directional comparisons.
+// The engine packs view-space normals as UNORM: enc.xy = normal.xy * 0.5 + 0.5
+// and enc.z = sqrt(normal.z * 0.5 + 0.5). Rebuild XY with the game decoder's
+// epsilon, then normalize as the second skin-scatter pass does for comparisons.
 float3 DecodeNormal(float3 enc) {
   const float2 xy = enc.xy * 2.0 - 1.0;
   const float nz = 2.0 * enc.z * enc.z - 1.0;

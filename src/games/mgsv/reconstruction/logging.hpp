@@ -1,10 +1,9 @@
 #pragma once
 
 /*
- * Lightweight logging helpers for the MGSV TAA runtime.
- *
- * Native-hook handshakes, input rejection, and dispatch decisions remain
- * visible in ReShade.log without a rebuild.
+ * Logging helpers for temporal reconstruction. Messages go to ReShade.log with
+ * an "MgsvTaa: " prefix. Hook installation, rejected inputs and scheduling
+ * decisions are logged in normal builds; MGSV_TAA_LOGGING=0 compiles them out.
  */
 
 #include <cstdint>
@@ -65,6 +64,8 @@ inline void Warn(Args&&... args) {
 #endif
 }
 
+// Rate limit for messages that could repeat every frame: true at most once per
+// `interval` frames for each `last_logged` counter.
 inline bool ShouldLogFrame(uint64_t frame, uint64_t& last_logged, uint64_t interval = 120u) {
   if (last_logged == std::numeric_limits<uint64_t>::max() || frame - last_logged >= interval) {
     last_logged = frame;

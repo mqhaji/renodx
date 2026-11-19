@@ -14,9 +14,10 @@ namespace mgsv::rendering {
 
 using SharedHandle = std::unique_ptr<void, decltype([](void* handle) { CloseHandle(handle); })>;
 
-// The allocation owns its export and cached import. Command slots can rotate
-// independently without opening the same image again. Slots retain their own
-// COM references, so replacing this cache cannot release an in-flight image.
+// One shareable D3D11 texture's exported NT handle and its cached D3D12 import.
+// Bridge command slots can rotate without opening the same image again. Each
+// slot keeps its own COM references, so replacing this cache cannot release an
+// image the GPU is still using.
 struct SharedTexture {
   std::shared_mutex mutex;
   SharedHandle handle;

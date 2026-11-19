@@ -25,6 +25,10 @@
 #include "d3d12_timing.hpp"
 #include "shared_texture.hpp"
 
+// Runs the mod's D3D12 compute work (DLSS, FSR, Analytical TAA, reflections) for
+// the game's D3D11 renderer on one D3D12 device and queue. Images are shared
+// between the APIs, and fences order each submission on the GPU: D3D11 signals,
+// D3D12 waits and runs, then D3D11 waits before it reads the result.
 namespace mgsv::rendering::d3d12_bridge {
 
 inline void Check(HRESULT result, const char* operation) {
@@ -33,8 +37,8 @@ inline void Check(HRESULT result, const char* operation) {
 
 inline Microsoft::WRL::ComPtr<IUnknown> GetDeviceIdentity(ID3D11Device* device) {
   // ReShade can return its device proxy from a native texture's GetDevice.
-  // Its published association is shared by both interfaces. Compare that
-  // object's COM identity so wrappers cannot make one device look like two.
+  // The proxy and the native device publish the same association, so compare
+  // that object's COM identity; otherwise one device could look like two.
   constexpr GUID reshade_device = {.Data1 = 0x72299288, .Data2 = 0x2C68, .Data3 = 0x4AD8, .Data4 = {0x94, 0x5D, 0x2B, 0xFB, 0x5A, 0xA9, 0xC6, 0x09}};
   IUnknown* proxy = nullptr;
   UINT size = sizeof(proxy);
@@ -65,8 +69,8 @@ struct SharedImage {
   SharedImage() = default;
   SharedImage(ID3D11Device* device11, ID3D12Device* device12, ID3D11Texture2D* original,
               const D3D11_TEXTURE2D_DESC& description, UINT binding, SharedTexture* shared_texture, uint64_t* import_count) {
-    // Addon-owned images can be shared at creation. Import that allocation
-    // directly. A native game image may still require a shared copy.
+    // Images the mod creates as shareable are imported directly. A game image
+    // usually is not shareable, so it goes through a shared copy instead.
     direct = shared_texture != nullptr && CanImport(description, binding);
     const D3D11_TEXTURE2D_DESC shared_description = {
         .Width = description.Width,
@@ -84,8 +88,9 @@ struct SharedImage {
     } else {
       Check(device11->CreateTexture2D(&shared_description, nullptr, &texture), "Create shared image");
     }
-    // Existing allocations carry their producer's handle. Re-exporting the
-    // same texture for each in-flight slot would violate DXGI's one-export rule.
+    // A shareable image already carries the handle its creator exported.
+    // Exporting the same texture again for each slot would break DXGI's rule
+    // of one export per texture.
     const auto exported = (direct ? std::shared_ptr<SharedTexture>{} : ExportTexture(texture.Get()));
     auto* shared = (direct ? shared_texture : exported.get());
     if (shared == nullptr) throw std::runtime_error("Export shared image failed");
@@ -101,13 +106,15 @@ struct SharedImage {
   }
 };
 
-// A recording callback borrows these objects for this call only. Both images
-// enter and leave the callback in COMMON. The callback records a complete pass.
+// A recording callback borrows these objects for this call only and records a
+// complete pass. Both images are in the COMMON state when the callback starts
+// and must be back in COMMON when it returns.
 struct Dispatch {
   ID3D12GraphicsCommandList* commands = nullptr;
   ID3D12Resource* input = nullptr;
   ID3D12Resource* output = nullptr;
-  // Pass-owned descriptor and constant storage follows this slot's retirement.
+  // A pass keeps descriptors and constants per slot; they are free to reuse once
+  // this slot retires.
   size_t slot_index = 0u;
   // GPU timing of this recording, active only on a diagnostic request.
   d3d12_timing::Scope* timing = nullptr;
@@ -149,8 +156,8 @@ struct SubmissionTiming {
 };
 
 // The caller serializes submission and destruction with the D3D11 immediate
-// context. GPU waits order the APIs. CPU completion checks protect allocator
-// reset and pool reuse without waiting in the render loop.
+// context. GPU waits order the two APIs. Fence values checked on the CPU guard
+// allocator reset and slot reuse without waiting in the render loop.
 class Bridge {
  public:
   static constexpr size_t MAX_IN_FLIGHT = 4u;
@@ -162,7 +169,8 @@ class Bridge {
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commands;
     D3D11_TEXTURE2D_DESC description = {};
     D3D11_TEXTURE2D_DESC target_description = {};
-    // D3D11 must finish any mirror copies; D3D12 must finish this command list.
+    // The slot is free once D3D11 has finished its copies to and from the shared
+    // images and D3D12 has finished this command list.
     uint64_t d3d11_completion = 0u;
     uint64_t d3d12_completion = 0u;
   };
@@ -196,11 +204,11 @@ class Bridge {
     // Use the game's adapter so shared images stay on the same GPU.
     Check(renodx::utils::directx::pD3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device12_owner)), "Create D3D12 bridge device");
     device12 = device12_owner;
-    // Private passes already have their own scheduling, state, and diagnostics.
-    // Create their objects below ReShade so game callbacks cannot intercept them.
-    // Private data can pass through other wrappers, so first verify that the
-    // returned device is exactly ReShade's published proxy. Leave other outer
-    // wrappers intact; their own API contracts may require interception.
+    // The mod's D3D12 passes manage their own scheduling, state and diagnostics,
+    // so create their objects below ReShade, where add-on callbacks do not see
+    // them. Private data can pass through other wrappers, so first confirm the
+    // returned device is exactly ReShade's proxy. Other wrappers stay in place;
+    // they may need to see every call.
     constexpr GUID reshade_device = {.Data1 = 0x2523AFF4, .Data2 = 0x978B, .Data3 = 0x4939, .Data4 = {0xBA, 0x16, 0x8E, 0xE8, 0x76, 0xA4, 0xCB, 0x2A}};
     IUnknown* associated = nullptr;
     UINT association_size = sizeof(associated);
@@ -239,14 +247,15 @@ class Bridge {
     return true;
   }
 
-  // Both reconstruction and lighting use these same queue dependencies. Their
-  // adapters provide any required D3D11 transfers around the private work.
+  // Reconstruction and lighting share this ordering. `prepare` and `complete`
+  // run any D3D11 copies before and after the D3D12 work.
   template <typename Prepare, typename Complete>
   void Submit(ID3D11DeviceContext* context, Slot* slot, const Scene& scene,
               Prepare prepare, Complete complete, bool copied_input, bool copied_output,
               SubmissionTiming* timing = nullptr) {
-    // Preparation may reject native inputs before either queue is linked.
-    // Only a partial queue submission needs to stop subsequent bridge work.
+    // If prepare throws, nothing has been queued yet. After that, `failed` stays
+    // set until the whole submission succeeds, because a partial submission
+    // must stop later bridge work.
     const auto transfer_started = (timing != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{});
     prepare();
     failed = true;
@@ -498,8 +507,8 @@ class Bridge {
   }
 };
 
-// The coordinator serializes all users, including native lighting callbacks.
-// Method changes release reconstruction state without replacing this device.
+// The reconstruction coordinator serializes every user, including lighting
+// callbacks. Switching methods releases that method's state but keeps this device.
 static std::unique_ptr<Bridge> backend;
 
 inline Bridge& Get(ID3D11Device* device) {

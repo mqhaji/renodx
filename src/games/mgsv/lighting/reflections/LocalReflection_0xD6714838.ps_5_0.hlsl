@@ -1,5 +1,7 @@
 #include "../../common.hlsli"
 
+// Port of the game's LocalReflection, the general screen-space reflection
+// trace. The host skips this draw when enhanced reflections replace it.
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:33 2026
 
 // clang-format off
@@ -71,9 +73,6 @@ void main(
   r1.xy = r1.xy;
   r1.xy = float2(0.49609375, 0.49609375) + r1.xy;
   r1.xy = g_psSystem.m_renderBuffer.zw * r1.xy;
-  // GT-VBGI supplies a filtered lighting estimate, but native SSR can still
-  // find reflection detail it misses. Keep tracing; the later compositor
-  // blends valid hits against the current scene with complementary weights.
   r1.xy = r1.xy;
   r0.xyzw = r0.xyzw;
   r0.xyzw = r0.xyzw;
@@ -377,6 +376,8 @@ void main(
           r1.xy = g_psObject.m_localParam[2].xy * r1.xy;
           r1.xyw = inColorImage.SampleLevel(g_samplerLinear_Clamp_s, r1.xy, 0).xyz;
 #if FIX_UNORM_SRGB
+          // Mod edit: the FP16 scene target holds extended sRGB and has no sRGB
+          // view to decode it, so decode here as the game's view did.
           r1.xyw = renodx::color::srgb::Decode(max(0, r1.xyw));
 #endif
 

@@ -1,11 +1,15 @@
 #include "../../materials/brdf.hlsli"
+// Builds the GGX response table that the reflection trace and resolve share,
+// once per backend. Rows are roughness and columns are N.V. RG holds the Schlick
+// single-scattering terms (weights of 1 - F and F); B holds the row's
+// cosine-weighted average for unit Fresnel, used for multiple scattering.
 RWTexture2D<float4> output_brdf : register(u0);
 groupshared float2 integrated_response[SPECULAR_BRDF_SIZE];
 groupshared float average_terms[64];
 
-// Keep the existing 16 by 16 dispatch and 8 by 8 thread layout. Each active
-// group integrates one complete roughness row, two view angles per thread.
-// Sharing that row makes its average available in this same startup dispatch.
+// The host dispatches 16 x 16 groups of 8 x 8 threads. Each of the first 128
+// groups integrates one full roughness row, two N.V columns per thread. Keeping
+// a row in one group lets it compute the row's average in the same dispatch.
 [numthreads(8, 8, 1)] void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
   const uint row = group.x + group.y * (SPECULAR_BRDF_SIZE / 8u);
   if (row >= SPECULAR_BRDF_SIZE) return;

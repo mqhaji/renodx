@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
-#ifndef MGSV_SHADOWS_NATIVE_LIGHTS_HPP_
-#define MGSV_SHADOWS_NATIVE_LIGHTS_HPP_
+#ifndef RENODX_GAMES_MGSV_ENGINE_LOCAL_LIGHTS_HPP_
+#define RENODX_GAMES_MGSV_ENGINE_LOCAL_LIGHTS_HPP_
 
 #include <d3d11.h>
 #include <windows.h>
@@ -72,15 +72,17 @@ static void __fastcall HookMainExec(void* plugin, void* render, void* viewport) 
 
 }  // namespace internal
 
-// Copy at the shaded draw. Native Flush has uploaded these CPU constant banks
-// without clearing them; the next light can overwrite them as soon as we return.
-// The CommandBuffer must be the one recording into the draw's own context.
+// Call at the light's draw. The engine's Flush has already uploaded these CPU
+// constant banks without clearing them, and the next light can overwrite them as
+// soon as the draw returns, so copy them now. The CommandBuffer must be the one
+// recording into the draw's context.
 inline bool ReadConstants(uintptr_t command_buffer, ID3D11DeviceContext* context, Constants* output) {
   if (command_buffer == 0u || context == nullptr) return false;
   // The executable signatures checked at installation establish these layouts:
   // CommandBuffer+8 is its native context, whose +8 is the D3D context, and
-  // CommandBuffer+0x28 points to eight 32-byte bank entries. Each entry holds
-  // its CPU data at +8 and float4 count at +0x18. Banks 2/3 match shader b2/b3.
+  // CommandBuffer+0x28 points to eight 32-byte bank entries, followed by the bank
+  // count at +0x108 and a mask of active banks at +0x114. Each entry holds its
+  // CPU data at +8 and float4 count at +0x18. Banks 2 and 3 match shader b2/b3.
   const auto* buffer = reinterpret_cast<const std::byte*>(command_buffer);  // NOLINT(performance-no-int-to-ptr)
   const auto* native_context = *reinterpret_cast<const std::byte* const*>(buffer + 8u);
   if (native_context == nullptr || engine::views::Unwrap(*reinterpret_cast<const uintptr_t*>(native_context + 8u)).Get() != context) return false;
@@ -155,4 +157,4 @@ inline bool Detach() {
 
 }  // namespace mgsv::engine::local_lights
 
-#endif  // MGSV_SHADOWS_NATIVE_LIGHTS_HPP_
+#endif  // RENODX_GAMES_MGSV_ENGINE_LOCAL_LIGHTS_HPP_

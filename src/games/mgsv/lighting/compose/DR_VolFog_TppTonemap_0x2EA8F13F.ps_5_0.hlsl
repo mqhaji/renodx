@@ -1,6 +1,12 @@
 #include "specular_composition.hlsli"
 #include "../../tonemap/tonemap.hlsli"
 
+// Port of the game's DR_VolFog_TppTonemap deferred composition: albedo *
+// diffuse plus specular, times AO, then volumetric fog and the game's TPP tone
+// curve (ApplyTppTonemap).
+// Mod edits are marked below. With enhanced indirect lighting, AO applies
+// only to environment specular, and SV_Target1 exports the environment light
+// that enhanced reflections replace (specular_composition.hlsli).
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:23 2026
 
 // clang-format off
@@ -116,7 +122,9 @@ void main(
   const float3 specular_correction = GetEnvironmentSpecularCorrection(specular_uv, inDepth, r0.x, r1.xyz, r3.xyz, r2.xyz, reflection_environment);
   r0.xyw = r0.xxx;
   r2.xyz = r3.xyz * r2.xyz;
-  // Diffuse already has ambient-only AO; the correction separates specular below.
+  // Mod edit: with enhanced indirect lighting, native AO darkens only the
+  // environment part of specular; diffuse already has GT-VBGI's ambient AO.
+  // See GetEnvironmentSpecularCorrection.
   if (UsesEnhancedIndirectLighting()) {
     r0.xyw = r2.xyz + r1.xyz * r0.xyw;
   } else {
@@ -182,6 +190,8 @@ void main(
   r1.xyzw = r1.xyzw;
 
   // NApplyVolFog: apply volumetric fog to the resolved scene color.
+  // Mod edit: apply the same fog transmission to the exported environment;
+  // its alpha becomes that transmission.
   if (reflection_environment.a >= 0.0) reflection_environment *= saturate(r1.w);
   r0.xyz = r1.www * r0.xyw;
   r0.xyz = r0.xyz + r1.xyz;
@@ -203,6 +213,8 @@ void main(
   // Final output: tonemapped RGB plus luminance-derived alpha.
   o0.xyzw = r1.xyzw;
 #if FIX_UNORM_SRGB
+  // Mod edit: the FP16 scene target has no sRGB view, so encode here as the
+  // game's sRGB view did.
   o0.rgb = renodx::color::srgb::Encode(max(0, o0.rgb));
 #endif
 

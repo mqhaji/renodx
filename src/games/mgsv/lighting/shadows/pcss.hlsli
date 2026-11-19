@@ -2,10 +2,16 @@
 #ifndef SRC_GAMES_MGSV_SHADOWS_PCSS_HLSLI_
 #define SRC_GAMES_MGSV_SHADOWS_PCSS_HLSLI_
 
-// Shared PCSS sampling, diagnostics, and light-specific depth conversions.
+// PCSS (percentage-closer soft shadows) for the game's sun/moon, spot, and
+// point-light shadow maps, used by the native light shader replacements. Each
+// filter searches the map for blockers, sizes the soft edge from their distance
+// to the receiver, then filters with hardware depth comparisons. When it cannot
+// (no blocker found, a footprint under one texel, or no usable projection), it
+// returns filtered = false and the caller runs the native four-tap filter.
+// Shadow-map depth is reversed in all three: larger values are nearer the light.
 struct PcssResult {
   float visibility;
-  float blocker_gap;
+  float blocker_gap;  // Receiver-to-blocker distance in game units.
   float radius;  // Soft edge radius in game units, before projection to texture UV.
   uint region;   // Sun cascade or point-light hemisphere, for diagnostics.
   bool valid;
@@ -17,8 +23,11 @@ static const uint PCSS_SUN_BLOCKER_SAMPLES = 12u;
 static const uint PCSS_LOCAL_BLOCKER_SAMPLES = 4u;
 static const uint PCSS_FILTER_SAMPLES = 4u;
 static const float PCSS_MAX_RADIUS = 0.25;
+// Byte offset of the cached PcssProjection in each light's contact-shadow record.
 static const uint PCSS_PROJECTION_OFFSET = 348u;
-// Both shadow maps and screen-space rays represent these same source sizes.
+// PCSS and the contact-shadow trace use the same light sizes, both scaled by
+// Shadow Softness: an angular radius of 0.27 degrees for the sun or moon, and a
+// radius of 0.05 game units for local lights.
 static const float SHADOW_DIRECTIONAL_ANGULAR_RADIUS = 0.27 * 0.01745329252;
 static const float SHADOW_LOCAL_SOURCE_RADIUS = 0.05;
 // Contact shadows supply fine detail; bound their small spatial filter in
@@ -32,8 +41,9 @@ struct PcssProjection {
   float depth_b;
 };
 
-// These values depend on the light matrix, not the shaded pixel. The setup
-// dispatch calculates them once; the pixel fallback also uses this function.
+// These values depend on the light matrix, not the shaded pixel. The contact
+// setup dispatch calculates them once per light; the pixel shader calls this
+// directly when that cached copy is unavailable.
 PcssProjection CalculatePcssProjection(float4x4 projection, float4x4 cascades, bool directional) {
   PcssProjection result = (PcssProjection)0;
   if (directional) {
@@ -89,8 +99,9 @@ float2 PcssNoise(float2 pixel) {
   return shadow_noise.Load(int4(uint2(pixel) & 127u, uint(CUSTOM_SHADOW_NOISE_FRAME) & 31u, 0));
 }
 
-// The four native taps share this pattern for every light projection. Keep
-// projected-W scaling before division, matching the spotlight's native order.
+// The game's four-tap filter, used whenever PCSS does not filter. All light
+// types share this pattern. Scale the offsets by projected W before dividing,
+// matching the spotlight's native order of operations.
 float NativeShadowVisibility(Texture2D<float4> shadow_map, SamplerComparisonState comparison,
                              float4 projected, float2 map_size, float2 pixel) {
   float4 pattern = frac((pixel.xyxy - 0.5) * 0.5) >= 0.300000012
@@ -105,6 +116,8 @@ float NativeShadowVisibility(Texture2D<float4> shadow_map, SamplerComparisonStat
   return 1.0 - occlusion * 0.25;
 }
 
+// Receiver-plane slope: shadow depth change per unit of shadow-map UV, solved
+// from the screen-space derivatives of UV and depth.
 float2 PcssDepthGradient(float2 uv_dx, float2 uv_dy, float depth_dx, float depth_dy) {
   float determinant = uv_dx.x * uv_dy.y - uv_dx.y * uv_dy.x;
   if (abs(determinant) <= 1e-20) return 0.0;
@@ -119,6 +132,8 @@ float PcssReceiverBias(float2 depth_gradient, float2 texel) {
   return 2.0 / 16777215.0 + 0.5 * dot(abs(depth_gradient), texel);
 }
 
+// Shadow-map debug views: 1 blocker distance, 2 filter radius, 3 visibility,
+// 4 cascade or hemisphere. Magenta means no PCSS result.
 float3 PcssDebug(PcssResult value, uint view, float max_radius) {
   if (!value.valid) return float3(1.0, 0.0, 1.0);
   switch (view) {
@@ -134,6 +149,8 @@ float3 PcssDebug(PcssResult value, uint view, float max_radius) {
   return 0.0;
 }
 
+// Sun or moon: four cascades share one atlas, one quadrant each. native_uv
+// picks the starting cascade.
 PcssResult FilterSunShadow(Texture2D<float4> shadow_map, SamplerComparisonState comparison,
                            float3 projected, float3 projected_dx, float3 projected_dy,
                            float2 native_uv,

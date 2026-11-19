@@ -1,3 +1,5 @@
+// Port of the native FXAA pass, which also applies the mod's film grain. With
+// reconstruction enabled, the mod skips FXAA and applies only the film grain.
 #include "antialiasing.hlsli"
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:29 2026
 

@@ -1,6 +1,12 @@
 #include "specular_composition.hlsli"
 #include "../../tonemap/tonemap.hlsli"
 
+// Port of the game's DeferredRenderingFilmic_VolFog deferred composition:
+// albedo * diffuse plus specular, times AO, then volumetric fog and, under the
+// vanilla tone mapper, the game's filmic curve.
+// Mod edits are marked below. With enhanced indirect lighting, AO applies
+// only to environment specular, and SV_Target1 exports the environment light
+// that enhanced reflections replace (specular_composition.hlsli).
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:32 2026
 
 // clang-format off
@@ -110,7 +116,9 @@ void main(
   const float3 specular_correction = GetEnvironmentSpecularCorrection(specular_uv, inDepth, r0.x, r1.xyz, r3.xyz, r2.xyz, reflection_environment);
   r0.xyw = r0.xxx;
   r2.xyz = r3.xyz * r2.xyz;
-  // Diffuse already has ambient-only AO; the correction separates specular below.
+  // Mod edit: with enhanced indirect lighting, native AO darkens only the
+  // environment part of specular; diffuse already has GT-VBGI's ambient AO.
+  // See GetEnvironmentSpecularCorrection.
   if (UsesEnhancedIndirectLighting()) {
     r0.xyw = r2.xyz + r1.xyz * r0.xyw;
   } else {
@@ -166,6 +174,8 @@ void main(
   r1.w = r1.w;
   r1.xyzw = r1.xyzw;
   r1.xyzw = r1.xyzw;
+  // Mod edit: apply the same fog transmission to the exported environment;
+  // its alpha becomes that transmission.
   if (reflection_environment.a >= 0.0) reflection_environment *= saturate(r1.w);
   r0.xyz = r1.www * r0.xyw;
   r0.xyz = r0.xyz + r1.xyz;
@@ -183,13 +193,16 @@ void main(
 
   float A = g_psObject.m_localParam[1].x, B = g_psObject.m_localParam[1].y, C = g_psObject.m_localParam[1].z, D = g_psObject.m_localParam[1].w;
   float E = g_psObject.m_localParam[2].x, F = g_psObject.m_localParam[2].y, W = g_psObject.m_localParam[2].z;
-  // Lighting stays linear in RenoDX mode, independently of reflection settings.
+  // Mod edit: the RenoDX tone mapper runs later, so keep linear light here;
+  // the game's filmic curve runs only under the vanilla tone mapper.
   r1.rgb = RENODX_TONE_MAP_TYPE != 0.0 ? r0.rgb : ApplyUnchartedFilmicTonemap(r0.rgb, A, B, C, D, E, F, W);
 
   r1.w = r1.w;
   o0.xyzw = r1.xyzw;
 
 #if FIX_UNORM_SRGB
+  // Mod edit: the FP16 scene target has no sRGB view, so encode here as the
+  // game's sRGB view did.
   o0.rgb = renodx::color::srgb::Encode(max(0, o0.rgb));
 #endif
   return;

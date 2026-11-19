@@ -1,7 +1,10 @@
 #ifndef RENODX_GAMES_MGSV_RENDERING_D3D11_STATE_HPP_
 #define RENODX_GAMES_MGSV_RENDERING_D3D11_STATE_HPP_
 
-// Compute and affected graphics-state preservation for reconstruction and added lighting.
+// Saves and restores the D3D11 state that added compute work can disturb: every
+// compute binding, shader resources of all stages, and the output-merger state.
+// Reconstruction, shadows and the added lighting passes wrap their dispatches
+// in the game's command list with Capture and Restore.
 
 #include <array>
 #include <cstddef>
@@ -48,16 +51,17 @@ struct State {
   bool native_descriptors_captured = false;
 };
 
-// Also unbinds output-merger targets so compute outputs can be bound safely.
-// Restore must follow the added work, including when that work is skipped after capture.
+// Also unbinds the output-merger targets so compute outputs can be bound without
+// conflicts. Always call Restore afterward, even if the added work is skipped.
 inline State Capture(reshade::api::command_list* cmd_list) {
   State result = {};
   if (cmd_list == nullptr || cmd_list->get_device()->get_api() != reshade::api::device_api::d3d11) return result;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   if (context == nullptr) return result;
 
-  // Capture native bindings once. Added work uses the native context or ReShade
-  // commands, which leave the game's tracked pipeline and descriptor state alone.
+  // Capture the game's bindings once. Added work binds through the native context
+  // or ReShade commands and does not change the game's tracked pipeline and
+  // descriptor state.
   std::array<ID3D11SamplerState*, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT> samplers = {};
   std::array<ID3D11ShaderResourceView*, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT> shader_resources = {};
   std::array<ID3D11ShaderResourceView*, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT> vertex_shader_resources = {};
@@ -204,6 +208,8 @@ inline void Restore(reshade::api::command_list* cmd_list, const State& state) {
     class_instances[index] = state.class_instances[index].Get();
   }
 
+  // Clear the added work's compute views first. D3D11 drops a shader resource
+  // whose resource is still bound as an unordered access view.
   constexpr std::array<ID3D11ShaderResourceView*, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT>
       null_shader_resources = {};
   constexpr std::array<ID3D11UnorderedAccessView*, D3D11_PS_CS_UAV_REGISTER_COUNT> null_unordered_access_views = {};

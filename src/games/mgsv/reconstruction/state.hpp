@@ -1,17 +1,16 @@
 #pragma once
 
 /*
- * Shared state for the MGSV TAA runtime.
+ * State shared by every temporal reconstruction method:
+ *  - The active method, after availability checks (runtime.hpp sets it).
+ *  - Per-frame bookkeeping that Present checks, and the next jitter sample.
+ *  - Analytical TAA tuning and diagnostic settings.
+ *  - Halton (2,3) jitter in render-space UV. The pattern has eight phases at
+ *    native size and more as the upscaling ratio grows.
  *
- * Owns:
- *  - The availability-validated effective temporal mode.
- *  - Presentation diagnostics and the next jitter sample to reserve.
- *  - Halton (2,3) jitter in render-space UV coordinates.
- *    The pattern starts at eight phases and grows with the upscaling ratio.
- *
- * The native projection hook and ReShade callbacks can execute on different
- * threads. The projection hook reserves a sample for each native scene.
- * Reconstruction uses that recorded sample when the scene reaches the GPU.
+ * The projection hook and ReShade callbacks run on different threads. The
+ * hook reserves a sample for each scene when its projection is set up, and
+ * reconstruction uses that sample when the scene reaches the GPU.
  */
 
 #include <algorithm>
@@ -30,8 +29,8 @@
 
 namespace mgsv::reconstruction::state {
 
-// Stable persisted values. Append future reconstruction methods instead of
-// reordering these entries so presets remain forward-compatible.
+// Saved in settings. Add new methods at the end and never reorder, so saved
+// values keep their meaning.
 enum class TemporalMode : std::uint8_t {
   OFF = 0u,
   ANALYTICAL_TAA = 1u,
@@ -51,16 +50,23 @@ inline TemporalMode NormalizeTemporalMode(float value) {
 inline constexpr float DEFAULT_DIAGNOSTIC_VIEW = 0.f;
 inline constexpr float DEFAULT_VELOCITY_VISUALIZATION_RANGE = 8.f;
 
+// Serializes reconstruction scheduling, submission, method changes and the
+// Present checks. The coordinator takes it through ExecutionGuard.
 inline std::atomic_flag execution_lock = ATOMIC_FLAG_INIT;
 
 inline constexpr float DEFAULT_CLIP_TIGHTNESS = 0.5f;
 inline constexpr float DEFAULT_HISTORY_CLIP_STRENGTH = 1.f;
 inline constexpr float DEFAULT_CURRENT_FRAME_BLEND = 0.15f;
 
+// Accessed under execution_lock.
 struct FrameState {
-  uint32_t sample_index = 0u;  // Successfully installed reconstruction outputs.
+  uint32_t sample_index = 0u;  // Reconstructed outputs installed since the last reset.
   uint64_t frame_index = 0u;
+  // Advances on each history reset. Scenes scheduled before it are not
+  // reconstructed.
   uint64_t temporal_generation = 0u;
+  // Since the last Present: whether a reconstruction was scheduled and
+  // whether one finished. Present uses them to detect missed reconstructions.
   bool reconstruction_scheduled = false;
   bool reconstruction_completed = false;
   // A scene since the last Present had every reconstruction input.
@@ -78,7 +84,8 @@ inline std::atomic<float> runtime_clip_tightness = DEFAULT_CLIP_TIGHTNESS;
 inline std::atomic<float> runtime_history_clip_strength = DEFAULT_HISTORY_CLIP_STRENGTH;
 inline std::atomic<float> runtime_current_frame_blend = DEFAULT_CURRENT_FRAME_BLEND;
 inline std::atomic<uint64_t> current_frame_token = 0u;
-// Advances during native scene recording. History commits do not change it.
+// The next jitter sample. The projection hook advances it once per scene;
+// history commits do not change it.
 inline std::atomic<uint32_t> current_sample_index = 0u;
 inline FrameState frame_state = {};
 inline constexpr uint32_t BASE_JITTER_PHASE_COUNT = 8u;
@@ -179,14 +186,15 @@ inline std::array<float, 2> JitterForSample(uint32_t sample_index, uint32_t widt
     }
     return result;
   };
-  // Native-resolution TAA uses ceil(8 * 1^2) = 8 phases. Skip Halton index
-  // zero because it is the unit-square origin rather than a distributed tap.
+  // Eight phases at native size, more while upscaling (Plan::JitterPhaseCount).
+  // Halton index 0 is skipped because it is the origin, not a spread-out sample.
   const uint32_t halton_index = (sample_index % runtime_jitter_phases.load(std::memory_order_acquire)) + 1u;
   std::array<float, 2> result = {
       halton_sample(halton_index, 2u) - 0.5f,
       halton_sample(halton_index, 3u) - 0.5f,
   };
-  // Matrix patching converts UV jitter to projection space by multiplying by two.
+  // The result is in UV units. The projection hooks multiply it by two to
+  // offset clip space.
   result[0] /= static_cast<float>(width);
   result[1] /= static_cast<float>(height);
   return result;
@@ -209,7 +217,8 @@ inline void BeginFrame() {
   current_frame_token.store(frame_state.frame_index, std::memory_order_release);
 }
 
-// Called only after a successful compute dispatch and copy-back.
+// Called from camera_state::Commit, only after a reconstructed output was
+// installed.
 inline void CommitTemporalFrame() {
   frame_state.reconstruction_scheduled = false;
   frame_state.reconstruction_completed = true;

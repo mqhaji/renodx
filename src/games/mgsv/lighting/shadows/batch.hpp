@@ -32,11 +32,12 @@
 #include "../../rendering/d3d11_state.hpp"
 #include "../../shared.h"
 
-// Contact shadows run as one batch of lights: one setup, one clear, and one
-// trace write every light's mask into a shared atlas, and each light draw reads
-// its own rectangle. All local lights of a lighting pass share the frame batch,
-// which the engine executes before any of their draws. A light that batch
-// cannot take, and the sun, record a batch of their own beside their draw.
+// Contact shadows (Bend screen-space shadows) run as one batch of lights: one
+// setup, one clear, and one trace write every light's mask into a shared atlas,
+// and each light draw reads its own rectangle. All local lights of a lighting
+// pass share the frame batch, which the engine executes before any of their
+// draws. A light that batch cannot take, and the sun, record a batch of their
+// own beside their draw.
 namespace mgsv::shadows::batch {
 
 // These sizes match contact/bend_common.hlsli. A light's record holds its
@@ -278,6 +279,8 @@ struct Batch {
     // A sealed batch no longer changes, so a replayed list uploads the same lights.
     auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
     const auto saved = rendering::d3d11_compute_state::Capture(cmd_list);
+    // Light draws read the atlas and records at PS t18-t19. Unbind them before
+    // the passes write those resources.
     constexpr std::array<ID3D11ShaderResourceView*, 2> empty_views = {};
     context->PSSetShaderResources(18u, static_cast<UINT>(empty_views.size()), empty_views.data());
     // DEFAULT storage supports both immediate execution and command lists
@@ -379,7 +382,7 @@ inline void BeginLocalLights() {
       }
     }
   } catch (...) {
-    // The native plugin continues; its lights record batches of their own.
+    // The native plugin continues; its lights record separate batches.
   }
 }
 
@@ -523,7 +526,7 @@ inline bool RecordLight(ID3D11DeviceContext* context, DeviceState* device_state,
     }
     storage = device_state->local_storage;
   }
-  // The header and the kind come from here; the light's own vectors are copied
+  // The header and the kind come from here; the light's vectors are copied
   // from its native buffers below. A box starting at zero avoids the deferred
   // context's offset error for partial updates.
   std::array<LightVector, 1u + LIGHT_VECTORS> inputs = {};

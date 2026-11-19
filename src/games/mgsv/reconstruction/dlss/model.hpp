@@ -6,9 +6,9 @@
 
 namespace mgsv::reconstruction::dlss {
 
-// These values match NVSDK_NGX_DLSS_Hint_Render_Preset. The current public
-// header no longer names A-D, but compatible feature DLLs still accept their
-// stable numeric preset identifiers.
+// These values match NVSDK_NGX_DLSS_Hint_Render_Preset. The public SDK header
+// does not name A-D, but compatible feature DLLs still accept their numeric
+// values.
 enum class Model : uint8_t {
   DEFAULT = 0u,
   A = 1u,

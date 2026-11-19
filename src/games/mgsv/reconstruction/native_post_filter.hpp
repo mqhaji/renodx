@@ -22,10 +22,13 @@
 #include "probe_api.hpp"
 
 // The engine starts a view's post-processing in DgDx11::StartPostFilter: once
-// per view, on the build thread, after the last scene writer and before the
-// first post pass. It opens that thread's next command list only at the first
-// post draw, so the hook arms the scene and the list the build thread begins
-// next is the one to cut. Reconstruction runs at that cut.
+// per view, on the thread that builds it (the build thread), after the last draw that
+// writes the scene and before the first post-processing pass. Usually no
+// command list is open then; the engine opens the next one at the first
+// post-processing draw. So the hook marks the scene as waiting, and the next
+// list that thread begins is the one to cut: the coordinator ends it there and
+// schedules reconstruction between the two halves. A list that is already
+// open is cut at once.
 namespace mgsv::reconstruction::native_post_filter {
 
 // Runs on the build thread at the cut of the presented main view, with the
@@ -63,8 +66,8 @@ struct Scene {
   uint64_t generation = 0u;
   bool operator==(const Scene&) const = default;
 };
-// The scene whose post-processing has started on this thread and whose next
-// command list has not begun, and the scene this thread cut last.
+// armed: the scene whose post-processing has started on this thread but whose
+// next command list has not begun yet. last_cut: the scene this thread cut last.
 static thread_local Scene armed;
 static thread_local Scene last_cut;
 
@@ -132,6 +135,7 @@ static void __fastcall HookStartPostFilter(void* dg) {
         ReportUnusedStart(armed);
       }
       armed = scene;
+      // A list the build thread already has open is cut now.
       if (const auto recording = engine::views::GetRecording(); IsBuildThreadList(recording)) {
         Cut(recording, true);
       }
@@ -141,7 +145,8 @@ static void __fastcall HookStartPostFilter(void* dg) {
   calls_in_flight.fetch_sub(1u, std::memory_order_acq_rel);
 }
 
-// Runs on every recording thread right after the engine begins a list.
+// Runs on every recording thread right after the engine begins a list. A list
+// for another scene means the waiting scene recorded nothing after its start.
 static void OnRecordingBegan() {
   if (armed.scene == 0u) return;
   const auto recording = engine::views::GetRecording();

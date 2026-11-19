@@ -19,10 +19,13 @@
 #include "d3d12_compute.hpp"
 #include "d3d12_timing.hpp"
 
+// Runs NVIDIA's NRD REBLUR specular denoiser for reflections on the D3D12
+// bridge, with no NRI or other interop layer.
 namespace mgsv::rendering::denoising {
 
-// NRD supplies algorithms and shader bytecode. Our existing backend retains
-// ownership of the device, command lists, descriptors and GPU synchronization.
+// Loads NRD.dll from the game folder. NRD supplies the algorithm and its shader
+// bytecode; the bridge keeps ownership of the device, command lists, descriptors
+// and GPU synchronization.
 struct Library {
   HMODULE module = nullptr;
   decltype(&nrd::CreateInstance) create = nullptr;
@@ -121,16 +124,16 @@ struct Runtime {
     Configure(nrd::ReblurSettings{});
   }
 
-  // The render thread applies settings before asking the SDK for dispatches.
-  // Existing queued work already owns its constants and keeps using the same pools.
+  // Call on the render thread before Record asks the SDK for dispatches. Work
+  // already queued has its own copy of the constants and keeps the same pools.
   void Configure(const nrd::ReblurSettings& settings) {
     if (instance.get_deleter().library->set_denoiser(*instance, SPECULAR, &settings) != nrd::Result::SUCCESS) {
       throw std::runtime_error("Cannot configure NRD specular denoiser");
     }
   }
 
-  // Called only after the bridge has retired old work. NRD histories are private
-  // to this view size; they are never shared with another camera or effect.
+  // Call only after the bridge has retired earlier work. NRD's history textures
+  // belong to this size and are never shared with another camera or effect.
   void Resize(ID3D12Device* device, uint32_t width, uint32_t height) {
     const auto& description = *instance.get_deleter().library->describe(*instance);
     const auto allocate = [&](std::vector<Texture>* pool, const nrd::TextureDesc* textures, uint32_t count) {
@@ -168,9 +171,10 @@ struct Runtime {
     size = {width, height};
   }
 
-  // Record into the caller's existing submission and retired descriptor arena.
-  // Pool states persist across dispatches. Only external resources return to
-  // COMMON, where the surrounding passes and the shared-resource bridge expect them.
+  // Records into the caller's command list and the slot's descriptor arena.
+  // Pool textures keep their state between calls. External resources must be in
+  // COMMON on entry and are returned to COMMON, as the surrounding passes and
+  // the bridge expect.
   uint32_t Record(ID3D12Device* device, ID3D12GraphicsCommandList* commands, d3d12_compute::Frame* frame,
                   const nrd::CommonSettings& settings, const std::array<ID3D12Resource*, RESOURCE_COUNT>& resources,
                   std::span<std::byte> constant_capture = {}, d3d12_timing::Scope* timing = nullptr) {
@@ -186,8 +190,8 @@ struct Runtime {
     D3D12_GPU_VIRTUAL_ADDRESS constant_address = 0u;
     for (uint32_t index = 0u; index < count; ++index) {
       const auto& dispatch = dispatches[index];
-      // An explicit probe request can inspect the SDK's actual generated
-      // camera constants. Ordinary rendering does not copy diagnostic data.
+      // When the probe asks, copy the SDK's generated constants (including its
+      // camera data) for inspection. Ordinary rendering passes an empty span.
       const auto capture_size = std::min(constant_capture.size(), static_cast<size_t>(dispatch.constantBufferDataSize));
       if (capture_size > captured_bytes) {
         std::memcpy(constant_capture.data(), dispatch.constantBufferData, capture_size);

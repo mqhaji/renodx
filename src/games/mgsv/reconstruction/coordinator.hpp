@@ -1,7 +1,12 @@
 #pragma once
 
-/* Cuts native command lists for added work and runs that work in recorded order.
- * Reconstruction is scheduled where the engine starts a scene's post-processing;
+/* Runs added GPU work at a chosen point inside the game's command lists. The
+ * engine records with D3D11 deferred contexts, so the work cannot run when it
+ * is scheduled. Instead the list is cut: FinishCommandList ends it there (the
+ * prefix), and the game keeps recording into a new list (the remainder,
+ * `post`). When the game executes the remainder on the immediate context, the
+ * prefixes run first, each followed by its added work, in recorded order.
+ * Reconstruction is cut in where the engine starts a scene's post-processing;
  * the shadow batch and the indirect lighting passes use the same cuts. */
 
 #include <windows.h>
@@ -49,14 +54,15 @@
 
 namespace mgsv::reconstruction::coordinator {
 
-// Bound retained split recordings if the game delays or abandons submission.
+// Limits how many cuts can wait for execution, in case the game delays or
+// drops a submission.
 inline constexpr size_t MAX_PENDING_DISPATCHES = 64u;
 // Shadow batches must leave room for GI and the later scene reconstruction.
 inline constexpr size_t RESERVED_LIGHTING_DISPATCHES = 8u;
 inline auto& execution_lock = state::execution_lock;
 inline reshade::api::device* runtime_device = nullptr;
-// Protected by ExecutionGuard. Failed teardown must not admit new work against
-// resources from the old device, even if a new device reuses its address.
+// Protected by ExecutionGuard. After a failed teardown, no new work may use
+// the old device's resources, even if a new device reuses its address.
 inline bool device_teardown_pending = false;
 
 using BeginQuery = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Asynchronous*);
@@ -67,6 +73,9 @@ enum class LightingPolicy : uint8_t {
   SHADOW_BATCH,
 };
 
+// One cut: the native list before it (`prefix`), the added work, and the
+// native list after it (`post`), set once the game finishes that list. The
+// COM references keep a scene's inputs and output alive until the work runs.
 struct PendingTemporalDispatch {
   engine::views::Scope scope;
   reshade::api::command_list* deferred_context = nullptr;
@@ -86,21 +95,30 @@ struct PendingTemporalDispatch {
   bool fill_only = false;
   std::function<void(reshade::api::command_list*, bool)> lighting_callback;
   bool is_lighting = false;
+  // Set the first time the list is executed. A replay runs the native commands
+  // again but does not add the same scene to history twice.
   bool dispatch_consumed = false;
   LightingPolicy lighting_policy = LightingPolicy::INDIRECT;
   std::function<void()> on_recording_complete;
 };
 
-// The lock owns query/list transactions; hook pointers use lifecycle serialization instead.
+// `mutex` protects these members. The query hook pointers below are not
+// covered; they change only while the bridge is installed or removed.
 struct SubmissionState {
   std::shared_mutex mutex;
   std::vector<PendingTemporalDispatch> pending_dispatches;
+  // Queries begun but not yet ended on each tracked deferred context. A
+  // context with an open query is not cut.
   std::unordered_map<ID3D11DeviceContext*, std::unordered_set<ID3D11Asynchronous*>> active_queries;
   // The ReShade command list of each deferred context above.
   std::unordered_map<ID3D11DeviceContext*, reshade::api::command_list*> recording_lists;
 };
 inline SubmissionState submission;
 
+// The D3D11 submission bridge: hooks on ID3D11DeviceContext::Begin and End
+// (immediate and, when different, deferred) that track open queries, plus the
+// command-list event handlers in this file. Lighting and every temporal method
+// share it.
 inline BeginQuery begin_query = nullptr;
 inline BeginQuery deferred_begin_query = nullptr;
 inline EndQuery end_query = nullptr;
@@ -109,11 +127,15 @@ inline bool submission_bridge_installed = false;
 inline std::atomic<reshade::api::device*> submission_bridge_device = nullptr;
 inline std::atomic<uint32_t> execution_hook_calls_in_flight = 0u;
 inline std::atomic<bool> logged_immediate_dispatch = false;
+// Set when scheduled work could not run as planned. The next Present turns
+// temporal reconstruction off.
 inline std::atomic<bool> submission_failure_pending = false;
-// Contact shadows reserve their batch through this bridge even when no temporal
-// feature needs it. Set once such a batch has been wanted.
+// Set once contact shadows have asked for a shadow batch. Present then
+// installs the bridge even when no temporal feature needs it.
 inline std::atomic<bool> shadow_batch_requested = false;
 
+// Adds every other thread of the process to the open Detours transaction, so
+// no thread is running the bytes being patched.
 inline bool EnlistProcessThreads(std::vector<HANDLE>* handles) {
   const DWORD current_process = GetCurrentProcessId();
   const DWORD current_thread = GetCurrentThreadId();
@@ -140,8 +162,8 @@ inline bool EnlistProcessThreads(std::vector<HANDLE>* handles) {
     has_entry = Thread32Next(snapshot, &entry);
   }
   CloseHandle(snapshot);
-  // DetourUpdateThread suspends immediately. Finish enumeration/allocation
-  // before suspending threads that may own allocator or loader locks.
+  // DetourUpdateThread suspends the thread at once. Finish enumerating and
+  // allocating first, since a suspended thread may hold the heap or loader lock.
   if (DetourUpdateThread(GetCurrentThread()) != NO_ERROR) return false;
   return std::ranges::all_of(*handles, [](HANDLE thread) {
     return DetourUpdateThread(thread) == NO_ERROR;
@@ -155,6 +177,8 @@ inline void CloseThreadHandles(std::vector<HANDLE>* handles) {
   handles->clear();
 }
 
+// Counts calls inside the query hooks, so removing them can wait until no call
+// is still running.
 struct ExecutionHookCallGuard {
   ExecutionHookCallGuard() { execution_hook_calls_in_flight.fetch_add(1u, std::memory_order_acq_rel); }
   ExecutionHookCallGuard(const ExecutionHookCallGuard&) = delete;
@@ -175,6 +199,8 @@ struct ExecutionGuard {
   ~ExecutionGuard() { execution_lock.clear(std::memory_order_release); }
 };
 
+// The first device seen becomes the reconstruction device; later calls succeed
+// only for that device.
 inline bool BindRuntimeDevice(reshade::api::device* device) {
   if (device == nullptr || device_teardown_pending) return false;
   if (runtime_device == nullptr) {
@@ -216,10 +242,10 @@ inline void Destroy(reshade::api::device* device) {
   device_teardown_pending = false;
 }
 
-// Called under ExecutionGuard from Present and before an immediate evaluation.
-// Either can be first after a UI change. Release private GPU allocations, but
-// keep the SDKs initialized so switching does not pass through Off or resize
-// the game while a runtime is being loaded again.
+// Called under ExecutionGuard at Present and before each evaluation; either can
+// come first after a method change. Frees the other methods' GPU allocations
+// but keeps their SDKs loaded, so switching back neither passes through Off nor
+// resizes the game while a runtime loads again.
 inline void ReleaseInactiveResources(reshade::api::device* device, state::TemporalMode mode) {
   if (mode != state::TemporalMode::ANALYTICAL_TAA) {
     analytical::Destroy(device);
@@ -234,6 +260,8 @@ inline void ReleaseInactiveResources(reshade::api::device* device, state::Tempor
   }
 }
 
+// Runs one scene's reconstruction on the immediate context, between the native
+// prefix and remainder. Returns true when the method wrote the output.
 inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
   // A recorded scene can reach submission after device teardown has started.
   if (inputs.device == nullptr || device_teardown_pending) return false;
@@ -262,8 +290,8 @@ inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
         || camera.reset_generation != camera_state::reset_generation.load(std::memory_order_relaxed)
         || (previous.valid && camera.reservation <= previous.reservation)) return false;
 
-    // Native motion describes the preceding scene. A skipped scene requires
-    // fresh history because its object motion cannot span the missing update.
+    // The engine's motion vectors lead back to the scene just before this one.
+    // If a scene was skipped, start fresh history: the motion cannot span it.
     camera.camera_reprojection_valid = previous.valid
                                        && previous.owner_generation == camera.owner_generation
                                        && previous.reservation + 1u == camera.reservation
@@ -277,6 +305,7 @@ inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
                                                  previous.current_view_projection, camera.inverse_view_projection))
                                            : std::array<float, 16>{});
   }
+  // Apply a preparation shader the lighting probe has queued.
   if (dx12::probe_pending.load(std::memory_order_acquire)) {
     dx12::ProbeUpdate update;
     {
@@ -290,14 +319,14 @@ inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
       Microsoft::WRL::ComPtr<ID3D11ComputeShader> replacement;
       auto* native = reinterpret_cast<ID3D11Device*>(inputs.device->get_native());  // NOLINT(performance-no-int-to-ptr)
       dx12::Check(native->CreateComputeShader(code.data(), code.size(), nullptr, &replacement), "Create live reconstruction preparation");
-      // D3D11 retains the shader in already recorded/queued commands. This
-      // replaces one preparation dispatch, without changing DX12 resources.
+      // Commands already recorded keep their own reference to the old shader.
+      // Only the preparation shader changes; D3D12 resources stay as they are.
       if (dx12::runtime.prepare != nullptr) {
         dx12::runtime.prepare = std::move(replacement);
       }
       dx12::probe_state.active_code = std::move(update.code);
-      // Input changes seed new SDK history without resetting the native scene,
-      // camera sample, or resource pool. The first changed frame is transient.
+      // Different inputs start fresh method history. The scene, camera sample
+      // and resources are kept.
       analytical::InvalidateHistory("probe reconstruction inputs changed");
       dlss::InvalidateHistory();
       fsr::InvalidateHistory();
@@ -341,8 +370,9 @@ inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
   bool succeeded = false;
   try {
     ReleaseInactiveResources(inputs.device, state::GetTemporalMode());
-    // Each method writes inputs.output through the shared backend. The bridge
-    // queues the D3D11 wait before native post-processing can read that image.
+    // Each method writes inputs.output through the shared D3D12 transport
+    // (d3d12.hpp). It queues a D3D11 wait, so native post-processing reads
+    // that image only after D3D12 has written it.
     switch (state::GetTemporalMode()) {
       case state::TemporalMode::ANALYTICAL_TAA: succeeded = analytical::Dispatch(inputs); break;
       case state::TemporalMode::AMD_FSR:        succeeded = fsr::Dispatch(inputs); break;
@@ -354,12 +384,14 @@ inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
     if (logging::ShouldLogFrame(state::CurrentFrameToken(), last_backend_failure)) {
       logging::Warn("D3D12 reconstruction failed: ", error.what());
     }
-    // SDKs may have advanced internal state while recording a discarded list.
-    // Recover through the existing method transition, never reuse that history.
+    // An SDK may have changed its internal state while recording the discarded
+    // work, so its history cannot be trusted. DLSS and FSR are turned off at
+    // the next Present instead of reusing it.
     if (state::GetTemporalMode() == state::TemporalMode::NVIDIA_DLSS) {
       dlss::QueueFatalFailure();
     } else if (state::GetTemporalMode() == state::TemporalMode::AMD_FSR) {
-      // The next settings transition restores Off and explains the SDK failure.
+      // FSR then reports itself unavailable, and the next settings
+      // transition selects Off and shows the reason.
       fsr::runtime_failed.store(true, std::memory_order_release);
     }
     succeeded = false;
@@ -371,7 +403,7 @@ inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
   mgsv::rendering::d3d11_compute_state::Restore(inputs.cmd_list, previous_compute_state);
   if (!succeeded) {
     // An SDK evaluation may have changed its history before output validation
-    // failed. Its next evaluation must seed history again.
+    // failed. Its next evaluation must start fresh history.
     analytical::InvalidateHistory("reconstruction output was not installed");
     dlss::InvalidateHistory();
     fsr::InvalidateHistory();
@@ -391,6 +423,9 @@ inline bool DispatchValidatedLocked(ValidatedFrameInputs& inputs) {
   return true;
 }
 
+// Saves the immediate context's whole state by swapping in an empty context
+// state, and swaps the game's state back when destroyed. The prefixes and the
+// added work run in between without disturbing what the game had bound.
 struct ImmediateContextStateGuard {
   Microsoft::WRL::ComPtr<ID3D11DeviceContext1> context;
   Microsoft::WRL::ComPtr<ID3DDeviceContextState> captured_state;
@@ -471,6 +506,8 @@ inline void STDMETHODCALLTYPE HookEndQuery(
   }
 }
 
+// Installs the query hooks once, for the first D3D11 device. Deferred contexts
+// can use different Begin and End functions, so those are hooked as well.
 inline bool EnsureTemporalSubmissionBridge(reshade::api::device* device) {
   if (submission_bridge_installed) return submission_bridge_device.load(std::memory_order_acquire) == device;
   if (device == nullptr || device->get_api() != reshade::api::device_api::d3d11) return false;
@@ -565,6 +602,7 @@ inline void UninstallTemporalSubmissionBridge() {
   logging::Info("uninstalled D3D11 temporal submission bridge");
 }
 
+// Starts tracking each new deferred context; only tracked contexts are cut.
 inline void OnInitCommandList(reshade::api::command_list* command_list) {
   const auto* device = submission_bridge_device.load(std::memory_order_acquire);
   if (device == nullptr || command_list == nullptr || command_list->get_device() != device) return;
@@ -584,6 +622,9 @@ inline reshade::api::command_list* FindRecordingList(ID3D11DeviceContext* contex
   return found != submission.recording_lists.end() ? found->second : nullptr;
 }
 
+// Called whenever a deferred context finishes a list, whether the game or a
+// cut finished it. Moves the context's output references onto the finished
+// list and links a waiting cut to its remainder.
 inline void CompleteRecording(reshade::api::command_list* recording, ID3D11CommandList* finished) {
   if (auto* route = recording->get_private_data<output_size::Recording>(); route != nullptr) {
     output_size::RetainOutput(recording, route->output);
@@ -591,8 +632,8 @@ inline void CompleteRecording(reshade::api::command_list* recording, ID3D11Comma
       auto retained = Microsoft::WRL::Make<output_size::RetainedOutputs>();
       retained->outputs = std::move(route->retained_outputs);
       if (FAILED(finished->SetPrivateDataInterface(output_size::OUTPUT_LEASE_GUID, retained.Get()))) {
-        // Retire these allocations from reuse. The native list still owns its
-        // D3D resources, and the pool releases its references at reset.
+        // Stop reusing these allocations. The native list still holds its own
+        // D3D references, and the pool releases its references at reset.
         const std::unique_lock lock(output_size::state.mutex);
         for (const auto& output : retained->outputs) {
           output->reusable = false;
@@ -625,13 +666,16 @@ inline void CompleteRecording(reshade::api::command_list* recording, ID3D11Comma
       on_recording_complete = std::move(pending->on_recording_complete);
     }
   }
-  // A successful FinishCommandList stops input collection for this insertion.
-  // Run completion outside our lock because feature callbacks can take theirs.
+  // A successful FinishCommandList ends input collection for this cut. Run the
+  // callback outside our lock, because feature callbacks take their own locks.
   if (on_recording_complete) {
     on_recording_complete();
   }
 }
 
+// Cuts `cmd_list` here so `callback` runs when the game executes the list; its
+// bool argument is true on the list's first execution. On the immediate
+// context the callback runs at once. Returns false when the list cannot be cut.
 inline bool ScheduleLighting(
     reshade::api::command_list* cmd_list,
     std::function<void(reshade::api::command_list*, bool)> callback,
@@ -660,8 +704,8 @@ inline bool ScheduleLighting(
   }
   Microsoft::WRL::ComPtr<ID3D11CommandList> prefix;
   if (FAILED(context->FinishCommandList(TRUE, &prefix)) || prefix == nullptr) return false;
-  // A second split completes the preceding insertion's remainder. Keep that
-  // link so GI and the later scene reconstruction execute in recorded order.
+  // If this list already had a cut, this prefix is that cut's remainder.
+  // Linking them keeps GI and the later scene reconstruction in recorded order.
   CompleteRecording(cmd_list, prefix.Get());
   const std::unique_lock lock(submission.mutex);
   submission.pending_dispatches.push_back({
@@ -683,9 +727,9 @@ inline void OnExecuteSecondaryCommandList(
   if (device == nullptr || command_list == nullptr || secondary_command_list == nullptr
       || command_list->get_device() != device || secondary_command_list->get_device() != device) return;
 
-  // ReShade emits (finished list, deferred context) only AFTER successful
-  // native FinishCommandList, with either restore flag. reset_command_list
-  // alone is insufficient: it can also be emitted after a failed Finish.
+  // ReShade sends this event as (finished list, deferred context) only after
+  // FinishCommandList succeeds, whatever its restore flag. reset_command_list
+  // is not enough, because it also follows a failed FinishCommandList.
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> recording_context;
   auto* secondary_native = reinterpret_cast<IUnknown*>(secondary_command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   if (secondary_native == nullptr) return;
@@ -696,6 +740,8 @@ inline void OnExecuteSecondaryCommandList(
     return;
   }
 
+  // Otherwise the game is executing a finished list. Collect the cuts that lead
+  // to it by following each cut's prefix back to the cut before it.
   auto* post = reinterpret_cast<ID3D11CommandList*>(secondary_command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   std::vector<PendingTemporalDispatch> chain;
   {
@@ -715,8 +761,8 @@ inline void OnExecuteSecondaryCommandList(
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   if (context == nullptr) return;
   const auto retain_list_outputs = [&](ID3D11CommandList* native_list) {
-    // A merged list keeps every output used by the nested list, including UI
-    // lists that contain no reconstruction insertion of their own.
+    // A list executed into another deferred list passes on every output it
+    // uses, including UI lists that have no cut.
     Microsoft::WRL::ComPtr<IUnknown> retained;
     UINT retained_size = sizeof(IUnknown*);
     if (SUCCEEDED(native_list->GetPrivateData(output_size::OUTPUT_LEASE_GUID, &retained_size, retained.GetAddressOf())) && retained != nullptr) {
@@ -736,6 +782,9 @@ inline void OnExecuteSecondaryCommandList(
     return;
   }
   std::ranges::reverse(chain);
+  // Executed into another deferred list: replay the prefixes into it. Only a
+  // shadow batch can be recorded there; a reconstruction cannot, and its
+  // scene is reported as a submission failure.
   if (context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) {
     for (const auto& pending : chain) {
       const engine::views::ScopedOwner owner_scope(pending.scope);
@@ -778,8 +827,8 @@ inline void OnExecuteSecondaryCommandList(
     rendering::d3d12_timing::CpuSubmission::EndPart("native prefix");
     if (pending.is_lighting) {
       if (pending.lighting_callback) {
-        // Shadows also run after the first submission; unlike temporal history,
-        // their visibility belongs to this execution of the native light draws.
+        // Lighting runs on every execution, not only the first: unlike temporal
+        // history, shadow visibility belongs to this execution of the light draws.
         pending.lighting_callback(command_list, !pending.dispatch_consumed);
       }
       continue;
@@ -789,9 +838,9 @@ inline void OnExecuteSecondaryCommandList(
     const bool depth_ready = pending.post_output == nullptr
                              || pending.post_output->PrepareDepth(context, pending.inputs.camera.jitter_uv_x, pending.inputs.camera.jitter_uv_y);
     rendering::d3d12_timing::CpuSubmission::EndPart("output depth");
-    // Every native prefix runs even when its added operation was canceled. A
-    // replayed scene refreshes its output from that prefix and does not add the
-    // same observation to temporal history a second time.
+    // Every native prefix runs even when its added work was canceled. A
+    // replayed scene is not added to history a second time; while upscaling,
+    // its output is refreshed from the native image instead.
     const bool reconstructs = !pending.fill_only && !pending.dispatch_consumed
                               && pending.temporal_generation == state::frame_state.temporal_generation
                               && state::GetTemporalMode() == pending.mode;
@@ -840,8 +889,9 @@ inline void OnDestroyCommandList(reshade::api::command_list* command_list) {
     submission.active_queries.erase(native_context);
     submission.recording_lists.erase(native_context);
     std::vector<ID3D11CommandList*> orphaned_lists = {native_command_list};
-    // Intermediate prefixes were finished through the native context, so they
-    // have no ReShade wrapper destruction event. Retire their whole chain.
+    // Prefixes from cuts were finished directly on the native context, so
+    // ReShade never reports their destruction. Remove the whole chain of cuts
+    // that leads to this list.
     bool removed = true;
     while (removed) {
       removed = false;
@@ -884,7 +934,7 @@ inline void OnDestroyCommandList(reshade::api::command_list* command_list) {
 //     native image into the output, so the output-size passes read this
 //     frame's pixels, and the next reconstruction starts fresh history.
 //   Nothing: there is no usable scene image, or the list cannot be cut. At
-//     native size the engine's image stands. While upscaling the engine's own
+//     native size the engine's image stands. While upscaling the engine's
 //     render-size path does not present a correct image, so these frames must
 //     stay rare. If complete records keep going unscheduled, the check at
 //     Present ends upscaling.
@@ -896,7 +946,7 @@ inline void ScheduleSceneLocked(reshade::api::command_list* cmd_list) {
   ValidatedFrameInputs inputs = {};
   const auto record = input_capture::BuildFrameInputsLocked(cmd_list, images, &inputs);
   const bool fill_only = record == input_capture::Record::SCENE_ONLY;
-  // At native size the engine's own image already stands in for a missing reconstruction.
+  // At native size the engine's image already stands in for a missing reconstruction.
   if (record == input_capture::Record::UNUSABLE || (fill_only && inputs.HasNativeOutputSize())) return;
   if (!BindRuntimeDevice(inputs.device)) {
     logging::Warn("rejecting temporal dispatch from an unavailable or different D3D11 device");
@@ -905,7 +955,7 @@ inline void ScheduleSceneLocked(reshade::api::command_list* cmd_list) {
   if (!submission_bridge_installed
       || (state::GetTemporalMode() == state::TemporalMode::NVIDIA_DLSS && !dlss::runtime_ready.load(std::memory_order_acquire))) return;
 
-  // The engine records with deferred contexts; the job runs when the list is played back.
+  // The engine records with deferred contexts; the job runs when the list is executed.
   auto* native_context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   const auto fail_submission = [] {
     logging::Warn("failed to schedule temporal dispatch");
@@ -967,8 +1017,9 @@ inline void ScheduleSceneLocked(reshade::api::command_list* cmd_list) {
       .mode = state::GetTemporalMode(),
       .fill_only = fill_only,
   };
-  // The source SRV already retains the destination in the usual in-place
-  // Native AA case. A distinct target needs its own lifetime through replay.
+  // At native size the output is the scene image itself, which color_srv
+  // already keeps alive. A separate output needs its own reference until the
+  // job runs.
   if (inputs.output.resource.handle != inputs.color_resource.handle) {
     pending.output_resource = reinterpret_cast<ID3D11Resource*>(inputs.output.resource.handle);  // NOLINT(performance-no-int-to-ptr)
   }
@@ -986,7 +1037,8 @@ inline void ScheduleSceneLocked(reshade::api::command_list* cmd_list) {
     const std::unique_lock lock(submission.mutex);
     submission.pending_dispatches.emplace_back(std::move(pending));
   }
-  // The redirection needs the output while the rest of this list is recorded.
+  // The output-size route redirects the rest of this list's post-processing
+  // into this output, so make it the active output now.
   if (post_output != nullptr) {
     const std::unique_lock lock(output_size::state.mutex);
     output_size::Recording route = {.output = post_output, .producer = output_producer, .frame = inputs.frame_token, .generation = output_size::state.generation, .owner = scope.owner};

@@ -15,9 +15,10 @@ namespace mgsv::lighting::reflections {
 
 inline constexpr UINT INPUT_COUNT = 12u;
 
-// Recorded at deferred composition, published with that native command list,
-// and consumed by the same scene's later reflection draw. Retaining a resource
-// alone does not prove which scene wrote it; the producer ledger supplies that.
+// Reflection inputs captured at deferred composition, published with that
+// native command list, and used by the same scene's later reflection composite.
+// Holding a resource does not prove which scene wrote it; the producer records
+// in submission order supply that association.
 struct Inputs {
   std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, INPUT_COUNT> views;
   Microsoft::WRL::ComPtr<ID3D11Buffer> scene;

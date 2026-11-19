@@ -1,6 +1,9 @@
 #include "../../common.hlsli"
 #include "composition.hlsli"
 
+// Port of the game's LocalReflectionComposite, which adds the native reflection
+// result to the scene. With an enhanced result bound for this view, the mod
+// composes that result instead (composition.hlsli).
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:29 2026
 
 cbuffer cPSSystem : register(b0) {
@@ -30,7 +33,9 @@ void main(
     result = LoadReflectionResult(uv);
   }
   if (result.replaces_native) {
-    // General surfaces and the sortie floor use the same complete GGX result.
+    // General surfaces and the sortie floor use the same GGX result.
+    // ComposeReflections takes extended sRGB: the FP16 target already holds it,
+    // while a game sRGB view has decoded it and must be encoded again.
     const float3 color = inColorImage.Sample(g_samplerLinear_Wrap_s, uv).rgb;
 #if FIX_UNORM_SRGB
     o0 = float4(ComposeReflections(color, result), 1.0);
@@ -53,6 +58,7 @@ void main(
   r0.xy = r0.xy;
   r1.xyz = inColorImage.Sample(g_samplerLinear_Wrap_s, r0.xy).xyz;
 #if FIX_UNORM_SRGB
+  // Mod edit: decode the FP16 target's extended sRGB, as the game's sRGB view did.
   r1.rgb = renodx::color::srgb::Decode(max(r1.rgb, 0.0));
 #endif
   r1.xyz = r1.xyz;

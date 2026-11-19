@@ -1,7 +1,12 @@
+// Tone mapping helpers for the scene, sky, water, and final tonemap ports: the
+// native in-scene curves, the color LUT with grading controls, and the final
+// output tone map.
 #include "../common.hlsli"
 #include "customtest35.hlsli"
 #include "uncharted2extended.hlsli"
 
+// Native Uncharted 2 filmic curve normalized to white point W. With RenoDX tone
+// mapping on, the curve continues linearly past its inflection point instead.
 float3 ApplyUnchartedFilmicTonemap(float3 untonemapped, float A, float B, float C, float D, float E, float F, float W) {
   [branch]
   if (RENODX_TONE_MAP_TYPE != 0.f) {
@@ -15,6 +20,9 @@ float3 ApplyUnchartedFilmicTonemap(float3 untonemapped, float A, float B, float 
          / renodx::tonemap::ApplyCurve(W, A, B, C, D, E, F);
 }
 
+// Native TppTonemap curve: linear up to the shoulder start, then a hyperbolic
+// shoulder. With RenoDX tone mapping on, the color passes through untouched so
+// ApplyFinalTonemap can map the full HDR range.
 float3 ApplyTppTonemap(float3 untonemapped, float3 params) {
   [branch]
   if (RENODX_TONE_MAP_TYPE != 0.f) return untonemapped;
@@ -52,6 +60,9 @@ float ComputeAnchoredCInfinityMaxChannelScale(
   return renodx::math::DivideSafe(compressed_max, max_channel, 1.f);
 }
 
+// Final output: decode the sRGB-encoded scene, tone map it with PsychoV test35
+// (or clamp to SDR when tone mapping is off), scale diffuse white to graphics
+// white, and encode for the swap chain.
 float3 ApplyFinalTonemap(float3 untonemapped) {
   float3 r0 = untonemapped;
 
@@ -104,14 +115,16 @@ float3 ApplyFinalTonemap(float3 untonemapped) {
   return r0.rgb;
 }
 
+// Native 16x16x16 color LUT stored as a 2D strip. Input is linear SDR color; the
+// game indexes the LUT by its square root and returns gamma-encoded color.
 float3 Sample2DLUT(float3 color, Texture2D<float4> inColorLUT, SamplerState g_samplerLinear_Clamp_s) {
   float4 r0;
   r0.rgb = color;
   float3 r1;
 
   const float LUT_SIZE = 16.0;
-  const float INV_LUT_SIZE = 1.0 / LUT_SIZE;  // 0.0625
-  const float LUT_BIAS = 0.5 * INV_LUT_SIZE;  // 0.03125
+  const float INV_LUT_SIZE = 1.0 / LUT_SIZE;
+  const float LUT_BIAS = 0.5 * INV_LUT_SIZE;
 
   r0.rgb = saturate(r0.rgb);
   r1.xyz = max(float3(0.001953125, 0.001953125, 0.001953125), r0.xyz);
@@ -140,6 +153,8 @@ float3 Sample2DLUT(float3 color, Texture2D<float4> inColorLUT, SamplerState g_sa
   return r0.rgb;
 }
 
+// Remove the LUT's raised black (its output for zero input) from a graded color.
+// The removal fades out as the source gets brighter than that offset.
 float3 CompensateGradingZeroInputOffset(
     float3 graded,
     float3 source,
@@ -172,6 +187,8 @@ float3 CompensateGradingZeroInputOffset(
   return graded - offset_compensation;
 }
 
+// LUT lookup with the mod's grading controls: Color Grade Scaling removes the
+// LUT's raised black, and Color Grade Strength blends back toward the input.
 float3 Sample2DLUTWithScaling(float3 color, Texture2D<float4> inColorLUT, SamplerState g_samplerLinear_Clamp_s) {
   float3 output_gamma = Sample2DLUT(color, inColorLUT, g_samplerLinear_Clamp_s);
 

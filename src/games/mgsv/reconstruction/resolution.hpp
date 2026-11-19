@@ -28,6 +28,12 @@
 #include "logging.hpp"
 #include "state.hpp"
 
+// Upscaling for FSR and DLSS: the engine renders the scene below output size.
+// Present picks a size plan (MakePlan). The hook on DgDx11::Start, which runs
+// before the engine builds the next frame's views, writes the planned render
+// size into the backend's resize request, so the engine resizes through
+// its normal update. The depth-of-field hooks make the native scatter depth of
+// field work at output size, since it runs after reconstruction.
 namespace mgsv::reconstruction::resolution {
 
 enum class Quality : uint8_t {
@@ -71,17 +77,22 @@ struct Plan {
 
 struct State {
   std::shared_mutex mutex;
+  // `requested` is chosen at Present. `actual` is what the backend reports
+  // after its Start call, and `generation` advances when it changes.
   Plan requested;
   Size actual;
   uint64_t generation = 0u;
-  uintptr_t backend = 0u;  // Borrowed identity; read only during its native Start call.
+  uintptr_t backend = 0u;  // The backend this mod sizes; compared, never dereferenced.
   uint64_t presentation_generation = 0u;
+  // The size the game itself last requested, and the size this mod last left
+  // in the request, which tells the game's changes apart from ours.
   Size engine_wanted;
   Size last_written;
 };
 inline State sizing_state;
 inline std::atomic<Quality> quality = Quality::AUTO;
 inline std::atomic<bool> installed = false;
+// Set by Fail. Cleared when the user selects a different quality.
 inline std::atomic<bool> failed = false;
 inline std::atomic<float> mip_bias = 0.f;
 
@@ -121,8 +132,8 @@ inline Plan MakePlan(Size output, state::TemporalMode mode, Quality selected) {
   return result;
 }
 
-// A failure restores native sizing at the renderer's next update. It never
-// rebuilds resources from inside a draw or a settings callback.
+// Ends upscaling: the next Present plans native size, and the backend's next
+// Start applies it. Nothing is rebuilt inside a draw or a settings callback.
 inline void Fail(const char* reason) {
   if (!failed.exchange(true, std::memory_order_acq_rel)) {
     logging::Warn("upscaling disabled: ", reason);
@@ -141,8 +152,8 @@ inline DofDimensions dof_dimensions = nullptr;
 inline DofSprites dof_sprites = nullptr;
 inline uintptr_t backend_step_entry = 0u;
 
-// The hooks, and the constants the native depth-of-field scatter is
-// rescaled around at output size.
+// The hooked functions, and the depth-of-field scatter constants the output-size
+// rescaling depends on.
 inline constexpr std::array REQUIRED_ENTRIES = {
     engine::Entry::DG_START,
     engine::Entry::DEPTH_OF_FIELD_DRAW,
@@ -174,6 +185,8 @@ struct DofDrawState {
     return IsScaled() && scene != 0u && scene == owner.scene && generation == owner.generation;
   }
 };
+// The scaled depth-of-field draw running on this thread, which tells the
+// nested size calls to use output size. Each draw restores its caller's value.
 static thread_local DofDrawState active_dof;
 
 inline void __fastcall HookBackendStep(uint8_t* backend) {
@@ -188,8 +201,9 @@ inline void __fastcall HookBackendStep(uint8_t* backend) {
   {
     const std::unique_lock lock(sizing_state.mutex);
     const auto& plan = sizing_state.requested;
-    // A native-size scene establishes the swapchain/backend association during
-    // startup. Apply its scale at the next Start, without a settings toggle.
+    // This backend is selected once a main view has been matched to the
+    // presented swapchain, which can happen at native size during startup.
+    // The next Start then applies the plan without any settings change.
     const bool selected = presentation.backend == backend_address && presentation.generation != 0u
                           && table != nullptr && table[BACKEND_START_SLOT] == backend_step_entry;
     if (selected && sizing_state.backend != backend_address) {
@@ -206,8 +220,9 @@ inline void __fastcall HookBackendStep(uint8_t* backend) {
       }
       const bool scaled = selected && installed.load(std::memory_order_acquire) && !failed.load(std::memory_order_acquire)
                           && state::IsEnabled() && plan.IsScaled() && plan.output == display;
-      // Preserve the game's own request across resize, recovery, and a lost
-      // presentation association. Only a backend we already own is restored.
+      // When not scaling, write back the game's last request, so a resize,
+      // a recovery or a lost swapchain match returns to it. Only a backend
+      // selected earlier is changed.
       const auto desired = (scaled ? plan.render : sizing_state.engine_wanted);
       if ((*flags & BACKEND_BUSY_FLAG) == 0u && desired.width != 0u && desired.height != 0u && *wanted != desired) {
         *wanted = desired;
@@ -240,8 +255,8 @@ inline void __fastcall HookDofDraw(void* effect, const float* parameters) {
   Plan plan;
   {
     const std::shared_lock lock(sizing_state.mutex);
-    // MainExec supplies the viewport and camera. Dimensions then check that
-    // its scene was built with the plan currently applied to this backend.
+    // The depth-of-field scope identifies the view. The size checks confirm
+    // its scene was built with the plan this backend currently applies.
     if (scope.matches_view && scope.effect == reinterpret_cast<uintptr_t>(effect)
         && owner.main_view && owner.active_member && owner.presentation_matches
         && owner.backend == sizing_state.backend && owner.generation == sizing_state.presentation_generation
@@ -265,8 +280,8 @@ inline void __fastcall HookDofDraw(void* effect, const float* parameters) {
       active_dof = {.plan = plan, .effect = scope.effect, .invocation = scope.invocation, .scene = owner.scene, .generation = owner.generation};
       std::memcpy(copied.data(), parameters, sizeof(copied));
       const float scale = static_cast<float>(plan.output.width) / static_cast<float>(plan.render.width);
-      // The native scatter converts these physical blur terms into pixels
-      // using render width. Supply output-pixel terms without changing its view.
+      // The scatter converts these blur terms to pixels using the render
+      // width. Scale them so they come out in output pixels.
       copied[0] *= scale;
       copied[5] *= scale;
       copied[6] *= scale;
@@ -286,8 +301,8 @@ inline void __fastcall HookDofDraw(void* effect, const float* parameters) {
 }
 
 inline void __fastcall HookDofDimensions(void* resources, uint32_t width, uint32_t height) {
-  // DrawScatterDof passes its shared DgResources here. The enclosing admitted
-  // draw identifies the scene whose DoF rectangles need output dimensions.
+  // The scatter path passes its shared DgResources here. active_dof, set by
+  // the enclosing HookDofDraw, says whether these rectangles need output size.
   if (active_dof.IsScaled() && Size{.width = width, .height = height} == active_dof.plan.render) {
     width = active_dof.plan.output.width;
     height = active_dof.plan.output.height;
@@ -340,7 +355,8 @@ inline void Use(DWORD reason) {
     reshade::register_event<reshade::addon_event::init_device>(OnInitDevice);
   } else if (reason == DLL_PROCESS_DETACH) {
     reshade::unregister_event<reshade::addon_event::init_device>(OnInitDevice);
-    // Pinned native code and its trampolines remain valid until process exit.
+    // The hooks stay installed. The module is pinned, so their code and
+    // trampolines stay valid until the process exits.
   }
 }
 

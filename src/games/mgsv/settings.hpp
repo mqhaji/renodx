@@ -5,8 +5,10 @@
 
 #pragma once
 
-// Core controls and cross-feature preset policy. Each registry stays bound to its original state.
-// Bound state and the registry must outlive the callbacks.
+// The core menu (output, tone mapping, color grading, effects, links) and the
+// "Off" preset that returns every feature to the vanilla look. Setting callbacks
+// keep raw pointers to the registry, ShaderInjectData and output state, so those
+// must outlive the settings.
 
 #include <algorithm>
 #include <array>
@@ -97,8 +99,8 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
                 if (ImGui::SliderInt("UI Visibility", &visibility, 0, 1, visibility == 0 ? "Hide" : "Show", ImGuiSliderFlags_NoInput)) {
                   reconstruction::output_size::ui_visible.store(visibility != 0, std::memory_order_relaxed);
                 }
-                // Custom controls have no config value. Update rendering directly
-                // without marking the saved preset as changed.
+                // This control has no saved value. It applies immediately, and
+                // returning false keeps the preset from being marked as changed.
                 return false;
               },
           },

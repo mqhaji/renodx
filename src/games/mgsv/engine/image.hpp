@@ -38,9 +38,9 @@ inline const Image& GetImage() {
   // The first caller verifies; any concurrent caller waits for that result.
   static const Image RUNNING_IMAGE = [] {
     Image result = {.base = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr))};
-    // Entries are checked in the executable file, not in the loaded image:
-    // hooks this or another add-on has already installed change the code in
-    // memory, and the probe add-on verifies after the mod has hooked.
+    // Entries are checked in the executable file, not in memory: hooks that
+    // this or another add-on already installed change the loaded code, and the
+    // probe add-on runs its check after the mod has hooked.
     std::array<wchar_t, 32768> path = {};
     const DWORD path_length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
     std::ifstream file(std::filesystem::path(std::wstring_view(path.data(), path_length)), std::ios::binary);
@@ -96,7 +96,7 @@ inline const Image& GetImage() {
       if (!matches) failure[index_of(info.entry)] = "its bytes differ";
     }
 
-    // An entry without bytes of its own is identified only by a verified
+    // An entry without bytes is identified only by a verified
     // entry that refers to it.
     std::array<bool, ENTRY_COUNT> confirmed = {};
     for (const auto& reference : REFERENCES) {

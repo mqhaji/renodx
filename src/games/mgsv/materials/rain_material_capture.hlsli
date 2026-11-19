@@ -1,4 +1,5 @@
-// Carry a cube material's record through the native wet-surface adjustment.
+// Helper for the rain G-buffer ports: carry a cube material's record through the
+// native wet-surface adjustment.
 #ifndef MGSV_RAIN_MATERIAL_CAPTURE_HLSLI_
 #define MGSV_RAIN_MATERIAL_CAPTURE_HLSLI_
 

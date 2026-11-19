@@ -9,11 +9,15 @@
 
 #include "../../../../utils/cross_addon.hpp"
 
+// Development interface between the game addon and the local lighting probe
+// addon. The probe can replace the reflection compute shaders, switch denoiser
+// comparison modes, and request camera snapshots; the game addon installs the
+// callbacks.
 namespace mgsv::lighting::reflections::probe {
 
-// The probe compiles and validates a complete set outside the renderer. These
-// borrowed bytes are copied by the provider before Request returns. No owning
-// containers, COM objects, or allocator responsibilities cross the DLL boundary.
+// The probe compiles and validates a complete shader set itself. The game addon
+// copies these borrowed bytes before the request callback returns, so no owning
+// containers, COM objects, or allocations cross the DLL boundary.
 inline constexpr size_t PASS_COUNT = 5u;
 inline constexpr uint32_t CONSTANT_BYTES = 128u;
 struct Bytecode {
@@ -25,8 +29,9 @@ struct Request {
   std::array<Bytecode, PASS_COUNT> shaders;
   bool restore = false;
 };
-// Development-only comparisons. Each starts from the SDK defaults, changes
-// one stage or history policy, and restarts history without replacing shaders.
+// Development-only denoiser comparisons. Each starts from the SDK defaults,
+// changes one stage or history policy, and restarts history without replacing
+// shaders.
 enum class DenoiserMode : uint8_t {
   DEFAULT,
   NO_STABILIZATION,
@@ -36,6 +41,8 @@ enum class DenoiserMode : uint8_t {
   COUNT,
 };
 inline constexpr uint32_t MAX_CAMERA_SNAPSHOTS = 4u;
+// The cameras of one reflection submission: the source matrices, the engine's
+// own previous matrices, and the matrices after conversion for NRD.
 struct CameraSnapshot {
   uint64_t scene = 0u;
   uint64_t owner_generation = 0u;
@@ -79,11 +86,12 @@ struct Status {
   std::array<CameraSnapshot, MAX_CAMERA_SNAPSHOTS> cameras;
 };
 
-// Callbacks only copy requests/status. Hold this lock while calling them so
-// unloading the provider cannot leave a caller executing code from its DLL.
-// The provider never calls back into this interface while holding its own lock.
-// This UUID identifies the NRD guide layout, its 128-byte controls and live
-// denoiser configuration. Older probes must not use a different callback layout.
+// The callbacks only copy requests and status. Callers hold this lock while
+// calling them, so unloading the game addon cannot leave the probe running code
+// from its DLL. The game addon never calls back into this interface while
+// holding its own lock. The UUID identifies this layout, including the NRD
+// guide layout, the 128-byte constants, and live denoiser configuration; change
+// it when the layout changes so an older probe cannot attach.
 struct __declspec(uuid("B4ED6C86-0731-40AE-8DC9-6A3E70EA1B02")) Interface {
   std::shared_mutex mutex;
   bool (*request)(const Request*, Status*) = nullptr;

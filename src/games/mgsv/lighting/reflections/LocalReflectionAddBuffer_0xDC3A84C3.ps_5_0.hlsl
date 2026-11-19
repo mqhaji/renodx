@@ -1,6 +1,9 @@
 #include "../../common.hlsli"
 #include "composition.hlsli"
 
+// Port of the game's LocalReflectionAddBuffer, which blends the native
+// reflection trace result over the scene. With an enhanced result bound for
+// this view, the mod composes that result instead (composition.hlsli).
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:33 2026
 
 // clang-format off
@@ -43,7 +46,9 @@ void main(
     result = LoadReflectionResult(uv);
   }
   if (result.replaces_native) {
-    // General surfaces and the sortie floor use the same complete GGX result.
+    // General surfaces and the sortie floor use the same GGX result.
+    // ComposeReflections takes extended sRGB: the FP16 target already holds it,
+    // while a game sRGB view has decoded it and must be encoded again.
     const float3 color = inColorImage.Sample(g_samplerLinear_Wrap_s, uv).rgb;
 #if FIX_UNORM_SRGB
     o0 = float4(ComposeReflections(color, result), 1.0);
@@ -75,6 +80,7 @@ void main(
   r1.xyzw = inRefMapImage.SampleLevel(g_samplerLinear_Wrap_s, r0.xy, r0.z).xyzw;
   r0.xyz = inColorImage.Sample(g_samplerLinear_Wrap_s, r0.xy).xyz;
 #if FIX_UNORM_SRGB
+  // Mod edit: decode the FP16 target's extended sRGB, as the game's sRGB view did.
   r0.rgb = renodx::color::srgb::Decode(max(0, r0.rgb));
 #endif
 
@@ -85,8 +91,8 @@ void main(
   r0.w = g_psObject.m_localParam[3].x * r0.w;
   r1.w = -r0.w;
   r1.w = 1 + r1.w;
-  // Native hit alpha replaces part of the current scene.
-  // Keep that complement: adding the reflection alone would count both terms.
+  // The native hit alpha blends the reflection over the scene:
+  // scene * (1 - alpha) + reflection * alpha.
   r0.xyz = r1.www * r0.xyz;
   r1.xyz = r1.xyz * r0.www;
   r0.xyz = r1.xyz + r0.xyz;

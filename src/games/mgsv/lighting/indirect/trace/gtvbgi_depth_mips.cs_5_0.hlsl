@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Copyright and license notices: ../README.md#credits-and-license.
 
-// GT-VBGI reverse-Z depth reduction: nearest depth wins.
-// Each dispatch writes one mip. Odd trailing rows/columns join the last footprint.
+// Builds one level of the nearest-depth pyramid that GT-VBGI uses for distant
+// samples. Each dispatch reads full-resolution depth or the previous level and
+// writes the next level. Depth is reverse-Z, so the maximum is the nearest
+// surface. An odd last row or column joins the last destination texel.
 
 Texture2D<float4> source_depth : register(t0);
 RWTexture2D<float> destination_level : register(u0);

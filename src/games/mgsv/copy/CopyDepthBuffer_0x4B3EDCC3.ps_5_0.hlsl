@@ -1,3 +1,4 @@
+// Port of the native depth-buffer copy: it writes the copied depth and a constant color.
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:25 2026
 
 cbuffer cPSSystem : register(b0)

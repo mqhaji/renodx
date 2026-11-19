@@ -1,3 +1,5 @@
+// Port of a native shadowed sun light. The mod adds PCSS shadow-map filtering and
+// Bend Studio's contact shadows, and clears the environment and readiness outputs.
 #include "../shadows/screen_space_shadows.hlsli"
 
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:35 2026
@@ -310,8 +312,8 @@ void main(
                                       ReadPcssProjection(g_psScene.m_shadowProjection, g_psScene.m_shadowProjection2, true),
                                       g_psScene.m_shadowProjection2, PcssNoise(v0.xy));
   }
-  // The native comparisons return occlusion. Preserve the native cone,
-  // distance fade, projected-light mask, and shadow-strength operations below.
+  // r0.x is occlusion, as the native comparisons return it. Skip the shadow map
+  // when the contact shadow already hides the light. The native math below is unchanged.
   [branch]
   if (!shadow_required) {
     r0.x = 1.0;
@@ -547,7 +549,7 @@ void main(
   r0.xyzw = r0.xyzw;
   o0.xyzw = r0.xyzw;
   o1.xyzw = r1.xyzw;
-  // Preserve native output alpha and any diffuse-only material behavior.
+  // Apply the contact shadow to RGB only; native output alpha stays as written.
   o0.rgb *= contact_shadow.visibility;
   o1.rgb *= contact_shadow.visibility;
   ApplyBendDebug(contact_shadow, o0.rgb, o1.rgb);

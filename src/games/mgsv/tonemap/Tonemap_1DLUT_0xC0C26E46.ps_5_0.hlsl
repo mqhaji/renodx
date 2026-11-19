@@ -1,3 +1,5 @@
+// Port of the native tonemap pass that uses a per-channel 1D LUT. The mod adds the
+// enhanced bloom mode and the bloom strength setting; the output stays SDR.
 #include "../postprocess/bloom/bloom.hlsli"
 #include "tonemap.hlsli"
 

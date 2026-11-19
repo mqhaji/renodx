@@ -25,20 +25,24 @@ struct Image {
   std::shared_ptr<rendering::SharedTexture> shared;
 };
 
-// A material allocation has one result, even when diffuse/specular lighting
-// ping-pongs through several allocations. Composition reads GPU-written
-// readiness, so CPU recording order cannot expose an old reflection.
+// The Enhanced reflection images for one G-buffer material texture. Each
+// material texture has one result, even when the diffuse and specular lighting
+// targets alternate between several textures. The reflection composite checks
+// the GPU-written readiness image, so CPU recording order cannot expose an old
+// reflection.
 struct Target {
   uint64_t generation = 0u;
   uint32_t width = 0u;
   uint32_t height = 0u;
-  // Complete reflected light (alpha: valid receiver), then environment sampling
-  // weight (alpha: directional visibility). Both share the same GGX sample.
+  // [0]: complete reflected light, alpha marks a valid receiver.
+  // [1]: environment sampling weight, alpha is directional visibility.
+  // Both come from the same GGX sample.
   std::array<Image, 2> images;
-  Image ready;  // R8 bytes: 0 unavailable, 255 enhanced result complete.
-  // The deferred draw writes the exact environment term already in scene RGB,
-  // including the wet-ground cube. Alpha is receiver fog transmission; -1 is
-  // unavailable. Later SSR replaces this term without changing direct light.
+  Image ready;  // R8_UNORM: 0 is unavailable, 1 means the result is complete.
+  // Deferred composition writes the exact environment term already in scene
+  // RGB, including the wet-ground cube map. Alpha is receiver fog transmission;
+  // -1 means unavailable. The reflection composite replaces this term without
+  // changing direct light.
   Image environment;
 };
 

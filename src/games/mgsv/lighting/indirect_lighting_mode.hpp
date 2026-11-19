@@ -9,15 +9,17 @@
 
 namespace mgsv::lighting {
 
-// Present copies the user's mode here, so every pass recorded for one frame
-// reads the same answer without taking the settings lock on a worker thread.
+// Present stores here whether Enhanced indirect lighting is in effect: the mode
+// is Enhanced and the RenoDX tone mapper is selected. Every pass recorded for
+// one frame reads the same answer without taking the settings lock on a worker
+// thread.
 inline std::atomic<bool> indirect_lighting_enhanced = false;
 
-// Enhanced indirect lighting belongs to the presented main view. The material
+// Enhanced indirect lighting runs only in the presented main view. The material
 // capture, the diffuse gather, the environment export, and the reflections all
-// ask this one question: a view that exports its environment light for
+// ask this one function, because a view that exports its environment light for
 // replacement must also be the view whose reflections replace it. Other views
-// keep the game's own lighting.
+// keep the game's lighting.
 inline bool UsesEnhancedIndirectLighting() {
   if (!indirect_lighting_enhanced.load(std::memory_order_acquire)) return false;
   const auto owner = engine::views::GetScope().owner;

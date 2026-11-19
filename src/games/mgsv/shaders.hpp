@@ -34,7 +34,9 @@
 #include "rendering/producer_records.hpp"
 #include "shared.h"
 
-// Explicit registrations precede the generated shader entries.
+// The game shaders the mod replaces or watches, each with the callbacks that run
+// around its draw. Hand-written entries come first; the generated entries then
+// fill in every other replacement shader.
 namespace mgsv::game {
 
 #define MGSV_DEFERRED_COMPOSITE_SHADER(value)                              \
@@ -71,8 +73,9 @@ namespace mgsv::game {
 inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shader_injection) {
   mgsv::lighting::material_inputs::controls = shader_injection;
   mgsv::shadows::batch::controls = shader_injection;
-  // Take one settings snapshot for the added work. Bind the shared PCSS noise
-  // only for lights with a native map; End restores every displaced pixel input.
+  // Copy the settings once for the added shadow work. Bind the shared PCSS noise
+  // (t20) only for lights with a shadow map; screen_space::End puts back every
+  // pixel shader input it displaced.
   const auto begin_shadows = [shader_injection](reshade::api::command_list* cmd_list, uint32_t light_type,
                                                 bool has_shadow_map = true) {
     ShaderInjectData constants = {};
@@ -106,8 +109,8 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
     const auto* saved = cmd_list->get_private_data<mgsv::shadows::screen_space::DrawState>();
     return saved != nullptr && saved->active && saved->replacement_safe;
   };
-  // Directional draws also supply the existing environment-specular capture.
-  // Keep that attachment around the same native draw as the new shadow mask.
+  // Sun draws also feed the environment-specular capture, so begin and end it
+  // around the same draw as the enhanced shadows.
   const auto begin_directional = [begin_shadows](reshade::api::command_list* cmd_list, bool has_shadow_map = true) {
     begin_shadows(cmd_list, 0u, has_shadow_map);
     mgsv::lighting::temporal_inputs::CaptureScene(cmd_list);
@@ -131,8 +134,8 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
         .on_drawn = &mgsv::shadows::screen_space::End,
     };
   };
-  // A replacement can write the optional capture output only after its native
-  // bindings were qualified. Otherwise the original light shader stays active.
+  // Use the replacement only when the capture or the shadow pass accepted this
+  // draw's bindings; otherwise the original light shader runs.
   const auto directional_shadow_shader = [begin_directional, end_directional, capture_active, shadow_active](
                                              uint32_t hash, std::span<const uint8_t> code, bool has_shadow_map) {
     return renodx::mods::shader::CustomShader{
@@ -144,6 +147,8 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
     };
   };
   renodx::mods::shader::CustomShaders shaders = {
+      // Sky ambient light and its upsample (BilateralUpscale2x2): enhanced
+      // diffuse lighting captures the ambient term here.
       {
           0x4FBDBB39,
           {.crc32 = 0x4FBDBB39, .on_inject = [](auto*) { return false; }, .on_drawn = &mgsv::lighting::ambient_diffuse::OnSkyDrawn},
@@ -160,6 +165,8 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
                 return true; },
           },
       },
+      // CopyBuffer copies the diffuse light buffer before the skin-scatter passes;
+      // enhanced lighting prepares its diffuse source from this copy.
       {
           0xD71E843E,
           {
@@ -177,13 +184,16 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
                 } },
           },
       },
+      // Rain G-buffer material layers.
       {0x2C230875, {.crc32 = 0x2C230875, .code = __0x2C230875, .on_replace = &mgsv::lighting::material_inputs::IsCaptureActive, .on_inject = [](auto*) { return false; }, .on_draw = &mgsv::lighting::material_inputs::OnRainDraw, .on_drawn = &mgsv::lighting::material_inputs::EndCapture}},
       {0xC3538951, {.crc32 = 0xC3538951, .code = __0xC3538951, .on_replace = &mgsv::lighting::material_inputs::IsCaptureActive, .on_inject = [](auto*) { return false; }, .on_draw = &mgsv::lighting::material_inputs::OnRainDraw, .on_drawn = &mgsv::lighting::material_inputs::EndCapture}},
+      // Bloom and lens-flare chain, replaced only for draws in that chain.
       MGSV_BLOOM_SHADER(0x72C1D157, true),
       MGSV_BLOOM_SHADER(0x463195C2, false),
       MGSV_BLOOM_SHADER(0x1AC1A5EF, false),
       MGSV_BLOOM_SHADER(0x265053A6, false),
       MGSV_BLOOM_SHADER(0x9BE51873, false),
+      // Motion blur's velocity and depth bake, replaced only for upscaled scenes.
       {
           0x512E2B48,
           {
@@ -195,6 +205,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
               .on_inject = [](auto*) { return false; },
           },
       },
+      // CopyRenderBuffer; its copy of the bloom result ends the bloom chain.
       {
           0x83272BCB,
           {
@@ -205,14 +216,16 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
           },
       },
 
-      // Deferred rendering paths perform the actual filmic tonemap before the
-      // later LUT/color-grading pass. They write the engine's float scene color.
+      // Deferred composition variants. They apply the game's filmic tone curve,
+      // before the later LUT/color-grading pass, and write the engine's float
+      // scene color.
       MGSV_DEFERRED_COMPOSITE_SHADER(0xC973024D),  // DeferredRenderingFilmic_VolFog
       MGSV_DEFERRED_COMPOSITE_SHADER(0xBDE1F4CD),  // DR_TonemapRainFilter
       MGSV_DEFERRED_COMPOSITE_SHADER(0x6E29F0AB),  // DR_TonemapRainFilter_NoIR
       MGSV_DEFERRED_COMPOSITE_SHADER(0x2EA8F13F),  // DR_VolFog_TppTonemap
       MGSV_DEFERRED_COMPOSITE_SHADER(0x59B44963),  // DR_VolFog_TppTonemap_MD
 
+      // FXAA.
       {
           0x900968FF,
           {
@@ -232,6 +245,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
 
       MGSV_DEFERRED_COMPOSITE_SHADER(0x410AE8C5),  // DeferredRenderingFilmic
 
+      // Sun and local light draws. Type 0 is the sun; 1 to 4 are local light types.
       {
           0x5AFD2E17,
           {
@@ -246,6 +260,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
       {0x08292A5E, local_shadow_shader(0x08292A5E, __0x08292A5E, 1u, true)},
       {0x1D4DB9C5, local_shadow_shader(0x1D4DB9C5, __0x1D4DB9C5, 3u, true)},
       {0x80F0A0BC, local_shadow_shader(0x80F0A0BC, __0x80F0A0BC, 2u, true)},
+      // SunLight_ES gets only the environment-specular capture, no enhanced shadows.
       {
           0x34B04FB1,
           {
@@ -258,8 +273,9 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
           },
       },
 
-      // Preserve each native variant's masks and material response. Lights
-      // without shadow maps use contact shadows and the same spotlight budget.
+      // Light variants by type. Each port keeps its native masks and material
+      // response. Lights without shadow maps still get contact shadows and the
+      // same spotlight budget.
       {0x0636037A, local_shadow_shader(0x0636037A, __0x0636037A, 2u, true)},
       {0x0C708B4B, directional_shadow_shader(0x0C708B4B, __0x0C708B4B, true)},
       {0x1B5FA666, local_shadow_shader(0x1B5FA666, __0x1B5FA666, 1u, true)},
@@ -285,15 +301,19 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
       {0xE82F8D58, local_shadow_shader(0xE82F8D58, __0xE82F8D58, 3u, false)},
       {0xFB8F891F, directional_shadow_shader(0xFB8F891F, __0xFB8F891F, true)},
 
+      // Native reflection trace and its composite.
       {0xD6714838, {.crc32 = 0xD6714838, .code = __0xD6714838, .on_draw = &mgsv::lighting::reflections::native_chain::OnTrace}},
       {0xDC3A84C3, {.crc32 = 0xDC3A84C3, .code = __0xDC3A84C3, .on_draw = &mgsv::lighting::reflections::BeginComposite, .on_drawn = [](auto* cmd_list) { mgsv::lighting::reflections::EndComposite(cmd_list); mgsv::lighting::reflections::native_chain::OnResetCommandList(cmd_list); }}},
-      // Keep native motion packing and alpha tests. The recording callback
-      // upgrades velocity storage; the CPU upload fixes previous-position math.
+      // Velocity shaders stay native, keeping their motion packing and alpha
+      // tests, and only opt out of constant injection. Their targets are created
+      // as float (engine/render_targets.hpp), and projection_jitter.hpp fixes the
+      // G-buffer pair's previous-position matrices when the engine uploads them.
       {0x9815404F, {.crc32 = 0x9815404F, .on_inject = [](auto*) { return false; }}},
       {0x58C10658, {.crc32 = 0x58C10658, .on_inject = [](auto*) { return false; }}},
       {0xA13321B6, {.crc32 = 0xA13321B6, .on_inject = [](auto*) { return false; }}},
-      // Correct ambient lighting before native skin scattering. Keep the original
-      // scatter shader: the old horizontal port changes its normal and angle math.
+      // The enhanced diffuse lighting passes run just before the first native
+      // skin-scatter pass. The scatter shader itself stays native, because a
+      // port of it did not match its normal and angle math.
       {
           0x6DAF0C4A,
           {
@@ -304,7 +324,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
                 return true; },
           },
       },
-      // The original second scatter still runs, without another lighting chain.
+      // The second skin-scatter pass also stays native; the lighting passes run only once.
       {
           0xB2601810,
           {
@@ -325,8 +345,8 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
                                        .on_drawn = &mgsv::lighting::material_inputs::EndCapture,
                                    });
   }
-  // Enhanced replaces both general and sortie-floor reflection traces. Shared
-  // filters are skipped only when they follow a canceled trace.
+  // Enhanced reflections cancel both the general and the sortie-floor native
+  // traces. The shared filters are skipped only when they follow a canceled trace.
   shaders.emplace(0xA621C684u, renodx::mods::shader::CustomShader{.crc32 = 0xA621C684u, .code = __0xA621C684, .on_inject = [](auto*) { return false; }, .on_draw = &mgsv::lighting::reflections::native_chain::OnTrace});
   for (const uint32_t hash : {0xBC4665A3u, 0xB301C16Du}) {
     shaders.emplace(hash, renodx::mods::shader::CustomShader{.crc32 = hash, .on_inject = [](auto*) { return false; }, .on_draw = &mgsv::lighting::reflections::native_chain::OnTrace});
@@ -336,7 +356,8 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
   }
   // Leave the native mask intact: it can precede selection of the planar path.
   shaders.emplace(0x93B69040u, renodx::mods::shader::CustomShader{.crc32 = 0x93B69040u, .code = __0x93B69040, .on_draw = &mgsv::lighting::reflections::BeginComposite, .on_drawn = [](auto* cmd_list) { mgsv::lighting::reflections::EndComposite(cmd_list); mgsv::lighting::reflections::native_chain::OnResetCommandList(cmd_list); }});
-  // Unported composition programs report their use once for investigation.
+  // Deferred composition variants without a port keep the native shader and log
+  // once when the game first uses them.
   struct NativeVariant {
     uint32_t hash;
     const char* message;
@@ -361,7 +382,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
           return true; },
                                   });
   }
-  // Explicit callbacks win. Automatic entries supply the remaining replacements.
+  // merge keeps existing keys, so the entries above win over generated ones.
   shaders.merge(renodx::mods::shader::CustomShaders{__ALL_CUSTOM_SHADERS});
   return shaders;
 }

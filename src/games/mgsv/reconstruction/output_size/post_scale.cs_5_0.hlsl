@@ -5,8 +5,9 @@
 Texture2D<float4> input_color : register(t0);
 RWTexture2D<float4> output_color : register(u0);
 
-// This fallback uses this submission's current scene when temporal work was
-// canceled. Decode before interpolation; the next native pass expects encoding.
+// Fills the output-sized scene by bilinear scaling of this frame's native scene
+// when the scene is not reconstructed (see Output::CopyNative). Interpolate in
+// linear light, then encode again because later native passes expect it.
 [numthreads(8, 8, 1)] void main(uint3 thread_id : SV_DispatchThreadID) {
   if (any(thread_id.xy >= output_size)) return;
   const float2 position = ((float2(thread_id.xy) + 0.5f) / float2(output_size) + jitter_uv) * float2(input_size) - 0.5f;

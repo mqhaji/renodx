@@ -1,6 +1,8 @@
 #include "../shadows/screen_space_shadows.hlsli"
 
-// Native sun baseline; the extra output captures environment specular before addition.
+// Port of a native sun light without a shadow map. The mod adds Bend Studio's
+// contact shadows, writes the environment specular term to an extra output
+// before it is added, and clears reflection readiness.
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:27 2026
 
 cbuffer cPSScene : register(b2) {

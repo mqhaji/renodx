@@ -1,19 +1,23 @@
 #pragma once
 
 /*
- * Native hook for MGSV's gameplay projection commit.
+ * Camera jitter for temporal reconstruction. While a method is on, the engine
+ * paths below that turn the scene's projection into GPU constants all get the
+ * same per-scene sub-pixel offset.
  *
- * The verified signature is a locator, not a function boundary. It identifies
- * the exact projection copy followed by the dirty flags and adjacent
- * SetViewMatrixState call. We decode that call and detour the helper entry,
- * then filter by the expected return address so the helper's other call sites
- * remain untouched.
+ * HookSetViewMatrixState is the main hook. When Render::buildRendering commits
+ * a gameplay projection (the call returning to RENDER_SET_VIEW_RETURN), it
+ * reserves the scene's jitter sample, offsets the shader manager's active
+ * projection, and publishes the unjittered camera to camera_state. Calls from
+ * the velocity, model and thermography paths reapply the saved sample. The
+ * other hooks carry the same sample into paths with their own copies of the
+ * camera: forward rendering, local-light packets, the scene constant bank,
+ * skin-scattering constants, the sun volume, spherical-harmonics lighting,
+ * the sky and terrain decals.
  *
- * While temporal reconstruction is enabled, the hook applies jitter only to the active copied
- * projection and publishes the exact camera state consumed by the resolve.
- * The next unmodified game copy restores vanilla state when reconstruction is disabled.
- * Final constant uploads keep depth reconstruction aligned with that projection
- * and preserve subpixel precision in the verified character-motion transforms.
+ * With reconstruction off, the hooks change nothing and the game's next
+ * projection copy is unmodified. HookFlushConstants also improves the
+ * precision of the character-motion matrices, which stays on regardless.
  */
 
 #include <d3d11.h>
@@ -44,7 +48,8 @@
 
 namespace mgsv::reconstruction::projection_jitter {
 
-// These names identify native packet layouts, not adjustable sampling modes.
+// The native path a NativeProjectionScope belongs to. Nested hooks check it
+// before they read the scope's camera.
 enum class ProjectionPath : uint8_t {
   SUN_VOLUME,
   SH_LIGHTING,
@@ -139,10 +144,13 @@ inline void* new_thermography_return_address = nullptr;
 inline void* thermography_return_address = nullptr;
 inline void** shader_manager_global = nullptr;
 inline std::atomic<bool> installed = false;
-// Only lifecycle callbacks take this mutex; native hooks must never need it
-// to drain. Own installation before changing any target/trampoline pointer.
+// Only install and shutdown take this mutex; the native hooks never do, so
+// they never wait on it. Hold it before changing any hook target or trampoline.
 inline std::shared_mutex lifecycle_mutex;
 
+// After jitter is turned off, the next REQUIRED_RESTORATION_HITS gameplay
+// projection copies must equal the shader manager's active projection. That
+// confirms the game's projection is back.
 inline std::atomic<uint32_t> production_restoration_hits = 0u;
 inline std::atomic<bool> production_awaiting_restoration = false;
 
@@ -160,6 +168,9 @@ inline void CancelProductionRestorationCheck() {
   production_awaiting_restoration.store(false, std::memory_order_release);
 }
 
+// A finite perspective projection from a viewport with a camera and flag bit 0
+// set. Viewports smaller than 640x360 pass only at the current upscaling
+// render size.
 inline bool LooksLikeGameplayProjection(
     const float* projection,
     uint32_t width,
@@ -181,6 +192,8 @@ inline bool LooksLikeGameplayProjection(
          && projection[14] > 0.f;
 }
 
+// Offsets the projection center and sets the same shader-manager dirty flags
+// the engine sets when it commits a projection, so the change is uploaded.
 inline void ApplyProjectionJitter(
     float* active_projection,
     void* shader_manager,
@@ -197,8 +210,9 @@ inline void ApplyProjectionJitter(float* projection, float jitter_uv_x, float ji
   projection[9] -= 2.f * jitter_uv_y;
 }
 
-// Called under the publication lock. Qualify the native owner's saved camera,
-// rather than using a newer scene that another worker may already be recording.
+// Called under the publication lock. Returns the camera saved for the current
+// scene when it matches this viewport's live camera, matrices and size; never
+// a newer scene that another worker may already be recording.
 inline bool GetPublishedCameraForViewportLocked(const uint8_t* viewport, camera_state::CameraFrame* frame) {
   if (!state::IsEnabled() || viewport == nullptr) return false;
 
@@ -248,8 +262,10 @@ inline bool GetPublishedJitterForViewportLocked(
   return true;
 }
 
-// Native commands can fill their scene bank without using the vector setter.
-// Correct the final upload source, after those commands have finished writing.
+// Corrects the scene constant bank as it is uploaded: adds the scene's jitter
+// to the camera center (register 28), and improves the precision of the
+// character-motion matrices. Engine commands can write the bank directly,
+// without the setter, so the correction happens here, after every write.
 inline void __fastcall HookFlushConstants(void* registers, void* backend) {
   if (registers == nullptr) {
     flush_constants(registers, backend);
@@ -308,16 +324,17 @@ inline void __fastcall HookFlushConstants(void* registers, void* backend) {
     }
     if (motion_pair) {
       // This precision correction uses only the two native matrices from this
-      // upload. It needs no reconstruction history or camera publication and
-      // remains active with reconstruction Off, like velocity storage upgrades.
+      // upload. It needs no reconstruction history or published camera and
+      // stays on with reconstruction Off.
       if (!replace_source) {
         std::memcpy(corrected.data(), *source, sizeof(corrected));
       }
       // Native motion transforms the previous skinned position into world space,
       // then into clip space. Large world coordinates lose subpixel precision in
       // those float operations. Combine the matrices once per upload in double,
-      // before rounding back to float. The unchanged VS now transforms directly
-      // from previous model space to clip space, then multiplies by identity.
+      // before rounding back to float. The unmodified vertex shader then goes
+      // straight from previous model space to clip space, then multiplies by
+      // identity.
       constexpr size_t previous_world = 12u * 4u;
       constexpr size_t previous_clip = 16u * 4u;
       for (size_t row = 0u; row < 4u; ++row) {
@@ -338,10 +355,11 @@ inline void __fastcall HookFlushConstants(void* registers, void* backend) {
     flush_constants(registers, backend);
     return;
   }
-  // This command context is used by one recording thread. Flush copies the
-  // selected bank synchronously into its mapped GPU buffer. Temporarily select
-  // our private values; retain all native dirty/binding updates and restore the
-  // source pointer before returning. Native CPU data and the camera stay intact.
+  // Only one recording thread uses this command context, and Flush copies the
+  // selected bank into its mapped GPU buffer before returning. So point the
+  // source at our corrected copy for this call only, keep all of the engine's
+  // dirty and binding updates, and restore the pointer afterward. The engine's
+  // CPU data and the camera are never changed.
   struct RestoreSource {
     const float** destination;
     const float* original;
@@ -352,6 +370,8 @@ inline void __fastcall HookFlushConstants(void* registers, void* backend) {
   flush_constants(registers, backend);
 }
 
+// Applies the scene's jitter to the camera center in the 64-byte
+// skin-scattering constants uploaded from SCATTER_UPLOAD_RETURN.
 inline void __fastcall HookUploadConstants(void* manager, void* buffer, const void* values, uint32_t bytes) {
   struct alignas(16) ScatterConstants {
     uint32_t width;
@@ -392,11 +412,13 @@ inline void __fastcall HookUploadConstants(void* manager, void* buffer, const vo
   upload_constants(manager, buffer, selected, bytes);
 }
 
+// Reapplies the scene's saved jitter to the shader manager's active projection
+// when it still holds this viewport's unjittered projection.
 inline void ApplyPublishedJitterToActiveProjection(
     const uint8_t* viewport) {
-  // Native callbacks may already hold the execution gate, so do not take it
-  // here. Keep camera validation and the write under one publication lock so
-  // reset, camera replacement, or sample advancement cannot split them.
+  // The caller may already hold the execution lock, so do not take it here.
+  // Keep camera validation and the write under one publication lock so a
+  // reset, a camera change or a new sample cannot happen between them.
   const camera_state::PublicationWriterGuard publication_guard;
   std::array<float, 2> jitter_uv = {};
   void* shader_manager = shader_manager_global != nullptr ? *shader_manager_global : nullptr;
@@ -430,8 +452,8 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   }
 
   const bool taa_enabled = state::IsEnabled();
-  // The hook stays installed for the process lifetime, but Off-mode work stops
-  // here unless a short exact-restoration check is still pending.
+  // The hook stays installed for the whole process. With reconstruction off it
+  // does nothing more, unless the restoration check is still running.
   if (!taa_enabled && !production_awaiting_restoration.load(std::memory_order_acquire)) {
     return;
   }
@@ -452,8 +474,8 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
       static_cast<uint8_t*>(shader_manager) + 0x680u);
   const bool projection_matches = std::memcmp(projection, active_projection, 16u * sizeof(float)) == 0;
 
-  // Three consecutive vanilla copies prove that disabling TAA restored the
-  // active projection before the verification flag is cleared.
+  // Three matching unmodified copies in a row confirm that turning
+  // reconstruction off restored the game's active projection.
   if (!taa_enabled
       && production_awaiting_restoration.load(std::memory_order_acquire)) {
     if (projection_matches) {
@@ -500,6 +522,8 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
     }
     return;
   }
+  // First setup of this scene: reserve its sample and number, jitter the
+  // active projection, and publish the unjittered camera.
   const uint32_t sample_index = state::current_sample_index.fetch_add(1u, std::memory_order_relaxed);
   const uint64_t reservation = ++camera_state::next_reservation;
   const auto jitter_uv = state::JitterForSample(sample_index, width, height);
@@ -551,6 +575,8 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   camera_state::PublishLocked(camera_frame);
 }
 
+// The forward-rendering plugin can rewrite the active projection; reapply the
+// scene's jitter after it.
 inline void __fastcall HookForwardRendering(void* plugin, void* render, void* viewport_pointer) {
   const auto original = forward_rendering;
   if (original == nullptr) return;
@@ -565,21 +591,24 @@ inline void __fastcall HookRequestLocalLightDraws(
   const auto original = request_local_light_draws;
   if (original == nullptr) return;
 
-  // MainExec has finished this packet but has not published it to workers.
-  // Only this verified caller supplies the viewport as argument seven.
+  // PluginLocalLight::MainExec has finished this packet but not yet handed it
+  // to worker jobs. Only this verified caller passes the viewport as argument
+  // seven.
   if (_ReturnAddress() == local_light_request_return_address
       && packet_pointer != nullptr && viewport_pointer != nullptr && state::IsEnabled()) {
     const camera_state::PublicationWriterGuard publication_guard;
     const auto* viewport = static_cast<const uint8_t*>(viewport_pointer);
     auto* packet = static_cast<uint8_t*>(packet_pointer);
     std::array<float, 2> jitter_uv = {};
-    // Match the copied P/V and viewport rectangle as well as the scene's camera.
-    // A packet already carrying jitter fails this check, preventing a second offset.
+    // Match the packet's copied projection, view and viewport rectangle as well
+    // as the scene's camera. A packet that already has jitter fails this
+    // check, so it never gets a second offset.
     if (GetPublishedJitterForViewportLocked(viewport, &jitter_uv)
         && std::memcmp(packet + 0x1A0u, viewport + 0x280u, 2u * 16u * sizeof(float)) == 0
         && std::memcmp(packet + 0x370u, viewport + 0x5D0u, 4u * sizeof(uint32_t)) == 0) {
-      // Workers retain or copy this render P. The separate culling P/V and
-      // frustum planes stay intact, and the shared viewport remains read-only.
+      // Workers keep or copy this render projection. The separate culling
+      // matrices and frustum planes are left alone, and the shared viewport is
+      // only read.
       ApplyProjectionJitter(reinterpret_cast<float*>(packet + 0x1A0u), jitter_uv[0], jitter_uv[1]);
     }
   }
@@ -589,6 +618,9 @@ inline void __fastcall HookRequestLocalLightDraws(
            input_context, output_context, viewport_pointer, jobs);
 }
 
+// Paths that build their own matrices from the scene's camera. A producer hook
+// opens a NativeProjectionScope around the engine call. The matrices that call
+// produces are corrected by nested hooks or after the call returns.
 using SunPass = void(__fastcall*)(void*, void*, uint32_t, uint32_t, uint8_t, uint8_t);
 using SunVolume = void(__fastcall*)(void*, const float*, const void*, const void*, void*, void*);
 using ShFallback = uint32_t(__fastcall*)(void*, uint32_t, float*, float*, float*, void*, void*);
@@ -611,12 +643,15 @@ inline const void* sky_parameters_return_address = nullptr;
 inline const void* terrain_set_input_return_address = nullptr;
 inline constexpr std::array<uint32_t, 4> SH_VERTEX_COUNTS = {8u, 6u, 18u, 8u};
 
-// The scope constructor links to this thread-local head of its own type.
+// The innermost NativeProjectionScope on this thread.
 struct NativeProjectionScope;
 inline thread_local const NativeProjectionScope* native_scope = nullptr;
 
-// Own every matrix/sample value; only the TLS link is borrowed, and only by
-// synchronous children. Even a rejected nested parent shadows its predecessor.
+// Lives for the duration of one engine call so nested hooks on the same thread
+// can find the scene's camera. It copies every matrix and sample it needs;
+// only the link to the enclosing scope is a pointer. A scope that failed its
+// checks still hides the enclosing one, so a nested call never uses another
+// call's camera.
 struct NativeProjectionScope {
   const NativeProjectionScope* previous = native_scope;
   ProjectionPath path;
@@ -630,8 +665,8 @@ struct NativeProjectionScope {
       : path(selected) {
     native_scope = this;
     if (source == nullptr) return;
-    // Scene camera data has its own lock. GPU reconstruction can run while
-    // workers prepare these matrices without making them skip jitter.
+    // Only the publication lock is taken, not the execution lock, so a
+    // reconstruction running elsewhere never makes these workers skip jitter.
     const camera_state::PublicationWriterGuard publication_guard;
     frame = camera_state::GetForSceneLocked();
     if (!frame.valid || !frame.camera_matrix_valid
@@ -664,6 +699,8 @@ struct NativeProjectionScope {
   NativeProjectionScope& operator=(const NativeProjectionScope&) = delete;
   ~NativeProjectionScope() { native_scope = previous; }
 
+  // True while the scope's camera still belongs to the current scene and no
+  // history reset has happened. Called under the publication lock.
   [[nodiscard]] bool CurrentLocked() const {
     const auto owner = engine::views::GetScope().owner;
     return valid && state::IsEnabled()
@@ -672,8 +709,9 @@ struct NativeProjectionScope {
   }
 };
 
-// Shared clip translation: native column-major matrices are four float4s;
-// SH outputs are up to eighteen float4s. Validate ALL results before any write.
+// Adds twice the UV jitter times W to each float4's x and y, which shifts clip
+// space without changing Z or W. Matrices are four float4s; spherical-harmonics
+// outputs are up to eighteen. Every result is checked before anything is written.
 inline bool TranslateClip(float* values, uint32_t count, const std::array<float, 2>& jitter) {
   if (values == nullptr || count > 18u) return false;
   std::array<float, 72> corrected = {};
@@ -693,14 +731,18 @@ inline bool TranslateClip(float* values, uint32_t count, const std::array<float,
   return true;
 }
 
+// Jitters a matrix the engine built from the scope's projection (times its
+// view, unless projection_only). The matrix must equal the expected unjittered
+// value; a matrix that is already jittered or unrelated is left alone.
 inline bool CorrectNativeMatrix(float* matrix, const NativeProjectionScope& scope, bool projection_only = false) {
   if (!scope.valid || matrix == nullptr) return false;
   const camera_state::PublicationWriterGuard publication_guard;
   if (!scope.CurrentLocked()) return false;
   alignas(16) std::array<float, 16> expected = scope.projection;
   if (!projection_only) {
-    // Match native SSE's pairwise sum, without a world-coordinate-relative
-    // epsilon that could swallow an entire subpixel offset.
+    // Sum in the same pairwise order as the engine's SSE code, so a tight
+    // tolerance works. A tolerance scaled to world coordinates could hide a
+    // whole sub-pixel offset.
     for (uint32_t c = 0u; c < 4u; ++c) {
       for (uint32_t r = 0u; r < 4u; ++r) {
         expected[(c * 4u) + r] =
@@ -729,6 +771,7 @@ inline bool CorrectNativeMatrix(float* matrix, const NativeProjectionScope& scop
 
 // Identifies the sun pass recording on this thread, or 0 outside one. A pass
 // shades one directional light against one depth image, with up to four draws.
+// Screen-space shadows use it to group the draws of one pass.
 inline thread_local uint64_t sun_pass_count = 0u;
 inline thread_local uint64_t active_sun_pass = 0u;
 
@@ -762,7 +805,7 @@ inline uint32_t __fastcall HookShFallback(void* renderer, uint32_t kind, float* 
       TranslateClip(output, SH_VERTEX_COUNTS[kind], scope.jitter);
     }
   }
-  return success;  // EAX is success, NOT a vertex count. Bounds/Z/W untouched.
+  return success;  // A success flag, not a vertex count. Bounds, Z and W are unchanged.
 }
 
 inline void __fastcall HookShProducer(void* renderer, void* scene, void* viewport, void* inputs) {
@@ -826,7 +869,8 @@ inline void __fastcall HookTerrainAttach(void* command, void* packet, uint64_t c
       && native_scope->path == ProjectionPath::TERRAIN_DECAL) {
     CorrectNativeMatrix(reinterpret_cast<float*>(static_cast<uint8_t*>(packet) + 0x160u), *native_scope, true);
   }
-  // Original native object/header is retained; no borrowed/stack packet escapes.
+  // The engine's packet is corrected in place and passed on; no
+  // temporary copy reaches the engine.
   terrain_attach(command, packet, c, d);
 }
 
@@ -858,8 +902,9 @@ inline bool Attach() {
   motion_upload_return_address = Address(Entry::MODEL_CONSTANT_UPLOAD_RETURN);
   upload_constants = reinterpret_cast<UploadConstants>(Address(Entry::CONSTANT_BUFFER_MAP_DATA));
   scatter_upload_return_address = Address(Entry::SCATTER_UPLOAD_RETURN);
-  // The SH output packet is still producer-owned at its call. The sky helper
-  // finishes its inverse matrices before MainExec uploads them for the draw.
+  // These points are safe to edit at: the SH packet still belongs to its
+  // producer when it is attached, and the sky helper finishes its inverse
+  // matrices before MainExec uploads them for the draw.
   sun_pass = reinterpret_cast<SunPass>(Address(Entry::SUN_LIGHT_DRAW));
   sun_volume = reinterpret_cast<SunVolume>(Address(Entry::DRAW_SHADOW_BOX));
   sun_shadow_box_return_address = Address(Entry::SUN_SHADOW_BOX_RETURN);
@@ -873,9 +918,9 @@ inline bool Attach() {
   terrain_producer = reinterpret_cast<TerrainProducer>(Address(Entry::TERRAIN_DECAL_DRAW_ON_JOB));
   terrain_attach = reinterpret_cast<AttachPacket>(Address(Entry::TERRAIN_DECAL_SET_INPUT));
   terrain_set_input_return_address = Address(Entry::TERRAIN_DECAL_SET_INPUT_RETURN);
-  // Never reclaim trampolines while native callers can still enter. Pin the
-  // addon as well: device destruction/FreeLibrary is not native quiescence.
-  // Installation remains at initial device creation, before scene rendering.
+  // The hooks are never removed, because a game thread could still be entering
+  // one. Pin the addon so unloading it cannot free their code either. Install
+  // at the first device creation, before scene rendering starts.
   HMODULE pinned_module = nullptr;
   if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
                          reinterpret_cast<LPCWSTR>(&HookSetViewMatrixState), &pinned_module)
@@ -941,6 +986,9 @@ inline bool Attach() {
   return true;
 }
 
+// Stops new jitter at device teardown and DLL detach. With transition_runtime it turns
+// temporal reconstruction off and invalidates the published camera. The hooks
+// themselves stay installed.
 inline void StopAdmission(bool wait_for_lifecycle_owner = true, bool transition_runtime = true) {
   std::unique_lock lifecycle_guard(lifecycle_mutex, std::defer_lock);
   if (wait_for_lifecycle_owner) {
@@ -957,9 +1005,9 @@ inline void StopAdmission(bool wait_for_lifecycle_owner = true, bool transition_
     camera_state::InvalidateLocked();
   }
 
-  // Intentionally retain installed code and trampolines until process exit.
-  // A counter reaching zero is NOT a barrier against a subsequent native call.
-  // No wait, unpatch, pointer clearing or trampoline free occurs here.
+  // The hooks and trampolines stay until the process exits. A zero count of
+  // calls in progress would not stop a later native call from entering, so
+  // nothing is waited for, unpatched, cleared or freed here.
 }
 
 inline void OnInitDevice(reshade::api::device* device) {
@@ -967,6 +1015,8 @@ inline void OnInitDevice(reshade::api::device* device) {
   Attach();
 }
 
+// Tags the character-motion vertex and pixel shaders by bytecode hash, for the
+// precision fix in HookFlushConstants.
 inline void OnInitPipeline(reshade::api::device* device, reshade::api::pipeline_layout /*layout*/,
                            uint32_t count, const reshade::api::pipeline_subobject* objects,
                            reshade::api::pipeline pipeline) {

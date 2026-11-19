@@ -9,18 +9,23 @@
 
 #include "../../../utils/cross_addon.hpp"
 
+// Cross-addon interface for the MGSV lighting probe addon. The probe can swap
+// the reconstruction preparation shader while the game runs and read back
+// status. The mod registers the callbacks; the probe calls them.
 namespace mgsv::reconstruction::probe {
 
 struct Request {
+  // Must equal the current Status::revision, so a stale request is rejected.
   uint64_t expected_revision = 0u;
   const uint8_t* code = nullptr;
   size_t size = 0u;
+  // Return to the built-in shader; code and size are ignored.
   bool restore = false;
 };
 
-// What the hook on the engine's post-processing start has counted for the
-// presented main view. In a healthy run starts and cuts are equal and the
-// other three stay zero.
+// Counts from the hook on the engine's post-processing start, for the
+// presented main view. Normally starts equals cuts and the other three stay
+// zero.
 struct PostFilterStatus {
   uint64_t starts = 0u;
   uint64_t cuts = 0u;
@@ -29,6 +34,9 @@ struct PostFilterStatus {
   uint64_t repeated_starts = 0u;
 };
 
+// revision counts accepted requests, active_revision is the one the shader was
+// last built from, and submitted_revision is the one a reconstruction has run
+// with since. live is true while probe bytecode replaces the built-in shader.
 struct Status {
   uint64_t revision = 0u;
   uint64_t active_revision = 0u;
@@ -39,9 +47,10 @@ struct Status {
   PostFilterStatus post_filter;
 };
 
-// Requests copy borrowed bytecode before returning. No owning containers or
-// native graphics objects cross this boundary. Hold the interface lock while
-// calling a callback so the provider cannot unload during the call.
+// request copies the bytecode before it returns; the caller keeps ownership.
+// Only plain data crosses this boundary, never containers or graphics objects.
+// Hold `mutex` while calling a callback so the mod cannot unregister it
+// during the call.
 struct __declspec(uuid("847E48E7-C140-4A70-9389-34246E069325")) Interface {
   std::shared_mutex mutex;
   bool (*request)(const Request*, Status*) = nullptr;

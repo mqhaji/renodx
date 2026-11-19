@@ -2,9 +2,9 @@
 #ifndef RENODX_GAMES_MGSV_RENDERING_D3D12_TIMING_HPP_
 #define RENODX_GAMES_MGSV_RENDERING_D3D12_TIMING_HPP_
 
-// GPU timestamps for the private D3D12 work, and the CPU time spent submitting
-// it, recorded only while a diagnostic client has asked for them. Ordinary
-// rendering issues no queries and reads no clock.
+// GPU timestamps for the mod's D3D12 work, and the CPU time spent submitting
+// it, recorded only while a diagnostic client (the probe) has asked for them.
+// Ordinary rendering issues no queries and reads no clock.
 
 #include <d3d12.h>
 #include <wrl/client.h>
@@ -22,7 +22,7 @@
 
 namespace mgsv::rendering::d3d12_timing {
 
-// Each bridge consumer is one stream. The consumer names the spans of its own
+// Each bridge consumer is one stream. The consumer names the spans of its
 // submission, in recording order.
 enum class Stream : uint8_t {
   LIGHTING,

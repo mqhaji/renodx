@@ -1,6 +1,9 @@
 #pragma once
 
-/* NVIDIA DLSS discovery, capability probing, model selection, and D3D12 dispatch. */
+/* NVIDIA DLSS discovery, capability probing, model selection, and D3D12 dispatch.
+   Nothing is inspected or loaded until DLSS is requested; the probe and NGX setup
+   then run at Present. Each evaluation records into the shared D3D12 command list,
+   followed by the shared output encoder. */
 
 #include <windows.h>
 
@@ -620,8 +623,9 @@ inline float FrameDeltaMilliseconds(bool reset) {
   return std::clamp(milliseconds, 1.f, 1000.f);
 }
 
-// The coordinator owns one bridge submission. NGX records into that same list;
-// the encoder immediately follows evaluation and writes the shared destination.
+// Runs once per reconstructed scene inside the coordinator's single D3D12
+// submission. NGX records into that list, and the encoder follows it to write
+// the shared output texture.
 inline bool Dispatch(const ValidatedFrameInputs& inputs) {
   const bool succeeded = dx12::Execute(inputs, !resources.history_initialized, [&](const dx12::Evaluation& evaluation) {
     if (!EnsureResources(inputs.device, evaluation.commands, inputs)) throw std::runtime_error("Cannot create D3D12 DLSS feature");
@@ -631,6 +635,7 @@ inline bool Dispatch(const ValidatedFrameInputs& inputs) {
     resources.parameters->Set(NVSDK_NGX_Parameter_Output, resources.linear_output.Get());
     resources.parameters->Set(NVSDK_NGX_Parameter_Depth, evaluation.depth);
     resources.parameters->Set(NVSDK_NGX_Parameter_MotionVectors, evaluation.motion);
+    // Jitter and the prepared motion are in UV units; NGX takes render pixels.
     resources.parameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, inputs.camera.jitter_uv_x * static_cast<float>(inputs.render_width));
     resources.parameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, inputs.camera.jitter_uv_y * static_cast<float>(inputs.render_height));
     resources.parameters->Set(NVSDK_NGX_Parameter_Reset, reset ? 1 : 0);

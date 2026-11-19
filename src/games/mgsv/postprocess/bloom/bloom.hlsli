@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+// Enhanced bloom helpers: the native working-region size and the cubic B-spline
+// filters used by the bloom reduction and by the final reconstruction in Tonemap.
 #ifndef RENODX_GAMES_MGSV_BLOOM_HLSLI_
 #define RENODX_GAMES_MGSV_BLOOM_HLSLI_
 

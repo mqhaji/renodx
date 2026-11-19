@@ -354,6 +354,8 @@ void OnPresetOff() {
   mgsv::settings::ApplyPresetOff(&settings, &shader_injection, output_state);
 }
 
+// View tracking needs the selected swapchain to tell which view is presented, so
+// it and the hooks that read its scopes install once a swapchain is selected.
 void UpdateNativePresentation(reshade::api::swapchain* swapchain) {
   if (mgsv::engine::views::Install()) {
     mgsv::engine::views::SetPresentation(reinterpret_cast<IDXGISwapChain*>(swapchain->get_native()));  // NOLINT(performance-no-int-to-ptr)
@@ -386,7 +388,8 @@ void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool resize) {
   mgsv::lighting::ResetNativeLightViews(swapchain->get_device());
   mgsv::reconstruction::coordinator::ResetTemporalState("input swapchain retired");
   mgsv::reconstruction::output_size::Reset();
-  // Cancel reconstruction but retain every original game prefix/post list for its existing replay path.
+  // Cancel the added work of every pending cut but keep the cuts, so the game's prefix and
+  // post lists still run. The moved references are released on return, outside the lock.
   std::vector<std::array<Microsoft::WRL::ComPtr<ID3D11DeviceChild>, 5>> retired_resources;
   std::vector<std::function<void(reshade::api::command_list*, bool)>> retired_lighting;
   {
@@ -405,8 +408,10 @@ void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool resize) {
   }
 }
 
-// Scheduling must precede the pipeline actions that redirect this same draw.
-// Keeping both in command_action also preserves order when DevKit owns its hook.
+// At the game's camera-velocity draw, record the motion and camera that lighting
+// history uses; the draw itself always runs. This reads the draw's bindings, so it
+// must run before any action that redirects the draw. Keeping both in
+// command_action preserves that order even when the DevKit owns the draw hook.
 constexpr auto RECONSTRUCTION_DRAW = [](auto& command) {
   using Context = std::remove_reference_t<decltype(command)>;
   if (command.IsDispatch()) return renodx::utils::command_action::CallbackResult<Context>{};
@@ -436,8 +441,9 @@ void OnPresent(
     const bool was_selected = mgsv::inputs::IsSelectedSwapchain(swapchain);
     mgsv::inputs::OnPresent(queue, swapchain, source_rect, dest_rect, dirty_rect_count, dirty_rects);
     if (mgsv::inputs::IsSelectedSwapchain(swapchain)) {
-      // Initial creation precedes selection. Join the ownership provider when
-      // the first Present selects this swapchain, and refresh it after resize.
+      // The swapchain is created before Present selects it, so view tracking
+      // starts on the first selecting Present. OnInitSwapchain refreshes it
+      // after a resize.
       if (!was_selected) {
         UpdateNativePresentation(swapchain);
       }
@@ -448,8 +454,8 @@ void OnPresent(
         mgsv::lighting::ambient_diffuse::Reset();
         mgsv::lighting::ResetNativeLightViews(queue->get_device());
       }
-      // Scene camera and motion records serve reflection history and the gather's
-      // noise phase, so they follow the mode.
+      // The scene camera and motion records feed reflection history and the
+      // lighting noise phase, so they are kept only while enhanced lighting is on.
       mgsv::lighting::temporal_inputs::enabled.store(lighting_enabled, std::memory_order_release);
       mgsv::lighting::indirect_lighting_enhanced.store(lighting_enabled, std::memory_order_release);
       mgsv::engine::motion_vectors::wanted.store(lighting_enabled || mgsv::reconstruction::state::IsEnabled(), std::memory_order_release);
@@ -476,10 +482,12 @@ void OnPresent(
 }
 
 void OnDestroyDevice(reshade::api::device* device) {
-  // The bridge owns its D3D12 device and may release it during D3D11 teardown.
+  // Only the game's D3D11 device matters here. The bridge's D3D12 device can
+  // be released during D3D11 teardown and must not start this.
   if (device->get_api() != reshade::api::device_api::d3d11) return;
   if (!mgsv::inputs::IsSelectedDevice(device)) return;
-  // A cut in progress can be waiting for the execution lock taken below.
+  // Remove these hooks before taking the execution lock: a cut in progress
+  // inside them can be waiting for that lock.
   mgsv::reconstruction::native_post_filter::Detach();
   mgsv::engine::motion_vectors::Detach();
   const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
@@ -509,13 +517,15 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       if (!reshade::register_addon(h_module)) return FALSE;
       reshade::register_overlay(nullptr, ADDON_SETTINGS);
 
+      // Build the menu. Core settings come first because bloom inserts its
+      // controls among them in Effects; each other feature appends its section.
       mgsv::settings::AppendSettings(&settings, &shader_injection, &output_state);
       mgsv::bloom::AppendSettings(&settings, &shader_injection);
       mgsv::shadows::AppendSettings(&settings, &shader_injection);
       mgsv::reconstruction::settings::AppendSettings(&settings, &shader_injection, &reconstruction_settings);
       mgsv::lighting::AppendSettings(&settings, &shader_injection);
 
-      // Name, before the menu is ever drawn, the features whose engine entries
+      // Before the menu is first drawn, list the features whose engine entries
       // did not verify in the running executable.
       if (std::ranges::none_of(settings, [](auto* setting) { return setting->section == "Game Version"; })) {
         std::string unavailable;
@@ -553,8 +563,9 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
         renodx::utils::settings::on_preset_changed_callbacks.emplace_back(
             [] { mgsv::reconstruction::transitions::ApplySettingsSnapshot(reconstruction_settings); });
 
+        // Settings reach shaders in b13 (RenoDXSettings in shared.h). Only the
+        // game's D3D11 shaders get that buffer; the D3D12 passes bind their own.
         renodx::mods::shader::expected_constant_buffer_index = 13;
-        // Only the game's D3D11 shaders use the injected MGSV settings buffer.
         renodx::mods::shader::on_create_pipeline_layout = [](reshade::api::device* device, std::span<reshade::api::pipeline_layout_param>) {
           return device->get_api() == reshade::api::device_api::d3d11;
         };
@@ -585,8 +596,9 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
         initialized = true;
       }
 
+      // Swapchain selection, Present and device teardown for the whole mod.
       reshade::register_event<reshade::addon_event::copy_resource>(mgsv::rendering::draw_roles::OnCopySceneResource);
-      reshade::register_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);  // detect peak brightness
+      reshade::register_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);
       reshade::register_event<reshade::addon_event::destroy_swapchain>(OnDestroySwapchain);
       reshade::register_event<reshade::addon_event::present>(OnPresent);
       reshade::register_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
@@ -619,6 +631,9 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   renodx::utils::resource::Use(fdw_reason);
   renodx::utils::shader::Use(fdw_reason);
   renodx::utils::state::Use(fdw_reason);
+  // Interfaces for the development probe, then each feature's device, command
+  // list and resource callbacks. render_targets must hook at init_device, which
+  // runs inside device creation before the engine creates its first target.
   if (fdw_reason == DLL_PROCESS_ATTACH) {
     mgsv::lighting::reflections::UseProbe(true);
     mgsv::reconstruction::dx12::UseProbe(true);
@@ -742,8 +757,9 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   renodx::mods::swapchain::v2::Use(fdw_reason, &shader_injection);
 
   if (fdw_reason == DLL_PROCESS_ATTACH) {
-    // Register before the shared dispatcher selects its draw events. Its global
-    // callback publishes reconstruction output before per-shader scene routing.
+    // Register before renodx::mods::shader::Use, which starts command_action;
+    // it hooks only the draw events that have callbacks at that point. As a
+    // global callback, this runs before the per-shader callbacks of a draw.
     renodx::utils::command_action::Register(RECONSTRUCTION_DRAW,
                                             {.command_types = renodx::utils::command_action::COMMAND_TYPE_DIRECT_DRAW | renodx::utils::command_action::COMMAND_TYPE_INDIRECT});
   } else if (fdw_reason == DLL_PROCESS_DETACH) {

@@ -1,4 +1,9 @@
 #include "common.hlsli"
+// Last enhanced reflection pass. Reads NRD's denoised, demodulated light and
+// multiplies the receiver's material response back in. Writes linear reflected
+// light (alpha 0: no reflection data, so composition keeps the saved
+// environment) and passes the environment weight and visibility through,
+// except in the NRD Validation view, where NRD writes that image instead.
 Texture2D<float4> input_light : register(t0);
 Texture2D<float4> input_environment_weight : register(t1);
 Texture2D<float4> normals : register(t2);
@@ -32,7 +37,7 @@ RWTexture2D<float4> output_response : register(u1);
   // Reapply the original material response, not NRD's filtered guide roughness.
   const float3 light = REBLUR_BackEnd_UnpackRadianceAndNormHitDist(input_light.Load(int3(pixel, 0))).rgb;
   output_light[pixel] = float4(max(light, 0.0) * energy, 1.0);
-  // Alpha preserves directional environment visibility from the same ray.
-  // It is independent of the importance weight and is not a second AO factor.
+  // Alpha is the environment visibility measured by the same rays. It is
+  // separate from the importance weight and is not a second AO factor.
   if ((reflection_flags & 2u) == 0u) output_response[pixel] = input_environment_weight.Load(int3(pixel, 0));
 }

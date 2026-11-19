@@ -1,6 +1,10 @@
 #include "../shared.h"
 #include "prepare_constants.hlsli"
 
+// Last D3D12 step for DLSS and FSR: converts the method's linear output back to
+// the game's scene encoding in the shared output texture, and restores the
+// game's alpha from the prepared color input. Analytical TAA encodes in its own
+// resolve instead.
 Texture2D<float4> linear_reconstruction : register(t0);
 Texture2D<float4> scene_alpha_input : register(t1);
 RWTexture2D<float4> encoded_scene_output : register(u0);
@@ -20,8 +24,9 @@ RWTexture2D<float4> encoded_scene_output : register(u0);
   if (input_width == width && input_height == height) {
     scene_alpha = scene_alpha_input.Load(int3(pixel, 0)).a;
   } else {
-    // DoF uses this current-frame highlight value. Interpolate on the input
-    // grid, clamping each tap so the last row and column retain their energy.
+    // DoF reads alpha as this frame's highlight value. When upscaling, resample
+    // it bilinearly at the jittered input position, clamping each tap to the
+    // image so the last row and column keep their values.
     const float2 input_position = ((float2(pixel) + 0.5f) / float2(width, height) + current_jitter_uv) * float2(input_width, input_height) - 0.5f;
     const int2 base_pixel = int2(floor(input_position));
     const float2 fraction = frac(input_position);

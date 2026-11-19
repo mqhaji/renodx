@@ -1,3 +1,6 @@
+// Port of the native gamma control pass that writes the final image. With RenoDX
+// tone mapping on, the mod skips the game's gamma curve. Both paths then encode for
+// the swap chain: gamma 2.2 for SDR, or BT.2020 PQ for HDR.
 #include "../common.hlsli"
 
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:22 2026

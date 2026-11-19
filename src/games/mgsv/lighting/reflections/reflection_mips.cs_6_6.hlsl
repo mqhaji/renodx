@@ -1,4 +1,6 @@
 #include "common.hlsli"
+// Builds one level of the reflection depth pyramid from the level below. Depth
+// is reverse-Z, so the maximum of each cell is its nearest surface.
 Texture2D<float> input_depth : register(t0);
 RWTexture2D<float> output_depth : register(u0);
 
@@ -8,8 +10,8 @@ RWTexture2D<float> output_depth : register(u0);
   if (any(id.xy >= uint2(width, height))) return;
   uint input_width, input_height;
   input_depth.GetDimensions(input_width, input_height);
-  // Include the trailing texel at odd dimensions. Every source pixel belongs
-  // to one cell, so thin surfaces cannot fall out of the depth hierarchy.
+  // At odd sizes the last cell also takes the trailing texel. Every source
+  // texel then belongs to a cell, so thin surfaces cannot drop out.
   const uint2 first = id.xy * 2u;
   const uint2 last = min(first + 2u + uint2(id.x + 1u == width, id.y + 1u == height), uint2(input_width, input_height));
   float nearest = 0.0;

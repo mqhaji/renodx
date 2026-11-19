@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: MIT
 // Copyright and license notices: ../README.md#credits-and-license.
 
-// MGSV GT-VBGI - full-resolution diffuse lighting.
+// GT-VBGI application, run at full render resolution just before the game's
+// first skin-scattering pass.
 //
-// Reconstruct ambient and shared lighting before skin scattering. AO changes
-// ambient diffuse only; direct light and visibility-integrated GI stay separate.
-// Fog, tone curves, and display encoding still happen in the game's later passes.
+// Reads the lighting-resolution trace result (packed as in
+// indirect_diffuse.hlsli), depth, and the game's half-resolution ambient
+// diffuse with its upsample weights. Updates the native diffuse light buffer
+// and the skin-scattering copy in place, in linear pre-exposed light. AO
+// darkens only the native ambient part, direct light is kept, and GI is added
+// once. Fog, tone curves, and display encoding happen in later game passes.
 
 #include "../../../rendering/geometry.hlsli"
 #include "../../../shared.h"
@@ -26,8 +30,8 @@ RWTexture2D<float4> scattering_copy : register(u2);
 
 [numthreads(8, 8, 1)] void main(uint3 thread_id : SV_DispatchThreadID) {
   // 1. Reconstruct full-resolution lighting from four low-resolution taps.
-  // Depth weights prevent foreground bounce from spreading into the background;
-  // missing diffuse samples retain their separate validity.
+  // Depth weights keep foreground bounce from spreading into the background.
+  // AO and GI are each normalized over their own valid taps.
   const uint2 pixel = thread_id.xy;
   if (pixel.x >= buffer_width || pixel.y >= buffer_height) return;
   const float scale = max(CUSTOM_MGSV_LIGHTING_RESOLUTION_DIVISOR, 1.0);
@@ -68,16 +72,16 @@ RWTexture2D<float4> scattering_copy : register(u2);
       const float4 tap = lighting_buffer.Load(int3(q, 0));
       visibility += (HasAmbientVisibility(tap) ? saturate(tap.a) : 1.0) * weight;
       visibility_weight += weight;
-      // Preserve the AO resolve's neutral background taps. GI has stricter
-      // geometry validity and must keep a separate normalization sum.
+      // AO keeps background taps, which carry neutral visibility. GI skips taps
+      // without valid geometry and keeps its own weight sum.
       if (!gi_receiver_valid || !(qdepth > 0.0 && qz > 0.0 && qz < 1.0e6)) continue;
-      // Valid black remains in the weight sum; missing/invalid results do not.
+      // Valid black stays in the weight sum; missing or invalid results do not.
       if (HasDiffuseGI(tap)) {
         radiance += tap.rgb * weight;
         weight_sum += weight;
       }
-      // Invalid GI must remain visible in the validity view. Diagnostic RGB
-      // therefore has its own weights and never feeds the radiance result.
+      // Debug views keep their own weights so invalid GI still shows in the
+      // validity view. They never feed the radiance result.
       if (diagnostic >= 2 && diagnostic <= 6) {
         diagnostic_sum += diagnostic_buffer.Load(int3(q, 0)).rgb * weight;
         diagnostic_weight += weight;
@@ -85,9 +89,9 @@ RWTexture2D<float4> scattering_copy : register(u2);
     }
   }
 
-  // 2. Recover only the native ambient contribution. Our lighting upsample above
-  // cannot stand in for the game's own phase/depth-weighted ambient upsample:
-  // subtracting a different result would incorrectly change direct light.
+  // 2. Rebuild the native ambient diffuse exactly as the game upsampled it, so
+  // subtracting it from the light buffer leaves direct light unchanged. The
+  // trace upsample above differs and cannot be reused for this.
   const float3 bounce = radiance / max(weight_sum, 1.0e-4) * CUSTOM_MGSV_DIFFUSE_GI_STRENGTH;
   const float4 center_light = light_output.Load(pixel);
   const float ao = visibility_weight > 1.0e-4 ? visibility / visibility_weight : 1.0;
@@ -97,8 +101,8 @@ RWTexture2D<float4> scattering_copy : register(u2);
   ambient_diffuse.GetDimensions(ambient_width, ambient_height);
   if (ambient_width == buffer_width / 2u && ambient_height == buffer_height / 2u
       && ambient_width > 0u && ambient_height > 0u) {
-    // Match BilateralUpscale2x2: point-wrap sampling, four pixel phases, and
-    // raw-depth weights. The GT resolve above uses a different reconstruction.
+    // Match the game's BilateralUpscale2x2: point-wrap sampling, four pixel
+    // phases, and weights from raw depth differences.
     const float2 full_size = float2(buffer_width, buffer_height);
     const float2 size = ambient_local_params[0].xy;
     const float2 inverse_size = ambient_local_params[0].zw;
@@ -120,8 +124,9 @@ RWTexture2D<float4> scattering_copy : register(u2);
     const float4 c = ambient_diffuse.SampleLevel(ambient_point_wrap, float2(lower.x, upper.y), 0);
     const float4 d = ambient_diffuse.SampleLevel(ambient_point_wrap, upper, 0);
     ambient = a.rgb * weights.x + b.rgb * weights.y + c.rgb * weights.z + d.rgb * weights.w;
-    // Native ambient was rounded to FP16 before direct lighting was added.
-    // Reject larger mismatches; absorb only the small rounding uncertainty.
+    // Native ambient was rounded to FP16 before direct lighting was added, so
+    // allow that rounding error when checking ambient <= total light. Reject
+    // larger mismatches.
     const float3 rounding = max(abs(ambient), abs(center_light.rgb)) * (2.0 / 1024.0) + 1.2e-7;
     ambient_valid = all(float4(a.a, b.a, c.a, d.a) > 0.5)
                     && all(isfinite(ambient)) && all(ambient >= 0.0)
@@ -140,17 +145,16 @@ RWTexture2D<float4> scattering_copy : register(u2);
   }
   // Debug views replace diffuse only; surface color, native specular, fog,
   // and later image processing still affect how they look.
-  // Both native destinations receive the same RGB before scattering, with
-  // their own alpha preserved: accumulation alpha and the skin-material mask.
   float3 output = (diagnostic == 1) ? bounce : shaded_diffuse + bounce;
   if (diagnostic >= 2 && diagnostic <= 6) output = diagnostic_sum / max(diagnostic_weight, 1.0e-4);
   if (diagnostic == 7) output = ambient_valid ? ambient : float3(1.0, 0.0, 1.0);
   if (diagnostic == 8) output = ambient_valid ? direct : float3(1.0, 0.0, 1.0);
   if (diagnostic == 9) output = shaded_diffuse + bounce;
   if (diagnostic == 10) output = ambient_valid ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 1.0);
-  // 4. Update both diffuse consumers before skin scattering. The copy's alpha
-  // selects scattering materials; it is not a general lighting-validity flag.
-  // Preserve finite values in the native RGBA16F destination at high strengths.
+  // 4. Write the same RGB to both buffers the skin-scattering passes read. Each
+  // keeps its own alpha: accumulation alpha in the light buffer, the skin
+  // mask in the copy. Only skin pixels of the copy are written. Clamp to the
+  // RGBA16F maximum so high strengths stay finite.
   light_output[pixel] = float4(min(output, 65504.0), center_light.a);
   uint copy_width, copy_height;
   scattering_copy.GetDimensions(copy_width, copy_height);

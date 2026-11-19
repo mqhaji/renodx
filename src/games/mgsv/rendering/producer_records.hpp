@@ -27,6 +27,10 @@
 #include "../reconstruction/camera_state.hpp"
 #include "inputs.hpp"
 
+// Records which depth, motion and camera sample each view's scene was drawn
+// with, so lighting history reuses data only from the same scene. Records made
+// on a deferred context wait with their command list and publish when that list
+// is executed; records made on the immediate context publish at once.
 namespace mgsv::lighting::temporal_inputs {
 
 inline constexpr GUID DIFFUSE_SOURCE_GUID = {.Data1 = 0xa1465c19, .Data2 = 0x1276, .Data3 = 0x4697, .Data4 = {0x8a, 0xd0, 0x9c, 0x21, 0x35, 0xf7, 0xd8, 0x43}};
@@ -113,8 +117,9 @@ struct State {
 inline State state;
 inline std::atomic<bool> enabled = true;
 
-// Copy and material bindings qualify lighting inputs. They do not advance the
-// camera/motion submission number used to decide whether history can advance.
+// Copy, material and reflection records describe lighting inputs. They do not
+// advance the scene/motion submission number that decides whether history can
+// advance.
 inline void Publish(std::span<const Producer> producers) {
   {
     const std::unique_lock lock(state.mutex);
@@ -144,7 +149,7 @@ inline void Publish(std::span<const Producer> producers) {
       }
       if (producer.kind == ProducerKind::REFLECTION_INPUTS) {
         submitted.reflection_inputs = producer.reflection_inputs;
-        continue;  // Material publication does not advance the camera sample.
+        continue;  // Reflection inputs do not advance the submission number.
       }
       if (producer.kind == ProducerKind::MOTION) {
         submitted.motion = producer.motion;
@@ -160,9 +165,9 @@ inline void Publish(std::span<const Producer> producers) {
       submitted.submission = ++state.next_submission;
     }
   }
-  // Input metadata is consumed after this prefix. Publish its final associations
-  // in recorded order, outside the lock: replacing an interface can release
-  // a native resource and reenter destruction callbacks.
+  // Readers use these associations only after this command list has run.
+  // Publish them in recorded order, outside the lock: replacing a private-data
+  // interface can release a native resource and reenter destruction callbacks.
   for (const auto& producer : producers) {
     if (producer.kind != ProducerKind::DIFFUSE_COPY && producer.kind != ProducerKind::MATERIAL_PALETTE) continue;
     const auto selected = inputs::ReadSelection(producer.device);
@@ -173,8 +178,8 @@ inline void Publish(std::span<const Producer> producers) {
       // A cached target or recent Present cannot prove that its draw executed.
       producer.copy_destination->SetPrivateDataInterface(PREPARED_SOURCE_GUID, producer.prepared_source.Get());
     } else if (producer.material_palette.specular != nullptr) {
-      // The serialized submission path publishes palette and generation together. A worker
-      // recording another light cannot select its palette for this invocation.
+      // Submission is serialized, so the palette and its generation are published together.
+      // A worker recording another light cannot pick up this palette.
       const uint64_t invalid_generation = 0u;
       auto* destination = producer.material_palette.specular.Get();
       destination->SetPrivateData(MATERIAL_PALETTE_GENERATION_GUID, sizeof(invalid_generation), &invalid_generation);
@@ -185,8 +190,8 @@ inline void Publish(std::span<const Producer> producers) {
   }
 }
 
-// Only known native producers enter this ledger. Recorded observations become
-// eligible after their containing command list reaches immediate submission.
+// Only known game draws are recorded here. A record made on a deferred context
+// takes effect when its command list is executed on the immediate context.
 inline void Record(reshade::api::command_list* cmd_list, Producer producer) {
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   if (context == nullptr) return;

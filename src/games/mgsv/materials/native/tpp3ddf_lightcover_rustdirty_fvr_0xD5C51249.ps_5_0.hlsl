@@ -1,3 +1,5 @@
+// Port of a native G-buffer material that bakes a cube map into albedo. The mod
+// adds two outputs: the color without that cube, and a record of this surface.
 #include "../material_capture.hlsli"
 
 // clang-format off
@@ -441,10 +443,12 @@ void main(
   material_clean_pass = false;
   NativeMaterialMain(v0, v1, v2, v3, v4, v5, v6, o0, o1, o2);
   clean_material = float4(0.0, 0.0, 0.0, -1.0);
-  // A blended draw cannot say how much cube remains: unknown, at this depth.
+  // Blended draws get no capture flag and keep this default: depth only, color unknown.
   material_owner = uint4(0u, 0u, 0u, asuint(v0.z));
   const uint capture = material_capture_parameters.Load(int3(0, 0, 0));
   if ((capture & 1u) == 0u) return;
+  // Run the material again with the cube's color zeroed. Record that color and
+  // the three values this draw wrote, so later readers can tell if they changed.
   material_clean_pass = true;
   float4 clean_o0, clean_o1, clean_o2;
   NativeMaterialMain(v0, v1, v2, v3, v4, v5, v6, clean_o0, clean_o1, clean_o2);

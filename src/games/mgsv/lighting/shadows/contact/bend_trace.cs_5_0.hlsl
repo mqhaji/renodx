@@ -13,7 +13,10 @@ groupshared float shared_depth[((BEND_MAX_SAMPLES + BEND_GROUP_SIZE - 1) / BEND_
 
 [numthreads(BEND_GROUP_SIZE, 1, 1)]
 void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
-  // One dispatch traces every admitted light; each group finds its light from its tile index.
+  // One dispatch traces every admitted light; each group finds its light from
+  // its tile index. A group's 64 lanes are receivers on one shared screen ray
+  // from the light. Each lane tests its receiver against the depths of the
+  // next pixels toward the light, up to the reach setting.
   uint tile = group.y + (group.z << BEND_TILE_ROW_BITS);
   const uint light_count = asuint(bend_lights.Load(0u).x);
   const uint light_index = FindBendLight(tile, light_count, BEND_TRACE_END_OFFSET);
@@ -242,7 +245,7 @@ void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
         blocker_sample = soft_index + component + 1u;
       }
     }
-    // Typed reach values need not end on a four-sample boundary.
+    // The reach setting need not be a multiple of four samples.
     [loop]
     for (; soft_index < samples - fade_samples; ++soft_index) {
       const float separation = abs(reference - shared_depth[first_sample + soft_index] * depth_scale);
@@ -290,11 +293,9 @@ void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
   float visibility = min(hard_visibility, soft_visibility);
   float radius = 0.0;
   if (visibility < 1.0 && blocker_sample > 0u && CUSTOM_SHADOW_SOFTNESS > 0.0) {
-    // Size the soft edge from the first caster and the same light size as PCSS.
-    // Receiver depth cancels from the pixel radius in screen coordinates;
-    // only the world-space cap needs inverse depth.
-    // This avoids two position reconstructions, a light-vector normalization,
-    // and keeping the sweep's coordinates alive through the reduction loop.
+    // Size the soft edge from the first solid caster and the same light size
+    // as PCSS. Receiver depth cancels out of the radius in screen pixels; only
+    // the world-space cap (PCSS_MAX_RADIUS) needs inverse depth.
     const float2 viewport = bend_viewport.xy;
     const float2 receiver_ray = ((float2(output_pixel) + 0.5) / viewport * float2(2.0, -2.0)
                                  + float2(-1.0, 1.0) - bend_camera_center.xy)

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright and license notices: ../lighting/indirect/README.md#credits-and-license.
 
+// Specular BRDF shared by the reflection passes: material parameters from the
+// native palette, GGX visible-normal sampling, and the energy-compensated response.
 #ifndef MGSV_SPECULAR_BRDF_HLSLI_
 #define MGSV_SPECULAR_BRDF_HLSLI_
 
@@ -45,17 +47,17 @@ SpecularMaterial LoadSpecularMaterial(Texture2D<float4> palette, float4 packed) 
   const float4 tint = palette.Load(int3(index, 0, 0));
   const float4 parameters = palette.Load(int3(index, 1, 0));
   if (!all(isfinite(tint)) || !all(isfinite(parameters))) return result;
-  // Native annotations identify row 1 red as F0. Its Fresnel table is Schlick
-  // on an endpoint grid; sampling it as a texture adds an 8-bit/interpolation
-  // bias. Use the authored reflectance directly in our analytical model.
+  // The native shader annotations name row 1 red as F0. The game's Fresnel table
+  // is Schlick on an endpoint grid, and reading it as a texture adds 8-bit and
+  // interpolation error. Use the authored reflectance directly instead.
   result.f0 = saturate(tint.rgb * parameters.r);
-  // The captured native power table is consistent with this exponent, including
-  // row 1 alpha (ANISO_ROUGHNESS). It changes width and gain, despite receiving
-  // no tangent direction. Normalize the inferred power lobe, then match its NDF
-  // peak to GGX: alpha^2 = 2 / (power + 2). Keep its width relationship without
-  // importing the native gain. The distributions have different tails; this is
-  // an explicit isotropic approximation, not recovered physical surface data.
-  // See README.md for the producer/consumer evidence and special-material limits.
+  // The captured native power table matches this exponent, including row 1
+  // alpha (ANISO_ROUGHNESS), which changes lobe width and gain even though no
+  // tangent direction is supplied. Normalize that power lobe, then match its
+  // peak to GGX: alpha^2 = 2 / (power + 2). This keeps the native width but not
+  // the native gain. The two distributions have different tails, so this is an
+  // isotropic approximation, not recovered physical surface data. See README.md
+  // for the evidence and the limits on special materials.
   const float native_roughness = max(saturate(packed.r), saturate(parameters.a));
   const float power = exp2(12.0 - 11.0 * native_roughness);
   result.roughness = pow(2.0 / (power + 2.0), 0.25);
