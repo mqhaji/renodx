@@ -260,7 +260,7 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
   if (selected.generation != inputs.generation || selected.device == nullptr) return;
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());                         // NOLINT(performance-no-int-to-ptr)
   auto& bridge = bridge_api::Get(reinterpret_cast<ID3D11Device*>(cmd_list->get_device()->get_native()));  // NOLINT(performance-no-int-to-ptr)
-  const auto owner = rendering::native_context::GetScope().owner;
+  const auto owner = engine::views::GetScope().owner;
   if (owner.scene == 0u || owner.generation == 0u) return;
   auto views = inputs.views;
   uint64_t palette_generation = 0u;
@@ -889,7 +889,7 @@ inline bool BeginComposite(reshade::api::command_list* cmd_list) {
       try {
         // Read the association at submission, not worker recording time.
         // Different scenes can record into the same pooled material target.
-        const auto owner = rendering::native_context::GetScope().owner;
+        const auto owner = engine::views::GetScope().owner;
         std::shared_ptr<const Inputs> captured;
         {
           const std::shared_lock lock(temporal_inputs::state.mutex);

@@ -17,7 +17,7 @@
 #include "../../../utils/detour.hpp"
 #include "../engine/build.hpp"
 #include "../engine/image.hpp"
-#include "../rendering/native_context.hpp"
+#include "../engine/views.hpp"
 #include "logging.hpp"
 #include "probe_api.hpp"
 
@@ -70,11 +70,11 @@ static thread_local Scene last_cut;
 
 // The build thread can run a worker job between its own lists. That job's
 // command list is not the one post-processing continues in.
-inline bool IsBuildThreadList(const rendering::native_context::Recording& recording) {
+inline bool IsBuildThreadList(const engine::views::Recording& recording) {
   return recording.d3d_context != 0u && recording.command_buffer == 0u;
 }
 
-inline void Cut(const rendering::native_context::Recording& recording, bool list_was_open) {
+inline void Cut(const engine::views::Recording& recording, bool list_was_open) {
   last_cut = armed;
   armed = {};
   uint64_t cuts = 0u;
@@ -95,7 +95,7 @@ inline void Cut(const rendering::native_context::Recording& recording, bool list
     }
   }
   if (const auto callback = cut_callback.load(std::memory_order_acquire); callback != nullptr) {
-    callback(rendering::native_context::Unwrap(recording.d3d_context).Get());
+    callback(engine::views::Unwrap(recording.d3d_context).Get());
   }
 }
 
@@ -112,7 +112,7 @@ inline void ReportUnusedStart(const Scene& scene) {
 
 static void __fastcall HookStartPostFilter(void* dg) {
   calls_in_flight.fetch_add(1u, std::memory_order_acq_rel);
-  if (const auto owner = rendering::native_context::GetScope().owner; rendering::native_context::IsPresentedMainView(owner)) {
+  if (const auto owner = engine::views::GetScope().owner; engine::views::IsPresentedMainView(owner)) {
     const Scene scene = {.scene = owner.scene, .generation = owner.generation};
     const bool repeated = scene == armed || scene == last_cut;
     {
@@ -132,7 +132,7 @@ static void __fastcall HookStartPostFilter(void* dg) {
         ReportUnusedStart(armed);
       }
       armed = scene;
-      if (const auto recording = rendering::native_context::GetRecording(); IsBuildThreadList(recording)) {
+      if (const auto recording = engine::views::GetRecording(); IsBuildThreadList(recording)) {
         Cut(recording, true);
       }
     }
@@ -144,9 +144,9 @@ static void __fastcall HookStartPostFilter(void* dg) {
 // Runs on every recording thread right after the engine begins a list.
 static void OnRecordingBegan() {
   if (armed.scene == 0u) return;
-  const auto recording = rendering::native_context::GetRecording();
+  const auto recording = engine::views::GetRecording();
   if (!IsBuildThreadList(recording)) return;
-  const auto owner = rendering::native_context::GetScope().owner;
+  const auto owner = engine::views::GetScope().owner;
   if (owner.scene == armed.scene && owner.generation == armed.generation) {
     Cut(recording, false);
     return;
@@ -162,8 +162,8 @@ inline probe::PostFilterStatus ReadStatus() {
   return internal::statistics.status;
 }
 
-// Call after native_context::Install has succeeded; repeated calls are
-// harmless. Balance with Detach before native_context::Shutdown.
+// Call after engine::views::Install has succeeded; repeated calls are
+// harmless. Balance with Detach before engine::views::Shutdown.
 inline bool Install(CutCallback on_cut) {
   const std::unique_lock lock(internal::hooks.mutex);
   internal::cut_callback.store(on_cut, std::memory_order_release);
@@ -190,7 +190,7 @@ inline bool Install(CutCallback on_cut) {
     logging::Info("installed the native post-processing start hook");
   }
   if (!internal::hooks.listening) {
-    internal::hooks.listening = rendering::native_context::SetRecordingBegan(nullptr, internal::OnRecordingBegan);
+    internal::hooks.listening = engine::views::SetRecordingBegan(nullptr, internal::OnRecordingBegan);
   }
   return internal::hooks.listening;
 }
@@ -200,7 +200,7 @@ inline bool Install(CutCallback on_cut) {
 inline bool Detach() {
   const std::unique_lock lock(internal::hooks.mutex);
   if (internal::hooks.listening) {
-    rendering::native_context::SetRecordingBegan(internal::OnRecordingBegan, nullptr);
+    engine::views::SetRecordingBegan(internal::OnRecordingBegan, nullptr);
     internal::hooks.listening = false;
   }
   if (!internal::hooks.installed) return true;

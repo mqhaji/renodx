@@ -28,7 +28,7 @@
 #include "lighting/shadows/screen_space_shadows.hpp"
 #include "materials/capture.hpp"
 #include "materials/native/material_shaders.h"
-#include "reconstruction/postprocess/resources.hpp"
+#include "reconstruction/output_size/resources.hpp"
 #include "rendering/draw_roles.hpp"
 #include "rendering/inputs.hpp"
 #include "rendering/producer_records.hpp"
@@ -190,7 +190,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
               .crc32 = 0x512E2B48,
               .code = __0x512E2B48,
               .on_replace = [](auto* cmd_list) {
-                const auto output = mgsv::reconstruction::post_process::GetActive(cmd_list);
+                const auto output = mgsv::reconstruction::output_size::GetActive(cmd_list);
                 return output != nullptr && output->IsScaled(); },
               .on_inject = [](auto*) { return false; },
           },

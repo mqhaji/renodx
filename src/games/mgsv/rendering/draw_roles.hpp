@@ -17,8 +17,8 @@
 
 #include "../../../utils/resource.hpp"
 #include "../../../utils/swapchain.hpp"
-#include "../reconstruction/postprocess/runtime.hpp"
-#include "engine_targets.hpp"
+#include "../engine/render_targets.hpp"
+#include "../reconstruction/output_size/runtime.hpp"
 
 // Roles of draws that run generic or shared game shaders: velocity
 // producers, the bloom chain, and reads of the engine's scene images.
@@ -96,9 +96,9 @@ inline bool IsBloomChainDraw(reshade::api::command_list* cmd_list, bool reductio
   const bool bloom_input = std::ranges::find(scope->working, source_resource) != scope->working.end();
   bool scene_input = false;
   if (reduction && !bloom_input) {
-    const auto output = mgsv::reconstruction::post_process::GetActive(cmd_list);
+    const auto output = mgsv::reconstruction::output_size::GetActive(cmd_list);
     scene_input = (output != nullptr && (source.Get() == output->color.Get() || output->IsSceneTarget(source.Get())))
-                  || mgsv::reconstruction::post_process::ReadSceneDepth(source.Get()) != nullptr;
+                  || mgsv::reconstruction::output_size::ReadSceneDepth(source.Get()) != nullptr;
   }
   if (!bloom_input && !scene_input) return false;
   const auto& targets = renodx::utils::swapchain::GetRenderTargets(cmd_list);
@@ -117,13 +117,13 @@ inline bool IsBloomChainDraw(reshade::api::command_list* cmd_list, bool reductio
   auto* bloom_image = reinterpret_cast<ID3D11Resource*>(target.handle);  // NOLINT(performance-no-int-to-ptr)
   uint8_t image_state = 0u;
   UINT image_state_size = sizeof(image_state);
-  if (FAILED(bloom_image->GetPrivateData(engine_targets::BLOOM_IMAGE_GUID, &image_state_size, &image_state))
+  if (FAILED(bloom_image->GetPrivateData(engine::render_targets::BLOOM_IMAGE_GUID, &image_state_size, &image_state))
       || image_state_size != sizeof(image_state)) return false;
-  if (image_state == engine_targets::BLOOM_IMAGE_NEW) {
+  if (image_state == engine::render_targets::BLOOM_IMAGE_NEW) {
     // Clear new padding before the cropped reduction writes its working region.
     constexpr std::array<float, 4> black = {};
     cmd_list->clear_render_target_view(targets[0], black.data(), 0u, nullptr);
-    bloom_image->SetPrivateData(engine_targets::BLOOM_IMAGE_GUID, sizeof(engine_targets::BLOOM_IMAGE_CLEARED), &engine_targets::BLOOM_IMAGE_CLEARED);
+    bloom_image->SetPrivateData(engine::render_targets::BLOOM_IMAGE_GUID, sizeof(engine::render_targets::BLOOM_IMAGE_CLEARED), &engine::render_targets::BLOOM_IMAGE_CLEARED);
   }
   if (reduction) {
     scope->working[scene_input ? 0u : 1u] = target;
@@ -138,8 +138,8 @@ inline bool OnCopySceneResource(
     reshade::api::resource source,
     reshade::api::resource dest) {
   if (cmd_list == nullptr || source.handle == dest.handle) return false;
-  if (mgsv::reconstruction::post_process::OnCopyResource(cmd_list, source, dest)) return false;
-  const auto output = mgsv::reconstruction::post_process::GetActive(cmd_list);
+  if (mgsv::reconstruction::output_size::OnCopyResource(cmd_list, source, dest)) return false;
+  const auto output = mgsv::reconstruction::output_size::GetActive(cmd_list);
   if (output != nullptr && output->IsScaled()
       && output->IsSceneTarget(reinterpret_cast<ID3D11Resource*>(source.handle))) {  // NOLINT(performance-no-int-to-ptr)
     mgsv::reconstruction::resolution::Fail("cannot forward a scaled scene copy");

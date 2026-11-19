@@ -10,7 +10,7 @@ Shadows selects Vanilla or Enhanced. Enhanced combines PCSS filtering of native 
 | [contact/](contact/) | Added Bend setup, clear, and trace compute shaders, with their shared declarations |
 | [pcss.hlsli](pcss.hlsli), [screen_space_shadows.hlsli](screen_space_shadows.hlsli) | Shared shadow-map filtering and contact-mask application used by the native replacements |
 | [screen_space_shadows.hpp](screen_space_shadows.hpp), [settings.hpp](settings.hpp) | Resource ownership, command recording, state restoration, and controls |
-| [batch.hpp](batch.hpp), [native_lights.hpp](native_lights.hpp) | The engine hook where local lighting begins, CPU light constants, and the shared compute batch |
+| [batch.hpp](batch.hpp), [local_lights.hpp](../../engine/local_lights.hpp) | The engine hook where local lighting begins, CPU light constants, and the shared compute batch |
 
 ## Coverage and placement
 
@@ -42,7 +42,7 @@ The selected swapchain's Present bookkeeping advances the noise layer. This move
 
 ### Local-light batches
 
-The [local-light hook](native_lights.hpp) runs when the engine's local-light plugin begins on its build thread, before it branches the jobs that draw unshadowed and shadowed lights. There the [batch](batch.hpp) cuts the build thread's command list and reserves its dispatches at that point. The engine executes that list before every light job's list, and only after all of them have been recorded.
+The [local-light hook](../../engine/local_lights.hpp) runs when the engine's local-light plugin begins on its build thread, before it branches the jobs that draw unshadowed and shadowed lights. There the [batch](batch.hpp) cuts the build thread's command list and reserves its dispatches at that point. The engine executes that list before every light job's list, and only after all of them have been recorded.
 
 Every local light draw that writes lighting, with or without a shadow map, then adds its light to the batch: the CPU constants its worker has just uploaded, its type, and for shadowed lights its shadow-map projection. The batch uploads all lights when its dispatches execute, so lights recorded after the cut are included. All lights of a batch share depth, lighting target, settings, and camera; the first light fixes them.
 

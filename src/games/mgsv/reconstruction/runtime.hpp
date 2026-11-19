@@ -544,7 +544,7 @@ inline void OnPresent(
     observed_size_generation = size_generation;
     coordinator::ResetTemporalState("render/output size changed");
     if (previous_plan.IsScaled() && !plan.IsScaled()) {
-      post_process::Reset();
+      output_size::Reset();
     }
     if (size_changed) {
       logging::Info("upscaling plan render=", plan.render.width, "x", plan.render.height,

@@ -22,10 +22,10 @@
 
 #include <include/reshade.hpp>
 
+#include "../engine/views.hpp"
 #include "../lighting/reflections/inputs.hpp"
 #include "../reconstruction/camera_state.hpp"
 #include "inputs.hpp"
-#include "native_context.hpp"
 
 namespace mgsv::lighting::temporal_inputs {
 
@@ -49,7 +49,7 @@ struct Scene {
 // One submitted camera/motion pair. Read() qualifies their depth, generation,
 // and camera sample against the consumer's depth before history may use them.
 struct Snapshot {
-  rendering::native_context::Owner owner;
+  engine::views::Owner owner;
   inputs::Motion motion;
   Scene scene;
   uint64_t generation = 0u;
@@ -80,7 +80,7 @@ struct MaterialPaletteBinding {
 };
 
 struct Producer {
-  rendering::native_context::Owner owner;
+  engine::views::Owner owner;
   reshade::api::device* device = nullptr;
   uint64_t generation = 0u;
   inputs::Motion motion;
@@ -190,7 +190,7 @@ inline void Publish(std::span<const Producer> producers) {
 inline void Record(reshade::api::command_list* cmd_list, Producer producer) {
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
   if (context == nullptr) return;
-  producer.owner = rendering::native_context::GetScope().owner;
+  producer.owner = engine::views::GetScope().owner;
   if (context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED) {
     const std::unique_lock lock(state.mutex);
     state.recordings[context].push_back(std::move(producer));
@@ -275,7 +275,7 @@ inline Snapshot Read(reshade::api::device* device, reshade::api::resource_view s
   Microsoft::WRL::ComPtr<ID3D11Resource> depth;
   depth_view->GetResource(&depth);
   const std::shared_lock lock(state.mutex);
-  const auto owner = rendering::native_context::GetScope().owner;
+  const auto owner = engine::views::GetScope().owner;
   if (state.device != device || owner.scene == 0u) return {};
   const auto entry = std::ranges::find_if(state.submitted, [&](const Snapshot& candidate) {
     return candidate.owner.scene == owner.scene && candidate.owner.generation == owner.generation;

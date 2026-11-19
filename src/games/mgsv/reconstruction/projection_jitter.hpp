@@ -218,7 +218,7 @@ inline bool GetPublishedCameraForViewportLocked(const uint8_t* viewport, camera_
     return false;
   }
 
-  const auto owner = rendering::native_context::GetScope().owner;
+  const auto owner = engine::views::GetScope().owner;
   if (published.scene == 0u || published.scene != owner.scene
       || published.owner_generation != owner.generation
       || published.reset_generation != camera_state::reset_generation.load(std::memory_order_relaxed)) return false;
@@ -271,7 +271,7 @@ inline void __fastcall HookFlushConstants(void* registers, void* backend) {
   if (state::IsEnabled()) {
     const camera_state::PublicationWriterGuard guard;
     camera_state::CameraFrame frame;
-    const auto owner = rendering::native_context::GetScope().owner;
+    const auto owner = engine::views::GetScope().owner;
     if (GetPublishedCameraForViewportLocked(std::bit_cast<const uint8_t*>(owner.viewport), &frame)) {
       const auto* base = reinterpret_cast<const float*>(std::bit_cast<const uint8_t*>(frame.camera_identity) + 0x118u);
       const size_t index = SCENE_CAMERA_CENTER_REGISTER * 4u;
@@ -376,7 +376,7 @@ inline void __fastcall HookUploadConstants(void* manager, void* buffer, const vo
   {
     const camera_state::PublicationWriterGuard guard;
     camera_state::CameraFrame frame;
-    const auto owner = rendering::native_context::GetScope().owner;
+    const auto owner = engine::views::GetScope().owner;
     if (GetPublishedCameraForViewportLocked(std::bit_cast<const uint8_t*>(owner.viewport), &frame)) {
       std::memcpy(&corrected, values, sizeof(corrected));
       const auto* base = reinterpret_cast<const float*>(std::bit_cast<const uint8_t*>(frame.camera_identity) + 0x118u);
@@ -468,7 +468,7 @@ inline void __fastcall HookSetViewMatrixState(const float* view_matrix) {
   }
   if (!taa_enabled) return;
 
-  const auto owner = rendering::native_context::GetScope().owner;
+  const auto owner = engine::views::GetScope().owner;
   if (owner.scene == 0u || !owner.main_view || !owner.active_member || !owner.presentation_matches
       || owner.viewport != reinterpret_cast<uintptr_t>(viewport)
       || owner.camera != reinterpret_cast<uintptr_t>(camera)) return;
@@ -665,7 +665,7 @@ struct NativeProjectionScope {
   ~NativeProjectionScope() { native_scope = previous; }
 
   [[nodiscard]] bool CurrentLocked() const {
-    const auto owner = rendering::native_context::GetScope().owner;
+    const auto owner = engine::views::GetScope().owner;
     return valid && state::IsEnabled()
            && frame.scene == owner.scene && frame.owner_generation == owner.generation
            && frame.reset_generation == camera_state::reset_generation.load(std::memory_order_relaxed);

@@ -14,12 +14,12 @@
 
 #include <include/reshade.hpp>
 
+#include "../../engine/local_lights.hpp"
 #include "../../reconstruction/projection_jitter.hpp"
 #include "../../reconstruction/resolution.hpp"
 #include "../../rendering/inputs.hpp"
 #include "../../shared.h"
 #include "batch.hpp"
-#include "native_lights.hpp"
 
 namespace mgsv::shadows::screen_space {
 
@@ -54,14 +54,14 @@ struct __declspec(uuid("F5591171-16BF-4AC9-B341-D74C1F56BDE2")) DrawState {
 
 inline void OnInitDevice(reshade::api::device* device) {
   if (device->get_api() == reshade::api::device_api::d3d11) {
-    device->create_private_data<batch::DeviceState>()->native_hook = native_lights::Install(batch::BeginLocalLights);
+    device->create_private_data<batch::DeviceState>()->native_hook = engine::local_lights::Install(batch::BeginLocalLights);
   }
 }
 
 inline void OnDestroyDevice(reshade::api::device* device) {
   if (device->get_api() == reshade::api::device_api::d3d11) {
     if (const auto* state = device->get_private_data<batch::DeviceState>(); state != nullptr && state->native_hook) {
-      native_lights::Detach();
+      engine::local_lights::Detach();
     }
     device->destroy_private_data<batch::DeviceState>();
   }

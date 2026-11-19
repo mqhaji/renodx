@@ -22,7 +22,7 @@
 #include "../../utils/platform.hpp"
 #include "../../utils/settings.hpp"
 #include "output/output.hpp"
-#include "reconstruction/postprocess/runtime.hpp"
+#include "reconstruction/output_size/runtime.hpp"
 #include "shared.h"
 
 namespace mgsv::settings {
@@ -93,9 +93,9 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .section = "Output",
               .tooltip = "Shows or hides game menus, text, and HUD for this session. Starts at Show each launch. The RenoDX overlay and menu input remain available while hidden.",
               .on_draw = [] {
-                int visibility = (reconstruction::post_process::ui_visible.load(std::memory_order_relaxed) ? 1 : 0);
+                int visibility = (reconstruction::output_size::ui_visible.load(std::memory_order_relaxed) ? 1 : 0);
                 if (ImGui::SliderInt("UI Visibility", &visibility, 0, 1, visibility == 0 ? "Hide" : "Show", ImGuiSliderFlags_NoInput)) {
-                  reconstruction::post_process::ui_visible.store(visibility != 0, std::memory_order_relaxed);
+                  reconstruction::output_size::ui_visible.store(visibility != 0, std::memory_order_relaxed);
                 }
                 // Custom controls have no config value. Update rendering directly
                 // without marking the saved preset as changed.
@@ -279,7 +279,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .section = "Options",
               .group = "button-line-1",
               .on_change = [registry, shader_injection, output_state]() {
-                reconstruction::post_process::ui_visible.store(true, std::memory_order_relaxed);
+                reconstruction::output_size::ui_visible.store(true, std::memory_order_relaxed);
                 for (auto* setting : *registry) {
                   if (setting->key.empty()) continue;
                   if (setting->is_global) continue;
@@ -384,7 +384,7 @@ inline void ApplyPresetOff(renodx::utils::settings::Settings* registry, ShaderIn
       {"DirectLightingShadowsMode", 0.f},
       {"IndirectLightingMode", 0.f},
   });
-  reconstruction::post_process::ui_visible.store(true, std::memory_order_relaxed);
+  reconstruction::output_size::ui_visible.store(true, std::memory_order_relaxed);
   {
     const std::unique_lock lock(renodx::utils::mutex::global_mutex);
     for (const auto& [key, value] : PRESET_VALUES) {

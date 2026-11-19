@@ -16,7 +16,6 @@ RenoDX for Metal Gear Solid V: The Phantom Pain adds HDR output and color gradin
 | [Rendering architecture](docs/ARCHITECTURE.md) | File ownership, frame order, shared layouts, and submission rules |
 | [Roadmap](ROADMAP.md) | Planned work in order: hardening, raster lighting, atmosphere, water, frame generation, the scene on D3D12, ray-traced lighting, path tracing |
 | [Planned design](docs/DESIGN.md) | How the planned lighting methods, atmosphere, water, frame generation and settings are meant to work, how the mod should survive game updates, the planned folder layout, and how each claim is known |
-| [Shader name map](docs/MGSV_PixelShader_NameMap.md), [Fox Engine reference](docs/Fox_Engine_Render_Pipeline_Reference.md) | Historical native shader and executable findings, not current addon behavior |
 
 ## Temporal reconstruction
 

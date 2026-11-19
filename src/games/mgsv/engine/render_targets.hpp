@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef RENODX_GAMES_MGSV_RENDERING_ENGINE_TARGETS_HPP_
-#define RENODX_GAMES_MGSV_RENDERING_ENGINE_TARGETS_HPP_
+#ifndef RENODX_GAMES_MGSV_ENGINE_RENDER_TARGETS_HPP_
+#define RENODX_GAMES_MGSV_ENGINE_RENDER_TARGETS_HPP_
 
 #include <d3d11.h>
 #include <windows.h>
@@ -23,9 +23,9 @@
 #include <include/reshade.hpp>
 
 #include "../../../utils/detour.hpp"
-#include "../engine/build.hpp"
-#include "../engine/image.hpp"
-#include "native_context.hpp"
+#include "build.hpp"
+#include "image.hpp"
+#include "views.hpp"
 
 // The engine creates every render target in RenderTargetDx11::Initialize, on
 // first creation and on every resize, from a RenderTargetParameter that names
@@ -33,7 +33,7 @@
 // selected 8-bit targets as RGBA16F itself, so the game binds the float texture
 // directly and RenoDX keeps no clone of it. A plugin that keeps scene color in
 // an 8-bit temporary other plugins share gets float images of its own instead.
-namespace mgsv::rendering::engine_targets {
+namespace mgsv::engine::render_targets {
 
 inline constexpr std::array REQUIRED_ENTRIES = {
     engine::Entry::RENDER_TARGET_INITIALIZE,
@@ -457,6 +457,6 @@ inline void OnDestroyDevice(reshade::api::device* device) {
   device->destroy_private_data<internal::DeviceState>();
 }
 
-}  // namespace mgsv::rendering::engine_targets
+}  // namespace mgsv::engine::render_targets
 
-#endif  // RENODX_GAMES_MGSV_RENDERING_ENGINE_TARGETS_HPP_
+#endif  // RENODX_GAMES_MGSV_ENGINE_RENDER_TARGETS_HPP_

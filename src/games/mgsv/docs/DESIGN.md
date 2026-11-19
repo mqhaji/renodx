@@ -451,17 +451,17 @@ Nothing is installed until resolution is finished. The search reads the code onc
 
 ### 14.1 What the audit found
 
-The mod has 278 tracked files outside the generated `embed/` folder and the vendored FSR SDK. Most features already sit in a folder named for what they do. The problems:
+Most features already sit in a folder named for what they do. The audit found the problems below; the stage 1 move fixed the ones marked done.
 
-- **The scheduler lives in the wrong feature.** `reconstruction/coordinator.hpp` (1,022 lines) decides where in the engine's command lists our work runs, for contact shadows, the diffuse gather and reflections as well as reconstruction.
-- **Engine-facing code is spread over three folders.** `rendering/` mixes the engine's view and command-list tracking, render target creation, motion-vector hooks and draw identification with our own GPU infrastructure; the post-processing start hook sits in `reconstruction/` and the local-light hook in `lighting/shadows/`.
-- **Two folders share a name for different things.** `postprocess/` holds ports of the game's depth of field, motion blur and bloom; `reconstruction/postprocess/` is the redirection that runs post-processing at output size while upscaling.
-- **Dead files.** The root `common.hlsli` is empty, yet twelve shader files include it; `tonemap/customtest31.hlsli` (2,693 lines) is included by nothing.
-- **Inconsistent folders.** `UI/` is the only capitalized folder. Depth of field and motion blur ports sit loose in `postprocess/` while bloom has its own folder.
-- **Superseded documents.** `docs/Fox_Engine_Render_Pipeline_Reference.md` and `docs/MGSV_PixelShader_NameMap.md` are marked historical; the engine reference, the render map and the planned shader-name file replace them, and they hold conclusions from early analysis that later work corrected.
-- **Namespaces do not always match folders** (for example `mgsv::shadows::native_lights` in `lighting/shadows/`).
+- **Engine-facing code was spread over three folders.** Done: the view and command-list tracking, render target creation, motion-vector hooks and the local-light hook are now `engine/views.hpp`, `engine/render_targets.hpp`, `engine/motion_vectors.hpp` and `engine/local_lights.hpp`. Two hook files wait: `reconstruction/native_post_filter.hpp` uses reconstruction's logging and probe status, and `rendering/draw_roles.hpp` reads the output-size redirection's state. Each moves when that dependency is cut.
+- **The scheduler lives in the wrong feature.** `reconstruction/coordinator.hpp` (1,022 lines) decides where in the engine's command lists our work runs, for contact shadows, the diffuse gather and reflections as well as reconstruction. It still calls the reconstruction methods directly, so it moves to `rendering/submission.hpp` with the scheduling cleanup that takes reconstruction's dispatch out of it.
+- **Two folders shared a name for different things.** Done: the redirection that runs post-processing at output size is now `reconstruction/output_size/`; `postprocess/` holds only ports of the game's own passes.
+- **Dead files.** Done: the unused `tonemap/customtest31.hlsli` (2,693 lines) is gone. The root `common.hlsli` stays; it only includes `shared.h`, but the shaders that include it compile through it.
+- **Inconsistent folders.** Done: `UI/` is now `ui/`, and the depth-of-field and motion-blur ports have folders beside bloom.
+- **Superseded documents.** Done: `docs/Fox_Engine_Render_Pipeline_Reference.md` and `docs/MGSV_PixelShader_NameMap.md` held conclusions from early analysis that later work corrected; they are archived outside the repository, and the engine reference and the render map replace them.
+- **Namespaces did not always match folders.** Done for every moved file.
 
-Kept as they are: `materials/`, `lighting/native/`, `lighting/compose/`, `lighting/shadows/` (apart from its hook), `lighting/reflections/`, `reconstruction/dlss/`, `fsr/`, `analytical/`, `tonemap/` (apart from the dead file; `customtest35.hlsli` keeps its upstream name), `output/`, `copy/`, `antialiasing/`, `effects/`, `sky/native/`, `water/native/`, `assets/` and `third_party/`.
+Kept as they are: `materials/`, `lighting/native/`, `lighting/compose/`, `lighting/shadows/`, `lighting/reflections/`, `lighting/indirect/` (until stage 2 renames it), `reconstruction/dlss/`, `fsr/`, `analytical/`, `tonemap/` (`customtest35.hlsli` keeps its upstream name), `copy/`, `antialiasing/`, `effects/`, `sky/native/` and `output/` (until the stages that move them), `water/native/`, `assets/` and `third_party/`.
 
 ### 14.2 Rules
 
@@ -475,14 +475,14 @@ Kept as they are: `materials/`, `lighting/native/`, `lighting/compose/`, `lighti
 
 | Folder | Holds | Change |
 |---|---|---|
-| (root) | `addon.cpp`, `settings.hpp`, `shaders.hpp`, `shared.h`, `README.md`, `ROADMAP.md`, `AGENTS.md` | The empty `common.hlsli` and its includes go |
-| `engine/` | `build.hpp` and `image.hpp` (the table and its check); `views.hpp` (renderer, view and command-list tracking, today `rendering/native_context.hpp`); `render_targets.hpp` (`rendering/engine_targets.hpp`); `motion_vectors.hpp` (`rendering/native_velocity.hpp`); `post_filter.hpp` (`reconstruction/native_post_filter.hpp`); `local_lights.hpp` (`lighting/shadows/native_lights.hpp`); `draw_roles.hpp` (`rendering/draw_roles.hpp`); later `shader_names.hpp` | Stage 1 |
-| `rendering/` | `d3d11_state.hpp`, `d3d12_bridge.hpp`, `d3d12_compute.hpp`, `d3d12_timing.hpp`, `shared_texture.hpp`, `nrd.hpp`, `inputs.hpp`, `producer_records.hpp`, `submission.hpp` (today `reconstruction/coordinator.hpp`), the probe interface, and the shared shader includes | Stage 1 |
-| `reconstruction/` | The methods (`dlss/`, `fsr/`, `analytical/`), camera jitter, render size and mip bias, frame inputs, settings and state; `output_size/` (today `reconstruction/postprocess/`) | Stage 1 |
-| `postprocess/` | `bloom/`, `depth_of_field/` and `motion_blur/` ports | Stage 1: the loose ports move into their folders |
-| `ui/` | The subtitle port | Stage 1: renamed from `UI/` |
-| `tonemap/` | The two late tone-map ports and the curve and grading helpers | Stage 1: the unused `customtest31.hlsli` goes |
-| `docs/` | Architecture, design, the render map, the engine reference and their shared style and script | Stage 1: the two superseded documents go |
+| (root) | `addon.cpp`, `settings.hpp`, `shaders.hpp`, `shared.h`, `common.hlsli`, `README.md`, `ROADMAP.md`, `AGENTS.md` | Unchanged |
+| `engine/` | `build.hpp` and `image.hpp` (the table and its check); `views.hpp` (renderer, view and command-list tracking); `render_targets.hpp`; `motion_vectors.hpp`; `local_lights.hpp`; later `post_filter.hpp` (today `reconstruction/native_post_filter.hpp`), `draw_roles.hpp` (today `rendering/draw_roles.hpp`) and `shader_names.hpp` | Stage 1 done; the two hooks follow when their dependencies are cut |
+| `rendering/` | `d3d11_state.hpp`, `d3d12_bridge.hpp`, `d3d12_compute.hpp`, `d3d12_timing.hpp`, `shared_texture.hpp`, `nrd.hpp`, `inputs.hpp`, `producer_records.hpp`, later `submission.hpp` (today `reconstruction/coordinator.hpp`), the probe interface, and the shared shader includes | The scheduler moves with the scheduling cleanup |
+| `reconstruction/` | The methods (`dlss/`, `fsr/`, `analytical/`), camera jitter, render size and mip bias, frame inputs, settings and state; `output_size/` | Stage 1 done |
+| `postprocess/` | `bloom/`, `depth_of_field/` and `motion_blur/` ports | Stage 1 done |
+| `ui/` | The subtitle port | Stage 1 done |
+| `tonemap/` | The two late tone-map ports and the curve and grading helpers | Stage 1 done |
+| `docs/` | Architecture, design, the render map, the engine reference and their shared style and script | Stage 1 done |
 | `lighting/native/`, `lighting/compose/`, `lighting/shadows/`, `lighting/reflections/`, `materials/` | As today | Unchanged |
 | `lighting/memory/`, `lighting/probes/`, `lighting/forward/` | Scene memory, the probe grid, lighting for forward-drawn surfaces | New with stage 2 |
 | `lighting/gather/` | The near layer and the Ultra screen probes | Stage 2: today's `lighting/indirect/`, renamed when the new gather replaces it |
@@ -493,7 +493,7 @@ Kept as they are: `materials/`, `lighting/native/`, `lighting/compose/`, `lighti
 | `lighting/traced/`, `lighting/paths/` | The ray-traced method and the path tracer | New with stages 7 and 8 |
 | `copy/`, `antialiasing/`, `effects/`, `assets/`, `third_party/` | As today | Unchanged |
 
-The stage 1 moves are one commit with no behavior change: the same shaders compile to the same bytes, the same hooks install, and only paths, includes and namespaces change. The local probe follows the moves in the same change.
+The stage 1 moves were one change with no behavior change: the moved shaders compile to the same bytes, all 74 entries verify and the same hooks install at the title, and only paths, includes and namespaces changed. The local probe followed the moves in the same change.
 
 ## 15. Open questions
 

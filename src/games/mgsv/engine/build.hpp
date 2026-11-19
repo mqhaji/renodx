@@ -21,7 +21,7 @@ inline constexpr uint32_t IMAGE_TIMESTAMP = 0x6A4CB898u;
 inline constexpr uint32_t IMAGE_SIZE = 0xA01D000u;
 
 enum class Entry : uint8_t {
-  // Renderer, view and command-list lifetimes (rendering/native_context.hpp).
+  // Renderer, view and command-list lifetimes (engine/views.hpp).
   RENDER_BUILD_RENDERING,
   DG_INIT_RENDER,
   DG_INIT_VIEWPORT,
@@ -39,7 +39,7 @@ enum class Entry : uint8_t {
   DEPTH_OF_FIELD_MAIN_EXEC,
   GET_MAIN_VIEWPORT,
 
-  // Render target creation (rendering/engine_targets.hpp).
+  // Render target creation (engine/render_targets.hpp).
   RENDER_TARGET_INITIALIZE,
   GET_BUFFER_FORMAT_FROM_PARAMETER,
   RESIDENT_RESOURCE_GET_HANDLE,
@@ -50,14 +50,14 @@ enum class Entry : uint8_t {
   RENDER_TARGET_RESTORE_WITH_RESIZE,
   RENDER_TARGET_MANAGER,
 
-  // Motion vectors (rendering/native_velocity.hpp).
+  // Motion vectors (engine/motion_vectors.hpp).
   DEFERRED_GEOMETRY_POST_EXEC,
   DG_END_SCREEN_SPACE_VELOCITY,
 
   // Start of post-processing (reconstruction/native_post_filter.hpp).
   DG_START_POST_FILTER,
 
-  // Local lights and their constants (lighting/shadows/native_lights.hpp).
+  // Local lights and their constants (engine/local_lights.hpp).
   LOCAL_LIGHT_MAIN_EXEC,
   COMMAND_BUFFER_SET_VECTOR,
   SHADOW_CONSTANT_REGISTER_SET_VECTOR,
@@ -129,7 +129,7 @@ struct EntryInfo {
 };
 
 inline constexpr std::array<EntryInfo, ENTRY_COUNT> ENTRIES = {{
-    // Renderer, view and command-list lifetimes (rendering/native_context.hpp).
+    // Renderer, view and command-list lifetimes (engine/views.hpp).
     {.entry = Entry::RENDER_BUILD_RENDERING, .name = "fox::gr::Render::buildRendering", .rva = 0x1BEEC0u, .bytes = "40 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24"},
     {.entry = Entry::DG_INIT_RENDER, .name = "fox::gr::dg::DgDx11::InitRender", .rva = 0x2496A0u, .bytes = "40 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24"},
     {.entry = Entry::DG_INIT_VIEWPORT, .name = "fox::gr::dg::DgDx11::InitViewport", .rva = 0x249BE0u, .bytes = "40 55 56 57 41 56 41 57 48 81 EC 80 00 00 00 48"},
@@ -147,7 +147,7 @@ inline constexpr std::array<EntryInfo, ENTRY_COUNT> ENTRIES = {{
     {.entry = Entry::DEPTH_OF_FIELD_MAIN_EXEC, .name = "fox::gr::PluginDepthOfField::MainExec", .rva = 0x1DD1F0u, .bytes = "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 56 41 57 48 83 EC 30"},
     {.entry = Entry::GET_MAIN_VIEWPORT, .name = "tpp::ef::Utility::GetMainViewport", .rva = 0x6AD870u, .bytes = "48 8B 05 09 3A 53 02 C3"},
 
-    // Render target creation (rendering/engine_targets.hpp).
+    // Render target creation (engine/render_targets.hpp).
     {.entry = Entry::RENDER_TARGET_INITIALIZE, .name = "fox::gr::dg::RenderTargetDx11::Initialize", .rva = 0x2B2F90u, .bytes = "48 89 5C 24 18 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 D9 48 81 EC F0 00 00 00"},
     {.entry = Entry::GET_BUFFER_FORMAT_FROM_PARAMETER, .name = "fox::gr::dg::GetBufferFormatFromParameter", .rva = 0x2B29D0u, .bytes = "48 63 41 14 83 F8 0D 77 49"},
     {.entry = Entry::RESIDENT_RESOURCE_GET_HANDLE, .name = "fox::gr::dg::ResidentResourceManager::GetResourceHandle", .rva = 0x23BBE0u, .bytes = "48 8B D1 48 8B 0D"},
@@ -158,14 +158,14 @@ inline constexpr std::array<EntryInfo, ENTRY_COUNT> ENTRIES = {{
     {.entry = Entry::RENDER_TARGET_RESTORE_WITH_RESIZE, .name = "fox::gr::dg::RenderTargetManager::RestoreHandleWithResize", .rva = 0x242AC0u, .bytes = "40 53 48 83 EC 60 4C 8B 0D"},
     {.entry = Entry::RENDER_TARGET_MANAGER, .name = "fox::gr::ResourceManagerBase<RenderTargetResource>::m_instance", .rva = 0x2B73428u},
 
-    // Motion vectors (rendering/native_velocity.hpp).
+    // Motion vectors (engine/motion_vectors.hpp).
     {.entry = Entry::DEFERRED_GEOMETRY_POST_EXEC, .name = "fox::gr::PluginDeferredGeometry::PostExec", .rva = 0x1C54D0u, .bytes = "48 8B C4 53 55 56 57 41 56 48 81 EC 40 01 00 00 48 C7 44 24 40 FE FF FF FF"},
     {.entry = Entry::DG_END_SCREEN_SPACE_VELOCITY, .name = "fox::gr::dg::DgDx11::EndScreenSpaceVelocity", .rva = 0x2BF7A0u, .bytes = "40 53 48 83 EC 20 48 8B D9 48 8B 0D 10 49 8D 02"},
 
     // Start of post-processing (reconstruction/native_post_filter.hpp).
     {.entry = Entry::DG_START_POST_FILTER, .name = "fox::gr::dg::DgDx11::StartPostFilter", .rva = 0x2C2D90u, .bytes = "48 89 5C 24 10 57 48 83 EC 40 48 8B 05"},
 
-    // Local lights and their constants (lighting/shadows/native_lights.hpp).
+    // Local lights and their constants (engine/local_lights.hpp).
     {.entry = Entry::LOCAL_LIGHT_MAIN_EXEC, .name = "fox::gr::PluginLocalLight::MainExec", .rva = 0x20AA00u, .bytes = "48 8B C4 55 56 57 41 54 41 55 41 56 41 57 48 8D A8 18 FF FF FF 48 81 EC B0 01 00 00"},
     {.entry = Entry::COMMAND_BUFFER_SET_VECTOR, .name = "fox::gr::dg::CommandBuffer::SetVector", .rva = 0x2D8B70u, .bytes = "48 83 EC 38 48 8B 49 28 4D 8B D0 8B C2 C1 F8 04"},
     {.entry = Entry::SHADOW_CONSTANT_REGISTER_SET_VECTOR, .name = "fox::gr::dg::ShadowConstantRegister::SetVector", .rva = 0x2C5F30u, .bytes = "48 89 5C 24 08 57 48 83 EC 20 48 8B F9 BB 01 00 00 00"},

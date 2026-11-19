@@ -52,6 +52,10 @@
 #include "../../utils/swapchain.hpp"
 #include "engine/build.hpp"
 #include "engine/image.hpp"
+#include "engine/local_lights.hpp"
+#include "engine/motion_vectors.hpp"
+#include "engine/render_targets.hpp"
+#include "engine/views.hpp"
 #include "lighting/environment_specular.hpp"
 #include "lighting/indirect/ambient_diffuse.hpp"
 #include "lighting/indirect/runtime.hpp"
@@ -59,7 +63,6 @@
 #include "lighting/indirect_lighting_mode.hpp"
 #include "lighting/reflections/native_chain.hpp"
 #include "lighting/reflections/runtime.hpp"
-#include "lighting/shadows/native_lights.hpp"
 #include "lighting/shadows/screen_space_shadows.hpp"
 #include "lighting/shadows/settings.hpp"
 #include "materials/capture.hpp"
@@ -70,18 +73,15 @@
 #include "reconstruction/input_capture.hpp"
 #include "reconstruction/logging.hpp"
 #include "reconstruction/native_post_filter.hpp"
-#include "reconstruction/postprocess/resources.hpp"
-#include "reconstruction/postprocess/runtime.hpp"
+#include "reconstruction/output_size/resources.hpp"
+#include "reconstruction/output_size/runtime.hpp"
 #include "reconstruction/projection_jitter.hpp"
 #include "reconstruction/resolution.hpp"
 #include "reconstruction/runtime.hpp"
 #include "reconstruction/settings.hpp"
 #include "reconstruction/state.hpp"
 #include "rendering/draw_roles.hpp"
-#include "rendering/engine_targets.hpp"
 #include "rendering/inputs.hpp"
-#include "rendering/native_context.hpp"
-#include "rendering/native_velocity.hpp"
 #include "rendering/probe_controls.hpp"
 #include "rendering/producer_records.hpp"
 #include "settings.hpp"
@@ -355,13 +355,13 @@ void OnPresetOff() {
 }
 
 void UpdateNativePresentation(reshade::api::swapchain* swapchain) {
-  if (mgsv::rendering::native_context::Install()) {
-    mgsv::rendering::native_context::SetPresentation(reinterpret_cast<IDXGISwapChain*>(swapchain->get_native()));  // NOLINT(performance-no-int-to-ptr)
+  if (mgsv::engine::views::Install()) {
+    mgsv::engine::views::SetPresentation(reinterpret_cast<IDXGISwapChain*>(swapchain->get_native()));  // NOLINT(performance-no-int-to-ptr)
     mgsv::reconstruction::native_post_filter::Install(mgsv::reconstruction::OnPostFilterStart);
-    mgsv::rendering::native_velocity::Install();
+    mgsv::engine::motion_vectors::Install();
     mgsv::reconstruction::logging::Info("native view ownership ready for selected presentation");
   } else {
-    mgsv::reconstruction::logging::Warn("native view ownership unavailable: ", mgsv::rendering::native_context::installation_status);
+    mgsv::reconstruction::logging::Warn("native view ownership unavailable: ", mgsv::engine::views::installation_status);
     mgsv::reconstruction::resolution::Fail("native view ownership unavailable");
   }
 }
@@ -377,7 +377,7 @@ void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
 void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool resize) {
   const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
   if (!mgsv::inputs::IsSelectedSwapchain(swapchain)) return;
-  mgsv::rendering::native_context::SetPresentation(nullptr);
+  mgsv::engine::views::SetPresentation(nullptr);
   mgsv::inputs::OnDestroySwapchain(swapchain, resize);
   mgsv::lighting::environment_specular::Reset();
   mgsv::lighting::material_inputs::Reset();
@@ -385,7 +385,7 @@ void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool resize) {
   mgsv::lighting::ambient_diffuse::Reset();
   mgsv::lighting::ResetNativeLightViews(swapchain->get_device());
   mgsv::reconstruction::coordinator::ResetTemporalState("input swapchain retired");
-  mgsv::reconstruction::post_process::Reset();
+  mgsv::reconstruction::output_size::Reset();
   // Cancel reconstruction but retain every original game prefix/post list for its existing replay path.
   std::vector<std::array<Microsoft::WRL::ComPtr<ID3D11DeviceChild>, 5>> retired_resources;
   std::vector<std::function<void(reshade::api::command_list*, bool)>> retired_lighting;
@@ -452,7 +452,7 @@ void OnPresent(
       // noise phase, so they follow the mode.
       mgsv::lighting::temporal_inputs::enabled.store(lighting_enabled, std::memory_order_release);
       mgsv::lighting::indirect_lighting_enhanced.store(lighting_enabled, std::memory_order_release);
-      mgsv::rendering::native_velocity::wanted.store(lighting_enabled || mgsv::reconstruction::state::IsEnabled(), std::memory_order_release);
+      mgsv::engine::motion_vectors::wanted.store(lighting_enabled || mgsv::reconstruction::state::IsEnabled(), std::memory_order_release);
       shadow_noise_frame = mgsv::lighting::noise_frame.fetch_add(1u, std::memory_order_relaxed) + 1u;
       selected_present = true;
     }
@@ -481,9 +481,9 @@ void OnDestroyDevice(reshade::api::device* device) {
   if (!mgsv::inputs::IsSelectedDevice(device)) return;
   // A cut in progress can be waiting for the execution lock taken below.
   mgsv::reconstruction::native_post_filter::Detach();
-  mgsv::rendering::native_velocity::Detach();
+  mgsv::engine::motion_vectors::Detach();
   const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
-  mgsv::rendering::native_context::Shutdown();
+  mgsv::engine::views::Shutdown();
   mgsv::lighting::reflections::Destroy();
   mgsv::inputs::OnDestroyDevice(device);
   mgsv::lighting::environment_specular::Reset();
@@ -520,13 +520,13 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       if (std::ranges::none_of(settings, [](auto* setting) { return setting->section == "Game Version"; })) {
         std::string unavailable;
         for (const auto& requirement : {
-                 mgsv::rendering::native_context::REQUIREMENT,
-                 mgsv::rendering::engine_targets::REQUIREMENT,
-                 mgsv::rendering::native_velocity::REQUIREMENT,
+                 mgsv::engine::views::REQUIREMENT,
+                 mgsv::engine::render_targets::REQUIREMENT,
+                 mgsv::engine::motion_vectors::REQUIREMENT,
                  mgsv::reconstruction::native_post_filter::REQUIREMENT,
                  mgsv::reconstruction::projection_jitter::REQUIREMENT,
                  mgsv::reconstruction::resolution::REQUIREMENT,
-                 mgsv::shadows::native_lights::REQUIREMENT,
+                 mgsv::engine::local_lights::REQUIREMENT,
              }) {
           if (mgsv::engine::Verified(requirement.entries)) continue;
           unavailable.append(unavailable.empty() ? "" : ", ").append(requirement.feature);
@@ -594,8 +594,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       break;
     case DLL_PROCESS_DETACH:
       mgsv::reconstruction::native_post_filter::Detach();
-      mgsv::rendering::native_velocity::Detach();
-      mgsv::rendering::native_context::Shutdown();
+      mgsv::engine::motion_vectors::Detach();
+      mgsv::engine::views::Shutdown();
       reshade::unregister_overlay(nullptr, ADDON_SETTINGS);
       reshade::unregister_event<reshade::addon_event::copy_resource>(mgsv::rendering::draw_roles::OnCopySceneResource);
       reshade::unregister_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);
@@ -643,8 +643,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
           return true;
         },
         std::memory_order_release);
-    reshade::register_event<reshade::addon_event::init_device>(mgsv::rendering::engine_targets::OnInitDevice);
-    reshade::register_event<reshade::addon_event::destroy_device>(mgsv::rendering::engine_targets::OnDestroyDevice);
+    reshade::register_event<reshade::addon_event::init_device>(mgsv::engine::render_targets::OnInitDevice);
+    reshade::register_event<reshade::addon_event::destroy_device>(mgsv::engine::render_targets::OnDestroyDevice);
     reshade::register_event<reshade::addon_event::init_device>(mgsv::shadows::screen_space::OnInitDevice);
     reshade::register_event<reshade::addon_event::destroy_device>(mgsv::shadows::screen_space::OnDestroyDevice);
     reshade::register_event<reshade::addon_event::init_command_list>(mgsv::shadows::screen_space::OnInitCommandList);
@@ -691,8 +691,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     mgsv::reconstruction::dx12::UseProbe(false);
     mgsv::rendering::probe::transition.store(nullptr, std::memory_order_release);
     mgsv::rendering::probe::UseProbe(false);
-    reshade::unregister_event<reshade::addon_event::init_device>(mgsv::rendering::engine_targets::OnInitDevice);
-    reshade::unregister_event<reshade::addon_event::destroy_device>(mgsv::rendering::engine_targets::OnDestroyDevice);
+    reshade::unregister_event<reshade::addon_event::init_device>(mgsv::engine::render_targets::OnInitDevice);
+    reshade::unregister_event<reshade::addon_event::destroy_device>(mgsv::engine::render_targets::OnDestroyDevice);
     reshade::unregister_event<reshade::addon_event::init_device>(mgsv::shadows::screen_space::OnInitDevice);
     reshade::unregister_event<reshade::addon_event::destroy_device>(mgsv::shadows::screen_space::OnDestroyDevice);
     reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::shadows::screen_space::OnInitCommandList);
@@ -747,12 +747,12 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     renodx::utils::command_action::Register(RECONSTRUCTION_DRAW,
                                             {.command_types = renodx::utils::command_action::COMMAND_TYPE_DIRECT_DRAW | renodx::utils::command_action::COMMAND_TYPE_INDIRECT});
   } else if (fdw_reason == DLL_PROCESS_DETACH) {
-    mgsv::reconstruction::post_process::Use(fdw_reason);
+    mgsv::reconstruction::output_size::Use(fdw_reason);
     renodx::utils::command_action::Unregister(RECONSTRUCTION_DRAW);
   }
   renodx::mods::shader::Use(fdw_reason, custom_shaders, &shader_injection);
   if (fdw_reason == DLL_PROCESS_ATTACH) {
-    mgsv::reconstruction::post_process::Use(fdw_reason);
+    mgsv::reconstruction::output_size::Use(fdw_reason);
   }
 
   return TRUE;

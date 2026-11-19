@@ -11,7 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "../rendering/native_context.hpp"
+#include "../engine/views.hpp"
 
 #include "state.hpp"
 
@@ -240,7 +240,7 @@ inline void PublishLocked(const CameraFrame& frame) {
   }
   published_valid.store(frame.valid, std::memory_order_relaxed);
   published_sequence.fetch_add(1u, std::memory_order_release);
-  const auto owner = rendering::native_context::GetScope().owner;
+  const auto owner = engine::views::GetScope().owner;
   if (owner.scene != 0u && owner.main_view && owner.presentation_matches
       && owner.viewport == reinterpret_cast<uintptr_t>(staged_viewport)
       && owner.camera == reinterpret_cast<uintptr_t>(staged_camera)) {
@@ -299,7 +299,7 @@ inline CameraFrame Get() {
 
 // Callers hold the publication lock through any native projection write.
 inline CameraFrame GetForSceneLocked() {
-  const auto owner = rendering::native_context::GetScope().owner;
+  const auto owner = engine::views::GetScope().owner;
   if (owner.scene != 0u) {
     const auto entry = std::ranges::find_if(scene_publications, [&](const CameraFrame& candidate) {
       return candidate.scene == owner.scene && candidate.owner_generation == owner.generation;

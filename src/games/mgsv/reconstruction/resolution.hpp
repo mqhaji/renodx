@@ -24,7 +24,7 @@
 
 #include "../engine/build.hpp"
 #include "../engine/image.hpp"
-#include "../rendering/native_context.hpp"
+#include "../engine/views.hpp"
 #include "logging.hpp"
 #include "state.hpp"
 
@@ -170,18 +170,18 @@ struct DofDrawState {
   uint64_t generation = 0u;
 
   [[nodiscard]] bool IsScaled() const { return plan.IsScaled(); }
-  [[nodiscard]] bool Matches(const rendering::native_context::Owner& owner) const {
+  [[nodiscard]] bool Matches(const engine::views::Owner& owner) const {
     return IsScaled() && scene != 0u && scene == owner.scene && generation == owner.generation;
   }
 };
 static thread_local DofDrawState active_dof;
 
 inline void __fastcall HookBackendStep(uint8_t* backend) {
-  const auto presentation = rendering::native_context::GetPresentationOwner();
+  const auto presentation = engine::views::GetPresentationOwner();
   const auto backend_address = reinterpret_cast<uintptr_t>(backend);
   auto* wanted = reinterpret_cast<Size*>(backend + BACKEND_WANTED_SIZE_OFFSET);
   auto* flags = reinterpret_cast<uint32_t*>(backend + BACKEND_FLAGS_OFFSET);
-  const auto display = *reinterpret_cast<const Size*>(backend + rendering::native_context::OUTPUT_SIZE_OFFSET);
+  const auto display = *reinterpret_cast<const Size*>(backend + engine::views::OUTPUT_SIZE_OFFSET);
   const auto* table = *reinterpret_cast<const uintptr_t* const*>(backend);
   bool managed = false;
   bool acquired = false;
@@ -222,7 +222,7 @@ inline void __fastcall HookBackendStep(uint8_t* backend) {
   }
   backend_step(backend);
   if (!managed) return;
-  const auto actual = *reinterpret_cast<const Size*>(backend + rendering::native_context::RENDER_SIZE_OFFSET);
+  const auto actual = *reinterpret_cast<const Size*>(backend + engine::views::RENDER_SIZE_OFFSET);
   const std::unique_lock lock(sizing_state.mutex);
   if (sizing_state.backend != backend_address) return;
   if (sizing_state.actual != actual) {
@@ -235,7 +235,7 @@ inline void __fastcall HookBackendStep(uint8_t* backend) {
 }
 
 inline void __fastcall HookDofDraw(void* effect, const float* parameters) {
-  const auto scope = rendering::native_context::GetDofScope();
+  const auto scope = engine::views::GetDofScope();
   const auto& owner = scope.scope.owner;
   Plan plan;
   {

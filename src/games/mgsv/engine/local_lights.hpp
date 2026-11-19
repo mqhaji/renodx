@@ -18,15 +18,15 @@
 
 #include <include/reshade.hpp>
 
-#include "../../../../utils/detour.hpp"
-#include "../../engine/build.hpp"
-#include "../../engine/image.hpp"
-#include "../../rendering/native_context.hpp"
+#include "../../../utils/detour.hpp"
+#include "build.hpp"
+#include "image.hpp"
+#include "views.hpp"
 
 // The engine side of contact shadows: where local lighting begins on the build
 // thread, and the CPU constants a worker has prepared for the light it is about
 // to draw.
-namespace mgsv::shadows::native_lights {
+namespace mgsv::engine::local_lights {
 
 // The scene and light constant banks of one light draw, as shader b2 and b3.
 struct Constants {
@@ -83,7 +83,7 @@ inline bool ReadConstants(uintptr_t command_buffer, ID3D11DeviceContext* context
   // its CPU data at +8 and float4 count at +0x18. Banks 2/3 match shader b2/b3.
   const auto* buffer = reinterpret_cast<const std::byte*>(command_buffer);  // NOLINT(performance-no-int-to-ptr)
   const auto* native_context = *reinterpret_cast<const std::byte* const*>(buffer + 8u);
-  if (native_context == nullptr || rendering::native_context::Unwrap(*reinterpret_cast<const uintptr_t*>(native_context + 8u)).Get() != context) return false;
+  if (native_context == nullptr || engine::views::Unwrap(*reinterpret_cast<const uintptr_t*>(native_context + 8u)).Get() != context) return false;
   const auto* banks = *reinterpret_cast<const std::byte* const*>(buffer + 0x28u);
   if (banks == nullptr) return false;
   const auto bank_count = *reinterpret_cast<const uint32_t*>(banks + 0x108u);
@@ -153,6 +153,6 @@ inline bool Detach() {
   return true;
 }
 
-}  // namespace mgsv::shadows::native_lights
+}  // namespace mgsv::engine::local_lights
 
 #endif  // MGSV_SHADOWS_NATIVE_LIGHTS_HPP_

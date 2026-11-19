@@ -15,15 +15,16 @@ The [render map](render-map.html) follows these owners through the native frame,
 | `engine/build.hpp`, `engine/image.hpp` | Every address in the game's executable the mod relies on, with the bytes that identify it and the references between entries, verified once against the executable file; features take their addresses from here and stay off, named in the menu, when an entry they need does not verify |
 | `rendering/inputs.hpp` | Selected device/swapchain, reset versions, and retained native material/motion views |
 | `rendering/producer_records.hpp` | Camera/exposure, motion, diffuse-copy, prepared-source, and material-table records published in submission order |
-| `rendering/native_context.hpp` | Native renderer/view ownership, worker handoff, and copied scopes for submitted addon work |
-| `rendering/engine_targets.hpp` | Hooks on the engine's render target creation that make it create selected targets as RGBA16F, the private float images of depth of field and motion blur, the scene-role tag, and the engine's current scene, depth and velocity images for reconstruction |
-| `rendering/native_velocity.hpp` | Hooks that keep the engine drawing motion vectors without the game's motion blur and note which view builds drew them |
+| `engine/views.hpp` | Native renderer/view ownership, worker handoff, and copied scopes for submitted addon work |
+| `engine/render_targets.hpp` | Hooks on the engine's render target creation that make it create selected targets as RGBA16F, the private float images of depth of field and motion blur, the scene-role tag, and the engine's current scene, depth and velocity images for reconstruction |
+| `engine/motion_vectors.hpp` | Hooks that keep the engine drawing motion vectors without the game's motion blur and note which view builds drew them |
 | `rendering/draw_roles.hpp` | Velocity-producer identification, the bloom chain gate, and scene-copy handling for draws that run generic or shared shaders |
 | `rendering/d3d11_state.hpp`, `rendering/geometry.hlsli` | D3D11 state preservation and native geometry reconstruction |
 | `materials/capture.hpp`, `materials/native/` | Records for the 59 materials that bake a cube map into albedo, their ports, the two rain ports, and the registration inventory |
 | `materials/brdf.hlsli`, `lighting/reflections/sssr_brdf.cs_6_6.hlsl` | Native material decoding, reciprocal GGX response, and one-time integration table; [material contracts](../materials/README.md) describe producers, palette fields, and conversion limits |
 | `lighting/native/` | Native direct/environment light ports |
-| `lighting/shadows/` | PCSS, Bend kernels, per-draw state, the local-light hook and frame batch atlas, and controls |
+| `engine/local_lights.hpp` | The hook where the engine's local-light plugin begins, and the CPU light constants the shadow batch reads |
+| `lighting/shadows/` | PCSS, Bend kernels, per-draw state, the frame batch atlas, and controls |
 | `lighting/indirect/runtime.hpp` | Combined resources, controls, input checks, scheduling, and dispatches |
 | `lighting/indirect/ambient_diffuse.hpp` | Native ambient snapshots and diffuse-copy observation |
 | `lighting/indirect/source_preparation.hpp`, `source_radiance.hlsli` | Shared outgoing diffuse radiance beside the native diffuse copy |
@@ -36,7 +37,7 @@ The [render map](render-map.html) follows these owners through the native frame,
 | `reconstruction/` | Methods, native camera and motion precision, sizing, backend lifecycle, submission, and output-sized post-processing support |
 | `postprocess/`, `postprocess/bloom/` | Native DoF/motion-blur ports and bloom |
 | `tonemap/` | Two named late Tonemap/1DLUT shaders and shared curve/grading helpers |
-| `output/`, `UI/` | Display state, SDR/HDR encoding, and native UI compatibility |
+| `output/`, `ui/` | Display state, SDR/HDR encoding, and native UI compatibility |
 
 Feature headers are included at file scope and do not depend on hidden addon globals. Existing `mgsv::ao`, `mgsv::il`, and `mgsv::lighting::temporal_inputs` namespaces remain in use. Submission stays in `reconstruction/coordinator.hpp` because that code also evaluates the selected backend. Native material decoding and GGX remain together in `materials/brdf.hlsli`; indirect resources, controls, and orchestration remain together in `runtime.hpp`.
 

@@ -15,10 +15,10 @@
 
 #include <include/reshade.hpp>
 
-#include "../rendering/engine_targets.hpp"
+#include "../engine/motion_vectors.hpp"
+#include "../engine/render_targets.hpp"
+#include "../engine/views.hpp"
 #include "../rendering/inputs.hpp"
-#include "../rendering/native_context.hpp"
-#include "../rendering/native_velocity.hpp"
 #include "camera_state.hpp"
 #include "frame_inputs.hpp"
 #include "logging.hpp"
@@ -96,11 +96,11 @@ inline std::atomic<bool> probe_fill_only = false;
 // the result. Every check a record must pass is in this one list.
 inline Record BuildFrameInputsLocked(
     reshade::api::command_list* cmd_list,
-    const std::array<rendering::engine_targets::FrameImage, 4>& images,
+    const std::array<engine::render_targets::FrameImage, 4>& images,
     ValidatedFrameInputs* output) {
-  using rendering::engine_targets::FrameTarget;
+  using engine::render_targets::FrameTarget;
   auto* device = cmd_list->get_device();
-  const auto owner = rendering::native_context::GetScope().owner;
+  const auto owner = engine::views::GetScope().owner;
   const auto& color = images[static_cast<size_t>(FrameTarget::SCENE_COLOR)];
   const auto& depth = images[static_cast<size_t>(FrameTarget::DEPTH)];
   const auto& velocity = images[static_cast<size_t>(FrameTarget::VELOCITY)];
@@ -108,7 +108,7 @@ inline Record BuildFrameInputsLocked(
   auto record = Record::UNUSABLE;
   const char* cause = nullptr;
   const auto plan = resolution::Read();
-  if (std::ranges::any_of(images, [](const rendering::engine_targets::FrameImage& image) {
+  if (std::ranges::any_of(images, [](const engine::render_targets::FrameImage& image) {
         return image.texture == nullptr || image.shader_view == nullptr;
       })) {
     cause = "the engine created its scene, depth or velocity targets before the mod's hooks were installed";
@@ -120,7 +120,7 @@ inline Record BuildFrameInputsLocked(
     const uint32_t width = color_description.texture.width;
     const uint32_t height = color_description.texture.height;
     const auto color_format = GetTypedViewFormat(device, color_srv);
-    const auto matches_scene = [&](const rendering::engine_targets::FrameImage& image) {
+    const auto matches_scene = [&](const engine::render_targets::FrameImage& image) {
       D3D11_TEXTURE2D_DESC description;
       image.texture->GetDesc(&description);
       return description.Width == width && description.Height == height && description.ArraySize == 1u
@@ -139,7 +139,7 @@ inline Record BuildFrameInputsLocked(
     } else {
       const auto camera = camera_state::GetForCapture();
       record = Record::SCENE_ONLY;
-      if (!rendering::native_velocity::WasRecorded(owner)) {
+      if (!engine::motion_vectors::WasRecorded(owner)) {
         cause = "the engine drew no motion vectors for the view";
       } else if (camera.scene != owner.scene || camera.owner_generation != owner.generation || !camera.valid
                  || camera.reset_generation != camera_state::reset_generation.load(std::memory_order_acquire)) {

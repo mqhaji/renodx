@@ -5,7 +5,7 @@
 
 #include <include/reshade.hpp>
 
-#include "../rendering/native_context.hpp"
+#include "../engine/views.hpp"
 
 namespace mgsv::lighting {
 
@@ -20,7 +20,7 @@ inline std::atomic<bool> indirect_lighting_enhanced = false;
 // keep the game's own lighting.
 inline bool UsesEnhancedIndirectLighting() {
   if (!indirect_lighting_enhanced.load(std::memory_order_acquire)) return false;
-  const auto owner = rendering::native_context::GetScope().owner;
+  const auto owner = engine::views::GetScope().owner;
   if (owner.scene == 0u) {
     static std::atomic_flag reported = {};
     if (!reported.test_and_set(std::memory_order_relaxed)) {
@@ -28,7 +28,7 @@ inline bool UsesEnhancedIndirectLighting() {
     }
     return false;
   }
-  return rendering::native_context::IsPresentedMainView(owner);
+  return engine::views::IsPresentedMainView(owner);
 }
 
 }  // namespace mgsv::lighting

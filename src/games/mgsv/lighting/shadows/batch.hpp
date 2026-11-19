@@ -26,11 +26,11 @@
 #include <include/reshade.hpp>
 
 #include "../../../../utils/mutex.hpp"
+#include "../../engine/local_lights.hpp"
+#include "../../engine/views.hpp"
 #include "../../reconstruction/coordinator.hpp"
 #include "../../rendering/d3d11_state.hpp"
-#include "../../rendering/native_context.hpp"
 #include "../../shared.h"
-#include "native_lights.hpp"
 
 // Contact shadows run as one batch of lights: one setup, one clear, and one
 // trace write every light's mask into a shared atlas, and each light draw reads
@@ -342,9 +342,9 @@ inline void BeginLocalLights() {
       if (controls->shadows_mode < 0.5f) return;
     }
     reconstruction::coordinator::shadow_batch_requested.store(true, std::memory_order_release);
-    const auto scope = rendering::native_context::GetScope();
+    const auto scope = engine::views::GetScope();
     if (scope.owner.scene == 0u) return;
-    const auto context = rendering::native_context::Unwrap(rendering::native_context::GetRecording().d3d_context);
+    const auto context = engine::views::Unwrap(engine::views::GetRecording().d3d_context);
     // On an immediate context the dispatch would run now, before any light exists.
     if (context == nullptr || context->GetType() != D3D11_DEVICE_CONTEXT_DEFERRED) return;
     auto* cmd_list = reconstruction::coordinator::FindRecordingList(context.Get());
@@ -391,7 +391,7 @@ inline bool CollectLight(ID3D11DeviceContext* context, DeviceState* device_state
                          ID3D11ShaderResourceView* depth, ID3D11RenderTargetView* target, ID3D11UnorderedAccessView* budget,
                          std::array<ID3D11ShaderResourceView*, 2>* views) {
   if (light_type == 0u) return false;
-  const auto scope = rendering::native_context::GetScope();
+  const auto scope = engine::views::GetScope();
   if (scope.owner.scene == 0u) return false;
   std::shared_ptr<Batch> batch;
   {
@@ -411,8 +411,8 @@ inline bool CollectLight(ID3D11DeviceContext* context, DeviceState* device_state
     }
     return false;
   };
-  native_lights::Constants constants;
-  if (!native_lights::ReadConstants(rendering::native_context::GetRecording().command_buffer, context, &constants)) {
+  engine::local_lights::Constants constants;
+  if (!engine::local_lights::ReadConstants(engine::views::GetRecording().command_buffer, context, &constants)) {
     return rejected(0u, "its CPU constants could not be read");
   }
 

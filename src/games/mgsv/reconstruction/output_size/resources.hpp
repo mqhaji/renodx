@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef RENODX_GAMES_MGSV_RECONSTRUCTION_POSTPROCESS_RESOURCES_HPP_
-#define RENODX_GAMES_MGSV_RECONSTRUCTION_POSTPROCESS_RESOURCES_HPP_
+#ifndef RENODX_GAMES_MGSV_RECONSTRUCTION_OUTPUT_SIZE_RESOURCES_HPP_
+#define RENODX_GAMES_MGSV_RECONSTRUCTION_OUTPUT_SIZE_RESOURCES_HPP_
 
 #include <windows.h>
 
@@ -39,13 +39,13 @@
 #include <embed/post_system.h>
 #include <include/reshade.hpp>
 
-#include "../../rendering/native_context.hpp"
+#include "../../engine/views.hpp"
 #include "../../rendering/shared_texture.hpp"
 #include "../frame_inputs.hpp"
 #include "../resolution.hpp"
 #include "../state.hpp"
 
-namespace mgsv::reconstruction::post_process {
+namespace mgsv::reconstruction::output_size {
 
 // Reconstruction can produce a larger scene than the game rendered. Later
 // effects and UI need matching destinations, while earlier passes must keep
@@ -863,7 +863,7 @@ struct __declspec(uuid("71618f64-fc26-4a78-91de-6e20f879a85a")) Recording {
   std::shared_ptr<OutputProducer> producer;
   uint64_t frame = 0u;       // Recording interval used to qualify intermediate writes.
   uint64_t generation = 0u;  // Reset counter used to reject retired output resources.
-  rendering::native_context::Owner owner;
+  engine::views::Owner owner;
   // A recording can finish several scene sequences before FinishCommandList.
   // Keep every referenced output, even after display conversion closes a route.
   std::vector<std::shared_ptr<Output>> retained_outputs;
@@ -903,7 +903,7 @@ struct State {
   uint64_t frame = 0u;
   // Invalidates old Recording values without relying on CPU/GPU timing.
   uint64_t generation = 0u;
-  rendering::native_context::Owner active_owner;
+  engine::views::Owner active_owner;
 };
 inline State state;
 
@@ -947,7 +947,7 @@ inline std::optional<ClearColor> GetRecordedClear(ID3D11Resource* resource, uint
 // read these textures. A second worker for the same scene shares its route.
 // D3D11 orders subsequent GPU writes after earlier immediate submissions.
 inline std::shared_ptr<Output> AcquireOutput(const ValidatedFrameInputs& inputs) {
-  auto owner = rendering::native_context::GetScope().owner;
+  auto owner = engine::views::GetScope().owner;
   if (owner.scene == 0u) {
     owner.scene = owner.presentation_scene;
   }
@@ -1050,7 +1050,7 @@ inline void RetainOutput(reshade::api::command_list* command_list, const std::sh
 // Match the recorded native scene at every lookup. A worker may serve another
 // viewport between two calls, and a pooled target may belong to either view.
 inline std::shared_ptr<Output> GetActive(reshade::api::command_list* command_list, Recording* selected = nullptr, bool include_ui = false) {
-  const auto owner = rendering::native_context::GetScope().owner;
+  const auto owner = engine::views::GetScope().owner;
   const uint64_t scene = (owner.scene != 0u ? owner.scene : owner.presentation_scene);
   if (scene == 0u || !owner.presentation_matches
       || (owner.scene != 0u && (!owner.main_view || !owner.active_member))) return nullptr;
@@ -1119,6 +1119,6 @@ inline void Reset(bool release_pipelines = false) {
   }
 }
 
-}  // namespace mgsv::reconstruction::post_process
+}  // namespace mgsv::reconstruction::output_size
 
-#endif  // RENODX_GAMES_MGSV_RECONSTRUCTION_POSTPROCESS_RESOURCES_HPP_
+#endif  // RENODX_GAMES_MGSV_RECONSTRUCTION_OUTPUT_SIZE_RESOURCES_HPP_

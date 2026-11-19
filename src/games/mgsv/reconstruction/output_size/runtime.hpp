@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef RENODX_GAMES_MGSV_RECONSTRUCTION_POSTPROCESS_RUNTIME_HPP_
-#define RENODX_GAMES_MGSV_RECONSTRUCTION_POSTPROCESS_RUNTIME_HPP_
+#ifndef RENODX_GAMES_MGSV_RECONSTRUCTION_OUTPUT_SIZE_RUNTIME_HPP_
+#define RENODX_GAMES_MGSV_RECONSTRUCTION_OUTPUT_SIZE_RUNTIME_HPP_
 
 #include <windows.h>
 
@@ -37,13 +37,13 @@
 
 #include "../../../../utils/command_action.hpp"
 #include "../../../../utils/hash.hpp"
-#include "../../rendering/engine_targets.hpp"
+#include "../../engine/render_targets.hpp"
 #include "../logging.hpp"
 #include "../resolution.hpp"
 #include "../state.hpp"
 #include "resources.hpp"
 
-namespace mgsv::reconstruction::post_process {
+namespace mgsv::reconstruction::output_size {
 
 // Settings publish this independent flag to native UI recording workers.
 // Hiding draws does not disable menu input or the RenoDX overlay.
@@ -335,7 +335,7 @@ inline void OnBindTargets(reshade::api::command_list* command_list, uint32_t cou
   // scene images, the float copy DoF and motion blur make, and 8-bit temporaries.
   if (description.Width != render.width || description.Height != render.height
       || (description.Format != DXGI_FORMAT_B8G8R8A8_TYPELESS && description.Format != DXGI_FORMAT_B8G8R8A8_UNORM
-          && rendering::engine_targets::ReadSceneRole(resource.Get()) == 0u)) return;
+          && engine::render_targets::ReadSceneRole(resource.Get()) == 0u)) return;
   auto* native_depth = reinterpret_cast<ID3D11DepthStencilView*>(depth.handle);  // NOLINT(performance-no-int-to-ptr)
   resource->SetPrivateDataInterface(SCENE_DEPTH_GUID, native_depth);
 }
@@ -347,7 +347,7 @@ inline Recording GetUiRoute(reshade::api::command_list* command_list) {
   Recording route;
   if (GetActive(command_list, &route, true) != nullptr) return route;
   const auto* device = command_list->get_device();
-  const auto owner = rendering::native_context::GetScope().owner;
+  const auto owner = engine::views::GetScope().owner;
   // A utility view can draw into the same pooled texture as the main scene.
   // Its clears and Draw2D work must keep the utility view's pixel grid.
   if (owner.scene != 0u && (!owner.main_view || !owner.active_member || !owner.presentation_matches)) return {};
@@ -503,7 +503,7 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
   if (pass != nullptr && pass->shader_hash == 0x83272BCBu && targets[0] != nullptr) {
     Microsoft::WRL::ComPtr<ID3D11Resource> resource;
     targets[0]->GetResource(&resource);
-    feeds_exposure_meter = rendering::engine_targets::ReadSceneRole(resource.Get()) == rendering::engine_targets::EXPOSURE_SOURCE;
+    feeds_exposure_meter = engine::render_targets::ReadSceneRole(resource.Get()) == engine::render_targets::EXPOSURE_SOURCE;
   }
   if (!qualified_flare || feeds_exposure_meter) {
     *saved = {};
@@ -1167,7 +1167,7 @@ inline void End(reshade::api::command_list* command_list) {
 // aliases created later. Return false so the native target is cleared as usual.
 inline bool OnClearRenderTarget(reshade::api::command_list* command_list, reshade::api::resource_view view,
                                 const float* color, uint32_t rect_count, const reshade::api::rect* rects) {
-  const auto owner = rendering::native_context::GetScope().owner;
+  const auto owner = engine::views::GetScope().owner;
   if (owner.scene != 0u && (!owner.main_view || !owner.active_member || !owner.presentation_matches)) return false;
   const uint64_t scene = (owner.scene != 0u ? owner.scene : owner.presentation_scene);
   if (scene == 0u || !owner.presentation_matches) return false;
@@ -1364,7 +1364,7 @@ inline constexpr auto DRAW_CALLBACK = [](auto& command) {
   // the pooled output and its clear records. Startup scenes with no output
   // release their pending clears here so they cannot accumulate across frames.
   static constexpr auto RETIRE_SCENE = [] {
-    const auto owner = rendering::native_context::GetScope().owner;
+    const auto owner = engine::views::GetScope().owner;
     const uint64_t scene = (owner.scene != 0u ? owner.scene : owner.presentation_scene);
     if (scene == 0u) return;
     // Release resource references after dropping the state lock. Other scenes
@@ -1476,6 +1476,6 @@ inline void Use(DWORD reason) {
   }
 }
 
-}  // namespace mgsv::reconstruction::post_process
+}  // namespace mgsv::reconstruction::output_size
 
-#endif  // RENODX_GAMES_MGSV_RECONSTRUCTION_POSTPROCESS_RUNTIME_HPP_
+#endif  // RENODX_GAMES_MGSV_RECONSTRUCTION_OUTPUT_SIZE_RUNTIME_HPP_

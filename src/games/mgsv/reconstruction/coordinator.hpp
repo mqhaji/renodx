@@ -32,11 +32,11 @@
 #include <wrl/client.h>
 #include <wrl/implements.h>
 
+#include "../engine/render_targets.hpp"
+#include "../engine/views.hpp"
 #include "../rendering/d3d11_state.hpp"
 #include "../rendering/d3d12_timing.hpp"
-#include "../rendering/engine_targets.hpp"
 #include "../rendering/inputs.hpp"
-#include "../rendering/native_context.hpp"
 #include "../rendering/producer_records.hpp"
 #include "analytical/runtime.hpp"
 #include "camera_state.hpp"
@@ -44,7 +44,7 @@
 #include "fsr/runtime.hpp"
 #include "input_capture.hpp"
 #include "logging.hpp"
-#include "postprocess/resources.hpp"
+#include "output_size/resources.hpp"
 #include "state.hpp"
 
 namespace mgsv::reconstruction::coordinator {
@@ -68,7 +68,7 @@ enum class LightingPolicy : uint8_t {
 };
 
 struct PendingTemporalDispatch {
-  rendering::native_context::Scope scope;
+  engine::views::Scope scope;
   reshade::api::command_list* deferred_context = nullptr;
   Microsoft::WRL::ComPtr<ID3D11CommandList> prefix;
   Microsoft::WRL::ComPtr<ID3D11CommandList> post;
@@ -77,7 +77,7 @@ struct PendingTemporalDispatch {
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_srv;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> object_velocity_srv;
   Microsoft::WRL::ComPtr<ID3D11Resource> output_resource;
-  std::shared_ptr<post_process::Output> post_output;
+  std::shared_ptr<output_size::Output> post_output;
   ValidatedFrameInputs inputs;
   uint64_t temporal_generation = 0u;
   state::TemporalMode mode = state::TemporalMode::OFF;
@@ -209,7 +209,7 @@ inline void Destroy(reshade::api::device* device) {
   fsr::Destroy();
   dx12::Destroy();
   rendering::d3d12_bridge::Destroy();
-  post_process::Reset(true);
+  output_size::Reset(true);
   submission_failure_pending.store(false, std::memory_order_release);
   runtime_device = nullptr;
   lighting::temporal_inputs::Reset();
@@ -585,15 +585,15 @@ inline reshade::api::command_list* FindRecordingList(ID3D11DeviceContext* contex
 }
 
 inline void CompleteRecording(reshade::api::command_list* recording, ID3D11CommandList* finished) {
-  if (auto* route = recording->get_private_data<post_process::Recording>(); route != nullptr) {
-    post_process::RetainOutput(recording, route->output);
+  if (auto* route = recording->get_private_data<output_size::Recording>(); route != nullptr) {
+    output_size::RetainOutput(recording, route->output);
     if (!route->retained_outputs.empty()) {
-      auto retained = Microsoft::WRL::Make<post_process::RetainedOutputs>();
+      auto retained = Microsoft::WRL::Make<output_size::RetainedOutputs>();
       retained->outputs = std::move(route->retained_outputs);
-      if (FAILED(finished->SetPrivateDataInterface(post_process::OUTPUT_LEASE_GUID, retained.Get()))) {
+      if (FAILED(finished->SetPrivateDataInterface(output_size::OUTPUT_LEASE_GUID, retained.Get()))) {
         // Retire these allocations from reuse. The native list still owns its
         // D3D resources, and the pool releases its references at reset.
-        const std::unique_lock lock(post_process::state.mutex);
+        const std::unique_lock lock(output_size::state.mutex);
         for (const auto& output : retained->outputs) {
           output->reusable = false;
         }
@@ -665,7 +665,7 @@ inline bool ScheduleLighting(
   CompleteRecording(cmd_list, prefix.Get());
   const std::unique_lock lock(submission.mutex);
   submission.pending_dispatches.push_back({
-      .scope = rendering::native_context::GetScope(),
+      .scope = engine::views::GetScope(),
       .deferred_context = cmd_list,
       .prefix = std::move(prefix),
       .lighting_callback = std::move(callback),
@@ -719,10 +719,10 @@ inline void OnExecuteSecondaryCommandList(
     // lists that contain no reconstruction insertion of their own.
     Microsoft::WRL::ComPtr<IUnknown> retained;
     UINT retained_size = sizeof(IUnknown*);
-    if (SUCCEEDED(native_list->GetPrivateData(post_process::OUTPUT_LEASE_GUID, &retained_size, retained.GetAddressOf())) && retained != nullptr) {
-      const auto* leases = static_cast<post_process::RetainedOutputs*>(retained.Get());
+    if (SUCCEEDED(native_list->GetPrivateData(output_size::OUTPUT_LEASE_GUID, &retained_size, retained.GetAddressOf())) && retained != nullptr) {
+      const auto* leases = static_cast<output_size::RetainedOutputs*>(retained.Get());
       for (const auto& output : leases->outputs) {
-        post_process::RetainOutput(command_list, output);
+        output_size::RetainOutput(command_list, output);
       }
     }
   };
@@ -738,11 +738,11 @@ inline void OnExecuteSecondaryCommandList(
   std::ranges::reverse(chain);
   if (context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) {
     for (const auto& pending : chain) {
-      const rendering::native_context::ScopedOwner owner_scope(pending.scope);
+      const engine::views::ScopedOwner owner_scope(pending.scope);
       retain_list_outputs(pending.prefix.Get());
       context->ExecuteCommandList(pending.prefix.Get(), TRUE);
       if (pending.post_output != nullptr) {
-        post_process::RetainOutput(command_list, pending.post_output);
+        output_size::RetainOutput(command_list, pending.post_output);
       }
       if (pending.is_lighting && pending.lighting_policy == LightingPolicy::SHADOW_BATCH
           && pending.lighting_callback) {
@@ -772,7 +772,7 @@ inline void OnExecuteSecondaryCommandList(
   const ImmediateContextStateGuard state_guard(context);
   rendering::d3d12_timing::CpuSubmission::EndPart("D3D11 state save");
   for (auto& pending : chain) {
-    const rendering::native_context::ScopedOwner owner_scope(pending.scope);
+    const engine::views::ScopedOwner owner_scope(pending.scope);
     context->ExecuteCommandList(pending.prefix.Get(), state_guard.IsActive() ? FALSE : TRUE);
     lighting::temporal_inputs::Submit(pending.prefix.Get());
     rendering::d3d12_timing::CpuSubmission::EndPart("native prefix");
@@ -890,9 +890,9 @@ inline void OnDestroyCommandList(reshade::api::command_list* command_list) {
 //     Present ends upscaling.
 inline void ScheduleSceneLocked(reshade::api::command_list* cmd_list) {
   if (!state::IsEnabled()) return;
-  const auto scope = rendering::native_context::GetScope();
+  const auto scope = engine::views::GetScope();
   // Retained here until the job has taken its own references.
-  const auto images = rendering::engine_targets::ReadFrameImages();
+  const auto images = engine::render_targets::ReadFrameImages();
   ValidatedFrameInputs inputs = {};
   const auto record = input_capture::BuildFrameInputsLocked(cmd_list, images, &inputs);
   const bool fill_only = record == input_capture::Record::SCENE_ONLY;
@@ -925,17 +925,17 @@ inline void ScheduleSceneLocked(reshade::api::command_list* cmd_list) {
         || queries == submission.active_queries.end() || !queries->second.empty()) return;
   }
 
-  std::shared_ptr<post_process::Output> post_output;
-  std::shared_ptr<post_process::OutputProducer> output_producer;
+  std::shared_ptr<output_size::Output> post_output;
+  std::shared_ptr<output_size::OutputProducer> output_producer;
   if (!inputs.HasNativeOutputSize()) {
-    post_output = post_process::GetActive(cmd_list);
+    post_output = output_size::GetActive(cmd_list);
     if (post_output != nullptr && !post_output->MatchesInputs(inputs)) {
       resolution::Fail("scene reconstruction inputs changed after output recording began");
       return;
     }
     if (post_output == nullptr) {
       try {
-        post_output = post_process::AcquireOutput(inputs);
+        post_output = output_size::AcquireOutput(inputs);
       } catch (const std::exception& error) {
         logging::Warn(error.what());
         resolution::Fail("scaled post-processing resources unavailable");
@@ -950,8 +950,8 @@ inline void ScheduleSceneLocked(reshade::api::command_list* cmd_list) {
       return;
     }
     inputs.output = post_output->target;
-    post_process::Recording route;
-    post_process::GetActive(cmd_list, &route, true);
+    output_size::Recording route;
+    output_size::GetActive(cmd_list, &route, true);
     output_producer = route.producer;
   }
   PendingTemporalDispatch pending = {
@@ -988,26 +988,26 @@ inline void ScheduleSceneLocked(reshade::api::command_list* cmd_list) {
   }
   // The redirection needs the output while the rest of this list is recorded.
   if (post_output != nullptr) {
-    const std::unique_lock lock(post_process::state.mutex);
-    post_process::Recording route = {.output = post_output, .producer = output_producer, .frame = inputs.frame_token, .generation = post_process::state.generation, .owner = scope.owner};
+    const std::unique_lock lock(output_size::state.mutex);
+    output_size::Recording route = {.output = post_output, .producer = output_producer, .frame = inputs.frame_token, .generation = output_size::state.generation, .owner = scope.owner};
     output_producer->reconstruction_recorded = true;
-    post_process::state.active = post_output;
-    post_process::state.producer = output_producer;
-    post_process::state.frame = inputs.frame_token;
-    post_process::state.active_owner = scope.owner;
-    if (const auto pooled = std::ranges::find(post_process::state.pool, post_output, &post_process::Recording::output); pooled != post_process::state.pool.end()) {
+    output_size::state.active = post_output;
+    output_size::state.producer = output_producer;
+    output_size::state.frame = inputs.frame_token;
+    output_size::state.active_owner = scope.owner;
+    if (const auto pooled = std::ranges::find(output_size::state.pool, post_output, &output_size::Recording::output); pooled != output_size::state.pool.end()) {
       *pooled = route;
     }
-    const auto existing = std::ranges::find_if(post_process::state.sequences, [&](const post_process::Recording& candidate) {
+    const auto existing = std::ranges::find_if(output_size::state.sequences, [&](const output_size::Recording& candidate) {
       return candidate.owner.scene == scope.owner.scene && candidate.owner.generation == scope.owner.generation;
     });
-    if (existing == post_process::state.sequences.end()) {
-      post_process::state.sequences.push_back(route);
+    if (existing == output_size::state.sequences.end()) {
+      output_size::state.sequences.push_back(route);
     } else {
       *existing = route;
     }
-    if (auto* recording = cmd_list->get_private_data<post_process::Recording>(); recording != nullptr) {
-      post_process::RetainOutput(cmd_list, recording->output);
+    if (auto* recording = cmd_list->get_private_data<output_size::Recording>(); recording != nullptr) {
+      output_size::RetainOutput(cmd_list, recording->output);
       route.retained_outputs = std::move(recording->retained_outputs);
       *recording = std::move(route);
     }

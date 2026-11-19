@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
-#ifndef RENODX_GAMES_MGSV_RENDERING_NATIVE_VELOCITY_HPP_
-#define RENODX_GAMES_MGSV_RENDERING_NATIVE_VELOCITY_HPP_
+#ifndef RENODX_GAMES_MGSV_ENGINE_MOTION_VECTORS_HPP_
+#define RENODX_GAMES_MGSV_ENGINE_MOTION_VECTORS_HPP_
 
 #include <windows.h>
 
@@ -15,16 +15,16 @@
 #include <include/reshade.hpp>
 
 #include "../../../utils/detour.hpp"
-#include "../engine/build.hpp"
-#include "../engine/image.hpp"
-#include "native_context.hpp"
+#include "build.hpp"
+#include "image.hpp"
+#include "views.hpp"
 
 // The engine draws object and camera motion vectors in
 // PluginDeferredGeometry::PostExec, and only when its motion blur plugin has
 // set a per-build flag (motion blur enabled with a non-zero amount). These
 // hooks keep the vectors drawn whenever a feature of the mod needs them, and
 // tell whether a view build drew them.
-namespace mgsv::rendering::native_velocity {
+namespace mgsv::engine::motion_vectors {
 
 // Present sets this while temporal reconstruction or enhanced indirect
 // lighting is on.
@@ -67,7 +67,7 @@ static void __fastcall HookPostExec(void* plugin, void* render, void* viewport) 
   // Every view of the build shares the flags, so the bit is set only for the
   // presented main view's call and cleared again after it.
   const bool keep = flags != nullptr && (*flags & MOTION_VECTORS_FLAG) == 0u && wanted.load(std::memory_order_acquire)
-                    && native_context::IsPresentedMainView(native_context::GetScope().owner);
+                    && engine::views::IsPresentedMainView(engine::views::GetScope().owner);
   if (keep) {
     *flags |= MOTION_VECTORS_FLAG;
     static std::atomic_flag reported;
@@ -86,7 +86,7 @@ static void __fastcall HookPostExec(void* plugin, void* render, void* viewport) 
 // thread building the view.
 static void __fastcall HookEndScreenSpaceVelocity(void* dg) {
   calls_in_flight.fetch_add(1u, std::memory_order_acq_rel);
-  const auto owner = native_context::GetScope().owner;
+  const auto owner = engine::views::GetScope().owner;
   recorded = {.scene = owner.scene, .generation = owner.generation};
   hooks.end_screen_space_velocity(dg);
   calls_in_flight.fetch_sub(1u, std::memory_order_acq_rel);
@@ -104,7 +104,7 @@ inline auto HookedFunctions() {
 
 // Whether the engine recorded this view build's camera-velocity pass. Ask on
 // the thread that builds the view.
-inline bool WasRecorded(const native_context::Owner& owner) {
+inline bool WasRecorded(const engine::views::Owner& owner) {
   return owner.scene != 0u && internal::recorded.scene == owner.scene && internal::recorded.generation == owner.generation;
 }
 
@@ -155,6 +155,6 @@ inline bool Detach() {
   return true;
 }
 
-}  // namespace mgsv::rendering::native_velocity
+}  // namespace mgsv::engine::motion_vectors
 
-#endif  // RENODX_GAMES_MGSV_RENDERING_NATIVE_VELOCITY_HPP_
+#endif  // RENODX_GAMES_MGSV_ENGINE_MOTION_VECTORS_HPP_

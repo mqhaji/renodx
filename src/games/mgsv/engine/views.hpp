@@ -2,8 +2,8 @@
  * Copyright (C) 2026 Musa Haji
  * SPDX-License-Identifier: MIT
  */
-#ifndef RENODX_GAMES_MGSV_RENDERING_NATIVE_CONTEXT_HPP_
-#define RENODX_GAMES_MGSV_RENDERING_NATIVE_CONTEXT_HPP_
+#ifndef RENODX_GAMES_MGSV_ENGINE_VIEWS_HPP_
+#define RENODX_GAMES_MGSV_ENGINE_VIEWS_HPP_
 
 #include <d3d11.h>
 #include <dxgi.h>
@@ -30,10 +30,10 @@
 #include "../../../utils/cross_addon.hpp"
 #include "../../../utils/data.hpp"
 #include "../../../utils/detour.hpp"
-#include "../engine/build.hpp"
-#include "../engine/image.hpp"
+#include "build.hpp"
+#include "image.hpp"
 
-namespace mgsv::rendering::native_context {
+namespace mgsv::engine::views {
 
 inline constexpr std::array REQUIRED_ENTRIES = {
     engine::Entry::RENDER_BUILD_RENDERING,
@@ -871,5 +871,5 @@ inline void Shutdown() {
   shared.UnregisterModule();
 }
 
-}  // namespace mgsv::rendering::native_context
-#endif  // RENODX_GAMES_MGSV_RENDERING_NATIVE_CONTEXT_HPP_
+}  // namespace mgsv::engine::views
+#endif  // RENODX_GAMES_MGSV_ENGINE_VIEWS_HPP_
