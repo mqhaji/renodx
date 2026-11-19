@@ -10,7 +10,7 @@ This page describes how the planned lighting, atmosphere, water, frame generatio
 - **Each direction counted once.** Linear light, energy conserved, no strength above 100%. Where our lighting has information it replaces the game's ambient light; where it has none it leaves the game's ambient light in place. It never adds one on top of the other.
 - **Unknown is dark or authored, never bright.** A ray that ends somewhere we know nothing about takes the game's own authored light for that place, not the sky.
 - **Stored light is recomputed where it can be.** Caches keep what a surface is (albedo), and light it again from the sun's shadow maps, the light list and the cached bounce light. Stored lit color is used only where nothing better exists.
-- **Engine boundaries, not shader guesses.** Work attaches where the engine starts or ends a pass.
+- **Shaders say what, the engine says when.** A shader's CRC32 identifies exactly which draw or dispatch is running, and since the game's shaders never change, those hashes are permanent names. Where a pass starts or ends is taken from the engine's own functions, because a shader that marks a boundary may not draw at all in some settings (bloom off, for example).
 - **Every feature has a Vanilla setting**, and a dependency on another setting is shown in the menu, never silent.
 - **Measured, not assumed.** Costs on this page are estimates from published numbers until our own measurements replace them.
 
@@ -42,16 +42,83 @@ One setting, **Lighting Method**, selects how Enhanced lighting is computed. The
 | Forward surfaces | Lit from the light field; water and glass trace the screen | The same, with ray queries | Traced as real surfaces |
 | Denoising | Probe filters; NRD for reflections | NRD; Ray Reconstruction optional | Ray Reconstruction |
 
-The frame has six places where our work attaches. They are the same for every method.
+### 3.1 What runs on D3D11 and what runs on D3D12
 
-| Place in the frame | Engine boundary | Work |
-|---|---|---|
-| After the sun's shadow maps | Sun shadow pass ends | Scene memory update from the sun's view; fog volume |
-| After the G-buffer | Geometry pass ends | Scene memory update from the camera; probe placement; tracing |
-| Diffuse hand-off | Before the first skin scatter (today's GI position) | Replace ambient light with the gathered light |
-| Reflection pass | The engine's reflection plugin (today's position) | Specular indirect light |
-| Forward passes | Forward models and both primitive passes | Replaced shaders sample the light field and the fog image |
-| Start of post-processing | `DgDx11::StartPostFilter` (today's reconstruction position) | DLSS, FSR or Ray Reconstruction; later, frame generation inputs after post-processing |
+The game keeps rendering on D3D11. Replacements of the game's own shaders inside its draws (light, composition, forward, water and post-processing ports) stay on D3D11, because those draws belong to the game. Every other pass of ours is placed by what it gains on D3D12 against what it costs to get there.
+
+**What D3D12 gives a pass:**
+
+- Features D3D11 lacks: ray queries; the SDKs (DLSS, FSR, Ray Reconstruction, NRD, frame generation).
+- Faster shaders through Shader Model 6: wave operations for reductions, prefix sums, histograms, bit masks and neighbor exchange without shared memory; native 16-bit math; 64-bit atomics for packing depth with a payload when splatting into grids; bindless access to every texture and buffer, which suits scene memory, the light field and materials at ray hits.
+- Faster submission: GPU-driven dispatch counts and per-dispatch constants with `ExecuteIndirect`, so adaptive work (extra probes, tiles that need rays) costs only what it does; explicit barriers instead of the driver's conservative ones between dependent dispatches; and less CPU on the game's submitting thread, which is the busy thread in CPU-bound scenes such as Mother Base at night.
+- A compute queue that may overlap the game's graphics work (measured before relied on, see below).
+
+**The rule:**
+
+1. A pass that needs a D3D12-only feature runs on D3D12.
+2. A pass at a place where a D3D12 block already runs joins the block and is written for D3D12, so it gets the speed features above at no extra switch.
+3. A pass at a place with no block stays on D3D11, unless a measurement shows its D3D12 version saves more than the round trip it would add.
+4. Our passes that only exist to hand engine images to D3D12, by copying or converting them on D3D11, are removed once the engine creates those images shareable; D3D12 then reads the engine's images directly.
+
+Applied to the D3D11 compute work the mod has today:
+
+| Pass (today on D3D11) | Plan |
+|---|---|
+| Reconstruction input preparation (`prepare_reconstruction`) | Into the reconstruction block on D3D12, reading the engine's shareable images |
+| Reflection input preparation (`prepare_reflections`) | Into the main block on D3D12, the same way |
+| Diffuse AO/GI trace, depth mips and application (`gtvbgi*`) | Replaced by the main block's near layer and gather on D3D12 |
+| Output-size post-processing helpers (`post_*`) | Stay on D3D11: they run inside the game's post-processing chain, where no block runs |
+| Contact shadows (`bend_*`) | Stay on D3D11 in the raster method: they feed the game's light draws, before the main block; replaced by ray-traced shadows in the traced methods |
+
+**What a switch costs.** A switch is a round trip: D3D11 hands work to D3D12 and then waits for its result before it can continue. At the reconstruction hand-off that wait measured 0.25 to 0.33 ms of idle GPU beyond the work itself. Work on D3D12 that D3D11 never waits for is not a switch: it costs no idle time.
+
+**How switches are kept down:**
+
+1. **One block per place, one round trip per block.** Everything D3D12 does at a place is recorded into one submission with one signal and one wait.
+2. **Work with no D3D11 input runs independently.** Updating the scene on D3D12 for ray tracing (skinning, acceleration structures) and the light field's own updates take their inputs from the CPU (bone matrices captured when the game uploads them, the light list) or from D3D12's own results. They are submitted as soon as their inputs exist, D3D11 never waits for them, and the block that needs them waits for them on D3D12's side, which costs nothing.
+3. **Last frame's image instead of a second block.** Reflections need lit surfaces to reflect. Instead of a second block at the engine's reflection pass, the reflection rays run in the main block and read the previous frame's scene image, which reconstruction already holds at the start of post-processing. The engine's reflection pass then only composites a finished texture, which is a D3D11 draw. This is how screen-space reflections commonly work. What it costs: one frame of delay in what moving objects reflect, and last frame's image also contains particles and fog, which today's source, taken before they are drawn, does not. The roadmap gates the change on both.
+4. **Whole passes move, not pieces.** In the traced methods the engine's own lighting draws are replaced by one D3D12 pass in the main block, instead of a switch for each light draw.
+5. **Overlap is measured, not assumed.** Independent D3D12 work may run on a compute queue beside the game's graphics work; an earlier test found the two APIs' work running one after the other on this GPU, so this is kept only where a measurement shows a gain.
+
+**The main block** runs at the diffuse hand-off, before the first skin scatter. Everything it needs is complete there: the G-buffer, depth, motion, the sun's shadow maps and the engine's direct light. Its inputs are engine targets created shareable, so it reads them without copies.
+
+**Raster:**
+
+| Pass | API |
+|---|---|
+| G-buffer, the engine's ambient and light draws with our shadow filtering | D3D11 |
+| Main block: scene memory update, light field, screen probes and near layer, fog volume, reflection rays and their denoising, ambient light replaced in the diffuse image | D3D12 |
+| Skin scatter, composition (fog and shafts applied), sky, forward models | D3D11 |
+| Reflection composite at the engine's reflection pass | D3D11 |
+| Particles, water ports, thermography | D3D11 |
+| Reconstruction | D3D12 |
+| Post-processing, HUD | D3D11 |
+| Frame generation and presentation | D3D12, no return |
+
+**Ray traced:** the same, with ray-traced shadows and the engine's direct lighting computed in the main block. The engine's light draws and its local-light shadow maps are skipped. The sun's shadow maps stay as long as forward shaders (particles, rivers, lit forward models) read them.
+
+**Path traced:**
+
+| Pass | API |
+|---|---|
+| Scene update for ray tracing | D3D12, independent |
+| G-buffer | D3D11 |
+| Main block: all lighting (direct and indirect, diffuse and specular, the traced forward layers), fog volume | D3D12 |
+| Composition (fog), sky, particles | D3D11 |
+| Ray Reconstruction | D3D12 |
+| Post-processing, HUD | D3D11 |
+| Frame generation and presentation | D3D12, no return |
+
+The engine's light, reflection and ambient draws are skipped, as are its forward draws of glass and water, which the path tracer already traced. Particles stay rasterized and are lit from the light field.
+
+**Round trips per frame:** two for every method, the main block and reconstruction. Frame generation adds a one-way hand-off at the end of the frame. Today's raster frame makes three: the diffuse pass, the reflections and reconstruction.
+
+**Why not one block from the start of the frame to reconstruction.** As more passes are replaced, the main block grows; in the path-traced method it already covers everything from the end of the G-buffer to composition. Making it reach from the start of the frame would mean moving the rest onto D3D12 as well: the G-buffer (about 220 material shaders, terrain, foliage, decals, rain and wetness, skin, instanced clones, each draw's state and constants every frame), the shadow maps the forward shaders still read, and the transparent effects (about 130 particle shaders, liquids, heat haze, camouflage, footprints). That is a port of most of the engine's renderer, it would have to reproduce every effect the game draws, and it would give up the rule that primary surfaces keep the game's own materials. What it would save is the remaining round trips, about 0.3 ms each. So the block grows only where a pass is replaced for its own sake, never to remove a switch.
+
+Two ways to shrink the path-traced frame further without a port, each an experiment for that stage:
+
+- **Transparent effects as a layer.** Most particles and effects do not read the lit scene. The game can draw them into a separate premultiplied layer on D3D11 while D3D12 computes the lighting, and Ray Reconstruction takes that layer through its transparency input. The few effects that refract the scene copy (heat haze, footprints, camouflage) would draw after reconstruction or move into the layer with a copy of last frame's image. If it works, the path-traced frame has one round trip.
+- **Traced primary surfaces per material class**, where the path tracer's materials are shown to match the G-buffer's. Each class moved that way takes its draws out of the G-buffer pass; the G-buffer itself stays as long as any class still needs it.
 
 What the methods share: the material record and BSDF, the light list, the sky model, the light field interface that forward surfaces and fog read, the screen-probe gather (Raster and Ray Traced), the signal formats, and the place of each pass in the frame. What they do not share: path tracing has its own primary-hit handling, sampling, cache and denoiser, and is free to diverge wherever sharing would cost it quality.
 
@@ -123,7 +190,7 @@ The gather needs no per-pixel denoiser for diffuse light. That removes the stage
 One chain, chosen per pixel by roughness (cutoffs are starting values in this engine's roughness scale):
 
 - **Rough surfaces** reuse the screen probes: their octahedral maps are resampled with the GGX lobe. No reflection ray is traced.
-- **Glossy surfaces** trace the screen as today (one GGX ray per pixel with neighbor reuse). A miss continues through the world segment and is lit from the caches.
+- **Glossy surfaces** trace the screen as today (one GGX ray per pixel with neighbor reuse), reading the previous frame's scene image (section 3.1). A miss continues through the world segment and is lit from the caches.
 - **Near-mirror surfaces** do the same, but where the world segment has no sharp answer they fall back to the area's cube map, corrected for parallax, dimmed by what the trace found blocking the ray, and scaled so its brightness matches the locally gathered light (the cube may only be darkened by this, never brightened). Then the sky.
 
 Specular occlusion for the fallbacks comes from the near layer's open directions weighed against the reflection lobe. NRD stays the denoiser for the traced part.
@@ -329,14 +396,14 @@ DLSS Ray Reconstruction is selectable under the Ray Traced method and forced und
 
 ## 13. Surviving a game update
 
-The game still receives small updates: the executable the mod supports was built on 2026-07-07. What the mod relies on, and what an update does to each:
+The game still receives small updates: the executable the mod supports was built on 2026-07-07, and the most recent update only changed online services (it removed support in Russia). The game's rendering does not change in these updates: the renderer's code, its structures and its shaders stay the same. What an update can do is rebuild the executable, which moves code and data to new addresses. So the problem to solve is finding unchanged code at new addresses, not following changed code. What the mod relies on, and what an update does to each:
 
 | The mod relies on | Today | Breaks when |
 |---|---|---|
 | Code addresses: functions, call sites, return addresses | About 60, in seven files; half are unnamed numbers | The executable is rebuilt at all: everything after a changed function shifts |
-| Structure field offsets | About 70, in five files; most are unnamed numbers | The engine's structures change, which a maintenance update rarely does |
+| Structure field offsets | About 70, in five files; most are unnamed numbers | Not expected: the renderer's structures do not change |
 | Global and virtual-table addresses | A few | The executable is rebuilt |
-| Shader hashes | Every ported shader, in its file name | The shader archives are rebuilt |
+| Shader CRC32s | Every ported shader, in its file name, and the draws we recognize | Not expected: the shaders do not change, so a CRC32 is a permanent name |
 | Name hashes of render targets and plugins | Dozens | Never, short of a rename |
 
 Today each hook file checks the executable for itself: its build time and size first, then the first bytes of each function it hooks. That is safe, but it is repeated in five places, any rebuilt executable turns off every engine-side feature at once, and after an update the numbers to fix are scattered through feature code. One site, the projection commit, already searches the game's code for its bytes at startup, skipping the call target inside them, so the approach below is proven here.
@@ -351,29 +418,30 @@ The goal: a small maintenance update needs no new mod build at all, and when som
 
 Each entry also lists its checks against other entries (below) and, for each known build, the address where it was found. No other file contains an address, an offset or a byte pattern. Feature code asks the table for entries by name.
 
+**Shaders by their engine names.** The game's shaders were compiled with debug information, so each dumped shader names its engine source file (for example `0x1B5FA666` is `SSLighting2_Spot_Mask_NSpec_ps`, from its `#line` directives); 1,584 of the 1,591 dumped shaders carry a name. A generated file, `engine/shader_names.hpp`, gives each shader the mod refers to a constant named after its engine source (`SSLIGHTING2_SPOT_MASK_NSPEC_PS = 0x1B5FA666`), and a lookup from CRC32 to name for logs and debug views. Feature code and registrations use the names; about 100 different bare hashes in the code today become names. Ported shader files keep their current `Name_0xCRC32` form.
+
 **2. Patterns are written so they survive a rebuild.** Every byte that changes when code moves is a wildcard: call and jump targets, references to global data, and constants that are themselves addresses. The bytes that encode what the code does stay fixed, including the structure offsets it uses (unless the entry exists to read that offset). A pattern for a function starts at the function's first byte and runs into its body until it is unique; prologues alone are not, since 18 of the 36 byte checks the mod has today appear in several places in the game's code, some in more than two thousand. Patterns are generated by the authoring tool (point 7), not written by hand.
 
 **3. Resolution at startup, in order.**
 
 1. **Known build:** if the build's identity (time stamp, image size and a hash of the code section) matches a build in the table, every entry is taken from its stored address and its pattern is checked there, wildcards included.
-2. **Unknown build, cached:** if a previous run already resolved this exact build, the result saved next to the add-on is loaded and checked the same way.
-3. **Unknown build, searched:** every function pattern is searched in the game's code. A match counts only if it is the only match, it starts exactly at a function's start in the executable's own function table (x64 executables list the start and end of every function; this one lists 141,291), and every check that involves it passes. Places inside a function are searched only between that function's start and end, so they cannot match anywhere else. Values are decoded from the matched instructions. A complete result is saved for the next start.
+2. **Unknown build:** every function pattern is searched in the game's code. A match counts only if it is the only match, it starts exactly at a function's start in the executable's own function table (x64 executables list the start and end of every function; this one lists 141,291), and every check that involves it passes. Places inside a function are searched only between that function's start and end, so they cannot match anywhere else. Values are decoded from the matched instructions.
 
 Nothing is installed until resolution is finished. The search reads the code once and costs a fraction of a second; it runs only on a build the table does not know.
 
-**Cost while playing: none.** Resolution happens once, before any hook is installed. Afterwards a hook is the same detour it is today, and a resolved address is a plain pointer read once. Structure field offsets stay compile-time constants, so feature code compiles to exactly the same field reads as now; on an unknown build the offsets decoded from the game's instructions are only compared with those constants, and a mismatch (a changed structure, which a maintenance update rarely makes) turns the feature off instead of feeding a runtime offset into code that runs every draw. At startup the known-build path costs a hash of the code section (151 MB, tens of milliseconds) and about a hundred short byte comparisons.
+**Cost while playing: none.** Resolution happens once, before any hook is installed. Afterwards a hook is the same detour it is today, and a resolved address is a plain pointer read once. Structure field offsets stay compile-time constants, so feature code compiles to exactly the same field reads as now; on an unknown build the offsets decoded from the game's instructions are only compared with those constants, and a mismatch (which would mean the renderer itself changed, contrary to what updates have done) turns the feature off instead of feeding a runtime offset into code that runs every draw. At startup the known-build path costs a hash of the code section (151 MB, tens of milliseconds) and about a hundred short byte comparisons.
 
 **4. Entries check each other.** A match is accepted only when its relations hold: a call site must call the function the table says it calls; a return address must follow a call to its function; a global decoded in two places must decode to the same address; a virtual table must sit in read-only data and its slots must point at the functions the table names; a function must be called from the places the table says call it. These checks are what make a wrong but unique match very unlikely, and they cost nothing at run time.
 
 **5. Features fail one at a time.** A feature declares the entries it needs. If any of them fails, the feature does not install, turns itself off, and the menu says which engine function was not found. Everything else keeps running. HDR output, tone mapping, color grading and shader replacements need no entries at all.
 
-**6. One log block per start** lists the build, how it was resolved (known, cached or searched) and each entry that failed with the reason (no match, several matches, a check that failed). After an update, that block is the to-do list.
+**6. One log block per start** lists the build, how it was resolved (known or searched) and each entry that failed with the reason (no match, several matches, a check that failed). After an update, that block is the to-do list.
 
 **7. An authoring and checking tool**, kept with the local analysis tools. It decodes instructions (so wildcards fall exactly on moving fields), writes the shortest unique pattern for each entry, regenerates the table, and runs the startup resolution offline against any executable. It is used three ways: when a new entry is added; as a check that every pattern is unique and every relation holds on the current build; and, when the game updates, run against the new executable before players report anything. Whatever it cannot place exactly once it lists for a person to look at in the decompile database; the fix is a new pattern in the table, and the stored address of the new build is added so the next release takes the fast path.
 
 **8. The table keeps old builds.** Stored addresses for each known build stay, so the mod works for a player who has not taken the game's update.
 
-**Shaders.** A ported shader is keyed by the hash of its bytecode. A rebuilt shader archive changes every hash even when nothing in a shader changed. The authoring tool dumps the new shaders, matches each to the old one by the engine source name in its debug information and by its instructions, and renames the ports whose instructions are unchanged; shaders that really changed are listed for review. At startup, any port whose hash the game never loads is listed in the same log block as failed entries.
+**Shaders.** The game's shaders are not expected to change: its updates since release have been maintenance of online services, the most recent removing support in Russia. So there is no tool for them. The startup log block still lists any ported shader whose hash the game never loads, which also catches a port registered under a wrong hash.
 
 **Gates** for this work: with the current executable treated as unknown, the search must find exactly the stored address for every entry; with one pattern deliberately broken, only the feature that needs it turns off; and the authoring tool must report every pattern unique and every relation holding.
 

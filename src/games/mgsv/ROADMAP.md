@@ -10,7 +10,7 @@ The goal is a path-traced method with DLSS Ray Reconstruction as the best way to
 - **The raster method stands alone.** It never depends on ray-tracing hardware or on the scene being on D3D12.
 - **Information before sampling.** Screen-space lighting is limited by what it cannot see, so the raster work first adds a memory of the scene, then a better gather.
 - **Each direction counted once.** Linear light, energy conserved, no strength above 100%. Where our lighting has information it replaces the game's ambient light; where it has none, the game's own look stays.
-- **Engine boundaries, not shader guesses.** New work attaches where the engine itself starts or ends a pass, and is verified against the executable and against captures before it is relied on.
+- **Shaders say what, the engine says when.** Shader CRC32s identify draws and never change; new work attaches where the engine itself starts or ends a pass, and is verified against the executable and against captures before it is relied on.
 - **Every new feature has a Vanilla setting.**
 - **Measured, not assumed.** Speed claims are measured at a fixed camera in the ACC title, at the hillside and at Mother Base, with frame time and GPU time separated. Image changes are judged side by side.
 
@@ -57,10 +57,10 @@ Reconstruction runs where the engine starts post-processing; contact shadows run
 
 **Engine entries that survive game updates.** This comes first, because every later stage adds hooks. Today about 60 code addresses and 70 structure offsets sit in seven feature files, half of them as unnamed numbers, five files each check the executable for themselves, and any rebuilt executable turns off every engine-side feature at once. The [design](docs/DESIGN.md#13-surviving-a-game-update) replaces that with one table of named entries, each found by a byte pattern that skips everything that moves with the code, confirmed against the executable's function table and by its relations to other entries, so a small game update needs no new mod build.
 
-1. **The table and one startup check, no behavior change.** Create `engine/build.hpp` and `engine/image.hpp`; move every address, offset and byte check into the table under engine names; features ask the table and fail one at a time with a menu note. Only the known-build path runs. **Gate:** on the current executable the same hooks install and the log is the same; with one entry deliberately broken, only the feature that needs it turns off.
+1. **The table and one startup check, no behavior change.** Create `engine/build.hpp` and `engine/image.hpp`; move every address, offset and byte check into the table under engine names; generate `engine/shader_names.hpp` from the dumped shaders' debug names and replace the bare shader hashes in the code with those names; features ask the table and fail one at a time with a menu note. Only the known-build path runs. **Gate:** on the current executable the same hooks install and the log is the same; with one entry deliberately broken, only the feature that needs it turns off.
 2. **The authoring tool.** Decodes instructions, writes the shortest unique pattern for every entry with wildcards on moving fields, and resolves the table offline against any executable. **Gate:** every pattern unique on the current build and every relation holding.
-3. **Search at startup for unknown builds,** with function-table and relation checks and a saved result per build. **Gate:** with the current executable treated as unknown, every entry resolves to exactly its stored address.
-4. **Shader updates.** Startup report of ports whose hash the game never loads, and the tool's matching of new shaders to old ones by source name and instructions. If an older or newer build of the game can be obtained, the whole path is tried on it.
+3. **Search at startup for unknown builds,** with function-table and relation checks. **Gate:** with the current executable treated as unknown, every entry resolves to exactly its stored address.
+4. **Trial on another build.** If an older build of the game can be obtained, the whole path is tried on it. Game updates are not expected to change shaders, so only a startup report of ported shaders the game never loads is added.
 
 **Folder layout.** The `engine/` folder arrives with the step above and collects the engine-facing headers as they are converted. Every other move in the [planned layout](docs/DESIGN.md#14-folder-layout) happens with the stage that touches that code.
 
@@ -102,7 +102,7 @@ Today's Global Illumination is replaced, not tuned: it can only gather light fro
 
 **Step 4: the screen-probe gather.** Probes on the depth buffer, their filters, and the merge with the near layer. This is the High tier and becomes the default. **Gate:** at the default tier the image matches or beats today's in the fixed scenes, stays stable under the upscaler without a diffuse denoiser, and its cost is measured.
 
-**Step 5: the reflection chain.** Rough reflections from the probes, glossy screen rays that continue into scene memory on a miss, and the cube map as the last fallback: corrected for parallax, dimmed by what the ray found in its way, and never brighter than the locally gathered light.
+**Step 5: the reflection chain.** Rough reflections from the probes, glossy screen rays that continue into scene memory on a miss, and the cube map as the last fallback: corrected for parallax, dimmed by what the ray found in its way, and never brighter than the locally gathered light. The rays move into the main D3D12 block and read the previous frame's scene image, so the engine's reflection pass only composites, which removes one of today's three round trips. **Gate:** side by side with today's current-frame source, moving characters and vehicles in reflections show no visible delay, and smoke, particles and fog, which last frame's image contains but today's source does not, do not smear into reflections; if they do, the reflection block stays where it is and the frame keeps three round trips.
 
 **Step 6: forward-drawn surfaces per pixel.** Ports of the glass and lit forward model shaders that sample the irradiance grid and take reflections from the trace. Emissive models become light for their surroundings where no engine light already does that job. The blob shadows under characters are removed where contact shadows cover them.
 
@@ -187,6 +187,7 @@ The flagship ([design](docs/DESIGN.md#10-path-traced-method)). It requires DLSS 
 ## Rules that carry through every stage
 
 - Keep custom work on one D3D12 queue unless a measurement shows a second queue helps; share only boundary images between the APIs.
+- The game keeps rendering on D3D11. Our passes run on D3D12 where it gives something D3D11 cannot (ray queries, Shader Model 6 features, the SDKs), grouped so every method makes two round trips per frame, as the [design](docs/DESIGN.md#31-what-runs-on-d3d11-and-what-runs-on-d3d12) lists pass by pass; a new switch between the APIs needs a measurement that it pays for itself.
 - Keep native shaders running on D3D11 until a whole pass moves.
 - Hooks stay loaded for the process lifetime; restart to replace or remove them.
 - Pick shader models and hardware features from what the device actually supports, and measure each one inside the pass that uses it.
