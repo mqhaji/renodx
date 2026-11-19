@@ -2,7 +2,7 @@
 
 Temporal reconstruction combines samples from several frames to smooth edges and recover detail. Camera jitter changes which parts of each edge are sampled. Analytical TAA runs at native resolution; FSR and NVIDIA DLSS support native or reduced rendering resolution. Upscaling runs before bloom preparation and depth of field (DoF), with later scene processing and UI at output resolution.
 
-The [addon guide](../README.md) owns build/deployment checks, the [architecture guide](../docs/ARCHITECTURE.md) covers shared ownership, the [roadmap](ROADMAP.md) tracks future work, and [FSR installation and API details](fsr/README.md) record SDK versions and licenses.
+The [addon guide](../README.md) owns build/deployment checks, the [architecture guide](../docs/ARCHITECTURE.md) covers shared ownership, the [roadmap](../ROADMAP.md) tracks future work, and [FSR installation and API details](fsr/README.md) record SDK versions and licenses.
 
 ## Usage and defaults
 
@@ -198,7 +198,7 @@ Reconstruction moved to the engine's post-processing start on November 19, 2026.
 - Character wobble predates resolution scaling and reproduces on the face and arms in the fixed ACC title camera with reflections, shadows and diffuse lighting disabled. Restoring both native skin scatters and correcting the scene/scatter camera centers did not resolve it alone. Captured inputs reveal precision loss in the native previous-position world transform. The CPU matrix combination reduces the visible warbling in the user's FSR check; the user reports no noticeable warbling in the DLSS follow-up. The cleaned build passes the user's ACC check with usual lighting enabled, reconstruction Off/DLSS, and Native/Auto quality switching. GPU captures confirm all 153 selected motion draws use the combined matrices with their original vertex and pixel shaders; all 354 selected scene/scatter camera centers match the expected jitter. Temporary vertex/preparation replacements and capture/profiling are off. These checks cover this fixed-camera scene, not every character, animation, camera movement, or gameplay transition. Keep any remaining character-history issue separate from NRD tuning.
 - Thermography has matching clip-position evidence at two guarded setters, and original-shader NVG looked clean in the reported test. The alternate branch and three enabled experimental projection paths still need transition/gameplay coverage.
 - There is no proven native camera-cut signal. The removed clip-space heuristic reset history continuously. FSR lacks external masks/exposure; Analytical lacks previous-depth rejection/history locks. Thin detail, transparency, rain, bright effects, and newly exposed surfaces remain difficult. No method adds sharpening.
-- Earlier RGBA16F velocity and FSR FL11_0 checks establish those inspected paths, not current character stability or the separate GT-VBGI accumulator. See the [roadmap](ROADMAP.md) for investigation requirements.
+- Earlier RGBA16F velocity and FSR FL11_0 checks establish those inspected paths, not current character stability or the separate GT-VBGI accumulator. See the [roadmap](../ROADMAP.md) for investigation requirements.
 
 ## Manual validation
 
