@@ -43,8 +43,8 @@ struct ShaderInjectData {
   // 0 = Vanilla, 1 = Enhanced shadow maps and contact shadows.
   float shadows_mode;
 
-  float shadow_softness;              // Multiplies tuned source sizes; 1 keeps the default softness.
-  float contact_shadow_reach_pixels;  // Contact-shadow search length in output pixels; effect-local copies convert to render pixels.
+  float shadow_softness;       // Multiplies tuned source sizes; 1 keeps the default softness.
+  float contact_shadow_reach;  // Contact-shadow search length in game units, converted to pixels at each receiver's depth.
   float shadow_map_debug_view;
 
   // Indirect Lighting controls. Keep their storage order stable across passes.
@@ -118,10 +118,10 @@ cbuffer RenoDXSettings : register(b13) {
 
 #define CUSTOM_MGSV_ENHANCED_SHADOWS (shader_injection.shadows_mode >= 0.5)
 
-#define CUSTOM_SHADOW_SOFTNESS             shader_injection.shadow_softness
-#define CUSTOM_CONTACT_SHADOW_REACH_PIXELS shader_injection.contact_shadow_reach_pixels
-#define CUSTOM_SHADOW_MAP_DEBUG_VIEW       shader_injection.shadow_map_debug_view
-#define CUSTOM_SHADOW_NOISE_FRAME          shader_injection.shadow_noise_frame
+#define CUSTOM_SHADOW_SOFTNESS       shader_injection.shadow_softness
+#define CUSTOM_CONTACT_SHADOW_REACH  shader_injection.contact_shadow_reach
+#define CUSTOM_SHADOW_MAP_DEBUG_VIEW shader_injection.shadow_map_debug_view
+#define CUSTOM_SHADOW_NOISE_FRAME    shader_injection.shadow_noise_frame
 
 #define CUSTOM_CONTACT_SHADOW_DEBUG_VIEW   shader_injection.contact_shadow_debug_view
 #define CUSTOM_SHADOW_DEBUG_LIGHT          shader_injection.shadow_debug_light

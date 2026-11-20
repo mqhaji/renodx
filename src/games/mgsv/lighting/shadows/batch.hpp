@@ -478,7 +478,7 @@ inline bool CollectLight(ID3D11DeviceContext* context, DeviceState* device_state
     // layout can change while a lighting pass is still recording.
     const auto& traced = batch->settings;
     const bool same_settings = traced.shadow_softness == settings.shadow_softness
-                               && traced.contact_shadow_reach_pixels == settings.contact_shadow_reach_pixels
+                               && traced.contact_shadow_reach == settings.contact_shadow_reach
                                && traced.contact_shadow_render_scale == settings.contact_shadow_render_scale
                                && traced.contact_shadow_debug_view == settings.contact_shadow_debug_view
                                && traced.shadow_debug_light == settings.shadow_debug_light

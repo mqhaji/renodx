@@ -350,7 +350,7 @@ Lighting Quality selects the raster tier (4.9), and the ray-traced tiers once st
 
 The preset sets the rest; changing any of them selects Custom. Reference Accumulation is the ground truth the other methods are checked against.
 
-**Direct Lighting (Advanced)** keeps Shadow Softness, Contact Shadow Reach (`DirectLightingContactShadowReachPixels`), Spot Contact Shadow Budget (`DirectLightingSpotContactShadowBudget`) and the debug views as they are, and gains **Local Light Shadows** (`DirectLightingLocalShadows`: Vanilla (default), All Lights; All Lights needs scene memory or ray tracing, and is an Ultra-cost feature in the raster method).
+**Direct Lighting (Advanced)** keeps Shadow Softness, Contact Shadow Reach (`DirectLightingContactShadowReach`), Spot Contact Shadow Budget (`DirectLightingSpotContactShadowBudget`) and the debug views as they are, and gains **Local Light Shadows** (`DirectLightingLocalShadows`: Vanilla (default), All Lights; All Lights needs scene memory or ray tracing, and is an Ultra-cost feature in the raster method).
 
 **Indirect Lighting (Advanced)** keeps the four strength controls and the debug views. The diffuse resolution, rays per pixel, search radius, thickness, offset, direction and sample controls and the depth-mip and backface-rejection switches are retired when the new gather replaces the pass they tune; their work moves into Lighting Quality.
 

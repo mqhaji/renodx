@@ -10,6 +10,40 @@ Texture2D<float4> bend_depth : register(t0);
 SamplerState bend_border : register(s0);
 
 groupshared float shared_depth[((BEND_MAX_SAMPLES + BEND_GROUP_SIZE - 1) / BEND_GROUP_SIZE + 1) * BEND_GROUP_SIZE];
+// The most samples any receiver of the group needs.
+groupshared uint group_samples;
+// A local light's center sits inside its lamp, so the trace stops this many
+// game units short of it: closer casters are taken to be the light's own
+// fixture, which the engine's shadow maps leave out too.
+static const float BEND_FIXTURE_DISTANCE = 0.25;
+
+// Stores one read of the group's casting depths: this lane's pixel, read
+// times 64 pixels toward the light. Returns that pixel's depth, which for
+// read 0 is the lane's receiver.
+float StoreCastingDepth(uint read, uint lane, float2 sample_pixel, bool major_x, float2 inverse_size, float render_scale,
+                        float pixel_distance, float direction, float light_depth, out bool depth_edge) {
+  const float2 texel = floor(sample_pixel) + 0.5;
+  const float minor = major_x ? sample_pixel.y : sample_pixel.x;
+  const float interpolation = frac(minor) - 0.5;
+  const float bias = interpolation > 0.0 ? 1.0 : -1.0;
+  const float2 offset = major_x ? float2(0.0, bias) : float2(bias, 0.0);
+  float first = bend_depth.SampleLevel(bend_border, texel * inverse_size, 0).x;
+  float second = bend_depth.SampleLevel(bend_border, (texel + offset) * inverse_size, 0).x;
+  first = isfinite(first) && first > 0.0 ? first : 0.0;
+  second = isfinite(second) && second > 0.0 ? second : 0.0;
+  // Bend's default 2% threshold avoids joining separate surfaces.
+  depth_edge = abs(first - second) > abs(first) * 0.02;
+  // Reverse-Z: moving the casting depth farther away means subtracting. The
+  // neighbor is one render pixel away; bias by one output pixel's difference.
+  const float casting_depth = depth_edge ? first : first - abs(first - second) * render_scale;
+  const float distance = pixel_distance + BEND_GROUP_SIZE * read * direction;
+  float stored = (casting_depth - light_depth) / distance;
+  if (abs(distance) < 1e-7 || (read != 0 && distance <= 0.0) || !isfinite(stored)) {
+    stored = 1e20;
+  }
+  shared_depth[read * BEND_GROUP_SIZE + lane] = stored;
+  return first;
+}
 
 [numthreads(BEND_GROUP_SIZE, 1, 1)]
 void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
@@ -93,59 +127,75 @@ void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
   }
   const precise float2 delta = pixel_step * BEND_GROUP_SIZE;
   const uint thread_step = lane ^ (light.w > 0.0 ? 0u : (BEND_GROUP_SIZE - 1u));
-  precise float2 sample_pixel = start - pixel_step * float(thread_step);
+  const precise float2 sample_pixel = start - pixel_step * float(thread_step);
   const int2 output_pixel = int2(floor(sample_pixel));
   const precise float pixel_distance = major_start - thread_step + fraction;
   const float direction = -light.w;
-  const uint samples = (uint)clamp(isfinite(CUSTOM_CONTACT_SHADOW_REACH_PIXELS) ? CUSTOM_CONTACT_SHADOW_REACH_PIXELS : 60.0,
-                                   16.0, float(BEND_MAX_SAMPLES));
   const float thickness = 0.005;
-  // Reach arrives in render pixels. The trace's other distances are tuned in
-  // output pixels too: an upscaled frame crosses more of the screen per sample,
-  // so it uses proportionally fewer hard and interleaved samples, a shorter end
-  // fade, and a smaller neighbor-depth bias. Otherwise thin casters lose most
-  // of their shadow as the render resolution drops.
+  // The trace's other distances are tuned in output pixels: an upscaled frame
+  // crosses more of the screen per sample, so it uses proportionally fewer hard
+  // and interleaved samples, a shorter end fade, and a smaller neighbor-depth
+  // bias. Otherwise thin casters lose most of their shadow as the render
+  // resolution drops.
   const float render_scale = isfinite(CUSTOM_CONTACT_SHADOW_RENDER_SCALE) && CUSTOM_CONTACT_SHADOW_RENDER_SCALE > 0.0
                                  ? min(CUSTOM_CONTACT_SHADOW_RENDER_SCALE, 1.0)
                                  : 1.0;
   // Whole divisors keep the four interleaved minima aligned. The thresholds are
   // the geometric midpoints between scales 1, 1/2, and 1/4.
   const uint sample_divisor = render_scale > 0.7071 ? 1u : (render_scale > 0.3536 ? 2u : 4u);
-  // The last receiver reads through shared index 63 + samples.
-  const uint reads = ((samples + BEND_GROUP_SIZE - 1u) >> 6) + 1u;
   const float2 inverse_size = rcp(float2(metadata.xy));
-  float receiver_depth = 0.0;
-  bool edge = false;
+  if (lane == 0u) {
+    group_samples = 16u;
+  }
+  GroupMemoryBarrierWithGroupSync();
 
   // Each thread supplies a few depths for many neighboring receivers. Stream
   // them into group memory instead of keeping a large per-thread depth array.
+  // The first read is this lane's receiver, whose depth sets its sample count.
+  bool edge = false;
+  const float receiver_depth = StoreCastingDepth(0u, lane, sample_pixel, major_x, inverse_size, render_scale,
+                                                 pixel_distance, direction, light.z, edge);
+  // The receiver's view-space position, when the camera projection is usable.
+  const float denominator = receiver_depth - bend_projection_param.w;
+  const float view_depth = bend_projection_param.z / denominator;
+  const bool projected = denominator > 0.0 && isfinite(view_depth)
+                         && all(isfinite(bend_projection_param.xy)) && all(isfinite(bend_camera_center.xy));
+  const float2 ray = ((float2(output_pixel) + 0.5) * inverse_size * float2(2.0, -2.0) + float2(-1.0, 1.0)
+                      - bend_camera_center.xy)
+                     * bend_projection_param.xy;
+  const float3 receiver_position = float3(ray * view_depth, view_depth);
+  // Reach is a world distance: one sample advances one render pixel along the
+  // ray's main screen axis, which covers more of the world the farther the
+  // receiver is. Without a usable projection, 60 render pixels.
+  uint samples = 60u;
+  const float footprint = 2.0 * abs(major_x ? bend_projection_param.x * inverse_size.x : bend_projection_param.y * inverse_size.y) * view_depth;
+  if (projected && isfinite(footprint) && footprint > 0.0
+      && isfinite(CUSTOM_CONTACT_SHADOW_REACH) && CUSTOM_CONTACT_SHADOW_REACH > 0.0) {
+    samples = (uint)clamp(CUSTOM_CONTACT_SHADOW_REACH / footprint, 16.0, float(BEND_MAX_SAMPLES));
+  }
+  if (projected && !directional) {
+    // Stop BEND_FIXTURE_DISTANCE short of the light. On screen the ray covers
+    // the fraction s of its pixels to the light, from the 3D fraction t by
+    // perspective division.
+    const float3 source = ReadBendLightParam(light_index, 3u).xyz;
+    const float source_distance = length(source - receiver_position);
+    if (source.z > 0.0 && isfinite(source_distance) && source_distance > 0.0) {
+      const float t = 1.0 - min(BEND_FIXTURE_DISTANCE / source_distance, 1.0);
+      const float s = t * source.z / max((1.0 - t) * view_depth + t * source.z, 1e-20);
+      samples = (uint)min(float(samples), max(floor(s * abs(pixel_distance)), 0.0));
+    }
+  }
+  if (all(output_pixel >= bounds.xy) && all(output_pixel < bounds.zw) && receiver_depth > 0.0) {
+    InterlockedMax(group_samples, samples);
+  }
+  GroupMemoryBarrierWithGroupSync();
+  // The group's last receiver reads through shared index 63 + its samples.
+  const uint reads = ((group_samples + BEND_GROUP_SIZE - 1u) >> 6) + 1u;
   [loop]
-  for (uint read = 0; read < reads; ++read) {
-    const float2 texel = floor(sample_pixel) + 0.5;
-    const float minor = major_x ? sample_pixel.y : sample_pixel.x;
-    const float interpolation = frac(minor) - 0.5;
-    const float bias = interpolation > 0.0 ? 1.0 : -1.0;
-    const float2 offset = major_x ? float2(0.0, bias) : float2(bias, 0.0);
-    float first = bend_depth.SampleLevel(bend_border, texel * inverse_size, 0).x;
-    float second = bend_depth.SampleLevel(bend_border, (texel + offset) * inverse_size, 0).x;
-    first = isfinite(first) && first > 0.0 ? first : 0.0;
-    second = isfinite(second) && second > 0.0 ? second : 0.0;
-    // Bend's default 2% threshold avoids joining separate surfaces.
-    const bool depth_edge = abs(first - second) > abs(first) * 0.02;
-    // Reverse-Z: moving the casting depth farther away means subtracting. The
-    // neighbor is one render pixel away; bias by one output pixel's difference.
-    const float casting_depth = depth_edge ? first : first - abs(first - second) * render_scale;
-    const float distance = pixel_distance + BEND_GROUP_SIZE * read * direction;
-    float stored = (casting_depth - light.z) / distance;
-    if (abs(distance) < 1e-7 || (read != 0 && distance <= 0.0) || !isfinite(stored)) {
-      stored = 1e20;
-    }
-    shared_depth[read * BEND_GROUP_SIZE + lane] = stored;
-    if (read == 0) {
-      receiver_depth = first;
-      edge = depth_edge;
-    }
-    sample_pixel += delta * direction;
+  for (uint read = 1u; read < reads; ++read) {
+    const precise float2 read_pixel = sample_pixel + delta * (direction * float(read));
+    bool unused_edge;
+    StoreCastingDepth(read, lane, read_pixel, major_x, inverse_size, render_scale, pixel_distance, direction, light.z, unused_edge);
   }
   // Out-of-bounds threads still supply depths needed by in-bounds receivers.
   GroupMemoryBarrierWithGroupSync();
@@ -162,7 +212,8 @@ void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
   const precise float2 endpoint_delta = float2(center_grid - relative)
                                         + center_direction * min(extension.x, extension.y);
   if (any(floor(endpoint_delta + 0.5) != 0.0)) return;
-  if (!(receiver_depth > 0.0) || abs(pixel_distance) < 1e-7) {
+  // Receivers too close to the light for a trace past its fixture stay lit.
+  if (!(receiver_depth > 0.0) || abs(pixel_distance) < 1e-7 || samples < 16u) {
     bend_output[BendMaskPixel(output_pixel, bounds, record)] = float4(1.0, 0.25, receiver_depth, 0.0);
     return;
   }
@@ -170,15 +221,8 @@ void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
   if (receiver_culling) {
     // After supplying casting depth, reject receivers outside the native light.
     // Earlier per-lane exits would remove depths needed by other lit receivers.
-    const float denominator = receiver_depth - bend_projection_param.w;
-    const float view_depth = bend_projection_param.z / denominator;
-    if (denominator > 0.0 && isfinite(view_depth)) {
-      const float2 pixel = (float2(output_pixel) + 0.5);
-      const float2 ray = (pixel * inverse_size * float2(2.0, -2.0) + float2(-1.0, 1.0)
-                          - bend_camera_center.xy)
-                         * bend_projection_param.xy;
-      const float3 position = float3(ray * view_depth, view_depth);
-      const float3 delta = position - ReadBendLightParam(light_index, 3u).xyz;
+    if (projected) {
+      const float3 delta = receiver_position - ReadBendLightParam(light_index, 3u).xyz;
       const float distance = length(delta);
       // Keep uncertain pixels near the light boundary.
       const float margin = length(2.0 * bend_projection_param.xy * view_depth * inverse_size)

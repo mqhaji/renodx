@@ -302,14 +302,13 @@ inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& 
     budget = state->budget.Get();
   }
 
-  // Convert reach in a private copy; other effects keep the user's output-pixel value.
-  // The trace scales its remaining output-pixel distances by the same factor.
+  // The trace's sample counts and depth bias are tuned in output pixels; give
+  // it the render scale in a private copy of the settings.
   auto constants = settings;
   constants.contact_shadow_render_scale = 1.f;
   const auto plan = reconstruction::resolution::Read();
   if (plan.IsScaled() && plan.render == reconstruction::resolution::Size{.width = depth_description.Width, .height = depth_description.Height}) {
     constants.contact_shadow_render_scale = static_cast<float>(depth_description.Width) / static_cast<float>(plan.output.width);
-    constants.contact_shadow_reach_pixels *= constants.contact_shadow_render_scale;
   }
 
   // A sun pass shades one directional light several times against the same

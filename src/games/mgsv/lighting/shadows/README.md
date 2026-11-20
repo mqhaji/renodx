@@ -64,10 +64,10 @@ Fixed trace settings are contrast 4, 0.5% relative nonlinear-depth thickness, a 
 |---|---:|---|
 | Shadows | Enhanced | Selects native shadows or enhanced shadow-map filtering and contact shadows together |
 | Shadow Softness | 100% | Scales the shared source sizes; 0% keeps native map filtering and sharp contact detail |
-| Contact Shadow Reach | 60 px | Shared search length, from 16 to 256 output pixels, converted to render pixels with a minimum of 16 render pixels |
+| Contact Shadow Reach | 0.30 | Shared search length toward the light in game units, from 0.05 to 2; each pixel converts it to screen pixels at its own depth, between 16 and 256 render pixels |
 | Spot Contact Shadow Budget | 34 | Limits spotlight contact evaluations between lighting-buffer clears; 0 is unlimited |
 
-Softness, reach, budget, and diagnostics are in Direct Lighting (Advanced), collapsed by default. At DLSS Performance, the minimum trace length corresponds to about 32 output pixels. Reach changes search distance, not softness. Skipped spotlight contacts retain shadow-map filtering. Preset Off selects Vanilla for Shadows; Reset All restores defaults.
+Softness, reach, budget, and diagnostics are in Direct Lighting (Advanced), collapsed by default. A local light's center sits inside its lamp, so each trace stops 0.25 game units short of it; closer casters are taken to be the light's own fixture, which the engine's shadow maps leave out too, and receivers that close to the light stay lit. Because reach is a world distance, a contact shadow keeps its length as the camera moves closer or farther; very close to a surface the 256-sample limit shortens it, and far away the 16-sample minimum lengthens it. The earlier pixel reach (`DirectLightingContactShadowReachPixels`) is no longer read. Reach changes search distance, not softness. Skipped spotlight contacts retain shadow-map filtering. Preset Off selects Vanilla for Shadows; Reset All restores defaults.
 
 ## Diagnostics and verification
 
