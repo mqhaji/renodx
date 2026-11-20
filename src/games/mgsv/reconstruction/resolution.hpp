@@ -29,11 +29,15 @@
 #include "state.hpp"
 
 // Upscaling for FSR and DLSS: the engine renders the scene below output size.
-// Present picks a size plan (MakePlan). The hook on DgDx11::Start, which runs
-// before the engine builds the next frame's views, writes the planned render
-// size into the backend's resize request, so the engine resizes through
-// its normal update. The depth-of-field hooks make the native scatter depth of
-// field work at output size, since it runs after reconstruction.
+// The output size is the render size the game requests, which follows its
+// resolution setting. In the game's borderless mode the window stays at
+// desktop size and the game's last pass scales the image to fit it, so the
+// output can be smaller than the window. Present picks a size plan (MakePlan).
+// The hook on DgDx11::Start, which runs before the engine builds the next
+// frame's views, writes the planned render size into the backend's resize
+// request, so the engine resizes through its normal update. The
+// depth-of-field hooks make the native scatter depth of field work at output
+// size, since it runs after reconstruction.
 namespace mgsv::reconstruction::resolution {
 
 enum class Quality : uint8_t {
@@ -84,8 +88,9 @@ struct State {
   uint64_t generation = 0u;
   uintptr_t backend = 0u;  // The backend this mod sizes; compared, never dereferenced.
   uint64_t presentation_generation = 0u;
-  // The size the game itself last requested, and the size this mod last left
-  // in the request, which tells the game's changes apart from ours.
+  // The render size the game last requested, which is the output size, and
+  // the size this mod last left in the request. A request that differs from
+  // the second was written by the game.
   Size engine_wanted;
   Size last_written;
 };
@@ -167,14 +172,13 @@ inline constexpr std::array REQUIRED_FIELDS = {
     engine::Field::BACKEND_WANTED_SIZE,
     engine::Field::BACKEND_FLAGS,
     engine::Field::BACKEND_FLAG_RESIZE,
-    engine::Field::BACKEND_OUTPUT_SIZE,
+    engine::Field::BACKEND_FLAG_VIDEO_SETTINGS,
     engine::Field::BACKEND_RENDER_SIZE,
 };
 inline constexpr engine::Requirement REQUIREMENT = {.feature = "Upscaling (DLSS and FSR below native resolution)", .entries = REQUIRED_ENTRIES, .fields = REQUIRED_FIELDS};
 
-// These fields belong to the shared Dg backend. Its Start call applies size
-// requests before the game begins building views for the next render.
-inline constexpr uint32_t BACKEND_BUSY_FLAG = 4u;
+// Start's slot in the Dg backend's virtual table. Start applies size requests
+// before the game begins building views for the next render.
 inline constexpr size_t BACKEND_START_SLOT = 6u;
 
 struct DofDrawState {
@@ -198,8 +202,10 @@ inline void __fastcall HookBackendStep(uint8_t* backend) {
   const auto backend_address = reinterpret_cast<uintptr_t>(backend);
   auto* wanted = reinterpret_cast<Size*>(backend + engine::Value(engine::Field::BACKEND_WANTED_SIZE));
   auto* flags = reinterpret_cast<uint32_t*>(backend + engine::Value(engine::Field::BACKEND_FLAGS));
-  const auto display = *reinterpret_cast<const Size*>(backend + engine::Value(engine::Field::BACKEND_OUTPUT_SIZE));
   const auto* table = *reinterpret_cast<const uintptr_t* const*>(backend);
+  // Set while changed video settings wait: this Start then copies their
+  // render size into the wanted size and clears the bit.
+  const bool game_request = (*flags & engine::Value(engine::Field::BACKEND_FLAG_VIDEO_SETTINGS)) != 0u;
   bool managed = false;
   bool acquired = false;
   {
@@ -219,16 +225,20 @@ inline void __fastcall HookBackendStep(uint8_t* backend) {
     if (managed) {
       acquired = selected && sizing_state.presentation_generation != presentation.generation;
       sizing_state.presentation_generation = (selected ? presentation.generation : 0u);
+      // The game also writes the wanted size outside Start: in its
+      // FlexibleWindowed mode, InitRender sets it to the window's size.
       if (*wanted != sizing_state.last_written) {
         sizing_state.engine_wanted = *wanted;
       }
+      // A plan made for an earlier request is not applied.
       const bool scaled = selected && installed.load(std::memory_order_acquire) && !failed.load(std::memory_order_acquire)
-                          && state::IsEnabled() && plan.IsScaled() && plan.output == display;
+                          && state::IsEnabled() && plan.IsScaled() && plan.output == sizing_state.engine_wanted;
       // When not scaling, write back the game's last request, so a resize,
       // a recovery or a lost swapchain match returns to it. Only a backend
       // selected earlier is changed.
       const auto desired = (scaled ? plan.render : sizing_state.engine_wanted);
-      if ((*flags & BACKEND_BUSY_FLAG) == 0u && desired.width != 0u && desired.height != 0u && *wanted != desired) {
+      // With changed video settings pending, Start replaces the wanted size.
+      if (!game_request && desired.width != 0u && desired.height != 0u && *wanted != desired) {
         *wanted = desired;
         *flags |= engine::Value(engine::Field::BACKEND_FLAG_RESIZE);
       }
@@ -244,6 +254,11 @@ inline void __fastcall HookBackendStep(uint8_t* backend) {
   const auto actual = *reinterpret_cast<const Size*>(backend + engine::Value(engine::Field::BACKEND_RENDER_SIZE));
   const std::unique_lock lock(sizing_state.mutex);
   if (sizing_state.backend != backend_address) return;
+  if (game_request) {
+    // Recorded here because the request can equal the size this mod wrote.
+    sizing_state.engine_wanted = *wanted;
+    sizing_state.last_written = *wanted;
+  }
   if (sizing_state.actual != actual) {
     sizing_state.actual = actual;
     ++sizing_state.generation;
@@ -265,8 +280,7 @@ inline void __fastcall HookDofDraw(void* effect, const float* parameters) {
         && owner.main_view && owner.active_member && owner.presentation_matches
         && owner.backend == sizing_state.backend && owner.generation == sizing_state.presentation_generation
         && sizing_state.requested.render == sizing_state.actual
-        && owner.render_size == std::array{sizing_state.actual.width, sizing_state.actual.height}
-        && owner.output_size == std::array{sizing_state.requested.output.width, sizing_state.requested.output.height}) {
+        && owner.render_size == std::array{sizing_state.actual.width, sizing_state.actual.height}) {
       plan = sizing_state.requested;
     }
   }

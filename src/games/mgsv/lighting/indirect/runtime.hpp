@@ -28,11 +28,11 @@
 #include "../../../../utils/settings.hpp"
 #include "../../assets/noise/fast_noise_gr8.h"
 #include "../../materials/capture.hpp"
-#include "../../reconstruction/coordinator.hpp"
 #include "../../reconstruction/resolution.hpp"
 #include "../../rendering/d3d11_state.hpp"
 #include "../../rendering/inputs.hpp"
 #include "../../rendering/producer_records.hpp"
+#include "../../rendering/submission.hpp"
 #include "../../shared.h"
 #include "../environment_specular.hpp"
 #include "../indirect_lighting_mode.hpp"
@@ -1317,8 +1317,8 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
                       depth, normal, light_source, scattering_copy,
                       albedo = shared_inputs.materials.albedo,
                       specular = shared_inputs.materials.specular,
-                      generation = shared_inputs.generation, get_light_view](reshade::api::command_list* submitted, bool first_submission) {
-    if (!first_submission) {
+                      generation = shared_inputs.generation, get_light_view](reshade::api::command_list* submitted, const mgsv::rendering::submission::Execution& execution) {
+    if (!execution.first) {
       // A replayed command list must not apply AO/GI again to diffuse lighting
       // that this insertion already corrected.
       Microsoft::WRL::ComPtr<ID3D11Resource> copied;
@@ -1419,12 +1419,12 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
     mgsv::ao::Apply(submitted_frame, submitted, constants, temporal_inputs::Read(submitted->get_device(), submitted_frame.depth));
     mgsv::rendering::d3d11_compute_state::Restore(submitted, previous_state);
   };
-  if (geometry != nullptr && mgsv::reconstruction::coordinator::ScheduleLighting(cmd_list, apply)) return;
+  if (geometry != nullptr && mgsv::rendering::submission::Schedule(cmd_list, {.run = apply})) return;
 
   // Without a constants copy or a free submission slot, record the chain
   // directly on this context.
-  const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
-  apply(cmd_list, true);
+  const mgsv::rendering::submission::ExecutionGuard execution_guard;
+  apply(cmd_list, {.first = true});
 }
 
 }  // namespace mgsv::lighting

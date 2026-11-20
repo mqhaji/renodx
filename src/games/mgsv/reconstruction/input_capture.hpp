@@ -1,9 +1,7 @@
 #pragma once
 
 /* BuildFrameInputsLocked builds the record reconstruction reads where a
- * scene's post-processing starts. CaptureCameraMotionLocked captures the
- * camera-velocity draw for the lighting history; reconstruction does not
- * use it. */
+ * scene's post-processing starts. */
 
 #include <d3d11.h>
 
@@ -12,15 +10,12 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
-#include <utility>
 
 #include <include/reshade.hpp>
 
 #include "../engine/motion_vectors.hpp"
 #include "../engine/render_targets.hpp"
 #include "../engine/views.hpp"
-#include "../rendering/inputs.hpp"
 #include "camera_state.hpp"
 #include "frame_inputs.hpp"
 #include "logging.hpp"
@@ -28,19 +23,6 @@
 #include "state.hpp"
 
 namespace mgsv::reconstruction::input_capture {
-
-// The camera-velocity draw's bindings and the camera its scene was recorded
-// with, for the lighting history.
-struct Resources {
-  inputs::Motion motion;
-  camera_state::CameraFrame camera = {};
-};
-
-inline uint64_t last_capture_missing_log = std::numeric_limits<uint64_t>::max();
-
-inline bool LogEvery(uint64_t& last_frame, uint64_t interval = 120u) {
-  return logging::ShouldLogFrame(state::CurrentFrameToken(), last_frame, interval);
-}
 
 inline reshade::api::format GetTypedViewFormat(
     reshade::api::device* device,
@@ -53,29 +35,6 @@ inline reshade::api::format GetTypedViewFormat(
   return reshade::api::format_to_default_typed(device->get_resource_desc(resource).texture.format);
 }
 
-inline Resources CaptureCameraMotionLocked(
-    reshade::api::command_list* cmd_list,
-    const inputs::descriptor_tracker::CommandListData& command_data,
-    reshade::api::resource_view velocity_rtv) {
-  if (velocity_rtv.handle == 0u) {
-    if (LogEvery(last_capture_missing_log)) logging::Warn("camera velocity pass has no RTV0");
-    return {};
-  }
-  if (command_data.pixel_srv_t2.handle == 0u || command_data.pixel_srv_t3.handle == 0u) {
-    if (LogEvery(last_capture_missing_log)) {
-      logging::Warn("camera velocity capture missing inputs velocity_rtv=", logging::Hex{velocity_rtv.handle},
-                    " depth=", logging::Hex{command_data.pixel_srv_t2.handle},
-                    " object_velocity=", logging::Hex{command_data.pixel_srv_t3.handle});
-    }
-    return {};
-  }
-
-  // Retain the live native bindings, including the velocity target this draw writes.
-  auto motion = inputs::CaptureMotion(cmd_list, velocity_rtv);
-  if (motion.velocity == nullptr) return {};
-  return {.motion = std::move(motion), .camera = camera_state::GetForCapture()};
-}
-
 // How much of a scene's reconstruction inputs the cut found.
 enum class Record : uint8_t {
   // No scene image reconstruction can read.
@@ -86,7 +45,7 @@ enum class Record : uint8_t {
 };
 
 // Why the last record was not complete; null while records are complete.
-// Accessed under the coordinator execution lock.
+// Accessed under the submission execution lock.
 inline const char* reported_cause = nullptr;
 // The probe can have complete records treated as scene-only, to exercise the
 // fill-only outcome at will.
@@ -169,8 +128,8 @@ inline Record BuildFrameInputsLocked(
           .sample_index = camera.sample_index,
           .render_width = width,
           .render_height = height,
-          // While upscaling, the output does not exist until the coordinator
-          // allocates it. Leave it empty rather than naming the smaller scene.
+          // While upscaling, the output does not exist until the scene's
+          // dispatch allocates it. Leave it empty rather than naming the smaller scene.
           .output = {
               .resource = (plan.IsScaled() ? reshade::api::resource{0u} : color_resource),
               .width = (plan.IsScaled() ? plan.output.width : width),

@@ -50,15 +50,11 @@ inline TemporalMode NormalizeTemporalMode(float value) {
 inline constexpr float DEFAULT_DIAGNOSTIC_VIEW = 0.f;
 inline constexpr float DEFAULT_VELOCITY_VISUALIZATION_RANGE = 8.f;
 
-// Serializes reconstruction scheduling, submission, method changes and the
-// Present checks. The coordinator takes it through ExecutionGuard.
-inline std::atomic_flag execution_lock = ATOMIC_FLAG_INIT;
-
 inline constexpr float DEFAULT_CLIP_TIGHTNESS = 0.5f;
 inline constexpr float DEFAULT_HISTORY_CLIP_STRENGTH = 1.f;
 inline constexpr float DEFAULT_CURRENT_FRAME_BLEND = 0.15f;
 
-// Accessed under execution_lock.
+// Accessed under the submission execution lock (rendering/submission.hpp).
 struct FrameState {
   uint32_t sample_index = 0u;  // Reconstructed outputs installed since the last reset.
   uint64_t frame_index = 0u;

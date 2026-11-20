@@ -507,8 +507,8 @@ class Bridge {
   }
 };
 
-// The reconstruction coordinator serializes every user, including lighting
-// callbacks. Switching methods releases that method's state but keeps this device.
+// The submission execution lock serializes every user, including lighting
+// jobs. Switching methods releases that method's state but keeps this device.
 static std::unique_ptr<Bridge> backend;
 
 inline Bridge& Get(ID3D11Device* device) {

@@ -4,7 +4,8 @@
 /* ReShade event handlers and method changes for temporal reconstruction.
  * Present applies settings, plans the render size and checks the frame that
  * just ended. The post-processing cut schedules each scene. Method and setting
- * changes reset history. HandleDraw only serves the lighting history. */
+ * changes reset history. OnCameraVelocityRecorded only serves the lighting
+ * history. */
 
 #include <windows.h>
 
@@ -22,79 +23,22 @@
 
 #include "../../../utils/mutex.hpp"
 #include "../../../utils/settings.hpp"
-#include "../../../utils/state.hpp"
 #include "../../../utils/swapchain.hpp"
-#include "../rendering/draw_roles.hpp"
+#include "../engine/render_targets.hpp"
+#include "../engine/views.hpp"
 #include "../rendering/inputs.hpp"
+#include "../rendering/producer_records.hpp"
+#include "../rendering/submission.hpp"
 #include "../shared.h"
 #include "camera_state.hpp"
-#include "coordinator.hpp"
+#include "dispatch.hpp"
 #include "dlss/model.hpp"
 #include "dlss/runtime.hpp"
-#include "input_capture.hpp"
 #include "logging.hpp"
 #include "mip_bias.hpp"
 #include "projection_jitter.hpp"
 #include "resolution.hpp"
 #include "state.hpp"
-
-namespace mgsv::game::reconstruction {
-
-namespace runtime = ::mgsv::reconstruction;
-
-// The engine's camera-velocity draw records the motion and camera that the
-// lighting history uses. Reconstruction takes its own inputs where
-// post-processing starts and does not need this draw. Always returns false,
-// so the draw runs unchanged.
-inline bool HandleDraw(reshade::api::command_list* cmd_list, [[maybe_unused]] const ShaderInjectData* shader_injection = nullptr) {
-  if (cmd_list == nullptr || !lighting::temporal_inputs::enabled.load(std::memory_order_acquire)) return false;
-  auto* device = cmd_list->get_device();
-  if (device == nullptr || device->get_api() != reshade::api::device_api::d3d11) return false;
-  // MGSV issues thousands of draws per frame. Classify first so unrelated
-  // draws return before taking any lock.
-  renodx::utils::state::CommandListStateCache state_cache;
-  const uint32_t vertex_hash = renodx::utils::state::GetCurrentShaderHash(
-      cmd_list, reshade::api::pipeline_stage::vertex_shader, &state_cache);
-  const uint32_t pixel_hash = renodx::utils::state::GetCurrentShaderHash(
-      cmd_list, reshade::api::pipeline_stage::pixel_shader, &state_cache);
-  if (::mgsv::rendering::draw_roles::IdentifyVelocityProducer(vertex_hash, pixel_hash) != ::mgsv::rendering::draw_roles::VelocityProducer::CAMERA) return false;
-
-  const runtime::coordinator::ExecutionGuard execution_guard;
-  const auto velocity_rtv = renodx::utils::state::GetRenderTarget(cmd_list, 0u);
-  // The lighting history tracks this capture through its own submissions.
-  // Without reconstruction the scene has no jitter, so no camera is attached.
-  if (!runtime::state::IsEnabled()) {
-    auto motion = inputs::CaptureMotion(cmd_list, velocity_rtv);
-    lighting::temporal_inputs::Record(cmd_list, {
-                                                    .device = device,
-                                                    .generation = motion.generation,
-                                                    .motion = std::move(motion),
-                                                    .velocity_projection_jitter_scale = 0.f,
-                                                    .jitter_valid = true,
-                                                    .kind = lighting::temporal_inputs::ProducerKind::MOTION,
-                                                });
-    return false;
-  }
-  auto* data = ::mgsv::inputs::descriptor_tracker::Get(cmd_list);
-  if (data == nullptr) return false;
-  auto captured = runtime::input_capture::CaptureCameraMotionLocked(cmd_list, *data, velocity_rtv);
-  const auto& camera = captured.camera;
-  lighting::temporal_inputs::Record(cmd_list, {
-                                                  .device = device,
-                                                  .generation = captured.motion.generation,
-                                                  .motion = std::move(captured.motion),
-                                                  .motion_jitter_uv = {camera.jitter_uv_x, camera.jitter_uv_y},
-                                                  .velocity_projection_jitter_scale = 1.f,
-                                                  .camera_publication = camera.publication_sequence,
-                                                  .camera_generation = camera.reset_generation,
-                                                  .camera_sample = camera.sample_index,
-                                                  .jitter_valid = camera.valid && camera.camera_matrix_valid,
-                                                  .kind = lighting::temporal_inputs::ProducerKind::MOTION,
-                                              });
-  return false;
-}
-
-}  // namespace mgsv::game::reconstruction
 
 namespace mgsv::reconstruction::settings {
 
@@ -256,11 +200,11 @@ inline void TransitionTemporalMode(
     projection_jitter::CancelProductionRestorationCheck();
   }
 
-  const coordinator::ExecutionGuard execution_guard;
+  const rendering::submission::ExecutionGuard execution_guard;
   // Present calls this again once the DLSS runtime is ready.
   if (mode == state::TemporalMode::NVIDIA_DLSS && !dlss::runtime_ready.load(std::memory_order_acquire)) return;
   const camera_state::PublicationWriterGuard publication_guard;
-  coordinator::ResetTemporalStateWithPublicationLocked(reason);
+  dispatch::ResetTemporalStateWithPublicationLocked(reason);
   if (enabled) {
     projection_jitter::CancelProductionRestorationCheck();
     state::SetTemporalMode(mode);
@@ -287,17 +231,17 @@ inline void TransitionDlssModel(float value, const char* reason) {
   if (dlss::GetModel() == model) return;
   dlss::SetModel(model);
   if (state::GetTemporalMode() == state::TemporalMode::NVIDIA_DLSS) {
-    const coordinator::ExecutionGuard execution_guard;
+    const rendering::submission::ExecutionGuard execution_guard;
     const camera_state::PublicationWriterGuard publication_guard;
-    coordinator::ResetTemporalStateWithPublicationLocked(reason);
+    dispatch::ResetTemporalStateWithPublicationLocked(reason);
   }
   const auto* option = dlss::FindModelOption(model);
   logging::Info("NVIDIA DLSS model changed model=", option == nullptr ? "unknown" : option->label);
 }
 
 inline void InvalidateHistoryForSetting(const char* reason) {
-  const coordinator::ExecutionGuard execution_guard;
-  coordinator::ResetTemporalState(reason);
+  const rendering::submission::ExecutionGuard execution_guard;
+  dispatch::ResetTemporalState(reason);
 }
 
 // Copies the saved settings under the settings mutex, then applies them. Runs
@@ -341,7 +285,7 @@ inline void ApplySettingsSnapshot(const settings::State& settings_state) {
   // Take the locks in the order documented on RuntimeTransitionGuard.
   const std::unique_lock settings_lock(renodx::utils::mutex::global_mutex);
   const RuntimeTransitionGuard transition_guard;
-  const coordinator::ExecutionGuard execution_guard;
+  const rendering::submission::ExecutionGuard execution_guard;
   const camera_state::PublicationWriterGuard publication_guard;
   bool history_settings_changed = state::GetClipTightness() != std::clamp(snapshot.clip_tightness, 0.f, 1.f)
                                   || state::GetHistoryClipStrength()
@@ -363,7 +307,7 @@ inline void ApplySettingsSnapshot(const settings::State& settings_state) {
 
 #endif
   if (history_settings_changed) {
-    coordinator::ResetTemporalStateWithPublicationLocked("settings synchronized");
+    dispatch::ResetTemporalStateWithPublicationLocked("settings synchronized");
   }
 }
 
@@ -380,9 +324,9 @@ inline void OnDestroyDevice(reshade::api::device* device) noexcept {
   try {
     if (device->get_api() != reshade::api::device_api::d3d11) return;
     {
-      const coordinator::ExecutionGuard execution_guard;
-      if (coordinator::IsForeignDevice(device)) return;
-      coordinator::device_teardown_pending = true;
+      const rendering::submission::ExecutionGuard execution_guard;
+      if (dispatch::IsForeignDevice(device)) return;
+      dispatch::device_teardown_pending = true;
     }
     // Projection hooks remain installed across device recreation. Stop new
     // jitter and reconstruction work before releasing their resources.
@@ -393,7 +337,7 @@ inline void OnDestroyDevice(reshade::api::device* device) noexcept {
         "device destroyed",
         true,
         false);
-    coordinator::UninstallTemporalSubmissionBridge();
+    rendering::submission::Uninstall();
     logging::Info("destroy device");
     {
       const std::unique_lock lock(resolution::sizing_state.mutex);
@@ -401,10 +345,12 @@ inline void OnDestroyDevice(reshade::api::device* device) noexcept {
       resolution::sizing_state.presentation_generation = 0u;
       resolution::sizing_state.requested = {};
       resolution::sizing_state.actual = {};
+      resolution::sizing_state.engine_wanted = {};
+      resolution::sizing_state.last_written = {};
       ++resolution::sizing_state.generation;
     }
-    const coordinator::ExecutionGuard execution_guard;
-    coordinator::Destroy(device);
+    const rendering::submission::ExecutionGuard execution_guard;
+    dispatch::Destroy(device);
   } catch (const std::exception& error) {
     // A failed GPU wait or SDK release stops cleanup with the remaining state
     // intact. Do not free potentially live resources or throw into ReShade.
@@ -433,10 +379,10 @@ inline void OnPresent(
   (void)dirty_rects;
   auto* device = (queue != nullptr ? queue->get_device() : nullptr);
   {
-    const coordinator::ExecutionGuard execution_guard;
+    const rendering::submission::ExecutionGuard execution_guard;
     // Concurrent first Presents must not bind reconstruction to a different input device.
     if (!inputs::IsSelectedDevice(device)) return;
-    if (!coordinator::BindRuntimeDevice(device)) return;
+    if (!dispatch::BindRuntimeDevice(device)) return;
     dlss::CheckAdapter(device);
   }
   if (dlss::ConsumeFatalFailure()
@@ -451,7 +397,7 @@ inline void OnPresent(
         true);
   }
   transitions::ApplySettingsSnapshot(*active_settings);
-  if (coordinator::submission_failure_pending.exchange(false, std::memory_order_acq_rel)
+  if (dispatch::submission_failure_pending.exchange(false, std::memory_order_acq_rel)
       && state::IsEnabled()) {
     settings::UpdateSetting(
         active_settings->temporal_mode_setting,
@@ -464,16 +410,16 @@ inline void OnPresent(
   }
   bool activation_serviced = false;
   {
-    const coordinator::ExecutionGuard execution_guard;
+    const rendering::submission::ExecutionGuard execution_guard;
     const bool bridge_required = state::IsEnabled()
                                  || lighting::temporal_inputs::enabled.load(std::memory_order_acquire)
-                                 || coordinator::shadow_batch_requested.load(std::memory_order_acquire)
+                                 || rendering::submission::install_requested.load(std::memory_order_acquire)
                                  || (dlss::activation_requested.load(std::memory_order_acquire)
                                      && dlss::ActivationPending());
-    const bool bridge_ready = !bridge_required || coordinator::EnsureTemporalSubmissionBridge(device);
+    const bool bridge_ready = !bridge_required || rendering::submission::Install(device);
     if (!bridge_ready) {
       logging::Warn("failed to install temporal submission bridge");
-      coordinator::submission_failure_pending.store(true, std::memory_order_release);
+      dispatch::submission_failure_pending.store(true, std::memory_order_release);
     }
     if (dlss::activation_requested.load(std::memory_order_acquire) && dlss::ActivationPending()) {
       activation_serviced = true;
@@ -498,25 +444,35 @@ inline void OnPresent(
   if (activation_serviced) {
     transitions::ApplySettingsSnapshot(*active_settings);
   }
-  const coordinator::ExecutionGuard execution_guard;
+  const rendering::submission::ExecutionGuard execution_guard;
   const auto mode = state::GetTemporalMode();
   // Initialization can finish after the user cancels or selects another method.
   // Release resources based on the active method, never a pending UI request.
   // The new method allocates its GPU history at its first dispatch.
   try {
-    coordinator::ReleaseInactiveResources(device, mode);
+    dispatch::ReleaseInactiveResources(device, mode);
   } catch (const std::exception& error) {
     static uint64_t last_release_failure_log = std::numeric_limits<uint64_t>::max();
     if (logging::ShouldLogFrame(state::CurrentFrameToken(), last_release_failure_log)) {
       logging::Warn("reconstruction method teardown failed: ", error.what());
     }
-    coordinator::submission_failure_pending.store(true, std::memory_order_release);
+    dispatch::submission_failure_pending.store(true, std::memory_order_release);
     return;
   }
-  const auto display = renodx::utils::swapchain::GetBackBufferDesc(device);
-  const auto previous_plan = resolution::Read();
-  auto plan = resolution::MakePlan({.width = display.texture.width, .height = display.texture.height}, mode,
-                                   resolution::quality.load(std::memory_order_acquire));
+  // The output is the render size the game requests. Until the Start hook has
+  // selected the backend, the back buffer's size stands in.
+  resolution::Size output;
+  resolution::Plan previous_plan;
+  {
+    const std::shared_lock lock(resolution::sizing_state.mutex);
+    output = resolution::sizing_state.engine_wanted;
+    previous_plan = resolution::sizing_state.requested;
+  }
+  if (output.width == 0u || output.height == 0u) {
+    const auto back_buffer = renodx::utils::swapchain::GetBackBufferDesc(device);
+    output = {.width = back_buffer.texture.width, .height = back_buffer.texture.height};
+  }
+  auto plan = resolution::MakePlan(output, mode, resolution::quality.load(std::memory_order_acquire));
   if (!resolution::installed.load(std::memory_order_acquire) || resolution::failed.load(std::memory_order_acquire)) {
     plan = resolution::MakePlan(plan.output, mode, resolution::Quality::NATIVE_AA);
   }
@@ -562,7 +518,7 @@ inline void OnPresent(
   static uint64_t observed_size_generation = 0u;
   if (size_changed || observed_size_generation != size_generation) {
     observed_size_generation = size_generation;
-    coordinator::ResetTemporalState("render/output size changed");
+    dispatch::ResetTemporalState("render/output size changed");
     if (previous_plan.IsScaled() && !plan.IsScaled()) {
       output_size::Reset();
     }
@@ -597,16 +553,63 @@ inline void OnPresent(
   state::BeginFrame();
 }
 
-// Called by native_post_filter at each cut: schedules the presented main
+// Called by engine::motion_vectors on the thread building a view, after the
+// engine has recorded the view's camera-velocity pass and before it ends that
+// pass, so the pass's target and inputs are still bound. Records the motion
+// and camera the lighting history uses; reconstruction takes its own inputs
+// where post-processing starts.
+inline void OnCameraVelocityRecorded() {
+  if (!lighting::temporal_inputs::enabled.load(std::memory_order_acquire)) return;
+  try {
+    const auto context = engine::views::Unwrap(engine::views::GetRecording().d3d_context);
+    // The engine records the pass on a deferred context.
+    if (context == nullptr || context->GetType() != D3D11_DEVICE_CONTEXT_DEFERRED) return;
+    auto* cmd_list = rendering::submission::FindRecordingList(context.Get());
+    if (cmd_list == nullptr) return;
+    const rendering::submission::ExecutionGuard execution_guard;
+    const auto images = engine::render_targets::ReadFrameImages();
+    auto motion = inputs::CaptureMotion(cmd_list, images[static_cast<size_t>(engine::render_targets::FrameTarget::VELOCITY)].texture.Get());
+    // The lighting history tracks this capture through its own submissions.
+    // Without reconstruction the scene has no jitter, so no camera is attached
+    // and the jitter counts as known. With it, a failed capture carries no
+    // camera and no valid jitter.
+    const bool reconstructing = state::IsEnabled();
+    lighting::temporal_inputs::Producer producer = {
+        .device = cmd_list->get_device(),
+        .generation = motion.generation,
+        .motion = std::move(motion),
+        .velocity_projection_jitter_scale = (reconstructing ? 1.f : 0.f),
+        .jitter_valid = !reconstructing,
+        .kind = lighting::temporal_inputs::ProducerKind::MOTION,
+    };
+    if (reconstructing && producer.motion.velocity != nullptr) {
+      const auto camera = camera_state::GetForCapture();
+      producer.motion_jitter_uv = {camera.jitter_uv_x, camera.jitter_uv_y};
+      producer.camera_publication = camera.publication_sequence;
+      producer.camera_generation = camera.reset_generation;
+      producer.camera_sample = camera.sample_index;
+      producer.jitter_valid = camera.valid && camera.camera_matrix_valid;
+    }
+    lighting::temporal_inputs::Record(cmd_list, std::move(producer));
+  } catch (const std::exception& error) {
+    // The engine continues its pass; the lighting history gets no motion for this view.
+    static std::atomic_flag reported;
+    if (!reported.test_and_set(std::memory_order_relaxed)) {
+      logging::Warn("recording the camera-velocity pass failed: ", error.what());
+    }
+  }
+}
+
+// Called by engine::post_filter at each cut: schedules the presented main
 // view's reconstruction in the list the engine has just begun for its
 // post-processing.
 inline void OnPostFilterStart(ID3D11DeviceContext* context) {
   if (!state::IsEnabled()) return;
   try {
-    auto* cmd_list = coordinator::FindRecordingList(context);
+    auto* cmd_list = rendering::submission::FindRecordingList(context);
     if (cmd_list == nullptr) return;
-    const coordinator::ExecutionGuard execution_guard;
-    coordinator::ScheduleSceneLocked(cmd_list);
+    const rendering::submission::ExecutionGuard execution_guard;
+    dispatch::ScheduleSceneLocked(cmd_list);
   } catch (const std::exception& error) {
     // The engine continues its post-processing; this scene is not reconstructed.
     static std::atomic_flag reported;
@@ -633,12 +636,12 @@ inline void Use(DWORD fdw_reason, const settings::State& settings_state) {
       resolution::Use(fdw_reason);
       mip_bias::Use(fdw_reason);
 
-      // Until the submission bridge is installed, the coordinator's handlers
-      // return before any QueryInterface call or coordinator lock.
-      reshade::register_event<reshade::addon_event::init_command_list>(coordinator::OnInitCommandList);
-      reshade::register_event<reshade::addon_event::destroy_command_list>(coordinator::OnDestroyCommandList);
+      // Until the submission bridge is installed, its handlers return before
+      // any QueryInterface call or lock.
+      reshade::register_event<reshade::addon_event::init_command_list>(rendering::submission::OnInitCommandList);
+      reshade::register_event<reshade::addon_event::destroy_command_list>(rendering::submission::OnDestroyCommandList);
       reshade::register_event<reshade::addon_event::execute_secondary_command_list>(
-          coordinator::OnExecuteSecondaryCommandList);
+          rendering::submission::OnExecuteSecondaryCommandList);
       reshade::register_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
       reshade::register_event<reshade::addon_event::present>(OnPresent);
       break;
@@ -654,10 +657,10 @@ inline void Use(DWORD fdw_reason, const settings::State& settings_state) {
       resolution::Use(fdw_reason);
       mip_bias::Use(fdw_reason);
 
-      reshade::unregister_event<reshade::addon_event::init_command_list>(coordinator::OnInitCommandList);
-      reshade::unregister_event<reshade::addon_event::destroy_command_list>(coordinator::OnDestroyCommandList);
+      reshade::unregister_event<reshade::addon_event::init_command_list>(rendering::submission::OnInitCommandList);
+      reshade::unregister_event<reshade::addon_event::destroy_command_list>(rendering::submission::OnDestroyCommandList);
       reshade::unregister_event<reshade::addon_event::execute_secondary_command_list>(
-          coordinator::OnExecuteSecondaryCommandList);
+          rendering::submission::OnExecuteSecondaryCommandList);
       reshade::unregister_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
       reshade::unregister_event<reshade::addon_event::present>(OnPresent);
       break;

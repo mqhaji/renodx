@@ -24,11 +24,11 @@
 #include <include/reshade.hpp>
 
 #include "../../assets/noise/fast_noise_gr8.h"
-#include "../../reconstruction/coordinator.hpp"
 #include "../../rendering/d3d11_state.hpp"
 #include "../../rendering/d3d12_compute.hpp"
 #include "../../rendering/nrd.hpp"
 #include "../../rendering/producer_records.hpp"
+#include "../../rendering/submission.hpp"
 #include "../environment_specular.hpp"
 #include "../indirect_lighting_mode.hpp"
 #include "probe_api.hpp"
@@ -234,8 +234,8 @@ struct Runtime {
   bool report_probe_submission = false;
 };
 
-// The reconstruction coordinator never runs this and reconstruction at the same
-// time. Both share one D3D12 device, queue, and fence pair, but have separate
+// The submission execution lock keeps this and reconstruction from running at
+// the same time. Both share one D3D12 device, queue, and fence pair, but have separate
 // command slots.
 static Runtime runtime;
 
@@ -901,7 +901,7 @@ inline bool BeginComposite(reshade::api::command_list* cmd_list) {
   }
   if (source != nullptr && result != nullptr) {
     outputs = {result->images[0].srv.Get(), result->images[1].srv.Get(), result->environment.srv.Get(), result->ready.srv.Get()};
-    const auto trace_scene = [source, material_resource, result](auto* submitted, bool) {
+    const auto trace_scene = [source, material_resource, result](auto* submitted, const rendering::submission::Execution&) {
       try {
         // Look up this scene's inputs at submission, not at worker recording
         // time. Different scenes can record into the same pooled material target.
@@ -936,7 +936,7 @@ inline bool BeginComposite(reshade::api::command_list* cmd_list) {
         if (!reported.test_and_set()) reshade::log::message(reshade::log::level::error, error.what());
       }
     };
-    if (!reconstruction::coordinator::ScheduleLighting(cmd_list, trace_scene)) {
+    if (!rendering::submission::Schedule(cmd_list, {.run = trace_scene})) {
       // native_chain::OnTrace already cleared readiness in GPU order, so the
       // composite keeps environment light.
       Report("MgsvReflections: could not insert work at native reflection composition");

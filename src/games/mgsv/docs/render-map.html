@@ -2589,7 +2589,7 @@
           <h3>Ordered submission and execution</h3>
           <ol>
             <li>The native walk submits completed lists in tree order: a node, its child, then its next sibling.</li>
-            <li>The coordinator preserves prefixes and remainders around custom immediate-context work.</li>
+            <li>The submission bridge preserves prefixes and remainders around custom immediate-context work.</li>
             <li>Successful reconstruction installs output, then commits its camera-history endpoint.</li>
             <li>Remaining post-processing, UI, and display work consume the retained output. GPU queries can establish completion.</li>
           </ol>
@@ -2597,7 +2597,7 @@
       </div>
       <p>A worker finishing display recording before a flare worker is a supported order. Earlier native clears move into the output producer when its allocation is acquired. The producer keeps them until reuse, allowing that late worker to initialize the enlarged flare layer. Startup scenes that never acquire output retire their pending clear records at display completion.</p>
       <p>Output reuse waits for recording contexts, open sequences, and native command lists to release their references. Compatible spare allocations support concurrent scenes. A cached list replay preserves native work. Reconstruction fills its output from the native image for that repeated observation, Bend recomputes contacts, and indirect lighting consumes its copy association once.</p>
-      <p><a href="../engine/views.hpp">Native ownership adapter</a> · <a href="../rendering/producer_records.hpp">Submitted producer records</a> · <a href="../reconstruction/coordinator.hpp">Submission coordinator</a> · <a href="../reconstruction/output_size/resources.hpp">Output lifetime and clear records</a></p>
+      <p><a href="../engine/views.hpp">Native ownership adapter</a> · <a href="../rendering/producer_records.hpp">Submitted producer records</a> · <a href="../rendering/submission.hpp">Submission bridge</a> · <a href="../reconstruction/output_size/resources.hpp">Output lifetime and clear records</a></p>
 
       <h3 id="tree-rules">How the tree is built and walked</h3>
       <p>These rules come from the retail decompiles. The generator asserts the ones a capture can show: child and sibling placement, walk order, and that recording ends before the walk. Engine names such as <code>CommandListNode::Branch</code> come from a community symbol database for another build and are used only where the retail function's logic matches.</p>
@@ -2607,7 +2607,7 @@
         <li><strong>Branching.</strong> When work goes to a job, <code>DgDx11::Branch</code> ends the open recording and <code>CommandListNode::Branch</code> gives the job a new child, then inserts a continuation sibling after the current node. With no recording open, the job takes the continuation itself and <code>Split</code> inserts another. The first job after an inline list is therefore that node's child, and later jobs are siblings.</li>
         <li><strong>Jobs.</strong> A job wraps its copied subcontext in a command buffer, records on its own deferred context, and can branch the same way. The shadowed-light job does this for every light. Eighteen threads recorded lists in each capture, including the thread that later ran the walk.</li>
         <li><strong>Walk.</strong> After every list is finished, <code>DgDx11::Kick</code> walks from the root: submit the node's list if it is ready, walk its child, then move to its sibling. The walk ran on a pool thread, a different one in each capture. One list from a separate thread executes first; the probe saw no draw, dispatch, clear, or copy in it.</li>
-        <li><strong>Addon cuts.</strong> At an insertion point the coordinator finishes the native list early and queues its own work. At submission it executes that prefix, runs the immediate-context work, and lets the native remainder follow. A cut node therefore submits two or three lists.</li>
+        <li><strong>Addon cuts.</strong> At an insertion point the submission bridge finishes the native list early and queues its own work. At submission it executes that prefix, runs the immediate-context work, and lets the native remainder follow. A cut node therefore submits two or three lists.</li>
       </ol>
 
       <h3>Verified executable boundaries</h3>

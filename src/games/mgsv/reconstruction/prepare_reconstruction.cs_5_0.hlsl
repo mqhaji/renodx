@@ -4,7 +4,7 @@
 #include "../rendering/motion.hlsli"
 
 // Input preparation shared by every reconstruction method. Runs at render size
-// on the game's D3D11 immediate context, when the coordinator executes the cut.
+// on the game's D3D11 immediate context, when the scene's job runs at its cut.
 // Reads the engine's encoded scene color, composed motion, depth, and object
 // motion (its mask in .r, its motion in .ba). Writes the shared D3D12 inputs:
 // linear color with the game's alpha, jitter-free motion, a depth copy, and for

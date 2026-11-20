@@ -12,24 +12,17 @@
 // #define DEBUG_LEVEL_3
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <cstdint>
-#include <functional>
 #include <mutex>
 #include <shared_mutex>
 #include <span>
 #include <string>
 #include <string_view>
-#include <type_traits>
-#include <utility>
-#include <vector>
 
 #include <windows.h>
 
-#include <d3d11.h>
 #include <dxgi.h>
-#include <wrl/client.h>
 
 #include <deps/imgui/imgui.h>
 #include <include/reshade.hpp>
@@ -42,7 +35,6 @@
 
 #include "../../mods/shader.hpp"
 #include "../../mods/swapchain_v2.hpp"
-#include "../../utils/command_action.hpp"
 #include "../../utils/mutex.hpp"
 #include "../../utils/random.hpp"
 #include "../../utils/resource.hpp"
@@ -54,6 +46,7 @@
 #include "engine/image.hpp"
 #include "engine/local_lights.hpp"
 #include "engine/motion_vectors.hpp"
+#include "engine/post_filter.hpp"
 #include "engine/render_targets.hpp"
 #include "engine/views.hpp"
 #include "lighting/environment_specular.hpp"
@@ -68,11 +61,10 @@
 #include "materials/capture.hpp"
 #include "output/output.hpp"
 #include "postprocess/bloom/bloom.hpp"
-#include "reconstruction/coordinator.hpp"
 #include "reconstruction/d3d12.hpp"
+#include "reconstruction/dispatch.hpp"
 #include "reconstruction/input_capture.hpp"
 #include "reconstruction/logging.hpp"
-#include "reconstruction/native_post_filter.hpp"
 #include "reconstruction/output_size/resources.hpp"
 #include "reconstruction/output_size/runtime.hpp"
 #include "reconstruction/projection_jitter.hpp"
@@ -80,10 +72,10 @@
 #include "reconstruction/runtime.hpp"
 #include "reconstruction/settings.hpp"
 #include "reconstruction/state.hpp"
-#include "rendering/draw_roles.hpp"
 #include "rendering/inputs.hpp"
 #include "rendering/probe_controls.hpp"
 #include "rendering/producer_records.hpp"
+#include "rendering/submission.hpp"
 #include "settings.hpp"
 #include "shaders.hpp"
 #include "shared.h"
@@ -359,8 +351,8 @@ void OnPresetOff() {
 void UpdateNativePresentation(reshade::api::swapchain* swapchain) {
   if (mgsv::engine::views::Install()) {
     mgsv::engine::views::SetPresentation(reinterpret_cast<IDXGISwapChain*>(swapchain->get_native()));  // NOLINT(performance-no-int-to-ptr)
-    mgsv::reconstruction::native_post_filter::Install(mgsv::reconstruction::OnPostFilterStart);
-    mgsv::engine::motion_vectors::Install();
+    mgsv::engine::post_filter::Install(mgsv::reconstruction::OnPostFilterStart);
+    mgsv::engine::motion_vectors::Install(mgsv::reconstruction::OnCameraVelocityRecorded);
     mgsv::reconstruction::logging::Info("native view ownership ready for selected presentation");
   } else {
     mgsv::reconstruction::logging::Warn("native view ownership unavailable: ", mgsv::engine::views::installation_status);
@@ -377,7 +369,7 @@ void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
 }
 
 void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool resize) {
-  const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
+  const mgsv::rendering::submission::ExecutionGuard execution_guard;
   if (!mgsv::inputs::IsSelectedSwapchain(swapchain)) return;
   mgsv::engine::views::SetPresentation(nullptr);
   mgsv::inputs::OnDestroySwapchain(swapchain, resize);
@@ -386,39 +378,10 @@ void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool resize) {
   mgsv::lighting::source_preparation::Reset();
   mgsv::lighting::ambient_diffuse::Reset();
   mgsv::lighting::ResetNativeLightViews(swapchain->get_device());
-  mgsv::reconstruction::coordinator::ResetTemporalState("input swapchain retired");
+  mgsv::reconstruction::dispatch::ResetTemporalState("input swapchain retired");
   mgsv::reconstruction::output_size::Reset();
-  // Cancel the added work of every pending cut but keep the cuts, so the game's prefix and
-  // post lists still run. The moved references are released on return, outside the lock.
-  std::vector<std::array<Microsoft::WRL::ComPtr<ID3D11DeviceChild>, 5>> retired_resources;
-  std::vector<std::function<void(reshade::api::command_list*, bool)>> retired_lighting;
-  {
-    const std::unique_lock submission_lock(mgsv::reconstruction::coordinator::submission.mutex);
-    for (auto& pending : mgsv::reconstruction::coordinator::submission.pending_dispatches) {
-      retired_resources.push_back({
-          std::move(pending.color_srv),
-          std::move(pending.velocity_srv),
-          std::move(pending.depth_srv),
-          std::move(pending.object_velocity_srv),
-          std::move(pending.output_resource),
-      });
-      pending.inputs = {};
-      if (pending.is_lighting) retired_lighting.push_back(std::move(pending.lighting_callback));
-    }
-  }
+  mgsv::rendering::submission::CancelJobs();
 }
-
-// At the game's camera-velocity draw, record the motion and camera that lighting
-// history uses; the draw itself always runs. This reads the draw's bindings, so it
-// must run before any action that redirects the draw. Keeping both in
-// command_action preserves that order even when the DevKit owns the draw hook.
-constexpr auto RECONSTRUCTION_DRAW = [](auto& command) {
-  using Context = std::remove_reference_t<decltype(command)>;
-  if (command.IsDispatch()) return renodx::utils::command_action::CallbackResult<Context>{};
-  return renodx::utils::command_action::CallbackResult<Context>{
-      .bypass = mgsv::game::reconstruction::HandleDraw(command.cmd_list),
-  };
-};
 
 void OnPresent(
     reshade::api::command_queue* queue,
@@ -437,7 +400,7 @@ void OnPresent(
     lighting_enabled = shader_injection.indirect_lighting_mode >= 0.5f && shader_injection.tone_map_type != 0.f;
   }
   {
-    const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
+    const mgsv::rendering::submission::ExecutionGuard execution_guard;
     const bool was_selected = mgsv::inputs::IsSelectedSwapchain(swapchain);
     mgsv::inputs::OnPresent(queue, swapchain, source_rect, dest_rect, dirty_rect_count, dirty_rects);
     if (mgsv::inputs::IsSelectedSwapchain(swapchain)) {
@@ -488,9 +451,9 @@ void OnDestroyDevice(reshade::api::device* device) {
   if (!mgsv::inputs::IsSelectedDevice(device)) return;
   // Remove these hooks before taking the execution lock: a cut in progress
   // inside them can be waiting for that lock.
-  mgsv::reconstruction::native_post_filter::Detach();
+  mgsv::engine::post_filter::Detach();
   mgsv::engine::motion_vectors::Detach();
-  const mgsv::reconstruction::coordinator::ExecutionGuard execution_guard;
+  const mgsv::rendering::submission::ExecutionGuard execution_guard;
   mgsv::engine::views::Shutdown();
   mgsv::lighting::reflections::Destroy();
   mgsv::inputs::OnDestroyDevice(device);
@@ -533,7 +496,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
                  mgsv::engine::views::REQUIREMENT,
                  mgsv::engine::render_targets::REQUIREMENT,
                  mgsv::engine::motion_vectors::REQUIREMENT,
-                 mgsv::reconstruction::native_post_filter::REQUIREMENT,
+                 mgsv::engine::post_filter::REQUIREMENT,
                  mgsv::reconstruction::projection_jitter::REQUIREMENT,
                  mgsv::reconstruction::resolution::REQUIREMENT,
                  mgsv::engine::local_lights::REQUIREMENT,
@@ -597,7 +560,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       }
 
       // Swapchain selection, Present and device teardown for the whole mod.
-      reshade::register_event<reshade::addon_event::copy_resource>(mgsv::rendering::draw_roles::OnCopySceneResource);
+      reshade::register_event<reshade::addon_event::copy_resource>(mgsv::reconstruction::output_size::OnCopyResource);
       reshade::register_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);
       reshade::register_event<reshade::addon_event::destroy_swapchain>(OnDestroySwapchain);
       reshade::register_event<reshade::addon_event::present>(OnPresent);
@@ -605,11 +568,11 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
 
       break;
     case DLL_PROCESS_DETACH:
-      mgsv::reconstruction::native_post_filter::Detach();
+      mgsv::engine::post_filter::Detach();
       mgsv::engine::motion_vectors::Detach();
       mgsv::engine::views::Shutdown();
       reshade::unregister_overlay(nullptr, ADDON_SETTINGS);
-      reshade::unregister_event<reshade::addon_event::copy_resource>(mgsv::rendering::draw_roles::OnCopySceneResource);
+      reshade::unregister_event<reshade::addon_event::copy_resource>(mgsv::reconstruction::output_size::OnCopyResource);
       reshade::unregister_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);
       reshade::unregister_event<reshade::addon_event::destroy_swapchain>(OnDestroySwapchain);
       reshade::unregister_event<reshade::addon_event::present>(OnPresent);
@@ -669,8 +632,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     reshade::register_event<reshade::addon_event::init_device>(mgsv::lighting::material_inputs::OnInitDevice);
     reshade::register_event<reshade::addon_event::destroy_device>(mgsv::lighting::environment_specular::OnDestroyDevice);
     reshade::register_event<reshade::addon_event::destroy_device>(mgsv::lighting::material_inputs::OnDestroyDevice);
-    reshade::register_event<reshade::addon_event::init_command_list>(mgsv::inputs::descriptor_tracker::OnInitCommandList);
-    reshade::register_event<reshade::addon_event::init_command_list>(mgsv::rendering::draw_roles::OnInitBloomCommandList);
+    reshade::register_event<reshade::addon_event::init_command_list>(mgsv::bloom::OnInitCommandList);
     reshade::register_event<reshade::addon_event::init_command_list>(mgsv::lighting::environment_specular::OnInitCommandList);
     reshade::register_event<reshade::addon_event::init_command_list>(mgsv::lighting::material_inputs::OnInitCommandList);
     reshade::register_event<reshade::addon_event::init_command_list>(mgsv::lighting::source_preparation::OnInitCommandList);
@@ -696,11 +658,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     reshade::register_event<reshade::addon_event::destroy_resource>(mgsv::lighting::source_preparation::OnDestroyResource);
     reshade::register_event<reshade::addon_event::destroy_resource>(mgsv::lighting::ambient_diffuse::OnDestroyResource);
     reshade::register_event<reshade::addon_event::clear_render_target_view>(mgsv::lighting::ambient_diffuse::OnClearRenderTarget);
-    reshade::register_event<reshade::addon_event::destroy_command_list>(mgsv::inputs::descriptor_tracker::OnDestroyCommandList);
-    reshade::register_event<reshade::addon_event::destroy_command_list>(mgsv::rendering::draw_roles::OnDestroyBloomCommandList);
-    reshade::register_event<reshade::addon_event::reset_command_list>(mgsv::inputs::descriptor_tracker::OnResetCommandList);
-    reshade::register_event<reshade::addon_event::reset_command_list>(mgsv::rendering::draw_roles::OnResetBloomCommandList);
-    reshade::register_event<reshade::addon_event::push_descriptors>(mgsv::inputs::descriptor_tracker::OnPushDescriptors);
+    reshade::register_event<reshade::addon_event::destroy_command_list>(mgsv::bloom::OnDestroyCommandList);
+    reshade::register_event<reshade::addon_event::reset_command_list>(mgsv::bloom::OnResetCommandList);
   } else if (fdw_reason == DLL_PROCESS_DETACH) {
     mgsv::lighting::reflections::UseProbe(false);
     mgsv::reconstruction::dx12::UseProbe(false);
@@ -717,8 +676,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     reshade::unregister_event<reshade::addon_event::init_device>(mgsv::lighting::material_inputs::OnInitDevice);
     reshade::unregister_event<reshade::addon_event::destroy_device>(mgsv::lighting::environment_specular::OnDestroyDevice);
     reshade::unregister_event<reshade::addon_event::destroy_device>(mgsv::lighting::material_inputs::OnDestroyDevice);
-    reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::inputs::descriptor_tracker::OnInitCommandList);
-    reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::rendering::draw_roles::OnInitBloomCommandList);
+    reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::bloom::OnInitCommandList);
     reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::lighting::environment_specular::OnInitCommandList);
     reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::lighting::material_inputs::OnInitCommandList);
     reshade::unregister_event<reshade::addon_event::init_command_list>(mgsv::lighting::source_preparation::OnInitCommandList);
@@ -744,11 +702,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     reshade::unregister_event<reshade::addon_event::destroy_resource>(mgsv::lighting::source_preparation::OnDestroyResource);
     reshade::unregister_event<reshade::addon_event::destroy_resource>(mgsv::lighting::ambient_diffuse::OnDestroyResource);
     reshade::unregister_event<reshade::addon_event::clear_render_target_view>(mgsv::lighting::ambient_diffuse::OnClearRenderTarget);
-    reshade::unregister_event<reshade::addon_event::destroy_command_list>(mgsv::inputs::descriptor_tracker::OnDestroyCommandList);
-    reshade::unregister_event<reshade::addon_event::destroy_command_list>(mgsv::rendering::draw_roles::OnDestroyBloomCommandList);
-    reshade::unregister_event<reshade::addon_event::reset_command_list>(mgsv::inputs::descriptor_tracker::OnResetCommandList);
-    reshade::unregister_event<reshade::addon_event::reset_command_list>(mgsv::rendering::draw_roles::OnResetBloomCommandList);
-    reshade::unregister_event<reshade::addon_event::push_descriptors>(mgsv::inputs::descriptor_tracker::OnPushDescriptors);
+    reshade::unregister_event<reshade::addon_event::destroy_command_list>(mgsv::bloom::OnDestroyCommandList);
+    reshade::unregister_event<reshade::addon_event::reset_command_list>(mgsv::bloom::OnResetCommandList);
   }
   mgsv::reconstruction::Use(fdw_reason, reconstruction_settings);
 
@@ -756,15 +711,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
 
   renodx::mods::swapchain::v2::Use(fdw_reason, &shader_injection);
 
-  if (fdw_reason == DLL_PROCESS_ATTACH) {
-    // Register before renodx::mods::shader::Use, which starts command_action;
-    // it hooks only the draw events that have callbacks at that point. As a
-    // global callback, this runs before the per-shader callbacks of a draw.
-    renodx::utils::command_action::Register(RECONSTRUCTION_DRAW,
-                                            {.command_types = renodx::utils::command_action::COMMAND_TYPE_DIRECT_DRAW | renodx::utils::command_action::COMMAND_TYPE_INDIRECT});
-  } else if (fdw_reason == DLL_PROCESS_DETACH) {
+  if (fdw_reason == DLL_PROCESS_DETACH) {
     mgsv::reconstruction::output_size::Use(fdw_reason);
-    renodx::utils::command_action::Unregister(RECONSTRUCTION_DRAW);
   }
   renodx::mods::shader::Use(fdw_reason, custom_shaders, &shader_injection);
   if (fdw_reason == DLL_PROCESS_ATTACH) {

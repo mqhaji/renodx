@@ -26,11 +26,11 @@
 #include <embed/encode_reconstruction.h>
 #include <embed/prepare_reconstruction.h>
 
+#include "../engine/post_filter.hpp"
 #include "../rendering/d3d12_compute.hpp"
 #include "../rendering/d3d12_timing.hpp"
 #include "frame_inputs.hpp"
 #include "logging.hpp"
-#include "native_post_filter.hpp"
 #include "probe_api.hpp"
 #include "state.hpp"
 
@@ -60,14 +60,14 @@ struct Runtime {
   UINT height = 0u;
 };
 
-// Used only under the coordinator's execution lock, including at Present and
+// Used only under the submission execution lock, including at Present and
 // while DLSS probes the device. Each submission queues a D3D11 wait on the
 // D3D12 work, so the next preparation cannot overwrite inputs D3D12 is still
 // reading.
 static Runtime runtime;
 
 // Live replacement of the preparation shader for the lighting probe
-// (probe_api.hpp). QueueProbeReload stores a request; the coordinator applies
+// (probe_api.hpp). QueueProbeReload stores a request; the scene's dispatch applies
 // it before the next reconstruction.
 struct ProbeUpdate {
   std::vector<uint8_t> code;
@@ -114,7 +114,14 @@ inline void ReadProbeStatus(probe::Status* status) {
   if (status == nullptr) return;
   const std::shared_lock lock(probe_state.mutex);
   *status = probe_state.status;
-  status->post_filter = native_post_filter::ReadStatus();
+  const auto counts = engine::post_filter::ReadCounts();
+  status->post_filter = {
+      .starts = counts.starts,
+      .cuts = counts.cuts,
+      .lists_open_at_start = counts.lists_open_at_start,
+      .unused_starts = counts.unused_starts,
+      .repeated_starts = counts.repeated_starts,
+  };
 }
 
 inline void UseProbe(bool attach) {

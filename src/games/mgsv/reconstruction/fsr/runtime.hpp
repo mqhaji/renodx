@@ -93,7 +93,7 @@ struct Library {
   }
 };
 
-// The coordinator serializes SDK access. Keep the loaded API until device
+// The submission execution lock serializes SDK access. Keep the loaded API until device
 // teardown; switching methods releases the context and its GPU allocations.
 static Library library;
 
@@ -134,7 +134,7 @@ inline void InvalidateHistory() {
 }
 
 // Runs once per reconstructed scene. Loads the DLLs on first use, then records
-// FSR and the shared encoder into the coordinator's single D3D12 submission.
+// FSR and the shared encoder into the scene's single D3D12 submission.
 inline bool Dispatch(const ValidatedFrameInputs& inputs) {
   if (const char* reason = UnavailableReason(); reason != nullptr) throw std::runtime_error(reason);
   if (library.create == nullptr) {

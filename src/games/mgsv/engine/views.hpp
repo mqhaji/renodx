@@ -60,7 +60,6 @@ inline constexpr std::array REQUIRED_ENTRIES = {
 inline constexpr std::array REQUIRED_FIELDS = {
     Field::RENDER_INFO,
     Field::RENDER_VIEWPORTS,
-    Field::BACKEND_OUTPUT_SIZE,
     Field::BACKEND_RENDER_SIZE,
     Field::RENDER_INFO_RENDER_SIZE,
     Field::RENDER_INFO_SWAP_CHAIN,
@@ -116,14 +115,13 @@ struct Owner {
   uint64_t scene = 0u;
   uint64_t membership = 0u;
   // The engine's rendering backend (DgDx11), shared by every renderer; it
-  // holds the render and output sizes.
+  // holds the render size.
   uintptr_t backend = 0u;
   uintptr_t renderer = 0u;
   uintptr_t render_info = 0u;
   uintptr_t viewport = 0u;
   uintptr_t camera = 0u;
   std::array<uint32_t, 2> render_size = {};
-  std::array<uint32_t, 2> output_size = {};
   std::array<int32_t, 4> rectangle = {};
   bool main_view = false;
   bool active_member = false;
@@ -413,7 +411,6 @@ inline void __fastcall BuildRender(uintptr_t renderer, uintptr_t backend, uintpt
         .renderer = renderer,
         .render_info = Read<uintptr_t>(renderer, Value(Field::RENDER_INFO)),
         .render_size = Read<std::array<uint32_t, 2>>(backend, Value(Field::BACKEND_RENDER_SIZE)),
-        .output_size = Read<std::array<uint32_t, 2>>(backend, Value(Field::BACKEND_OUTPUT_SIZE)),
     };
     node_serial = 0u;
     auto [entry, added] = runtime.renders.try_emplace(renderer);

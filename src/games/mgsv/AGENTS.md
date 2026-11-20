@@ -58,3 +58,17 @@ Scope: `src/games/mgsv/**`. This file adds MGSV-specific rules to the [root guid
 - Follow the repository `.clang-format` and `.clang-tidy` rules when writing or editing C++; do not leave new formatting or lint violations for later cleanup.
 - Before handing off changes for commit, run `clang-format` on changed C++ files and `clang-tidy` on their affected translation units using the active compilation database. Include changed headers in the lint scope, fix diagnostics introduced by the changes, and verify formatting with `clang-format --dry-run --Werror`.
 - Keep formatting and lint fixes scoped to the requested changes. Do not weaken checks or add suppressions merely to silence diagnostics; report unavailable tooling, analysis failures, or unresolved diagnostics instead of claiming the checks passed.
+
+## Reviews
+
+A request to review a change means all of the following, without being asked for each part. Fix what the review finds; ask only when a fix would change behavior the user chose or reach outside the change.
+
+- Check every factual statement in the changed comments, documentation, log text and commit message against its source: the code, the engine notes under `docs/`, the installed executable or its decompile, a capture, or the game log. Reword or remove what cannot be shown. A statement about the unmodified game needs evidence that does not come from a run with the mod active.
+- List the assumptions the change depends on and test each one. Name the ones that stay untested.
+- Walk each changed path through its event sequences: startup before a hook is selected, a settings or resolution change, a mode or quality switch, a failure and its recovery, device or swapchain teardown, and two threads arriving in either order. Compare each with the behavior before the change; a difference the change did not intend is a defect.
+- Look for what the change left behind: dead state and branches, checks that can no longer fail, unused includes and engine table fields, stale comments, names that no longer fit, and documentation or local tooling that still describes the old behavior.
+- Judge clarity and organization: a comment says what the code cannot, a file holds what its name says, facts about the executable are verified fields of the engine table, and nothing is more complicated than the behavior needs.
+- Read the text itself: plain American English, no filler such as an emphatic "own" after a possessive, one source line per Markdown paragraph.
+- For anything larger than a few lines, also get an independent review that is given the diff and its intent but not the conclusions. Check each of its findings against the code before acting on it.
+- Finish with the checks in Local workflow (build, `clang-format`, `clang-tidy`, embedded shader bytes, `git diff --check`), and say what was run in the game and what was not. When the changed behavior can be reached from the title screen, run it there before reporting, including one configuration that differs from the user's.
+- Report mistakes first, then what was fixed, what was left and why, and what is still untested. Say how each conclusion is known: read, measured, observed in game, or inferred.

@@ -28,8 +28,8 @@
 #include "../../../../utils/mutex.hpp"
 #include "../../engine/local_lights.hpp"
 #include "../../engine/views.hpp"
-#include "../../reconstruction/coordinator.hpp"
 #include "../../rendering/d3d11_state.hpp"
+#include "../../rendering/submission.hpp"
 #include "../../shared.h"
 
 // Contact shadows (Bend screen-space shadows) run as one batch of lights: one
@@ -344,13 +344,13 @@ inline void BeginLocalLights() {
       const std::shared_lock lock(renodx::utils::mutex::global_mutex);
       if (controls->shadows_mode < 0.5f) return;
     }
-    reconstruction::coordinator::shadow_batch_requested.store(true, std::memory_order_release);
+    rendering::submission::install_requested.store(true, std::memory_order_release);
     const auto scope = engine::views::GetScope();
     if (scope.owner.scene == 0u) return;
     const auto context = engine::views::Unwrap(engine::views::GetRecording().d3d_context);
     // On an immediate context the dispatch would run now, before any light exists.
     if (context == nullptr || context->GetType() != D3D11_DEVICE_CONTEXT_DEFERRED) return;
-    auto* cmd_list = reconstruction::coordinator::FindRecordingList(context.Get());
+    auto* cmd_list = rendering::submission::FindRecordingList(context.Get());
     if (cmd_list == nullptr) return;
     auto* device_state = cmd_list->get_device()->get_private_data<DeviceState>();
     if (device_state == nullptr
@@ -371,9 +371,11 @@ inline void BeginLocalLights() {
       }
       device_state->open.push_back(batch);
     }
-    if (!reconstruction::coordinator::ScheduleLighting(
-            cmd_list, [batch](reshade::api::command_list* submission, bool) { batch->Dispatch(submission); },
-            reconstruction::coordinator::LightingPolicy::SHADOW_BATCH)) {
+    // The batch runs on every execution. Inside another deferred list it is
+    // recorded between its native prefix and remainder, so visibility is
+    // computed again on every replay from that list's current depth.
+    const auto dispatch = [batch](reshade::api::command_list* submission, const auto&) { batch->Dispatch(submission); };
+    if (!rendering::submission::Schedule(cmd_list, {.run = dispatch, .run_merged = dispatch, .leaves_room = true})) {
       const std::unique_lock lock(device_state->mutex);
       std::erase(device_state->open, batch);
       static std::atomic_flag reported;

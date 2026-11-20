@@ -39,6 +39,7 @@
 #include "../../../../utils/hash.hpp"
 #include "../../engine/render_targets.hpp"
 #include "../../engine/shader_names.hpp"
+#include "../../rendering/submission.hpp"
 #include "../logging.hpp"
 #include "../resolution.hpp"
 #include "../state.hpp"
@@ -828,13 +829,29 @@ inline bool Begin(reshade::api::command_list* command_list, const Pass* pass = n
       scissors[i].right = static_cast<LONG>(std::ceil(static_cast<float>(scissors[i].right) * scale_x));
       scissors[i].bottom = static_cast<LONG>(std::ceil(static_cast<float>(scissors[i].bottom) * scale_y));
     }
-    if (display_output && saved->viewport_count == 1u) {
-      viewports[0].TopLeftX = 0.f;
-      viewports[0].TopLeftY = 0.f;
-      viewports[0].Width = static_cast<float>(saved->output->target.width);
-      viewports[0].Height = static_cast<float>(saved->output->target.height);
+    if (display_output && output_size.width != 0u && output_size.height != 0u) {
+      // The game's last pass (DgDx11::EndRender) fits its image into the back
+      // buffer, centered and with the aspect ratio kept; in exclusive full
+      // screen it centers the image unscaled, which is the same rectangle
+      // there. The engine sizes the rectangle from its render size, which is
+      // below the reconstructed image's size here, so the same fit is made for
+      // that image. output_size is this pass's target, the back buffer.
+      const auto& image = saved->output->target;
+      auto fitted = output_size;
+      if (static_cast<uint64_t>(image.width) * output_size.height <= static_cast<uint64_t>(output_size.width) * image.height) {
+        fitted.width = static_cast<uint32_t>(static_cast<uint64_t>(output_size.height) * image.width / image.height);
+      } else {
+        fitted.height = static_cast<uint32_t>(static_cast<uint64_t>(output_size.width) * image.height / image.width);
+      }
+      const auto left = static_cast<LONG>((output_size.width - fitted.width) / 2u);
+      const auto top = static_cast<LONG>((output_size.height - fitted.height) / 2u);
+      const D3D11_RECT area = {.left = left, .top = top, .right = left + static_cast<LONG>(fitted.width), .bottom = top + static_cast<LONG>(fitted.height)};
+      viewports[0].TopLeftX = static_cast<float>(area.left);
+      viewports[0].TopLeftY = static_cast<float>(area.top);
+      viewports[0].Width = static_cast<float>(fitted.width);
+      viewports[0].Height = static_cast<float>(fitted.height);
       if (saved->scissor_count == 1u) {
-        scissors[0] = {.left = 0, .top = 0, .right = static_cast<LONG>(saved->output->target.width), .bottom = static_cast<LONG>(saved->output->target.height)};
+        scissors[0] = area;
       }
     }
     struct ComputeBindings {
@@ -1294,19 +1311,59 @@ inline bool OnClearDepth(reshade::api::command_list* command_list, reshade::api:
   return false;
 }
 
+// The engine copies scene color into TEMPORARY_OUTPUT itself. When the scene is
+// upscaled, the same copy is made at output size; the native copy always runs
+// too. A scaled scene copy that cannot be made turns upscaling off.
 inline bool OnCopyResource(reshade::api::command_list* command_list, reshade::api::resource from, reshade::api::resource to) {
+  if (command_list == nullptr || from.handle == to.handle) return false;
   Recording route;
   const auto output = GetActive(command_list, &route);
   if (output == nullptr || !output->IsScaled()) return false;
-  auto* context = reinterpret_cast<ID3D11DeviceContext*>(command_list->get_native());  // NOLINT(performance-no-int-to-ptr)
-  const bool copied = output->CopySurface(context,
-                                          reinterpret_cast<ID3D11Resource*>(from.handle),  // NOLINT(performance-no-int-to-ptr)
-                                          reinterpret_cast<ID3D11Resource*>(to.handle),    // NOLINT(performance-no-int-to-ptr)
-                                          route.frame, route.producer.get());
-  if (copied) {
+  auto* context = reinterpret_cast<ID3D11DeviceContext*>(command_list->get_native());                                           // NOLINT(performance-no-int-to-ptr)
+  auto* source = reinterpret_cast<ID3D11Resource*>(from.handle);                                                                // NOLINT(performance-no-int-to-ptr)
+  if (output->CopySurface(context, source, reinterpret_cast<ID3D11Resource*>(to.handle), route.frame, route.producer.get())) {  // NOLINT(performance-no-int-to-ptr)
     RetainOutput(command_list, output);
+  } else if (output->IsSceneTarget(source)) {
+    resolution::Fail("cannot forward a scaled scene copy");
   }
-  return copied;
+  return false;
+}
+
+// Called by the submission bridge whenever a deferred context finishes a list.
+// Moves the context's output references onto the finished list.
+inline void OnListFinished(reshade::api::command_list* recording, ID3D11CommandList* finished) {
+  auto* route = recording->get_private_data<Recording>();
+  if (route == nullptr) return;
+  RetainOutput(recording, route->output);
+  if (!route->retained_outputs.empty()) {
+    auto retained = Microsoft::WRL::Make<RetainedOutputs>();
+    retained->outputs = std::move(route->retained_outputs);
+    if (FAILED(finished->SetPrivateDataInterface(OUTPUT_LEASE_GUID, retained.Get()))) {
+      // Stop reusing these allocations. The native list still holds its own
+      // D3D references, and the pool releases its references at reset.
+      const std::unique_lock lock(state.mutex);
+      for (const auto& output : retained->outputs) {
+        output->reusable = false;
+      }
+      resolution::Fail("cannot retain recorded post-processing output");
+    }
+  }
+  // The native list finished even if attachment failed, so its producer
+  // records and pending insertions must still be completed.
+  route->output.reset();
+  route->producer.reset();
+  route->owner = {};
+}
+
+// Called by the submission bridge when a finished list is executed into
+// another deferred list, which then needs every output the first one uses.
+inline void OnListExecutedInto(reshade::api::command_list* deferred, ID3D11CommandList* executed) {
+  Microsoft::WRL::ComPtr<IUnknown> retained;
+  UINT retained_size = sizeof(IUnknown*);
+  if (FAILED(executed->GetPrivateData(OUTPUT_LEASE_GUID, &retained_size, retained.GetAddressOf())) || retained == nullptr) return;
+  for (const auto& output : static_cast<RetainedOutputs*>(retained.Get())->outputs) {
+    RetainOutput(deferred, output);
+  }
 }
 
 // Existing native draw families that need output-size routing. This table
@@ -1462,6 +1519,7 @@ inline constexpr auto DRAW_CALLBACK = [](auto& command) {
 // Register after shader replacements so their draw callbacks run first.
 inline void Use(DWORD reason) {
   if (reason == DLL_PROCESS_ATTACH) {
+    rendering::submission::SetListObservers(OnListFinished, OnListExecutedInto);
     reshade::register_event<reshade::addon_event::init_command_list>(OnInitCommandList);
     reshade::register_event<reshade::addon_event::init_pipeline>(OnInitPipeline);
     reshade::register_event<reshade::addon_event::bind_pipeline>(OnBindPipeline);
@@ -1485,6 +1543,7 @@ inline void Use(DWORD reason) {
     reshade::unregister_event<reshade::addon_event::destroy_command_list>(OnDestroyCommandList);
     reshade::unregister_event<reshade::addon_event::clear_render_target_view>(OnClearRenderTarget);
     reshade::unregister_event<reshade::addon_event::clear_depth_stencil_view>(OnClearDepth);
+    rendering::submission::SetListObservers(nullptr, nullptr);
   }
 }
 

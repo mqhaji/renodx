@@ -29,7 +29,6 @@ inline constexpr uint32_t GBUFFER_MASKED_VELOCITY_VS = 0x7B809E72u;          // 
 inline constexpr uint32_t GBUFFER_VELOCITY_PS = 0x9815404Fu;                 // GBufferVelocity_ps.hlsl
 inline constexpr uint32_t GBUFFER_VELOCITY_VS = 0x1D2531B7u;                 // GBufferVelocity_vs.hlsl
 inline constexpr uint32_t MOTION_BLUR_BAKE_VELOCITY_DEPTH_PS = 0x512E2B48u;  // MotionBlurBakeVelocityDepth_ps.hlsl
-inline constexpr uint32_t MOTION_BLUR_CAMERA_VELOCITY_PS = 0xA13321B6u;      // MotionBlurCameraVelocity_ps.hlsl
 inline constexpr uint32_t MOTION_BLUR_MCGUIRE_PS = 0xBFC7D3C2u;              // MotionBlurMcGuire_ps.hlsl
 inline constexpr uint32_t SSLENS_FLARE_PASS1_PS = 0x1AC1A5EFu;               // SSLensFlarePass1_ps.hlsl
 inline constexpr uint32_t SSLENS_FLARE_PASS2_PS = 0x265053A6u;               // SSLensFlarePass2_ps.hlsl

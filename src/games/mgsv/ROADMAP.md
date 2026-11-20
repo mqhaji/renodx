@@ -57,9 +57,7 @@ Reconstruction runs where the engine starts post-processing; contact shadows run
 
 **Cleanup.**
 
-- Move the lighting history's motion record to the engine's camera-velocity hook, then remove the per-draw handler and its descriptor tracker.
 - Investigate letting the engine create the post-processing targets at output size, one plugin at a time, instead of redirecting them. First deliverables: the redirection's measured cost and a table of where each pass takes its size.
-- Move the scheduler (`reconstruction/coordinator.hpp` to `rendering/submission.hpp`, with the scheduling cleanup), the post-processing start hook and draw identification (to `engine/`), each when its dependency is cut; the full list is in the [planned layout](docs/DESIGN.md#14-folder-layout).
 
 **Exit:** the cleanup is done.
 

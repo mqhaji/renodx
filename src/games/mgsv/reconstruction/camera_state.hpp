@@ -3,7 +3,7 @@
 /* The camera each scene was set up with, and the previous camera that every
  * reconstruction method reprojects against. The projection hook in
  * projection_jitter.hpp writes the camera when a scene's projection is set;
- * input capture, the native draw hooks and the coordinator read it later. */
+ * input capture, the native draw hooks and the scene's dispatch read it later. */
 
 #include <intrin.h>
 

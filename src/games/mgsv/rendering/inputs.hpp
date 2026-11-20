@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <limits>
 #include <mutex>
@@ -13,70 +14,9 @@
 
 #include <include/reshade.hpp>
 
-#include "../../../utils/bitwise.hpp"
-#include "../../../utils/descriptor.hpp"
-
-// Records the pixel shader views bound at t2 and t3 on each command list, so
-// the camera-velocity draw can find its depth and object-velocity inputs.
-namespace mgsv::inputs::descriptor_tracker {
-
-struct __declspec(uuid("9F1A3A38-9D2A-4E5B-B5A3-3F2D0F38CD33")) CommandListData {
-  // The pixel shader views most recently bound on this command list.
-  reshade::api::resource_view pixel_srv_t2 = {0};  // Depth at MotionBlurCameraVelocity
-  reshade::api::resource_view pixel_srv_t3 = {0};  // Object velocity at MotionBlurCameraVelocity
-};
-
-inline CommandListData* Get(reshade::api::command_list* cmd_list) {
-  if (cmd_list == nullptr) return nullptr;
-  // ReShade creates this state in init_command_list. Do not allocate lazily
-  // from descriptor or draw callbacks, which may run concurrently.
-  return cmd_list->get_private_data<CommandListData>();
-}
-
-inline void OnInitCommandList(reshade::api::command_list* cmd_list) {
-  cmd_list->create_private_data<CommandListData>();
-}
-
-inline void OnDestroyCommandList(reshade::api::command_list* cmd_list) {
-  cmd_list->destroy_private_data<CommandListData>();
-}
-
-inline void OnResetCommandList(reshade::api::command_list* cmd_list) {
-  auto* data = Get(cmd_list);
-  if (data != nullptr) *data = {};
-}
-
-inline void OnPushDescriptors(
-    reshade::api::command_list* cmd_list,
-    reshade::api::shader_stage stages,
-    reshade::api::pipeline_layout /*layout*/,
-    uint32_t /*layout_param*/,
-    const reshade::api::descriptor_table_update& update) {
-  if (!renodx::utils::bitwise::HasFlag(stages, reshade::api::shader_stage::pixel)
-      || update.type != reshade::api::descriptor_type::shader_resource_view) return;
-
-  auto* data = Get(cmd_list);
-  if (data == nullptr) return;
-
-  for (uint32_t i = 0u; i < update.count; ++i) {
-    // For D3D11, ReShade reports bindings as shader register numbers.
-    const uint32_t slot = update.binding + i;
-    if (slot != 2u && slot != 3u) continue;
-
-    const auto view = renodx::utils::descriptor::GetResourceViewFromDescriptorUpdate(update, i);
-    switch (slot) {
-      case 2u: data->pixel_srv_t2 = view; break;
-      case 3u: data->pixel_srv_t3 = view; break;
-      default: break;
-    }
-  }
-}
-
-}  // namespace mgsv::inputs::descriptor_tracker
-
 // Selects the game's device and swapchain (the first D3D11 swapchain to present)
 // and keeps the native views later passes read: depth and velocity from the
-// camera-velocity draw, and the albedo and specular views from deferred
+// camera-velocity pass, and the albedo and specular views from deferred
 // composition. The generation changes whenever the swapchain or device retires,
 // so a capture that finishes after that is rejected.
 namespace mgsv::inputs {
@@ -92,8 +32,6 @@ struct Motion {
   reshade::api::format velocity_format = reshade::api::format::unknown;
   uint64_t generation = 0;
   uint64_t observation = 0;
-  uintptr_t context = 0;
-  uintptr_t producer_rtv = 0;  // Nonowning identity; never dereferenced.
 };
 
 struct Materials {
@@ -283,13 +221,14 @@ inline void OnDestroyDevice(reshade::api::device* device) {
                         ("MgsvInputs: device retired; generation=" + std::to_string(generation)).c_str());
 }
 
-// Called at the camera-velocity draw; both callers hold the reconstruction ExecutionGuard.
-// Generation checks reject a capture that
-// finishes after its selection retired; they do not synchronize native context use or
-// device destruction.
-inline Motion CaptureMotion(
-    reshade::api::command_list* cmd_list,
-    reshade::api::resource_view expected_velocity_rtv) {
+// Called once the engine has recorded its camera-velocity pass, while the
+// pass's target and inputs are still bound; the caller holds the submission
+// ExecutionGuard. velocity_target is the engine's combined velocity image: the
+// engine skips the pass without its velocity buffer, and the bindings then
+// belong to an earlier pass, so any other target is refused. Generation checks
+// reject a capture that finishes after its selection retired; they do not
+// synchronize native context use or device destruction.
+inline Motion CaptureMotion(reshade::api::command_list* cmd_list, ID3D11Texture2D* velocity_target) {
   if (cmd_list == nullptr) return {};
   auto* device = cmd_list->get_device();
   Snapshot previous;
@@ -313,10 +252,6 @@ inline Motion CaptureMotion(
   motion.object_velocity.Attach(pixel_views[1]);
   // Missing bindings leave the previous capture in place.
   if (producer == nullptr || motion.depth == nullptr || motion.object_velocity == nullptr) return {};
-  // Compare the expected target only by address. The reference kept is the one the
-  // getter returned; the expected handle is never turned into an owning COM pointer.
-  if (expected_velocity_rtv.handle != 0
-      && expected_velocity_rtv.handle != reinterpret_cast<uintptr_t>(producer.Get())) return {};
 
   auto* native_device = reinterpret_cast<ID3D11Device*>(device->get_native());  // NOLINT(performance-no-int-to-ptr)
   D3D11_TEXTURE2D_DESC velocity_description = {};
@@ -326,6 +261,14 @@ inline Motion CaptureMotion(
   const auto depth_texture = internal::ReadTexture(motion.depth.Get(), native_device, &depth_description);
   const auto object_texture = internal::ReadTexture(motion.object_velocity.Get(), native_device, &object_description);
   if (velocity_texture == nullptr || depth_texture == nullptr || object_texture == nullptr) return {};
+  if (velocity_texture.Get() != velocity_target) {
+    static std::atomic_flag reported;
+    if (!reported.test_and_set(std::memory_order_relaxed)) {
+      reshade::log::message(reshade::log::level::warning,
+                            "MgsvInputs: the camera-velocity pass did not have the engine's velocity image bound; its motion was not captured");
+    }
+    return {};
+  }
 
   D3D11_RENDER_TARGET_VIEW_DESC producer_description = {};
   producer->GetDesc(&producer_description);
@@ -342,8 +285,6 @@ inline Motion CaptureMotion(
       || reshade::api::format_is_typeless(motion.velocity_format)) return {};
   motion.generation = previous.generation;
   motion.observation = ticket;
-  motion.context = reinterpret_cast<uintptr_t>(context);
-  motion.producer_rtv = reinterpret_cast<uintptr_t>(producer.Get());
 
   // The velocity SRV covers mip 0 and slice 0. Reuse the cached one while the texture and
   // format are unchanged.

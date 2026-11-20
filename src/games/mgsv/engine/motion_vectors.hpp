@@ -22,9 +22,14 @@
 // The engine draws object and camera motion vectors in
 // PluginDeferredGeometry::PostExec, and only when its motion blur plugin has
 // set a per-build flag (motion blur enabled with a non-zero amount). These
-// hooks keep the vectors drawn whenever a feature of the mod needs them, and
-// tell whether a view build drew them.
+// hooks keep the vectors drawn whenever a feature of the mod needs them, tell
+// whether a view build drew them, and report each recorded camera-velocity pass.
 namespace mgsv::engine::motion_vectors {
+
+// Runs on the thread building the view once the engine has recorded its
+// camera-velocity pass, while that pass's target and inputs are still bound
+// on the recording context. It must not throw.
+using CameraVelocityCallback = void (*)();
 
 // Present sets this while temporal reconstruction or enhanced indirect
 // lighting is on.
@@ -32,7 +37,7 @@ inline std::atomic<bool> wanted = false;
 
 inline constexpr std::array REQUIRED_ENTRIES = {engine::Entry::DEFERRED_GEOMETRY_POST_EXEC, engine::Entry::DG_END_SCREEN_SPACE_VELOCITY};
 inline constexpr std::array REQUIRED_FIELDS = {Field::RENDER_FRAME_FLAGS, Field::FRAME_FLAG_MOTION_VECTORS};
-inline constexpr engine::Requirement REQUIREMENT = {.feature = "Motion vectors with the game's motion blur off", .entries = REQUIRED_ENTRIES, .fields = REQUIRED_FIELDS};
+inline constexpr engine::Requirement REQUIREMENT = {.feature = "Motion vectors (needed by temporal reconstruction and enhanced lighting)", .entries = REQUIRED_ENTRIES, .fields = REQUIRED_FIELDS};
 
 namespace internal {
 
@@ -53,6 +58,7 @@ struct HookState {
   bool logged_failure = false;
 };
 static HookState hooks;
+static std::atomic<CameraVelocityCallback> camera_velocity_callback = nullptr;
 static std::atomic<uint32_t> calls_in_flight = 0u;
 
 // The view build whose camera-velocity pass this thread recorded last.
@@ -84,11 +90,15 @@ static void __fastcall HookPostExec(void* plugin, void* render, void* viewport) 
 }
 
 // The engine calls this once its camera-velocity draw has been recorded, on the
-// thread building the view.
+// thread building the view. It ends the pass's render buffer, so the callback
+// runs first.
 static void __fastcall HookEndScreenSpaceVelocity(void* dg) {
   calls_in_flight.fetch_add(1u, std::memory_order_acq_rel);
   const auto owner = engine::views::GetScope().owner;
   recorded = {.scene = owner.scene, .generation = owner.generation};
+  if (const auto callback = camera_velocity_callback.load(std::memory_order_acquire); callback != nullptr) {
+    callback();
+  }
   hooks.end_screen_space_velocity(dg);
   calls_in_flight.fetch_sub(1u, std::memory_order_acq_rel);
 }
@@ -110,8 +120,9 @@ inline bool WasRecorded(const engine::views::Owner& owner) {
 }
 
 // Balance a successful call with Detach.
-inline bool Install() {
+inline bool Install(CameraVelocityCallback on_camera_velocity) {
   const std::unique_lock lock(internal::hooks.mutex);
+  internal::camera_velocity_callback.store(on_camera_velocity, std::memory_order_release);
   if (internal::hooks.installed) return true;
   const auto fail = [](const char* message) {
     if (!internal::hooks.logged_failure) {
@@ -121,7 +132,7 @@ inline bool Install() {
     return false;
   };
   if (!engine::Verified(REQUIREMENT)) {
-    return fail("MgsvVelocity: the velocity pass entries or structure fields did not verify; motion vectors follow the game's motion blur.");
+    return fail("MgsvVelocity: the velocity pass entries or structure fields did not verify; temporal reconstruction and the lighting history get no motion vectors.");
   }
   internal::hooks.post_exec = reinterpret_cast<internal::PostExec>(engine::Address(engine::Entry::DEFERRED_GEOMETRY_POST_EXEC));
   internal::hooks.end_screen_space_velocity = reinterpret_cast<internal::EndScreenSpaceVelocity>(engine::Address(engine::Entry::DG_END_SCREEN_SPACE_VELOCITY));
@@ -130,7 +141,7 @@ inline bool Install() {
   } catch (const std::system_error&) {
     internal::hooks.post_exec = nullptr;
     internal::hooks.end_screen_space_velocity = nullptr;
-    return fail("MgsvVelocity: native velocity hook installation failed; motion vectors follow the game's motion blur.");
+    return fail("MgsvVelocity: native velocity hook installation failed; temporal reconstruction and the lighting history get no motion vectors.");
   }
   internal::hooks.installed = true;
   internal::hooks.logged_failure = false;
@@ -138,6 +149,8 @@ inline bool Install() {
   return true;
 }
 
+// Waits for a callback in progress, which can be waiting for the submission
+// execution lock: do not call this while holding that lock.
 inline bool Detach() {
   const std::unique_lock lock(internal::hooks.mutex);
   if (!internal::hooks.installed) return true;
@@ -153,6 +166,7 @@ inline bool Detach() {
   internal::hooks.installed = false;
   internal::hooks.post_exec = nullptr;
   internal::hooks.end_screen_space_velocity = nullptr;
+  internal::camera_velocity_callback.store(nullptr, std::memory_order_release);
   return true;
 }
 

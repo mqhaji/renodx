@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
-#ifndef MGSV_RECONSTRUCTION_NATIVE_POST_FILTER_HPP_
-#define MGSV_RECONSTRUCTION_NATIVE_POST_FILTER_HPP_
+#ifndef RENODX_GAMES_MGSV_ENGINE_POST_FILTER_HPP_
+#define RENODX_GAMES_MGSV_ENGINE_POST_FILTER_HPP_
 
 #include <d3d11.h>
 #include <windows.h>
@@ -9,33 +9,43 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
-#include <cstring>
 #include <mutex>
 #include <shared_mutex>
+#include <string>
 #include <system_error>
 
+#include <include/reshade.hpp>
+
 #include "../../../utils/detour.hpp"
-#include "../engine/build.hpp"
-#include "../engine/image.hpp"
-#include "../engine/views.hpp"
-#include "logging.hpp"
-#include "probe_api.hpp"
+#include "build.hpp"
+#include "image.hpp"
+#include "views.hpp"
 
 // The engine starts a view's post-processing in DgDx11::StartPostFilter: once
 // per view, on the thread that builds it (the build thread), after the last draw that
 // writes the scene and before the first post-processing pass. Usually no
 // command list is open then; the engine opens the next one at the first
 // post-processing draw. So the hook marks the scene as waiting, and the next
-// list that thread begins is the one to cut: the coordinator ends it there and
+// list that thread begins is the one to cut: the callback ends it there and
 // schedules reconstruction between the two halves. A list that is already
 // open is cut at once.
-namespace mgsv::reconstruction::native_post_filter {
+namespace mgsv::engine::post_filter {
 
 // Runs on the build thread at the cut of the presented main view, with the
 // deferred context post-processing is recorded into. The list is empty unless
 // the engine already had it open when post-processing started. It must not
-// throw, and it may take the coordinator's execution lock.
+// throw, and it may take the submission execution lock.
 using CutCallback = void (*)(ID3D11DeviceContext* context);
+
+// Counts for the presented main view. Normally starts equals cuts and the
+// other three stay zero.
+struct Counts {
+  uint64_t starts = 0u;
+  uint64_t cuts = 0u;
+  uint64_t lists_open_at_start = 0u;
+  uint64_t unused_starts = 0u;
+  uint64_t repeated_starts = 0u;
+};
 
 inline constexpr std::array REQUIRED_ENTRIES = {engine::Entry::DG_START_POST_FILTER};
 inline constexpr engine::Requirement REQUIREMENT = {.feature = "Temporal reconstruction (DLSS, FSR and Analytical TAA)", .entries = REQUIRED_ENTRIES};
@@ -57,7 +67,7 @@ static std::atomic<uint32_t> calls_in_flight = 0u;
 
 struct Statistics {
   std::shared_mutex mutex;
-  probe::PostFilterStatus status;
+  Counts counts;
 };
 static Statistics statistics;
 
@@ -77,24 +87,29 @@ inline bool IsBuildThreadList(const engine::views::Recording& recording) {
   return recording.d3d_context != 0u && recording.command_buffer == 0u;
 }
 
+// The messages belong to temporal reconstruction, the only feature that cuts here.
+inline void Log(reshade::log::level level, const std::string& message) {
+  reshade::log::message(level, ("MgsvTaa: " + message).c_str());
+}
+
 inline void Cut(const engine::views::Recording& recording, bool list_was_open) {
   last_cut = armed;
   armed = {};
   uint64_t cuts = 0u;
   {
     const std::unique_lock lock(statistics.mutex);
-    cuts = ++statistics.status.cuts;
+    cuts = ++statistics.counts.cuts;
     if (list_was_open) {
-      ++statistics.status.lists_open_at_start;
+      ++statistics.counts.lists_open_at_start;
     }
   }
   if (cuts == 1u) {
-    logging::Info("first cut at the engine's post-processing start scene=", last_cut.scene);
+    Log(reshade::log::level::info, "first cut at the engine's post-processing start scene=" + std::to_string(last_cut.scene));
   }
   if (list_was_open) {
     static std::atomic_flag reported;
     if (!reported.test_and_set(std::memory_order_relaxed)) {
-      logging::Info("a command list was already open at the post-processing start scene=", last_cut.scene, "; it is cut there");
+      Log(reshade::log::level::info, "a command list was already open at the post-processing start scene=" + std::to_string(last_cut.scene) + "; it is cut there");
     }
   }
   if (const auto callback = cut_callback.load(std::memory_order_acquire); callback != nullptr) {
@@ -105,11 +120,11 @@ inline void Cut(const engine::views::Recording& recording, bool list_was_open) {
 inline void ReportUnusedStart(const Scene& scene) {
   {
     const std::unique_lock lock(statistics.mutex);
-    ++statistics.status.unused_starts;
+    ++statistics.counts.unused_starts;
   }
   static std::atomic_flag reported;
   if (!reported.test_and_set(std::memory_order_relaxed)) {
-    logging::Warn("a view recorded nothing after its post-processing start scene=", scene.scene, "; it was not reconstructed");
+    Log(reshade::log::level::warning, "a view recorded nothing after its post-processing start scene=" + std::to_string(scene.scene) + "; it was not reconstructed");
   }
 }
 
@@ -120,15 +135,15 @@ static void __fastcall HookStartPostFilter(void* dg) {
     const bool repeated = scene == armed || scene == last_cut;
     {
       const std::unique_lock lock(statistics.mutex);
-      ++statistics.status.starts;
+      ++statistics.counts.starts;
       if (repeated) {
-        ++statistics.status.repeated_starts;
+        ++statistics.counts.repeated_starts;
       }
     }
     if (repeated) {
       static std::atomic_flag reported;
       if (!reported.test_and_set(std::memory_order_relaxed)) {
-        logging::Warn("post-processing started twice in one view build scene=", scene.scene, "; the second start is ignored");
+        Log(reshade::log::level::warning, "post-processing started twice in one view build scene=" + std::to_string(scene.scene) + "; the second start is ignored");
       }
     } else {
       if (armed.scene != 0u) {
@@ -162,9 +177,9 @@ static void OnRecordingBegan() {
 
 }  // namespace internal
 
-inline probe::PostFilterStatus ReadStatus() {
+inline Counts ReadCounts() {
   const std::shared_lock lock(internal::statistics.mutex);
-  return internal::statistics.status;
+  return internal::statistics.counts;
 }
 
 // Call after engine::views::Install has succeeded; repeated calls are
@@ -175,7 +190,7 @@ inline bool Install(CutCallback on_cut) {
   if (!internal::hooks.installed) {
     const auto fail = [](const char* message) {
       if (!internal::hooks.logged_failure) {
-        logging::Warn(message);
+        internal::Log(reshade::log::level::warning, message);
         internal::hooks.logged_failure = true;
       }
       return false;
@@ -192,7 +207,7 @@ inline bool Install(CutCallback on_cut) {
     }
     internal::hooks.installed = true;
     internal::hooks.logged_failure = false;
-    logging::Info("installed the native post-processing start hook");
+    internal::Log(reshade::log::level::info, "installed the native post-processing start hook");
   }
   if (!internal::hooks.listening) {
     internal::hooks.listening = engine::views::SetRecordingBegan(nullptr, internal::OnRecordingBegan);
@@ -200,7 +215,7 @@ inline bool Install(CutCallback on_cut) {
   return internal::hooks.listening;
 }
 
-// Waits for a cut in progress, which can be waiting for the coordinator's
+// Waits for a cut in progress, which can be waiting for the submission
 // execution lock: do not call this while holding that lock.
 inline bool Detach() {
   const std::unique_lock lock(internal::hooks.mutex);
@@ -212,7 +227,7 @@ inline bool Detach() {
   try {
     renodx::utils::detour::Uninstall(std::array{renodx::utils::detour::Function(&internal::hooks.start_post_filter, internal::HookStartPostFilter)});
   } catch (const std::system_error&) {
-    logging::Warn("native post-processing start hook removal failed");
+    internal::Log(reshade::log::level::warning, "native post-processing start hook removal failed");
     return false;
   }
   while (internal::calls_in_flight.load(std::memory_order_acquire) != 0u) {
@@ -224,6 +239,6 @@ inline bool Detach() {
   return true;
 }
 
-}  // namespace mgsv::reconstruction::native_post_filter
+}  // namespace mgsv::engine::post_filter
 
-#endif  // MGSV_RECONSTRUCTION_NATIVE_POST_FILTER_HPP_
+#endif  // RENODX_GAMES_MGSV_ENGINE_POST_FILTER_HPP_

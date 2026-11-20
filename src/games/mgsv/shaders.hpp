@@ -28,9 +28,9 @@
 #include "lighting/shadows/screen_space_shadows.hpp"
 #include "materials/capture.hpp"
 #include "materials/native/material_shaders.h"
+#include "postprocess/bloom/bloom.hpp"
 #include "reconstruction/output_size/resources.hpp"
 #include "reconstruction/state.hpp"
-#include "rendering/draw_roles.hpp"
 #include "rendering/inputs.hpp"
 #include "rendering/producer_records.hpp"
 #include "shared.h"
@@ -58,16 +58,16 @@ namespace mgsv::game {
       },                                                                   \
   }
 
-#define MGSV_BLOOM_SHADER(value, reduction)                                            \
-  {                                                                                    \
-      (value),                                                                         \
-      {                                                                                \
-          .crc32 = (value),                                                            \
-          .code = __##value,                                                           \
-          .on_replace = [](auto* cmd_list) {                                           \
-            return mgsv::rendering::draw_roles::IsBloomChainDraw(cmd_list, reduction); \
-          },                                                                           \
-      },                                                                               \
+#define MGSV_BLOOM_SHADER(value, reduction)                       \
+  {                                                               \
+      (value),                                                    \
+      {                                                           \
+          .crc32 = (value),                                       \
+          .code = __##value,                                      \
+          .on_replace = [](auto* cmd_list) {                      \
+            return mgsv::bloom::IsChainDraw(cmd_list, reduction); \
+          },                                                      \
+      },                                                          \
   }
 
 // The ports that write motion in precise form, and the motion blur ports that
@@ -224,7 +224,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
               .crc32 = 0x83272BCB,
               .code = __0x83272BCB,
               .on_inject = [](auto*) { return false; },
-              .on_draw = &mgsv::rendering::draw_roles::OnCopyRenderBufferDraw,
+              .on_draw = &mgsv::bloom::OnCopyRenderBufferDraw,
           },
       },
 

@@ -64,7 +64,7 @@ enum class Availability : uint8_t {
 };
 
 struct Resources {
-  // Non-owning identity, cleared at device destruction; guarded by the coordinator.
+  // Non-owning identity, cleared at device destruction; guarded by the submission execution lock.
   reshade::api::device* adapter_device = nullptr;
   Microsoft::WRL::ComPtr<ID3D12Device> device;
   Microsoft::WRL::ComPtr<ID3D11Device> probed_device;
@@ -623,7 +623,7 @@ inline float FrameDeltaMilliseconds(bool reset) {
   return std::clamp(milliseconds, 1.f, 1000.f);
 }
 
-// Runs once per reconstructed scene inside the coordinator's single D3D12
+// Runs once per reconstructed scene inside the scene's single D3D12
 // submission. NGX records into that list, and the encoder follows it to write
 // the shared output texture.
 inline bool Dispatch(const ValidatedFrameInputs& inputs) {

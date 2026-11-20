@@ -56,7 +56,7 @@ enum class Entry : uint8_t {
   DEFERRED_GEOMETRY_POST_EXEC,
   DG_END_SCREEN_SPACE_VELOCITY,
 
-  // Start of post-processing (reconstruction/native_post_filter.hpp).
+  // Start of post-processing (engine/post_filter.hpp).
   DG_START_POST_FILTER,
 
   // Local lights and their constants (engine/local_lights.hpp).
@@ -170,7 +170,7 @@ inline constexpr std::array<EntryInfo, ENTRY_COUNT> ENTRIES = {{
     {.entry = Entry::DEFERRED_GEOMETRY_POST_EXEC, .name = "fox::gr::PluginDeferredGeometry::PostExec", .rva = 0x1C54D0u, .bytes = "48 8B C4 53 55 56 57 41 56 48 81 EC 40 01 00 00 48 C7 44 24 40 FE FF FF FF"},
     {.entry = Entry::DG_END_SCREEN_SPACE_VELOCITY, .name = "fox::gr::dg::DgDx11::EndScreenSpaceVelocity", .rva = 0x2BF7A0u, .bytes = "40 53 48 83 EC 20 48 8B D9 48 8B 0D 10 49 8D 02"},
 
-    // Start of post-processing (reconstruction/native_post_filter.hpp).
+    // Start of post-processing (engine/post_filter.hpp).
     {.entry = Entry::DG_START_POST_FILTER, .name = "fox::gr::dg::DgDx11::StartPostFilter", .rva = 0x2C2D90u, .bytes = "48 89 5C 24 10 57 48 83 EC 40 48 8B 05"},
 
     // Local lights and their constants (engine/local_lights.hpp).
@@ -319,11 +319,11 @@ enum class Field : uint8_t {
   FRAME_FLAG_MOTION_VECTORS,
 
   // The backend (fox::gr::dg::DgDx11), its render info and swap chain.
-  BACKEND_OUTPUT_SIZE,
   BACKEND_WANTED_SIZE,
   BACKEND_RENDER_SIZE,
   BACKEND_FLAGS,
   BACKEND_FLAG_RESIZE,
+  BACKEND_FLAG_VIDEO_SETTINGS,
   RENDER_INFO_RENDER_SIZE,
   RENDER_INFO_SWAP_CHAIN,
   SWAP_CHAIN_NATIVE,
@@ -415,11 +415,11 @@ inline constexpr std::array<FieldInfo, FIELD_COUNT> FIELDS = {{
     {.field = Field::FRAME_FLAG_MOTION_VECTORS, .name = "frame flags: bit that asks for motion vectors", .value = 0x1u, .source = Entry::DEFERRED_GEOMETRY_POST_EXEC, .instruction = 0xBFu, .position = 2u, .size = 1u},
 
     // The backend (fox::gr::dg::DgDx11), its render info and swap chain.
-    {.field = Field::BACKEND_OUTPUT_SIZE, .name = "fox::gr::dg::DgDx11: output size", .value = 0x180u, .source = Entry::DG_INIT_RENDER, .instruction = 0x205u, .position = 2u, .size = 4u},
     {.field = Field::BACKEND_WANTED_SIZE, .name = "fox::gr::dg::DgDx11: requested render size", .value = 0x188u, .source = Entry::DG_START, .instruction = 0x42u, .position = 2u, .size = 4u},
     {.field = Field::BACKEND_RENDER_SIZE, .name = "fox::gr::dg::DgDx11: render size", .value = 0x190u, .source = Entry::DG_START, .instruction = 0x48u, .position = 2u, .size = 4u},
     {.field = Field::BACKEND_FLAGS, .name = "fox::gr::dg::DgDx11: flags", .value = 0x198u, .source = Entry::DG_START, .instruction = 0x9u, .position = 2u, .size = 4u},
     {.field = Field::BACKEND_FLAG_RESIZE, .name = "fox::gr::dg::DgDx11 flags: bit that requests a resize", .value = 0x2u, .source = Entry::DG_START, .instruction = 0x39u, .position = 6u, .size = 1u},
+    {.field = Field::BACKEND_FLAG_VIDEO_SETTINGS, .name = "fox::gr::dg::DgDx11 flags: bit set while changed video settings wait for Start", .value = 0x4u, .source = Entry::DG_START, .instruction = 0xFu, .position = 2u, .size = 1u},
     {.field = Field::RENDER_INFO_RENDER_SIZE, .name = "fox::gr::dg::RenderInfoDx11: render size", .value = 0x14u, .source = Entry::DG_INIT_RENDER, .instruction = 0x36Cu, .position = 2u, .size = 1u},
     {.field = Field::RENDER_INFO_SWAP_CHAIN, .name = "fox::gr::dg::RenderInfoDx11: swap chain wrapper", .value = 0x20u, .source = Entry::RENDER_INFO_RESIZE_SWAP_CHAIN, .instruction = 0x32Au, .position = 3u, .size = 1u},
     {.field = Field::SWAP_CHAIN_NATIVE, .name = "gn swap chain wrapper: IDXGISwapChain", .value = 0x18u, .source = Entry::SWAP_CHAIN_PRESENT, .instruction = 0x0u, .position = 3u, .size = 1u},
