@@ -18,15 +18,15 @@ The goal is a path-traced method with DLSS Ray Reconstruction as the highest-qua
 
 | Stage | Contents | Depends on |
 |---|---|---|
-| 1. Harden | Projection coverage, temporal quality, reconstruction experiments, cleanup | — |
+| 1. Harden | Cleanup | — |
 | 2. Raster lighting | Scene memory, probe grid, reflection chain, forward-drawn surfaces, screen probes at Ultra, new settings, BRDF replacement | 1 |
 | 3. Atmosphere | Volumetric fog with light shafts, physical sky, clouds | 1; the fog volume can run beside 2 |
 | 4. Water | River, pond and ocean shaders: reflections, absorption, caustics | 2's trace and probe grid; 3's sky |
-| 5. Frame generation | FSR, then DLSS, then XeSS frame generation | 1 (the camera-cut signal); independent of 2 to 4 |
+| 5. Frame generation | FSR, then DLSS, then XeSS frame generation | 2 (the camera-cut signal); otherwise independent of 2 to 4 |
 | 6. The scene on D3D12 | Geometry, skinning, materials, lights, acceleration structures | 1 (new engine entries: bone uploads, scene lists) |
 | 7. Ray-traced lighting | Ray-traced shadows, the gather and reflections on real rays, RTXDI, SHaRC | 6 |
 | 8. Path tracing | Path tracing with Ray Reconstruction, then caustics | 7 |
-| Lowest priority | XeSS upscaling, Analytical TAA improvements | — |
+| Lowest priority | XeSS upscaling, Analytical TAA improvements, reactive masks, projection coverage | — |
 
 ## Surfaces the game draws forward
 
@@ -55,26 +55,13 @@ How each lighting method treats these surfaces is in the design: [raster](docs/D
 
 Reconstruction runs where the engine starts post-processing; contact shadows run as one batch per lighting pass; Global Illumination is one mode with a reduced material capture.
 
-**Projection coverage.** Spherical-harmonic volume kinds other than kind 0, terrain decals at Native input size, thermography's alternate branch, mirrors and other secondary views.
-
-**Temporal quality.**
-
-- A native camera-cut signal (aiming, binoculars, field-of-view changes, cuts, teleports), for scene memory and frame generation; reconstruction shows no visible problems at cuts without one. The old clip-space heuristic reset history continuously and stays removed.
-- Reactive and transparency masks for FSR and DLSS from verified material membership: rain first, then particles, animated textures and emissive transparency.
-
-**Reconstruction experiments.** Each is kept only if a side-by-side test shows it is better:
-
-- Give DLSS and FSR the scene's depth-stencil instead of the G-buffer depth, so the ocean and forward-drawn models get correct depth and camera motion.
-- Pass the engine's exposure to DLSS and FSR as pre-exposure, judged on a dark-to-bright transition. Low priority: Ray Reconstruction ignores exposure.
-
 **Cleanup.**
 
 - Move the lighting history's motion record to the engine's camera-velocity hook, then remove the per-draw handler and its descriptor tracker.
 - Investigate letting the engine create the post-processing targets at output size, one plugin at a time, instead of redirecting them. First deliverables: the redirection's measured cost and a table of where each pass takes its size.
 - Move the scheduler (`reconstruction/coordinator.hpp` to `rendering/submission.hpp`, with the scheduling cleanup), the post-processing start hook and draw identification (to `engine/`), each when its dependency is cut; the full list is in the [planned layout](docs/DESIGN.md#14-folder-layout).
-- Decide the DLSS model default: it is preset F, which NVIDIA's current programming guide (`external/DLSS/doc`) marks deprecated.
 
-**Exit:** the masks and the cleanup are done, and each experiment is kept or removed.
+**Exit:** the cleanup is done.
 
 ## Stage 2: raster lighting
 
@@ -82,7 +69,7 @@ Today's Global Illumination is replaced, not tuned: it can only gather light fro
 
 **Step 1: facts.** Settle the open questions the design depends on: what the sun's cascades hold at night and indoors and how far beyond the view they reach, whether front-face-culled shadow depths are the casters' far sides and how moving casters can be told apart, whether the G-buffer marks reflection receivers well enough, how many occluder polygons a scene has and where, whether terrain height data can be read, and whether the engine's targets can be created shareable so D3D12 reads them without copies.
 
-**Step 2: scene memory.** The world-aligned grids, fed by the camera, the sun's shadow maps and (if step 1 supports them) occluder polygons and terrain height, with moving objects kept out. Nothing reads it yet except a debug view. **Gate:** in normal play outdoors, most of the space around the player is known within seconds; interiors entered for the first time fail toward dark, not toward leaks; the cost of upkeep is measured. If the gate fails, the later steps run on the screen and the game's authored probes alone, and the tiers shrink accordingly.
+**Step 2: scene memory.** The world-aligned grids, fed by the camera, the sun's shadow maps and (if step 1 supports them) occluder polygons and terrain height, with moving objects kept out, and cleared on a native camera-cut signal (aiming, binoculars, field-of-view changes, cuts, teleports) found in this step; the old clip-space heuristic reset history continuously and stays removed. Nothing reads it yet except a debug view. **Gate:** in normal play outdoors, most of the space around the player is known within seconds; interiors entered for the first time fail toward dark, not toward leaks; the cost of upkeep is measured. If the gate fails, the later steps run on the screen and the game's authored probes alone, and the tiers shrink accordingly.
 
 **Step 3: hit lighting and the probe grid.** The trace function, lighting at world hits from the albedo cache, the sun's shadow maps and the light list, and the world probe grid with its irradiance grid. This step ships the diffuse half of the default tier (reflections stay today's chain until step 4): the grid lights the directions the shortened bitmask pass finds open, and replaces the game's ambient light as far as the scene is known. Forward-drawn surfaces get the grid's light through the one engine function that sets their ambient colors. **Gate:** bounce light stays when the camera turns away from a sunlit wall or a lamp; a uniform-light test passes; a dark interior beside a bright exterior does not leak; the image matches or beats today's in the fixed scenes; and the cost stays within the budget.
 
@@ -129,7 +116,7 @@ After the raster stages and before ray tracing. All three providers present thro
 
 **Step 1: the presentation path.** An experiment decides between replacing the game's swap chain and leaving it to ReShade and RenoDX while a D3D12 swap chain shows the frames. It must keep the ReShade overlay, HDR10 output and even pacing.
 
-**Step 2: inputs.** The image without the HUD and the HUD as a separate layer, split by the engine's draw lists; depth and dense motion, including the water surface record; camera data latched once per frame; the camera-cut signal from stage 1.
+**Step 2: inputs.** The image without the HUD and the HUD as a separate layer, split by the engine's draw lists; depth and dense motion, including the water surface record; camera data latched once per frame; the camera-cut signal from stage 2.
 
 **Step 3: providers.** FSR first, then DLSS Frame Generation with Reflex in the engine's main loop, then XeSS (last: it needs Intel's latency library, which cannot run beside Reflex).
 
@@ -169,6 +156,8 @@ The highest-quality method ([design](docs/DESIGN.md#10-path-traced-method)). It 
 
 - **XeSS.** A fourth upscaler in the existing reconstruction slot, using the same inputs as DLSS and FSR.
 - **Analytical TAA.** Previous-depth and disocclusion checks before any relaxation of its clipping. DLSS and FSR are the methods that matter.
+- **Projection coverage.** Spherical-harmonic volume kinds other than kind 0, terrain decals at Native input size, thermography's alternate branch, mirrors and other secondary views.
+- **Reactive and transparency masks for DLSS and FSR**, from verified material membership. Optional: rain and particles already look good with DLSS.
 
 ## Rules that carry through every stage
 
