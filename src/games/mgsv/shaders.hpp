@@ -29,6 +29,7 @@
 #include "materials/capture.hpp"
 #include "materials/native/material_shaders.h"
 #include "reconstruction/output_size/resources.hpp"
+#include "reconstruction/state.hpp"
 #include "rendering/draw_roles.hpp"
 #include "rendering/inputs.hpp"
 #include "rendering/producer_records.hpp"
@@ -68,6 +69,13 @@ namespace mgsv::game {
           },                                                                           \
       },                                                                               \
   }
+
+// The ports that write motion in precise form, and the motion blur ports that
+// read it, replace the game's shaders while temporal reconstruction is on
+// (rendering/motion.hlsli).
+inline bool IsTemporalReconstructionOn(reshade::api::command_list* /*cmd_list*/) {
+  return mgsv::reconstruction::state::IsEnabled();
+}
 
 // The supplied shader data must outlive this registry and its draw callbacks.
 inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shader_injection) {
@@ -193,13 +201,17 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
       MGSV_BLOOM_SHADER(0x1AC1A5EF, false),
       MGSV_BLOOM_SHADER(0x265053A6, false),
       MGSV_BLOOM_SHADER(0x9BE51873, false),
-      // Motion blur's velocity and depth bake, replaced only for upscaled scenes.
+      // Motion blur's tile pass and its velocity and depth bake, the two passes
+      // that read the combined motion image. The bake also scales motion for
+      // upscaled scenes.
+      {0x260C371F, {.crc32 = 0x260C371F, .code = __0x260C371F, .on_replace = &IsTemporalReconstructionOn, .on_inject = [](auto*) { return false; }}},
       {
           0x512E2B48,
           {
               .crc32 = 0x512E2B48,
               .code = __0x512E2B48,
               .on_replace = [](auto* cmd_list) {
+                if (IsTemporalReconstructionOn(cmd_list)) return true;
                 const auto output = mgsv::reconstruction::output_size::GetActive(cmd_list);
                 return output != nullptr && output->IsScaled(); },
               .on_inject = [](auto*) { return false; },
@@ -304,13 +316,16 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
       // Native reflection trace and its composite.
       {0xD6714838, {.crc32 = 0xD6714838, .code = __0xD6714838, .on_draw = &mgsv::lighting::reflections::native_chain::OnTrace}},
       {0xDC3A84C3, {.crc32 = 0xDC3A84C3, .code = __0xDC3A84C3, .on_draw = &mgsv::lighting::reflections::BeginComposite, .on_drawn = [](auto* cmd_list) { mgsv::lighting::reflections::EndComposite(cmd_list); mgsv::lighting::reflections::native_chain::OnResetCommandList(cmd_list); }}},
-      // Velocity shaders stay native, keeping their motion packing and alpha
-      // tests, and only opt out of constant injection. Their targets are created
-      // as float (engine/render_targets.hpp), and projection_jitter.hpp fixes the
-      // G-buffer pair's previous-position matrices when the engine uploads them.
-      {0x9815404F, {.crc32 = 0x9815404F, .on_inject = [](auto*) { return false; }}},
-      {0x58C10658, {.crc32 = 0x58C10658, .on_inject = [](auto*) { return false; }}},
-      {0xA13321B6, {.crc32 = 0xA13321B6, .on_inject = [](auto*) { return false; }}},
+      // Velocity shaders opt out of constant injection. Their targets are
+      // created as float (engine/render_targets.hpp), and projection_jitter.hpp
+      // fixes the G-buffer pair's previous-position matrices when the engine
+      // uploads them. While temporal reconstruction is on, the G-buffer pair's
+      // ports write object motion in precise form and the camera-velocity port
+      // writes the combined image in it (rendering/motion.hlsli); with it off
+      // the game's shaders run.
+      {0x9815404F, {.crc32 = 0x9815404F, .code = __0x9815404F, .on_replace = &IsTemporalReconstructionOn, .on_inject = [](auto*) { return false; }}},
+      {0x58C10658, {.crc32 = 0x58C10658, .code = __0x58C10658, .on_replace = &IsTemporalReconstructionOn, .on_inject = [](auto*) { return false; }}},
+      {0xA13321B6, {.crc32 = 0xA13321B6, .code = __0xA13321B6, .on_replace = &IsTemporalReconstructionOn, .on_inject = [](auto*) { return false; }}},
       // The enhanced diffuse lighting passes run just before the first native
       // skin-scatter pass. The scatter shader itself stays native, because a
       // port of it did not match its normal and angle math.

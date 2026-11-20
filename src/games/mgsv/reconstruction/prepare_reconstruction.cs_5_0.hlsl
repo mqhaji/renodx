@@ -6,9 +6,9 @@
 // Input preparation shared by every reconstruction method. Runs at render size
 // on the game's D3D11 immediate context, when the coordinator executes the cut.
 // Reads the engine's encoded scene color, composed motion, depth, and object
-// motion (only its mask in .r). Writes the shared D3D12 inputs: linear color
-// with the game's alpha, jitter-free motion, a depth copy, and for Analytical
-// TAA only, a diagnostic motion image.
+// motion (its mask in .r, its motion in .ba). Writes the shared D3D12 inputs:
+// linear color with the game's alpha, jitter-free motion, a depth copy, and for
+// Analytical TAA only, a diagnostic motion image.
 Texture2D<float4> encoded_color_texture : register(t0);
 Texture2D<float4> native_velocity_texture : register(t1);
 Texture2D<float> depth_texture : register(t2);
@@ -32,10 +32,10 @@ RWTexture2D<float4> motion_debug_output : register(u3);
   const float depth = depth_texture.Load(int3(pixel, 0));
   depth_output[pixel] = depth;
 
-  const float2 native_velocity = DecodeNativeMotion(native_velocity_texture.Load(int3(pixel, 0)).ba, reciprocal_render_size);
-  // The engine's velocity pass draws with the jittered projection, so its
-  // motion contains the current jitter on every pixel. Remove it once here for
-  // every use of the game's motion.
+  const float2 native_velocity = MotionPixels(native_velocity_texture.Load(int3(pixel, 0))) * reciprocal_render_size;
+  // The engine's velocity passes draw with the jittered projection, so both
+  // motion images contain the current jitter on every pixel. It is removed from
+  // each value read from them.
   const float2 unjittered_native_velocity = native_velocity - current_jitter_uv;
   // Static pixels use camera motion from depth and the unjittered camera
   // matrices when camera history is valid, and the game's motion otherwise.
@@ -49,8 +49,11 @@ RWTexture2D<float4> motion_debug_output : register(u3);
   if (analytical_taa > 0.f) {
     motion_debug_output[pixel] = float4(native_velocity, object_sample.r, 0.f);
   }
-  // Object pixels keep the game's motion, so bone and object movement survive.
-  const float2 velocity = (object_sample.r > 0.5f ? unjittered_native_velocity : camera_velocity);
+  // Object pixels keep the object's own motion, so bone and object movement
+  // survive. It comes from the object image, because the combined image holds
+  // the sprint blur effect's motion instead while that effect draws.
+  const float2 object_velocity = MotionPixels(object_sample) * reciprocal_render_size - current_jitter_uv;
+  const float2 velocity = (object_sample.r > 0.5f ? object_velocity : camera_velocity);
   // All consumers receive a previous-minus-current UV delta with jitter removed.
   motion_vector_output[pixel] = -velocity;
 }

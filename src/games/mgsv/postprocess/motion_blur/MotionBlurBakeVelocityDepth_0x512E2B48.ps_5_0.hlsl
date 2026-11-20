@@ -1,6 +1,8 @@
-// Port of the native motion blur velocity and depth bake. The mod scales motion
-// into output pixels when post-processing runs at output size.
+// Port of the native motion blur velocity and depth bake. It reads the combined
+// motion image in either form (rendering/motion.hlsli), and scales motion into
+// output pixels when post-processing runs at output size.
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:25 2026
+#include "../../rendering/motion.hlsli"
 
 cbuffer cPSScene : register(b2) {
   struct
@@ -65,9 +67,8 @@ void main(
   r0.z = g_psObject.m_localParam[0].w;
   r0.zw = float2(64, 64) * r0.zz;
   r0.zw = g_psObject.m_localParam[0].xy * r0.zw;
-  r1.xy = inVelocity.Sample(g_samplerPoint_Clamp_s, r0.xy).zw;
-  r1.xy = float2(2, 2) * r1.xy;
-  r1.xy = float2(-1, -1) + r1.xy;
+  // The combined motion image, in either form.
+  r1.xy = MotionBlurVelocity(inVelocity.Sample(g_samplerPoint_Clamp_s, r0.xy));
   // When upscaling, post-processing receives output-sized depth while b2 keeps the
   // render size. Scale both the direct and the tiled motion into output pixels.
   uint depth_width, depth_height;

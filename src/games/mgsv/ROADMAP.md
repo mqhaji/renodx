@@ -61,10 +61,6 @@ Reconstruction runs where the engine starts post-processing; contact shadows run
 
 **Reconstruction coverage.** Check in game, with the probe's start counters equal to its cut counters: bloom off, depth of field off and motion blur off while upscaling (motion blur off is the first run of the motion-vector hook), cutscenes, night vision, binoculars, the half-resolution particle setting, the iDroid, loading, pause and resize. Measure Off, Native and Performance at the hillside and at Mother Base by day and night.
 
-**Open defect.**
-
-- Slight character wobble. First suspect: the precision of object motion. Reconstruction computes camera motion itself from depth and the camera matrices, but for characters and other moving objects it uses the game's motion vectors. The engine now stores those in RGBA16F, yet the game's shaders still use the 8-bit layout: 0 to 1, with 0.5 meaning no motion and the ends meaning ±64 pixels. Zero motion sits at 0.5, where a half float's step is 1/2048 just above and 1/4096 just below, so small motion is stored in steps of 1/16 of a render pixel in one direction and 1/32 in the other. Test in a probe build: write signed pixel motion (zero at zero) into a separate float image for reconstruction and lighting, leaving the image the game's motion blur reads untouched, and compare wobble at the ACC title and on a walking character. If that is not the cause, match each character's current color to its current motion and its previous motion to the last accumulated color. Native object motion is clamped at 64 input pixels, so fast motion is checked separately. Disruptive motion experiments stay in the probe.
-
 **Projection coverage.** Spherical-harmonic volume kinds other than kind 0, terrain decals at Native input size, thermography's alternate branch, mirrors and other secondary views.
 
 **Temporal quality.**
@@ -83,7 +79,7 @@ Reconstruction runs where the engine starts post-processing; contact shadows run
 - Investigate letting the engine create the post-processing targets at output size, one plugin at a time, instead of redirecting them. First deliverables: the redirection's measured cost and a table of where each pass takes its size.
 - Decide the DLSS model default: it is preset F, which NVIDIA's current programming guide (`external/DLSS/doc`) marks deprecated.
 
-**Exit:** the coverage list passes, the wobble is explained or fixed, and the measurements are recorded.
+**Exit:** the coverage list passes and the measurements are recorded.
 
 ## Stage 2: raster lighting
 

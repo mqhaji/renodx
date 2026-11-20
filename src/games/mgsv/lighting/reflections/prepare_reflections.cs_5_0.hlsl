@@ -82,15 +82,16 @@ cbuffer NativeSceneBytes : register(b3) { uint4 scene_rows[30]; }
   view_depth_output[pixel] = valid ? GetReflectionDepth(depth) : 1e6;
   // Motion is needed only when history continues. Static pixels use camera
   // motion from the matched transforms; pixels in the object mask use the
-  // game's motion with its projection jitter removed. velocity is
+  // object image's motion with its projection jitter removed. velocity is
   // current-minus-previous, so it is negated for NRD.
   float2 velocity = 0.0;
   if ((reflection_flags & 1u) != 0u) {
-    const float2 native_motion = DecodeNativeMotion(native_velocity.Load(int3(pixel, 0)).ba, rcp(float2(reflection_size)));
+    const float2 native_motion = MotionPixels(native_velocity.Load(int3(pixel, 0))) * rcp(float2(reflection_size));
     velocity = native_motion;
     if (!GetCameraVelocity((float2(pixel) + 0.5) / float2(reflection_size), depth, current_jitter, current_to_previous_clip, velocity)) velocity = native_motion;
-    if (object_velocity.Load(int3(pixel, 0)).r > 0.5)
-      velocity = native_motion - current_jitter * velocity_projection_jitter_scale;
+    const float4 object_motion = object_velocity.Load(int3(pixel, 0));
+    if (object_motion.r > 0.5)
+      velocity = MotionPixels(object_motion) * rcp(float2(reflection_size)) - current_jitter * velocity_projection_jitter_scale;
   }
   motion_output[pixel] = -velocity;
 }

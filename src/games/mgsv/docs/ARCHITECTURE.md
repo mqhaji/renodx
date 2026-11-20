@@ -91,6 +91,7 @@ DLSS, FSR, Analytical TAA and stochastic reflections use one D3D12 device and di
 | `rendering/d3d12_compute.hpp` | Store per-slot descriptors and constants; create private textures and compute pipelines |
 | `lighting/reflections/runtime.hpp` | Prepare shared native inputs, record the complete reflection chain, and publish paired shared results |
 | `reconstruction/d3d12.hpp` | Prepare shared inputs, record a method's evaluation and encoding, and retain resources |
+| `reconstruction/GBufferVelocity_*`, `GBufferMaskedVelocity_*`, `MotionBlurCameraVelocity_*`, `postprocess/motion_blur/MotionBlurTile_*`, `MotionBlurBakeVelocityDepth_*` | While temporal reconstruction is on, write object motion and the combined motion image in precise form in place of the game's 8-bit encoding, and read either form in the two motion blur passes that read the combined image (`rendering/motion.hlsli`) |
 | `reconstruction/native_post_filter.hpp`, `reconstruction/input_capture.hpp` | Find the start of each scene's post-processing; build and check the scene's inputs there |
 | `reconstruction/coordinator.hpp` | Cut the native list at that point, run the job at playback with D3D11 state preserved, and commit history only after successful submission |
 | `reconstruction/analytical/`, `dlss/`, `fsr/` | Own each algorithm, its private history, and its SDK lifecycle |
