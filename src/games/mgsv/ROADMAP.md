@@ -18,7 +18,7 @@ The goal is a path-traced method with DLSS Ray Reconstruction as the highest-qua
 
 | Stage | Contents | Depends on |
 |---|---|---|
-| 1. Harden | The engine table and its update guide, the `engine/` folder, reconstruction coverage, the motion-precision check, temporal quality, cleanup | — |
+| 1. Harden | Projection coverage, temporal quality, reconstruction experiments, cleanup | — |
 | 2. Raster lighting | Scene memory, probe grid, reflection chain, forward-drawn surfaces, screen probes at Ultra, new settings, BRDF replacement | 1 |
 | 3. Atmosphere | Volumetric fog with light shafts, physical sky, clouds | 1; the fog volume can run beside 2 |
 | 4. Water | River, pond and ocean shaders: reflections, absorption, caustics | 2's trace and probe grid; 3's sky |
@@ -55,17 +55,11 @@ How each lighting method treats these surfaces is in the design: [raster](docs/D
 
 Reconstruction runs where the engine starts post-processing; contact shadows run as one batch per lighting pass; Global Illumination is one mode with a reduced material capture.
 
-**The engine table.** Done. Code addresses and structure fields are in one verified table, `engine/build.hpp`, checked against the executable file at startup, with a menu note naming features that cannot run. Each feature turns off by itself when an entry or field it needs does not verify: an accidental failure of two entries turned off only the two features that use them, and a deliberately wrong field turned off only upscaling. Each of the 59 structure fields (offsets, strides, shifts, masks and flag bits) is checked in an instruction of a verified entry that uses it. `engine/shader_names.hpp`, generated from the dumped shaders' debug names, names every game shader that feature code recognizes; registrations of ported shaders keep the hash that also names their file. A rebuilt executable turns off every engine-side feature until the table is moved to it; the [engine table guide](engine/README.md) says how, and the [design](docs/DESIGN.md#13-surviving-a-game-update) why the mod does not search for its entries at startup.
-
-**Folder layout.** Done, with no behavior change: the engine-facing headers are in `engine/`, `reconstruction/postprocess/` is `reconstruction/output_size/`, the depth-of-field and motion-blur ports have folders beside bloom, `UI/` is `ui/`, and the unused `tonemap/customtest31.hlsli` and the two superseded documents are gone. The moved shaders compile to the same bytes and every hook installs as before. Still to move, each when its dependency is cut: the scheduler (`reconstruction/coordinator.hpp` to `rendering/submission.hpp`, with the scheduling cleanup), the post-processing start hook and draw identification (to `engine/`). The full list is in the [planned layout](docs/DESIGN.md#14-folder-layout).
-
-**Reconstruction coverage.** Check in game, with the probe's start counters equal to its cut counters: bloom off, depth of field off and motion blur off while upscaling (motion blur off is the first run of the motion-vector hook), cutscenes, night vision, binoculars, the half-resolution particle setting, the iDroid, loading, pause and resize. Measure Off, Native and Performance at the hillside and at Mother Base by day and night.
-
 **Projection coverage.** Spherical-harmonic volume kinds other than kind 0, terrain decals at Native input size, thermography's alternate branch, mirrors and other secondary views.
 
 **Temporal quality.**
 
-- Find a native camera-cut signal (aiming, binoculars, field-of-view changes, cuts, teleports, pause) so history resets when it should. Scene memory and frame generation need the same signal. The old clip-space heuristic reset history continuously and stays removed.
+- A native camera-cut signal (aiming, binoculars, field-of-view changes, cuts, teleports), for scene memory and frame generation; reconstruction shows no visible problems at cuts without one. The old clip-space heuristic reset history continuously and stays removed.
 - Reactive and transparency masks for FSR and DLSS from verified material membership: rain first, then particles, animated textures and emissive transparency.
 
 **Reconstruction experiments.** Each is kept only if a side-by-side test shows it is better:
@@ -77,13 +71,14 @@ Reconstruction runs where the engine starts post-processing; contact shadows run
 
 - Move the lighting history's motion record to the engine's camera-velocity hook, then remove the per-draw handler and its descriptor tracker.
 - Investigate letting the engine create the post-processing targets at output size, one plugin at a time, instead of redirecting them. First deliverables: the redirection's measured cost and a table of where each pass takes its size.
+- Move the scheduler (`reconstruction/coordinator.hpp` to `rendering/submission.hpp`, with the scheduling cleanup), the post-processing start hook and draw identification (to `engine/`), each when its dependency is cut; the full list is in the [planned layout](docs/DESIGN.md#14-folder-layout).
 - Decide the DLSS model default: it is preset F, which NVIDIA's current programming guide (`external/DLSS/doc`) marks deprecated.
 
-**Exit:** the coverage list passes and the measurements are recorded.
+**Exit:** the masks and the cleanup are done, and each experiment is kept or removed.
 
 ## Stage 2: raster lighting
 
-Today's Global Illumination is replaced, not tuned: it can only gather light from what the current frame shows. The new method is described in the [design](docs/DESIGN.md#4-raster-method). Its default tier must cost at most about 1 ms of GPU time more than today in the same scene (today: about 2 to 3 ms at the sortie menu and Mother Base and about 3.6 ms on the hillside, at 1920×1080 internal on an RTX 5080). Its steps are ordered so each one ships something and the riskiest part is judged first. The earlier plan for a cheaper gather (`build/analysis/mgsv-gi-unified-20261118/PLAN.md`, steps 3 to 5) is superseded; its constraints still apply.
+Today's Global Illumination is replaced, not tuned: it can only gather light from what the current frame shows. The new method is described in the [design](docs/DESIGN.md#4-raster-method). Its default tier must cost at most about 1 ms of GPU time more than today in the same scene (today: about 2 to 3 ms at the sortie menu and Mother Base and about 3.6 ms on the hillside, at 1920×1080 internal on an RTX 5080). Its steps are ordered so each one ships something and the riskiest part is judged first. The earlier plan for a cheaper gather (`build/analysis/mgsv/mgsv-gi-unified-20261118/PLAN.md`, steps 3 to 5) is superseded; its constraints still apply.
 
 **Step 1: facts.** Settle the open questions the design depends on: what the sun's cascades hold at night and indoors and how far beyond the view they reach, whether front-face-culled shadow depths are the casters' far sides and how moving casters can be told apart, whether the G-buffer marks reflection receivers well enough, how many occluder polygons a scene has and where, whether terrain height data can be read, and whether the engine's targets can be created shareable so D3D12 reads them without copies.
 

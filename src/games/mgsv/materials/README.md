@@ -94,7 +94,7 @@ These are retail addresses in the inspected executable, not the development exec
 
 Representative consumer shaders are `SunLight_DL` (`0xB067B01D`), its CS/ES variants, `SSLighting2_Sun_LargestCascade` (`0x0C708B4B`), `SSLighting2_Point` (`0x80F0A0BC`), and `SSLighting2_Spot` (`0x08292A5E`). Their specular-capable variants use the three-input power lookup. NoSpec variants intentionally omit it. `SunLight_ES` (`0x34B04FB1`) exports environment specular, `SSLighting2_SH_SkyLight_Encode` (`0x4FBDBB39`) supplies diffuse sky lighting, and the two late reflection compositors consume already shaded scene/reflection inputs. The dedicated floor trace is `LocalReflectionTPP` (`0xA621C684`); it traces a floor-plane reflection against screen depth, not a separately rendered camera.
 
-Local audit scripts, complete shader inventories, original lookup bytes, byte comparisons, and numerical results are under `build/analysis/mgsv-material-calibration-20261115/` and `build/analysis/mgsv-material-reflections-20261107/`. These ignored files are investigation evidence, not runtime dependencies. Refresh the inventory when new dumps or shader families appear. A missing permutation must be reported rather than silently assigned a guessed material layout.
+Local audit scripts, complete shader inventories, original lookup bytes, byte comparisons, and numerical results are under `build/analysis/mgsv/mgsv-material-calibration-20261115/` and `build/analysis/mgsv/mgsv-material-reflections-20261107/`. These ignored files are investigation evidence, not runtime dependencies. Refresh the inventory when new dumps or shader families appear. A missing permutation must be reported rather than silently assigned a guessed material layout.
 
 ## Validation and future changes
 
