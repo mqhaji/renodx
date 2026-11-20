@@ -56,7 +56,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           new renodx::utils::settings::Setting{
               .key = "DirectLightingContactShadowReach",
               .binding = &shader_injection->contact_shadow_reach,
-              .default_value = 0.3f,
+              .default_value = 0.1f,
               .label = "Contact Shadow Reach",
               .section = "Direct Lighting (Advanced)",
               .tooltip = "Search length in game units toward the light, shared by all lights. Each pixel converts it to screen pixels at its own depth, so a contact shadow keeps its length as the camera moves, between 16 and 256 render pixels. Higher values find farther visible casters and cost more up close. This changes reach, not sample density.",
