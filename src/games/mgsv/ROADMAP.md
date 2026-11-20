@@ -16,14 +16,15 @@ The goal is a path-traced method with DLSS Ray Reconstruction as the highest-qua
 
 ## Overview
 
+Stage 1, hardening what exists, is done.
+
 | Stage | Contents | Depends on |
 |---|---|---|
-| 1. Harden | Cleanup | — |
-| 2. Raster lighting | Scene memory, probe grid, reflection chain, forward-drawn surfaces, screen probes at Ultra, new settings, BRDF replacement | 1 |
-| 3. Atmosphere | Volumetric fog with light shafts, physical sky, clouds | 1; the fog volume can run beside 2 |
+| 2. Raster lighting | Scene memory, probe grid, reflection chain, forward-drawn surfaces, screen probes at Ultra, new settings, BRDF replacement | — |
+| 3. Atmosphere | Volumetric fog with light shafts, physical sky, clouds | The fog volume can run beside 2 |
 | 4. Water | River, pond and ocean shaders: reflections, absorption, caustics | 2's trace and probe grid; 3's sky |
 | 5. Frame generation | FSR, then DLSS, then XeSS frame generation | 2 (the camera-cut signal); otherwise independent of 2 to 4 |
-| 6. The scene on D3D12 | Geometry, skinning, materials, lights, acceleration structures | 1 (new engine entries: bone uploads, scene lists) |
+| 6. The scene on D3D12 | Geometry, skinning, materials, lights, acceleration structures | New engine entries: bone uploads, scene lists |
 | 7. Ray-traced lighting | Ray-traced shadows, the gather and reflections on real rays, RTXDI, SHaRC | 6 |
 | 8. Path tracing | Path tracing with Ray Reconstruction, then caustics | 7 |
 | Lowest priority | XeSS upscaling, Analytical TAA improvements, reactive masks, projection coverage | — |
@@ -50,16 +51,6 @@ Our lighting runs on the G-buffer: GI before skin scattering, reflections at the
 Skid marks are not on this list: they are G-buffer decals and already receive our lighting. The fog nearly all of these shaders apply comes from one small image the engine fills once per frame (128 depth slices of 16 by 64 cells, no shadow maps); particles without a volumetric-fog variant, the scattering effect and the sky apply fog differently or not at all. Replacing what is written in that image changes fog for the rest at once.
 
 How each lighting method treats these surfaces is in the design: [raster](docs/DESIGN.md#48-forward-drawn-surfaces), [water](docs/DESIGN.md#6-water), [ray-traced](docs/DESIGN.md#9-ray-traced-method) and [path-traced](docs/DESIGN.md#10-path-traced-method).
-
-## Stage 1: harden what exists
-
-Reconstruction runs where the engine starts post-processing; contact shadows run as one batch per lighting pass; Global Illumination is one mode with a reduced material capture.
-
-**Cleanup.**
-
-- Investigate letting the engine create the post-processing targets at output size, one plugin at a time, instead of redirecting them. First deliverables: the redirection's measured cost and a table of where each pass takes its size.
-
-**Exit:** the cleanup is done.
 
 ## Stage 2: raster lighting
 
