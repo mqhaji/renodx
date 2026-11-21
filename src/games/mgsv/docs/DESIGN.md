@@ -93,10 +93,10 @@ Applied to the D3D11 compute work the mod has today:
 | Reflection composite at the engine's reflection pass, and the copies kept for the next frame | D3D11 |
 | Particles, water ports, thermography | D3D11 |
 | Reconstruction | D3D12 |
-
-Until step 4 creates the main block, scene memory runs inside the reflection round trip: its D3D11 sample and terrain-window passes join reflection preparation, and its D3D12 passes follow the reflection resolve.
 | Post-processing, HUD | D3D11 |
 | Frame generation and presentation | D3D12, no return |
+
+Until step 4 creates the main block, scene memory runs inside the reflection round trip: its D3D11 sample and terrain-window passes join reflection preparation, and its D3D12 passes follow the reflection resolve.
 
 **Ray traced:** the same, with ray-traced shadows and the engine's direct lighting computed in the main block. The engine's light draws and its local-light shadow maps are skipped. The sun's shadow maps stay as long as forward shaders (particles, rivers, lit forward models) read them.
 
