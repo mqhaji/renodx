@@ -10,6 +10,9 @@
 // and the skin-scattering copy in place, in linear pre-exposed light. AO
 // darkens only the native ambient part, direct light is kept, and GI is added
 // once. Fog, tone curves, and display encoding happen in later game passes.
+// It also records, for the next frame's source pass (gtvbgi_source), how much
+// it changed each pixel's light, with the pixel's view depth; 0 depth where
+// it records nothing.
 
 #include "../../../rendering/geometry.hlsli"
 #include "../../../shared.h"
@@ -26,6 +29,7 @@ cbuffer AmbientSampling : register(b3) {
   float4 ambient_local_params[4];
 }
 RWTexture2D<float4> light_output : register(u0);
+RWTexture2D<float4> light_change : register(u1);
 RWTexture2D<float4> scattering_copy : register(u2);
 
 [numthreads(8, 8, 1)] void main(uint3 thread_id : SV_DispatchThreadID) {
@@ -41,6 +45,7 @@ RWTexture2D<float4> scattering_copy : register(u2);
 
   const float depth = depth_buffer.Load(int3(pixel, 0)).x;
   const float z = LinearZ(depth);
+  light_change[pixel] = 0.0;
   if (!(z > 0.0) || z > 1.0e6) {
     return;
   }
@@ -143,6 +148,8 @@ RWTexture2D<float4> scattering_copy : register(u2);
     light_output[pixel] = float4(shaded_diffuse, center_light.a);
     return;
   }
+  const float3 lit = shaded_diffuse + bounce;
+  if (all(isfinite(lit))) light_change[pixel] = float4(clamp(lit - center_light.rgb, -65504.0, 65504.0), z);
   // Debug views replace diffuse only; surface color, native specular, fog,
   // and later image processing still affect how they look.
   float3 output = (diagnostic == 1) ? bounce : shaded_diffuse + bounce;

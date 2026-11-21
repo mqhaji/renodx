@@ -60,6 +60,7 @@ struct ShaderInjectData {
   float lighting_samples_per_side;
   float lighting_depth_mips_enabled;  // User choice; each dispatch copy records whether the mips are ready.
   float gi_reject_backfaces;
+  float diffuse_multiple_bounces;  // Read by the host only: the trace's source includes the previous frame's indirect light.
   float lighting_debug_view;
 
   // Set by the host for each lighting dispatch, not by the menu.

@@ -27,10 +27,13 @@
 #include "../../../../utils/mutex.hpp"
 #include "../../../../utils/settings.hpp"
 #include "../../assets/noise/fast_noise_gr8.h"
+#include "../../engine/views.hpp"
 #include "../../materials/capture.hpp"
+#include "../../reconstruction/camera_state.hpp"
 #include "../../reconstruction/resolution.hpp"
 #include "../../rendering/d3d11_state.hpp"
 #include "../../rendering/inputs.hpp"
+#include "../../rendering/live_shaders.hpp"
 #include "../../rendering/producer_records.hpp"
 #include "../../rendering/submission.hpp"
 #include "../../shared.h"
@@ -79,6 +82,8 @@ struct LightFrame {
 
 struct LightPass {
   reshade::api::pipeline pipeline = {0};
+  // The live_shaders revision the pipeline was created at.
+  uint32_t shader_revision = 0u;
 };
 
 // Every lighting stage binds this complete range so an unused slot cannot
@@ -267,10 +272,13 @@ inline bool EnsureLightPassLayout(reshade::api::device* device) {
 }
 
 inline bool EnsureLightPass(reshade::api::device* device, LightPass* pass, const char* name,
-                            std::span<const uint8_t> code) {
-  // Created once per device; the bytecode and layout do not change before teardown.
-  if (pass->pipeline.handle != 0) return true;
+                            const char* shader, std::span<const uint8_t> embedded) {
+  // Created once per device, and again when the probe replaces shaders; the
+  // layout does not change before teardown.
+  const uint32_t shader_revision = rendering::live_shaders::Revision();
+  if (pass->pipeline.handle != 0 && pass->shader_revision == shader_revision) return true;
   if (!EnsureLightPassLayout(device)) return false;
+  const auto code = rendering::live_shaders::Bytes(shader, embedded);
 
   reshade::api::shader_desc shader_description = {
       .code = code.data(),
@@ -285,10 +293,17 @@ inline bool EnsureLightPass(reshade::api::device* device, LightPass* pass, const
   if (!device->create_pipeline(light_pass_layout, 1, &subobject, &pipeline)) {
     static std::atomic_flag reported = {};
     LogLightOnce(&reported, reshade::log::level::error, "failed to create lighting pipeline; pass=", name);
-    return false;
+    // A replacement shader that fails keeps the pipeline it would have replaced.
+    pass->shader_revision = shader_revision;
+    return pass->pipeline.handle != 0;
   }
 
+  // D3D11 keeps the replaced shader alive while recorded work uses it.
+  if (pass->pipeline.handle != 0) {
+    device->destroy_pipeline(pass->pipeline);
+  }
   pass->pipeline = pipeline;
+  pass->shader_revision = shader_revision;
   LogLight(reshade::log::level::info, name);
   return true;
 }
@@ -707,11 +722,39 @@ inline LightPass add_pass;
 inline LightTarget indirect_diffuse_target;
 inline LightTarget diagnostic_target;
 
+// Multiple bounces. The application records how much it changed each
+// pixel's light (light_change, with the pixel's view depth); in the next
+// frame the source pass carries that change to the new pixels and adds it to
+// the trace's source radiance (bounce_source), so each frame adds a bounce.
+inline LightPass source_pass;
+inline LightTarget bounce_source;
+inline LightTarget light_change;
+// The source pass's reprojection constants (gtvbgi_source.cs_5_0.hlsl, b1).
+struct BounceConstants {
+  std::array<float, 16> current_to_previous_clip = {};
+  std::array<float, 2> current_jitter_uv = {};
+  std::array<float, 2> previous_jitter_uv = {};
+  float velocity_projection_jitter_scale = 0.f;
+  std::array<uint32_t, 3> padding = {};
+};
+inline Microsoft::WRL::ComPtr<ID3D11Buffer> bounce_constants;
+// The camera, jitter and size light_change was recorded with; the camera is
+// invalid until a recording had one.
+inline reconstruction::camera_state::CameraFrame recorded_camera;
+inline std::array<float, 2> recorded_jitter_uv = {};
+inline std::array<uint32_t, 2> recorded_size = {};
+
 inline void Destroy(reshade::api::device* device) {
   DestroyLightPass(device, &gather_pass);
   DestroyLightPass(device, &add_pass);
+  DestroyLightPass(device, &source_pass);
   DestroyLightTarget(device, &indirect_diffuse_target);
   DestroyLightTarget(device, &diagnostic_target);
+  DestroyLightTarget(device, &bounce_source);
+  DestroyLightTarget(device, &light_change);
+  bounce_constants.Reset();
+  recorded_camera = {};
+  recorded_size = {};
 }
 
 }  // namespace mgsv::il
@@ -868,6 +911,15 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .tooltip = "Rejects bounced light from surfaces facing away from the receiver. These surfaces still block light and reflections.",
       },
       new renodx::utils::settings::Setting{
+          .key = "IndirectLightingDiffuseMultipleBouncesEnabled",
+          .binding = &shader_injection->diffuse_multiple_bounces,
+          .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
+          .default_value = 1.f,
+          .label = "Multiple Bounces",
+          .section = "Indirect Lighting (Advanced)",
+          .tooltip = "Surfaces pass on the light they received in the previous frame, including its occlusion and bounced light, so light keeps bouncing instead of stopping after one bounce. Surfaces that just came into view bounce once for a frame. Has no effect with Reconstruction Off.",
+      },
+      new renodx::utils::settings::Setting{
           .key = "IndirectLightingDebugView",
           .binding = &shader_injection->lighting_debug_view,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
@@ -942,8 +994,8 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   const bool size_changed = il::indirect_diffuse_target.width != width || il::indirect_diffuse_target.height != height;
 
   if (!EnsureLightTarget(device, &il::indirect_diffuse_target, width, height)
-      || !EnsureLightPass(device, &il::gather_pass, "mgsv: GT-VBGI trace created", __gtvbgi)
-      || !EnsureLightPass(device, &il::add_pass, "mgsv: GT-VBGI application created", __gtvbgi_add)
+      || !EnsureLightPass(device, &il::gather_pass, "mgsv: GT-VBGI trace created", "gtvbgi", __gtvbgi)
+      || !EnsureLightPass(device, &il::add_pass, "mgsv: GT-VBGI application created", "gtvbgi_add", __gtvbgi_add)
       || !EnsureFallbackViews(device)) {
     static std::atomic_flag failed = {};
     LogLightOnce(&failed, reshade::log::level::warning,
@@ -993,7 +1045,60 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   const auto clean_owner = (clean_material != nullptr
                                 ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(clean_material->owner_srv.Get())}
                                 : reshade::api::resource_view{0u});
-  // 3. Trace AO and diffuse GI together. Reflections are traced separately,
+  // 3. Multiple bounces: add the indirect light the application recorded in
+  // the previous frame to the trace's source, carried here through the camera
+  // or the object's motion. The record is used only when it comes from this
+  // scene's previous camera or the same one (a replayed list), at this size.
+  const bool multiple_bounces = constants.diffuse_multiple_bounces >= 0.5f
+                                && EnsureLightTarget(device, &il::bounce_source, frame.width, frame.height)
+                                && EnsureLightTarget(device, &il::light_change, frame.width, frame.height)
+                                && EnsureLightPass(device, &il::source_pass, "mgsv: GT-VBGI source created", "gtvbgi_source", __gtvbgi_source);
+  if (multiple_bounces && il::bounce_constants == nullptr) {
+    const D3D11_BUFFER_DESC description = {.ByteWidth = sizeof(il::BounceConstants), .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_CONSTANT_BUFFER};
+    reinterpret_cast<ID3D11Device*>(device->get_native())->CreateBuffer(&description, nullptr, &il::bounce_constants);  // NOLINT(performance-no-int-to-ptr)
+  }
+  const auto owner = engine::views::GetScope().owner;
+  const auto camera = reconstruction::camera_state::GetForCapture();
+  const bool camera_valid = temporal.valid && camera.valid && camera.camera_matrix_valid && camera.scene == owner.scene
+                            && camera.owner_generation == owner.generation
+                            && camera.publication_sequence == temporal.camera_publication && camera.reservation != 0u;
+  const auto& previous = il::recorded_camera;
+  const bool history_valid = multiple_bounces && il::bounce_constants != nullptr && camera_valid && previous.valid
+                             && (camera.reservation == previous.reservation || camera.reservation == previous.reservation + 1u)
+                             && camera.reset_generation == previous.reset_generation && camera.owner_generation == previous.owner_generation
+                             && camera.viewport_identity == previous.viewport_identity && camera.camera_identity == previous.camera_identity
+                             && il::recorded_size == std::array<uint32_t, 2>{frame.width, frame.height};
+  if (history_valid) {
+    const il::BounceConstants bounce = {
+        .current_to_previous_clip = reconstruction::camera_state::ToRowMajorFloatArray(
+            reconstruction::camera_state::Multiply(previous.current_view_projection, camera.inverse_view_projection)),
+        .current_jitter_uv = temporal.current_jitter_uv,
+        .previous_jitter_uv = il::recorded_jitter_uv,
+        .velocity_projection_jitter_scale = temporal.velocity_projection_jitter_scale,
+    };
+    context->UpdateSubresource(il::bounce_constants.Get(), 0u, nullptr, &bounce, 0u, 0u);
+    context->CSSetConstantBuffers(1u, 1u, il::bounce_constants.GetAddressOf());
+    const std::array<reshade::api::resource_view, lighting::LIGHT_INPUT_COUNT> source_inputs = {
+        frame.depth,
+        frame.normal,
+        fallback_input,
+        frame.light_source,
+        frame.albedo,
+        il::light_change.view,
+        fallback_input,
+        environment != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(environment->material.Get())} : fallback_input,
+        fallback_input,
+        {reinterpret_cast<uintptr_t>(temporal.motion.object_velocity.Get())},
+        fallback_input,
+        clean_color,
+        clean_owner,
+        frame.prepared_source,
+    };
+    DispatchLightPass(cmd_list, &il::source_pass, constants, source_inputs, il::bounce_source.uav, fallback_outputs[0], fallback_outputs[1],
+                      frame.width, frame.height);
+  }
+
+  // 4. Trace AO and diffuse GI together. Reflections are traced separately,
   // later in the frame, and add no work to this chain.
   const std::array<reshade::api::resource_view, lighting::LIGHT_INPUT_COUNT> sources = {
       frame.depth,
@@ -1009,14 +1114,14 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
       fallback_input,
       clean_color,
       clean_owner,
-      frame.prepared_source,
+      history_valid ? il::bounce_source.view : frame.prepared_source,
   };
   DispatchLightPass(cmd_list, &il::gather_pass, constants, sources,
                     fallback_outputs[0], il::indirect_diffuse_target.uav,
                     diagnostic_ready ? il::diagnostic_target.uav : fallback_outputs[1],
                     width, height);
 
-  // 4. Apply. The application shader rebuilds the captured native ambient term
+  // 5. Apply. The application shader rebuilds the captured native ambient term
   // with its exact sampler, phase weights, and native b5 constants (bound here
   // at s0 and b3), so AO darkens only the ambient part of total diffuse. A
   // missing capture skips diffuse AO but not GI.
@@ -1054,8 +1159,11 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
       ambient != nullptr ? reshade::api::resource_view{reinterpret_cast<uintptr_t>(ambient->weight_view.Get())} : fallback_input,
   };
   // Update native diffuse and the eligible scattering copy, preserving their alpha.
-  DispatchLightPass(cmd_list, &il::add_pass, constants, apply_sources, frame.light, fallback_outputs[0],
+  DispatchLightPass(cmd_list, &il::add_pass, constants, apply_sources, frame.light, multiple_bounces ? il::light_change.uav : fallback_outputs[0],
                     frame.scattering_copy.handle != 0u ? frame.scattering_copy : fallback_outputs[1], frame.width, frame.height);
+  il::recorded_camera = (multiple_bounces && camera_valid ? camera : reconstruction::camera_state::CameraFrame{});
+  il::recorded_jitter_uv = temporal.current_jitter_uv;
+  il::recorded_size = {frame.width, frame.height};
   static std::atomic_flag recorded = {};
   LogLightOnce(&recorded, reshade::log::level::info,
                "GT-VBGI commands recorded; effect=", width, "x", height,
@@ -1070,6 +1178,7 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
                " ao_strength=", constants.ao_strength,
                " gi_backface=", constants.gi_reject_backfaces,
                " diffuse_gi_strength=", constants.diffuse_gi_strength,
+               " multiple_bounces=", multiple_bounces,
                " lighting_depth_mips_enabled=", constants.lighting_depth_mips_enabled,
                " debug_view=", constants.lighting_debug_view,
                "; command submission is not GPU completion");
@@ -1317,15 +1426,12 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
                       depth, normal, light_source, scattering_copy,
                       albedo = shared_inputs.materials.albedo,
                       specular = shared_inputs.materials.specular,
-                      generation = shared_inputs.generation, get_light_view](reshade::api::command_list* submitted, const mgsv::rendering::submission::Execution& execution) {
-    if (!execution.first) {
-      // A replayed command list must not apply AO/GI again to diffuse lighting
-      // that this insertion already corrected.
-      Microsoft::WRL::ComPtr<ID3D11Resource> copied;
-      light_source->GetResource(&copied);
-      copied->SetPrivateDataInterface(temporal_inputs::DIFFUSE_SOURCE_GUID, nullptr);
-      return;
-    }
+                      generation = shared_inputs.generation, get_light_view](reshade::api::command_list* submitted, const mgsv::rendering::submission::Execution& /*execution*/) {
+    // The game replays cached lists, often for many frames on end. A replay
+    // draws the native diffuse light and makes the native copy again, which
+    // publishes the copy's association again, so the chain applies once on
+    // every execution. The mode can change while a list is replayed.
+    if (!UsesEnhancedIndirectLighting()) return;
     const auto selected = inputs::ReadSelection(submitted->get_device());
     if (selected.device == nullptr || selected.generation != generation) return;
     auto* submitted_context = reinterpret_cast<ID3D11DeviceContext*>(submitted->get_native());  // NOLINT(performance-no-int-to-ptr)

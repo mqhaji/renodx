@@ -129,7 +129,7 @@ What the methods share: the material record and BSDF, the light list, the sky mo
 
 ### 4.1 Why the current GI falls short
 
-Today's Global Illumination gathers light only from what the current frame shows: one bounce of the diffuse light on visible surfaces, found by marching the depth buffer. A light source or a sunlit wall that leaves the screen stops lighting the scene, hidden surfaces neither block nor bounce, forward-drawn lamps contribute nothing, and nothing is remembered between frames. A better estimator on the same data (more rays, reservoirs, a stronger denoiser) cannot fix that, because the data is missing. The design below adds the missing data first.
+Today's Global Illumination gathers light only from what the current frame shows: diffuse light bounced from visible surfaces, found by marching the depth buffer, with further bounces carried from frame to frame on the surfaces that stay in view (Multiple Bounces). A light source or a sunlit wall that leaves the screen stops lighting the scene, hidden surfaces neither block nor bounce, forward-drawn lamps contribute nothing, and nothing off screen is remembered. A better estimator on the same data (more rays, reservoirs, a stronger denoiser) cannot fix that, because the data is missing. The design below adds the missing data first.
 
 ### 4.2 Scene memory
 
@@ -188,7 +188,7 @@ Light for G-buffer pixels is gathered in two layers that split the hemisphere be
 
 **Putting them together.** For a pixel with normal `n`, irradiance is the sum of three terms: light from nearby blockers in the directions they cover; the far layer's light in the directions the near layer found open; and the game's authored ambient light, scaled by the share of open directions whose far light ended in unknown space. When everything is known the authored ambient light is fully replaced. When nothing is known the result is the game's ambient light under our occlusion, which is what Global Illumination does to ambient light today.
 
-At the default tier the gather keeps what today's diffuse chain has: no per-pixel denoiser and no history for diffuse light, so nothing in it depends on the temporal upscaler.
+At the default tier the gather keeps what today's diffuse chain has: no per-pixel denoiser and no history for diffuse light beyond the light Multiple Bounces carries forward, which reads reconstruction's camera records and so turns off with Reconstruction Off.
 
 ### 4.6 Reflections
 

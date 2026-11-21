@@ -13,6 +13,7 @@
 #include "../../../utils/mutex.hpp"
 #include "../../../utils/settings.hpp"
 #include "d3d12_timing.hpp"
+#include "live_shaders.hpp"
 #include "probe_api.hpp"
 
 // Provides probe_api.hpp. Nothing here runs unless the probe calls it.
@@ -61,6 +62,7 @@ inline void UseProbe(bool attach) {
     };
     shared.data->request_d3d12_timing = d3d12_timing::Request;
     shared.data->read_d3d12_timing = d3d12_timing::Read;
+    shared.data->replace_shader = live_shaders::Replace;
   } else if (shared.data != nullptr) {
     {
       const std::unique_lock lock(shared.data->mutex);
@@ -68,6 +70,7 @@ inline void UseProbe(bool attach) {
       shared.data->set_setting = nullptr;
       shared.data->request_d3d12_timing = nullptr;
       shared.data->read_d3d12_timing = nullptr;
+      shared.data->replace_shader = nullptr;
     }
     shared.UnregisterModule();
   }
