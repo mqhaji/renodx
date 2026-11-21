@@ -111,6 +111,11 @@ enum class Entry : uint8_t {
   TERRAIN_DECAL_SET_INPUT,
   TERRAIN_DECAL_SET_INPUT_RETURN,
 
+  // Game pause (engine/pause.hpp). Read only, never hooked.
+  GAME_TIME_UPDATE,
+  GET_PAUSE_SYSTEM,
+  PAUSE_SYSTEM,
+
   // Read only to verify structure fields; never hooked.
   SHADOW_CONSTANT_REGISTER_DUPLICATE,
   RENDER_INFO_RESIZE_SWAP_CHAIN,
@@ -225,6 +230,11 @@ inline constexpr std::array<EntryInfo, ENTRY_COUNT> ENTRIES = {{
     {.entry = Entry::TERRAIN_DECAL_SET_INPUT, .name = "fox::gr::dg::BuildTerrainDecalJob::SetInputBuildParameters", .rva = 0x2D18D0u, .bytes = "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48"},
     {.entry = Entry::TERRAIN_DECAL_SET_INPUT_RETURN, .name = "fox::gr::dg::plugins::TerrainRendering::TerrainDecalDrawOnJob: return from SetInputBuildParameters", .rva = 0x2755CAu, .bytes_before = 5u, .bytes = "E8 ?? ?? ?? ??"},
 
+    // Game pause (engine/pause.hpp).
+    {.entry = Entry::GAME_TIME_UPDATE, .name = "fox::GameTime::Update", .rva = 0x816A0u, .bytes = "48 89 5C 24 10 4C 89 44 24 18 57 48 83 EC 40 0F 29 74 24 30"},
+    {.entry = Entry::GET_PAUSE_SYSTEM, .name = "fox::GetPauseSystem", .rva = 0xF1D80u, .bytes = "48 8D 05 ?? ?? ?? ?? C3"},
+    {.entry = Entry::PAUSE_SYSTEM, .name = "fox::PauseSystemImpl instance", .rva = 0x2B65D40u},
+
     // Read only to verify structure fields; never hooked.
     {.entry = Entry::SHADOW_CONSTANT_REGISTER_DUPLICATE, .name = "fox::gr::dg::ShadowConstantRegister::Duplicate", .rva = 0x2C5790u, .bytes = "40 55 56 57 48 81 EC A0 00 00 00 48 C7 44 24 28 FE FF FF FF"},
     {.entry = Entry::RENDER_INFO_RESIZE_SWAP_CHAIN, .name = "fox::gr::dg::RenderInfoDx11::ResizeSwapChain", .rva = 0x24AD80u, .bytes = "40 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 D9 48 81 EC B0 00 00 00"},
@@ -264,6 +274,8 @@ inline constexpr std::array REFERENCES = {
     Reference{.source = Entry::SPHERICAL_HARMONICS_SET_OUTPUT_RETURN, .instruction = -5, .displacement = 1u, .length = 5u, .target = Entry::SPHERICAL_HARMONICS_SET_OUTPUT},
     Reference{.source = Entry::SKY_PARAMETERS_RETURN, .instruction = -5, .displacement = 1u, .length = 5u, .target = Entry::SKY_CALC_SHADER_PARAMETERS},
     Reference{.source = Entry::TERRAIN_DECAL_SET_INPUT_RETURN, .instruction = -5, .displacement = 1u, .length = 5u, .target = Entry::TERRAIN_DECAL_SET_INPUT},
+    Reference{.source = Entry::GAME_TIME_UPDATE, .instruction = 0x1F, .displacement = 1u, .length = 5u, .target = Entry::GET_PAUSE_SYSTEM},
+    Reference{.source = Entry::GET_PAUSE_SYSTEM, .instruction = 0, .displacement = 3u, .length = 7u, .target = Entry::PAUSE_SYSTEM},
 };
 
 // A virtual table slot that must hold another entry's address. PluginLocalLight
@@ -376,6 +388,10 @@ enum class Field : uint8_t {
   DRAW_PACKET_PROJECTION,
   SKY_PARAMETERS_INVERSE_PROJECTION,
 
+  // fox::PauseSystemImpl.
+  PAUSE_FLAGS,
+  PAUSE_FLAGS_GAME_TIME,
+
   COUNT,
 };
 inline constexpr size_t FIELD_COUNT = static_cast<size_t>(Field::COUNT);
@@ -471,6 +487,10 @@ inline constexpr std::array<FieldInfo, FIELD_COUNT> FIELDS = {{
     {.field = Field::DRAW_PACKET_VIEW, .name = "spherical-harmonic lighting and terrain decal draw packet: view", .value = 0x120u, .source = Entry::TERRAIN_DECAL_DRAW_ON_JOB, .instruction = 0xC1u, .position = 3u, .size = 4u},
     {.field = Field::DRAW_PACKET_PROJECTION, .name = "spherical-harmonic lighting and terrain decal draw packet: projection", .value = 0x160u, .source = Entry::TERRAIN_DECAL_DRAW_ON_JOB, .instruction = 0xFDu, .position = 3u, .size = 4u},
     {.field = Field::SKY_PARAMETERS_INVERSE_PROJECTION, .name = "sky shader parameters: inverse projection rows", .value = 0x40u, .source = Entry::SKY_CALC_SHADER_PARAMETERS, .instruction = 0x30Eu, .position = 3u, .size = 1u},
+
+    // fox::PauseSystemImpl.
+    {.field = Field::PAUSE_FLAGS, .name = "fox::PauseSystemImpl: pause flags of every active pause source, combined once per game frame", .value = 0x8u, .source = Entry::GAME_TIME_UPDATE, .instruction = 0x24u, .position = 2u, .size = 1u},
+    {.field = Field::PAUSE_FLAGS_GAME_TIME, .name = "fox::PauseSystemImpl pause flags: any of these stops game time", .value = 0x7FFFFFFFu, .source = Entry::GAME_TIME_UPDATE, .instruction = 0x24u, .position = 3u, .size = 4u},
 }};
 
 inline constexpr bool FIELDS_WELL_FORMED = [] {

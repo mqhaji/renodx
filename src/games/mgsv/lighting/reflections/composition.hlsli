@@ -52,13 +52,17 @@ ReflectionResult LoadReflectionResult(float2 uv) {
 // Only the replacement happens in linear light. Scene alpha and the native
 // destination are left to the caller. Debug views 11 to 17 show the
 // reflection inputs; magenta marks a pixel without valid reflection data.
+// Scene memory's views 18 to 21 replace the light image on every pixel,
+// sky included.
 float3 ComposeReflections(float3 encoded_scene, ReflectionResult result) {
   const int debug_view = (int)CUSTOM_MGSV_LIGHTING_DEBUG_VIEW;
   float3 scene = renodx::color::srgb::Decode(max(encoded_scene, 0.0));
   const float4 light = result.light;
   const float4 environment_weight = result.environment_weight;
   const float4 environment = result.environment;
-  if (result.valid) {
+  if (debug_view >= 18 && debug_view <= 21) {
+    scene = (result.status == MGSV_REFLECTION_ENHANCED ? light.rgb : float3(1.0, 0.0, 1.0));
+  } else if (result.valid) {
     if (debug_view == 11)
       scene = light.rgb;
     else if (debug_view == 12)

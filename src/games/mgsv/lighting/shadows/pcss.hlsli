@@ -149,6 +149,14 @@ float3 PcssDebug(PcssResult value, uint view, float max_radius) {
   return 0.0;
 }
 
+// Sun or moon cascades. m_shadowProjection projects into cascade 0; cascade
+// c > 0 scales that by cascades[c - 1].w and offsets it by .xyz. Each cascade
+// owns one quadrant of the atlas, cascade 0 top left. Its stored depth is
+// (1 + clip.z) * cascades._m30, reverse depth: larger is nearer the light.
+float2 SunAtlasUv(uint cascade, float2 clip_xy) {
+  return float2(cascade & 1u, cascade >> 1u) * 0.5 + 0.25 + clip_xy * float2(0.25, -0.25);
+}
+
 // Sun or moon: four cascades share one atlas, one quadrant each. native_uv
 // picks the starting cascade.
 PcssResult FilterSunShadow(Texture2D<float4> shadow_map, SamplerComparisonState comparison,
@@ -186,7 +194,7 @@ PcssResult FilterSunShadow(Texture2D<float4> shadow_map, SamplerComparisonState 
   if (any(slack < 0.0) || receiver_depth < 0.0 || receiver_depth > 1.0 || depth_per_unit <= 0.0) return result;
   max_radius = min(max_radius, min(slack.x / uv_scale.x, slack.y / uv_scale.y));
   float2 tile = float2(result.region & 1u, result.region >> 1u) * 0.5;
-  float2 uv = tile + 0.25 + clip.xy * float2(0.25, -0.25) + 0.5 * texel;
+  float2 uv = SunAtlasUv(result.region, clip.xy) + 0.5 * texel;
   float2 tile_min = tile + 0.5 * texel;
   float2 tile_max = tile + 0.5 - 0.5 * texel;
 

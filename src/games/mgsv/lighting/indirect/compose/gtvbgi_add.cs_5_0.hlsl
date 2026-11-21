@@ -53,7 +53,7 @@ RWTexture2D<float4> scattering_copy : register(u2);
   float weight_sum = 0.0;
   float visibility = 0.0;
   float visibility_weight = 0.0;
-  const int diagnostic = (int)clamp(CUSTOM_MGSV_LIGHTING_DEBUG_VIEW, 0.0, 17.0);
+  const int diagnostic = (int)clamp(CUSTOM_MGSV_LIGHTING_DEBUG_VIEW, 0.0, 21.0);
   float3 diagnostic_sum = 0.0;
   float diagnostic_weight = 0.0;
   [unroll] for (int y = 0; y < 2; ++y) {

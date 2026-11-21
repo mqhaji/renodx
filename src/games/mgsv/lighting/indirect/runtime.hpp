@@ -874,8 +874,8 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .default_value = 0.f,
           .label = "Lighting Debug View",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Diffuse views inspect the AO/GI stages. Reflection views compare denoised and raw light, environment weights, input coverage, saved environment, specular visibility, and NRD validation. Sampling weights can exceed one. Reflection Coverage shows qualified inputs, not ray hits. Magenta marks unavailable inputs.",
-          .labels = {"Off", "GI Lighting", "Geometry Coverage", "Accepted Source Coverage", "Valid / Invalid Results", "Source Lighting", "Ambient Occlusion", "Ambient Diffuse", "Direct Diffuse", "Corrected Diffuse", "Ambient Input Validity", "Reflected Light", "Environment Weight", "Reflection Coverage", "Environment Specular", "Specular Visibility", "Raw Reflections", "NRD Validation"},
+          .tooltip = "Diffuse views inspect the AO/GI stages. Reflection views compare denoised and raw light, environment weights, input coverage, saved environment, specular visibility, and NRD validation. Sampling weights can exceed one. Reflection Coverage shows qualified inputs, not ray hits. Scene Memory shows the surfaces stored around the camera in their stored color, Behind Camera the ones behind it, as if turned around; magenta there is space not seen yet. Scene Memory Agreement compares memory with what is on screen: green matches, red is a stored surface in front of what is visible, blue is a visible surface memory holds as empty, magenta is unseen space. Scene Memory Sun Visibility shows stored sunlight from black (shadowed) to white (lit), red where none is stored (surfaces facing away from the sun store none) and orange where the sun has since moved more than two degrees (more for coarser cells). Magenta marks unavailable inputs.",
+          .labels = {"Off", "GI Lighting", "Geometry Coverage", "Accepted Source Coverage", "Valid / Invalid Results", "Source Lighting", "Ambient Occlusion", "Ambient Diffuse", "Direct Diffuse", "Corrected Diffuse", "Ambient Input Validity", "Reflected Light", "Environment Weight", "Reflection Coverage", "Environment Specular", "Specular Visibility", "Raw Reflections", "NRD Validation", "Scene Memory", "Scene Memory Behind Camera", "Scene Memory Agreement", "Scene Memory Sun Visibility"},
       },
   };
   for (auto* setting : additions) {
@@ -1098,7 +1098,7 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
   {
     const std::shared_lock lock(renodx::utils::mutex::global_mutex);
     constants = shader_injection;
-    constants.lighting_debug_view = std::clamp(constants.lighting_debug_view, 0.f, 17.f);
+    constants.lighting_debug_view = std::clamp(constants.lighting_debug_view, 0.f, 21.f);
   }
 
   // Lighting runs only on the device selected at the first Present, and not during a resize.

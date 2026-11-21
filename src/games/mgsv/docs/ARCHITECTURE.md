@@ -20,6 +20,7 @@ The [render map](render-map.html) follows these owners through the native frame,
 | `engine/render_targets.hpp` | Hooks on the engine's render target creation that make it create selected targets as RGBA16F, the private float images of depth of field and motion blur, the scene-role tag, and the engine's current scene, depth and velocity images for reconstruction |
 | `engine/motion_vectors.hpp` | Hooks that keep the engine drawing motion vectors without the game's motion blur, note which view builds drew them, and report each recorded camera-velocity pass to the lighting history |
 | `engine/post_filter.hpp` | The hook where the engine starts a view's post-processing, and its start and cut counts |
+| `engine/pause.hpp` | Whether game time is stopped, read from the engine's pause system |
 | `rendering/submission.hpp` | The D3D11 submission bridge: cuts a recorded list where a feature schedules a job and runs the job when the game executes the list, with D3D11 state preserved; contact shadows, the diffuse gather, reflections and reconstruction use it |
 | `rendering/d3d11_state.hpp`, `rendering/geometry.hlsli` | D3D11 state preservation and native geometry reconstruction |
 | `materials/capture.hpp`, `materials/native/` | Records for the 59 materials that bake a cube map into albedo, their ports, the two rain ports, and the registration inventory |
@@ -33,6 +34,7 @@ The [render map](render-map.html) follows these owners through the native frame,
 | `lighting/environment_specular.hpp` | Shared environment capture, material lookup tables, and scoped composition inputs |
 | `lighting/indirect/trace/`, `compose/` | Diffuse estimator and its application |
 | `lighting/reflections/` | GGX screen/environment estimation, NRD history and native reflection-chain bypass |
+| `lighting/memory/` | Scene memory: world-space grids of seen surfaces, their color and sun visibility, and the terrain, updated inside the reflection round trip; [scene memory guide](../lighting/memory/README.md) |
 | `lighting/compose/` | Native deferred lighting/fog composition ports, including their early tone curves |
 | `sky/native/`, `water/native/`, `effects/` | Existing sky/cloud, ocean, and wormhole/sand-wind ports, not new rendering models |
 | `copy/` | Native image-copy shader edits |
@@ -89,8 +91,8 @@ DLSS, FSR, Analytical TAA and stochastic reflections use one D3D12 device and di
 |---|---|
 | `rendering/shared_texture.hpp` | Own each exported texture handle and cache its D3D12 import |
 | `rendering/d3d12_bridge.hpp` | Create the same-adapter device and queue, synchronize the APIs, and retire command slots |
-| `rendering/d3d12_compute.hpp` | Store per-slot descriptors and constants; create private textures and compute pipelines |
-| `lighting/reflections/runtime.hpp` | Prepare shared native inputs, record the complete reflection chain, and publish paired shared results |
+| `rendering/d3d12_compute.hpp` | Store per-slot descriptors and constants; create private 2D and 3D textures, buffers, inputs shared from D3D11 and compute pipelines; record a pass with its views and constants |
+| `lighting/reflections/runtime.hpp` | Prepare shared native inputs, record the complete reflection chain, and publish paired shared results; scene memory's passes join its preparation and its recording |
 | `reconstruction/d3d12.hpp` | Prepare shared inputs, record a method's evaluation and encoding, and retain resources |
 | `reconstruction/GBufferVelocity_*`, `GBufferMaskedVelocity_*`, `MotionBlurCameraVelocity_*`, `postprocess/motion_blur/MotionBlurTile_*`, `MotionBlurBakeVelocityDepth_*` | While temporal reconstruction is on, write object motion and the combined motion image in precise form in place of the game's 8-bit encoding, and read either form in the two motion blur passes that read the combined image (`rendering/motion.hlsli`) |
 | `reconstruction/input_capture.hpp` | Build and check the scene's inputs where its post-processing starts |

@@ -31,6 +31,7 @@
 #include "../../rendering/submission.hpp"
 #include "../environment_specular.hpp"
 #include "../indirect_lighting_mode.hpp"
+#include "../memory/runtime.hpp"
 #include "probe_api.hpp"
 
 // Enhanced reflections. At deferred composition, Capture records the scene's
@@ -38,11 +39,13 @@
 // schedules Execute just before the draw. Execute prepares shared inputs with
 // one D3D11 compute pass, then records on D3D12: depth mips, the GGX trace, NRD
 // denoising, and the resolve into the shared result, which the composite reads.
+// Scene memory upkeep, when on, rides in the same round trip.
 namespace mgsv::lighting::reflections {
 
 namespace bridge_api = rendering::d3d12_bridge;
 namespace compute = rendering::d3d12_compute;
 using compute::Check;
+using compute::ImageView;
 
 inline constexpr UINT SCENE_BYTES = 480u;
 inline constexpr UINT SCENE_ROW_BYTES = 512u;
@@ -60,19 +63,6 @@ struct alignas(16) Constants {
   uint32_t rays_per_pixel = 1u;
 };
 static_assert(sizeof(Constants) == probe::CONSTANT_BYTES);
-
-struct SharedInput {
-  Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
-  Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
-  std::shared_ptr<rendering::SharedTexture> allocation;
-  bridge_api::SharedImage image;
-};
-
-struct ImageView {
-  ID3D12Resource* resource = nullptr;
-  UINT mip = 0u;
-  UINT mips = 1u;
-};
 
 struct Frame {
   compute::Frame arena;
@@ -178,6 +168,7 @@ inline bool QueueCameraCapture(uint32_t frames, probe::Status* status) {
 }
 
 inline void UseProbe(bool attach) {
+  memory::UseProbe(attach);
   if (attach) {
     probe::shared.RegisterModule();
     if (probe::shared.data == nullptr) return;
@@ -202,8 +193,8 @@ struct Runtime {
   Microsoft::WRL::ComPtr<ID3D12Device> device;
   bridge_api::Bridge::WorkPool commands;
   std::array<Frame, bridge_api::Bridge::MAX_IN_FLIGHT> frames;
-  std::array<SharedInput, 8> inputs;
-  SharedInput sampling_noise;
+  std::array<compute::SharedInput, 8> inputs;
+  compute::SharedInput sampling_noise;
   Pipelines pipelines;
   Microsoft::WRL::ComPtr<ID3D11Buffer> constants;
   Microsoft::WRL::ComPtr<ID3D12Resource> scene;
@@ -251,6 +242,7 @@ inline void Report(const char* message, reshade::log::level level = reshade::log
 inline void Destroy() {
   bridge_api::Drain();
   runtime = {};
+  memory::Destroy();
   nrd_submissions.store(0u, std::memory_order_relaxed);
   nrd_restarts.store(0u, std::memory_order_relaxed);
   const std::unique_lock lock(reload.mutex);
@@ -291,35 +283,11 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
   const auto camera = reconstruction::camera_state::GetForCapture();
   views[8] = scene.motion.velocity;
   views[11] = scene.motion.object_velocity;
+  views[12] = scene.scene.sun_shadow;
   // Allocate on the first scene or a resize. Other frames reuse the pipelines,
   // shared inputs, descriptors, and private ray outputs.
   const UINT width = inputs.result->width;
   const UINT height = inputs.result->height;
-  auto create_input = [&](UINT width, UINT height, DXGI_FORMAT format, UINT mips = 1u,
-                          const D3D11_SUBRESOURCE_DATA* initial_data = nullptr) {
-    SharedInput input;
-    const D3D11_TEXTURE2D_DESC description = {
-        .Width = width,
-        .Height = height,
-        .MipLevels = mips,
-        .ArraySize = 1u,
-        .Format = format,
-        .SampleDesc = {.Count = 1u},
-        .Usage = D3D11_USAGE_DEFAULT,
-        .BindFlags = D3D11_BIND_SHADER_RESOURCE | (initial_data == nullptr ? D3D11_BIND_UNORDERED_ACCESS : 0u),
-        .MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE,
-    };
-    Check(bridge.device11->CreateTexture2D(&description, initial_data, &input.texture), "Create reflection input");
-    if (initial_data == nullptr) {
-      Check(bridge.device11->CreateUnorderedAccessView(input.texture.Get(), nullptr, &input.uav), "Create reflection input view");
-    }
-    input.allocation = rendering::ExportTexture(input.texture.Get());
-    if (input.allocation == nullptr) throw std::runtime_error("Cannot export reflection input");
-    input.image = bridge_api::SharedImage(bridge.device11.Get(), bridge.device12.Get(), input.texture.Get(), description,
-                                          D3D11_BIND_SHADER_RESOURCE, input.allocation.get(), &bridge.statistics.image_imports);
-    if (!input.image.direct) throw std::runtime_error("Reflection input must be directly shared");
-    return input;
-  };
   if (runtime.device != bridge.device12) {
     // The bridge drains its queue before releasing an old device. A new device
     // cannot use descriptors or images from the previous one, so start over.
@@ -341,12 +309,9 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
     // directly, with no per-frame copy or dispatch. Its 32 layers are stacked
     // vertically, so every reflection input is an ordinary 2D view.
     const D3D11_SUBRESOURCE_DATA noise_data = {.pSysMem = FAST_NOISE_RG8.data(), .SysMemPitch = 128u * 2u};
-    runtime.sampling_noise = create_input(128u, 128u * 32u, DXGI_FORMAT_R8G8_UNORM, 1u, &noise_data);
-    const D3D12_HEAP_PROPERTIES heap = {.Type = D3D12_HEAP_TYPE_DEFAULT};
-    const D3D12_RESOURCE_DESC buffer = {.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER, .Width = SCENE_ROW_BYTES, .Height = 1u, .DepthOrArraySize = 1u, .MipLevels = 1u, .SampleDesc = {.Count = 1u}, .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR};
-    Check(bridge.device12->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COMMON,
-                                                   nullptr, IID_PPV_ARGS(&runtime.scene)),
-          "Create reflection scene constants");
+    runtime.sampling_noise = compute::CreateSharedInput(&bridge, 128u, 128u * 32u, DXGI_FORMAT_R8G8_UNORM, 1u, &noise_data);
+    runtime.scene = compute::CreateBuffer(bridge.device12.Get(), SCENE_ROW_BYTES, D3D12_HEAP_TYPE_DEFAULT,
+                                          D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON);
     runtime.pipelines_ready = true;
   }
   if (reload_pending.exchange(false, std::memory_order_acquire)) {
@@ -379,12 +344,12 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
     constexpr std::array formats = {DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT,
                                     DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R32_FLOAT};
     for (size_t index = 0u; index < formats.size(); ++index) {
-      runtime.inputs[index] = create_input(width, height, formats[index], index == 3u ? runtime.mip_count : 1u);
+      runtime.inputs[index] = compute::CreateSharedInput(&bridge, width, height, formats[index], index == 3u ? runtime.mip_count : 1u);
     }
-    runtime.inputs[4] = create_input(SCENE_ROW_BYTES / 16u, 1u, DXGI_FORMAT_R32G32B32A32_UINT);
-    runtime.inputs[5] = create_input(width, height, DXGI_FORMAT_R16G16_FLOAT);
-    runtime.inputs[6] = create_input(width, height, DXGI_FORMAT_R10G10B10A2_UNORM);
-    runtime.inputs[7] = create_input(width, height, DXGI_FORMAT_R32_FLOAT);
+    runtime.inputs[4] = compute::CreateSharedInput(&bridge, SCENE_ROW_BYTES / 16u, 1u, DXGI_FORMAT_R32G32B32A32_UINT);
+    runtime.inputs[5] = compute::CreateSharedInput(&bridge, width, height, DXGI_FORMAT_R16G16_FLOAT);
+    runtime.inputs[6] = compute::CreateSharedInput(&bridge, width, height, DXGI_FORMAT_R10G10B10A2_UNORM);
+    runtime.inputs[7] = compute::CreateSharedInput(&bridge, width, height, DXGI_FORMAT_R32_FLOAT);
     // Preparation writes directly into the shared source color and depth. Only
     // depth needs a mip chain; source color keeps its original pixel footprint.
     runtime.depth = runtime.inputs[3].image.resource;
@@ -396,6 +361,9 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
     runtime.filtered = compute::CreateTexture(bridge.device12.Get(), width, height, DXGI_FORMAT_R16G16B16A16_FLOAT);
     runtime.history_valid = false;
   }
+  const int debug_view = static_cast<int>(material_inputs::controls->lighting_debug_view);
+  const bool memory_active = memory::enabled.load(std::memory_order_relaxed) || memory::IsMemoryView(debug_view);
+  if (memory_active) memory::Prepare(&bridge);
   // Load NRD once. If its DLL is missing or incompatible, log a warning once and
   // use the raw, undenoised estimate instead of retrying every frame.
   if (!runtime.denoiser_attempted) {
@@ -458,49 +426,18 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
     // These are diagnostic requests, not saved settings. The settings reach
     // the GPU as per-submission constants, so changing them needs no queue drain.
   }
-  // Every private pass begins and ends in COMMON. The views name exact mip
-  // subresources, so a reduction can read one level while writing the next.
+  // Reflection passes bind their constants and the scene as b0 and b1.
   auto dispatch_pass = [&](const bridge_api::Dispatch& dispatch, compute::Frame* frame,
                            const compute::Pipeline& pipeline, D3D12_GPU_VIRTUAL_ADDRESS constants,
                            std::span<const ImageView> inputs, std::span<const ImageView> outputs, UINT width, UINT height,
                            bool scene_constants = true) {
-    const UINT first = frame->Allocate(static_cast<UINT>(inputs.size() + outputs.size()));
-    for (size_t index = 0u; index < inputs.size(); ++index) {
-      const auto& input = inputs[index];
-      const auto description = input.resource->GetDesc();
-      const D3D12_SHADER_RESOURCE_VIEW_DESC view = {.Format = description.Format, .ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D, .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING, .Texture2D = {.MostDetailedMip = input.mip, .MipLevels = input.mips}};
-      bridge.device12->CreateShaderResourceView(input.resource, &view, frame->Cpu(first + static_cast<UINT>(index)));
-      for (UINT mip = input.mip; mip < input.mip + input.mips; ++mip) {
-        compute::Transition(dispatch.commands, input.resource, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, mip);
-      }
-    }
-    for (size_t index = 0u; index < outputs.size(); ++index) {
-      const auto& output = outputs[index];
-      const D3D12_UNORDERED_ACCESS_VIEW_DESC view = {.Format = output.resource->GetDesc().Format,
-                                                     .ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D,
-                                                     .Texture2D = {.MipSlice = output.mip}};
-      bridge.device12->CreateUnorderedAccessView(output.resource, nullptr, &view, frame->Cpu(first + static_cast<UINT>(inputs.size() + index)));
-      compute::Transition(dispatch.commands, output.resource, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, output.mip);
-    }
-    pipeline.Bind(dispatch.commands, *frame, first);
-    if (scene_constants) {
-      dispatch.commands->SetComputeRootConstantBufferView(1u, constants);
-      dispatch.commands->SetComputeRootConstantBufferView(2u, runtime.scene->GetGPUVirtualAddress());
-    }
-    dispatch.commands->Dispatch((width + 7u) / 8u, (height + 7u) / 8u, 1u);
-    for (const auto& output : outputs) {
-      compute::Transition(dispatch.commands, output.resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON, output.mip);
-    }
-    for (const auto& input : inputs) {
-      for (UINT mip = input.mip; mip < input.mip + input.mips; ++mip) {
-        compute::Transition(dispatch.commands, input.resource, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON, mip);
-      }
-    }
+    const std::array addresses = {constants, runtime.scene->GetGPUVirtualAddress()};
+    const auto bound = (scene_constants ? std::span<const D3D12_GPU_VIRTUAL_ADDRESS>(addresses) : std::span<const D3D12_GPU_VIRTUAL_ADDRESS>());
+    compute::DispatchPass(bridge.device12.Get(), dispatch.commands, frame, pipeline, bound, inputs, outputs, width, height);
   };
   const float occlusion_strength = material_inputs::controls->specular_occlusion_strength;
   const auto rays_per_pixel = static_cast<uint32_t>(std::clamp(material_inputs::controls->reflection_rays_per_pixel,
                                                                1.f, static_cast<float>(MGSV_REFLECTION_MAX_RAYS_PER_PIXEL)));
-  const int debug_view = static_cast<int>(material_inputs::controls->lighting_debug_view);
   const bool camera_valid = scene.valid && camera.valid && camera.camera_matrix_valid
                             && camera.scene == owner.scene && camera.owner_generation == owner.generation
                             && camera.publication_sequence == scene.camera_publication && camera.reservation != 0u;
@@ -539,10 +476,12 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
   const nrd::ReblurSettings denoiser_settings;
   constants.hit_distance_parameters = {denoiser_settings.hitDistanceParameters.A, denoiser_settings.hitDistanceParameters.B, denoiser_settings.hitDistanceParameters.C};
   nrd::CommonSettings denoising;
+  std::optional<std::array<double, 3>> camera_origin;
   if (camera_valid) {
     const auto view_to_world = reconstruction::camera_state::Multiply(
         camera.inverse_view_projection, reconstruction::camera_state::LoadColumnMajorMatrix(camera.projection.data()));
-    const std::array<double, 3> origin = {view_to_world.m[0][3], view_to_world.m[1][3], view_to_world.m[2][3]};
+    camera_origin = {view_to_world.m[0][3], view_to_world.m[1][3], view_to_world.m[2][3]};
+    const auto& origin = *camera_origin;
     const auto set_camera = [&origin](const reconstruction::camera_state::CameraFrame& source, float* projection, float* view) {
       std::ranges::copy(source.projection, projection);
       std::ranges::copy(source.view, view);
@@ -613,6 +552,7 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
   }
   const auto saved = rendering::d3d11_compute_state::Capture(cmd_list);
   bool succeeded = false;
+  std::optional<size_t> memory_slot;
   try {
     const auto record_reflections = [&](const bridge_api::Dispatch& dispatch) {
       auto& frame = runtime.frames[dispatch.slot_index];
@@ -682,6 +622,12 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
       const std::array<ImageView, 2> resolve_outputs = {{{.resource = frame.outputs[0].resource.Get()}, {.resource = frame.outputs[1].resource.Get()}}};
       dispatch_pass(dispatch, &frame.arena, runtime.pipelines.resolve, constant_address, resolve_inputs, resolve_outputs, runtime.size[0], runtime.size[1]);
       dispatch.Mark("resolve");
+      if (memory_active) {
+        memory::Record(bridge.device12.Get(), dispatch, &frame.arena, {constant_address, runtime.scene->GetGPUVirtualAddress()},
+                       runtime.size, {.resource = runtime.depth.Get(), .mip = 0u, .mips = runtime.mip_count},
+                       {.resource = runtime.inputs[1].image.resource.Get()}, debug_view, frame.outputs[0].resource.Get());
+        memory_slot = dispatch.slot_index;
+      }
       compute::Transition(dispatch.commands, runtime.scene.Get(), D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER, D3D12_RESOURCE_STATE_COMMON);
       return true;
     };
@@ -701,6 +647,7 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
       context->CSSetShaderResources(0u, static_cast<UINT>(srvs.size()), srvs.data());
       context->CSSetUnorderedAccessViews(0u, static_cast<UINT>(outputs.size()), outputs.data(), nullptr);
       context->Dispatch((runtime.size[0] + 7u) / 8u, (runtime.size[1] + 7u) / 8u, 1u);
+      if (memory_active) memory::Sample(context);
       srvs.fill(nullptr);
       outputs.fill(nullptr);
       context->CSSetShaderResources(0u, static_cast<UINT>(srvs.size()), srvs.data());
@@ -731,6 +678,7 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
     runtime.previous_occlusion_strength = occlusion_strength;
     runtime.previous_rays_per_pixel = rays_per_pixel;
     runtime.previous_debug_view = debug_view;
+    if (memory_slot) memory::Submitted(*memory_slot, camera_origin);
     if (camera_capture) {
       const std::unique_lock lock(reload.mutex);
       if (reload.status.camera_count < reload.status.camera_requested) {
