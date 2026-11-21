@@ -7,7 +7,8 @@
 // First enhanced reflection pass, run at the game's late reflection compositor.
 // Reads the native G-buffer, the late scene color, cube-material records, the
 // material palette, motion, the environment light captured from the light
-// draws (t9), and the environment deferred composition exported (t10).
+// draws (t9), the environment deferred composition exported (t10), and the
+// scene depth at the late compositor (t12).
 // Writes, per pixel:
 //   u0 linear scene radiance that reflection rays gather (alpha 1 where valid)
 //   u1 view-space normal and roughness (roughness -1: not a reflection receiver)
@@ -28,6 +29,7 @@ Texture2D<float4> native_velocity : register(t8);
 Texture2D<float4> environment : register(t9);
 Texture2D<float4> receiver_environment : register(t10);
 Texture2D<float4> object_velocity : register(t11);
+Texture2D<float> scene_depth : register(t12);
 
 RWTexture2D<float4> source_output : register(u0);
 RWTexture2D<float4> normal_output : register(u1);
@@ -54,7 +56,16 @@ cbuffer NativeSceneBytes : register(b3) { uint4 scene_rows[30]; }
                                          native_albedo.Load(int3(pixel, 0)).rgb, packed_normal, packed_material, depth);
   const SpecularMaterial material = LoadSpecularMaterial(palette, packed_material);
   const float4 captured = environment.Load(int3(pixel, 0));
-  const bool valid = depth > 0.0 && color.a >= 0.0 && material.valid && normal_valid
+  // The scene depth starts as a copy of the G-buffer depth after composition,
+  // and every forward draw since then that wrote depth (forward models, glass,
+  // the Fulton wormhole) is nearer there. Such a pixel shows that layer, not
+  // the surface the G-buffer describes, so it receives no reflection.
+  // Reverse Z: nearer is larger. Without the scene depth every surface counts.
+  uint scene_depth_width, scene_depth_height;
+  scene_depth.GetDimensions(scene_depth_width, scene_depth_height);
+  const bool covered = all(uint2(scene_depth_width, scene_depth_height) == reflection_size)
+                       && scene_depth.Load(int3(pixel, 0)) > depth;
+  const bool valid = depth > 0.0 && !covered && color.a >= 0.0 && material.valid && normal_valid
                      && captured.a >= 0.5 && receiver_environment.Load(int3(pixel, 0)).a >= 0.0;
 
   // The late scene is an FP16 target holding extended sRGB. Decode it once here

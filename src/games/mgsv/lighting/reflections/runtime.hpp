@@ -236,9 +236,25 @@ inline void Report(const char* message, reshade::log::level level = reshade::log
   }
 }
 
+// The shader view of the scene depth that BeginComposite hands to preparation,
+// made once per depth texture. It is kept here rather than on the texture,
+// where the view would keep its own resource alive. The previous texture is
+// released when it is replaced.
+struct SceneDepthView {
+  std::shared_mutex mutex;
+  Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;  // Null when the texture cannot be read.
+};
+inline SceneDepthView scene_depth_view;
+
 inline void Destroy() {
   bridge_api::Drain();
   runtime = {};
+  {
+    const std::unique_lock lock(scene_depth_view.mutex);
+    scene_depth_view.resource.Reset();
+    scene_depth_view.view.Reset();
+  }
   nrd_submissions.store(0u, std::memory_order_relaxed);
   nrd_restarts.store(0u, std::memory_order_relaxed);
   const std::unique_lock lock(reload.mutex);
@@ -831,7 +847,47 @@ inline bool BeginComposite(reshade::api::command_list* cmd_list) {
   }
   if (source != nullptr && result != nullptr) {
     outputs = {result->images[0].srv.Get(), result->images[1].srv.Get(), result->environment.srv.Get(), result->ready.srv.Get()};
-    const auto trace_scene = [source, material_resource, result](auto* submitted, const rendering::submission::Execution&) {
+    // The depth bound to this draw is the scene depth: the G-buffer depth the
+    // engine copies after composition, made nearer by every forward draw since
+    // that wrote depth. Preparation compares the two to find pixels a forward
+    // layer covers. Without a readable view it treats every pixel as uncovered.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene_depth;
+    Microsoft::WRL::ComPtr<ID3D11DepthStencilView> depth_target;
+    context->OMGetRenderTargets(0u, nullptr, &depth_target);
+    if (depth_target == nullptr) {
+      static std::atomic_flag reported = {};
+      if (!reported.test_and_set()) reshade::log::message(reshade::log::level::warning, "MgsvReflections: no depth target at the reflection composite; forward layers do not exclude reflection receivers");
+    } else {
+      Microsoft::WRL::ComPtr<ID3D11Resource> depth_resource;
+      depth_target->GetResource(&depth_resource);
+      const std::unique_lock lock(scene_depth_view.mutex);
+      if (scene_depth_view.resource != depth_resource) {
+        scene_depth_view.resource = depth_resource;
+        scene_depth_view.view.Reset();
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        D3D11_TEXTURE2D_DESC description = {};
+        if (SUCCEEDED(depth_resource.As(&texture))) texture->GetDesc(&description);
+        // Typeless depth storage permits a typed view of the depth plane.
+        DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+        switch (description.Format) {
+          case DXGI_FORMAT_R32G8X24_TYPELESS: format = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS; break;
+          case DXGI_FORMAT_R24G8_TYPELESS:    format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; break;
+          case DXGI_FORMAT_R32_TYPELESS:      format = DXGI_FORMAT_R32_FLOAT; break;
+          default:                            break;
+        }
+        Microsoft::WRL::ComPtr<ID3D11Device> device;
+        depth_resource->GetDevice(&device);
+        const D3D11_SHADER_RESOURCE_VIEW_DESC view = {.Format = format, .ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D, .Texture2D = {.MostDetailedMip = 0u, .MipLevels = 1u}};
+        if (format == DXGI_FORMAT_UNKNOWN || (description.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0u
+            || description.Width != result->width || description.Height != result->height
+            || description.SampleDesc.Count != 1u || description.ArraySize != 1u
+            || FAILED(device->CreateShaderResourceView(depth_resource.Get(), &view, &scene_depth_view.view))) {
+          Report("MgsvReflections: scene depth is not readable on the G-buffer's pixel grid; forward layers do not exclude reflection receivers");
+        }
+      }
+      scene_depth = scene_depth_view.view;
+    }
+    const auto trace_scene = [source, material_resource, result, scene_depth](auto* submitted, const rendering::submission::Execution&) {
       try {
         // Look up this scene's inputs at submission, not at worker recording
         // time. Different scenes can record into the same pooled material target.
@@ -860,6 +916,7 @@ inline bool BeginComposite(reshade::api::command_list* cmd_list) {
         Inputs inputs = *captured;
         inputs.views[1] = source;
         inputs.views[10] = result->environment.srv;
+        inputs.views[12] = scene_depth;
         Execute(submitted, inputs);
       } catch (const std::exception& error) {
         static std::atomic_flag reported = {};
