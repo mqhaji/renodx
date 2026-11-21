@@ -40,12 +40,9 @@ inline constexpr GUID MATERIAL_PALETTE_GUID = {.Data1 = 0x5ab2941c, .Data2 = 0x5
 inline constexpr GUID MATERIAL_PALETTE_GENERATION_GUID = {.Data1 = 0x9ee98019, .Data2 = 0x58a5, .Data3 = 0x46c6, .Data4 = {0x91, 0x3a, 0xa2, 0x71, 0x18, 0xb5, 0x09, 0xe4}};
 
 // The native scene's depth allocation and the camera sample it was drawn with.
-// Jitter describes the producer, not the thread reading it. The sun's cascade
-// atlas is present only when one of the scene's directional light draws
-// sampled it.
+// Jitter describes the producer, not the thread reading it.
 struct Scene {
   Microsoft::WRL::ComPtr<ID3D11Resource> depth;
-  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> sun_shadow;
   std::array<float, 2> current_jitter_uv = {};
   uint64_t camera_publication = 0u;
   uint64_t camera_generation = 0u;
@@ -163,13 +160,7 @@ inline void Publish(std::span<const Producer> producers) {
         submitted.camera_sample = producer.camera_sample;
         submitted.jitter_valid = producer.jitter_valid;
       } else {
-        // A frame can draw a shadowed and then an unshadowed directional
-        // light. A draw without an atlas keeps the one already recorded; a
-        // scene ID belongs to one view build, so it never carries over to
-        // another frame.
-        auto sun_shadow = (producer.scene.sun_shadow != nullptr ? producer.scene.sun_shadow : submitted.scene.sun_shadow);
         submitted.scene = producer.scene;
-        submitted.scene.sun_shadow = std::move(sun_shadow);
       }
       submitted.submission = ++state.next_submission;
     }
@@ -213,10 +204,9 @@ inline void Record(reshade::api::command_list* cmd_list, Producer producer) {
   }
 }
 
-inline void CaptureScene(reshade::api::command_list* cmd_list, bool has_sun_shadow_map) {
+inline void CaptureScene(reshade::api::command_list* cmd_list) {
   // Pair the native scene producer's depth (t2) with this scene's camera
   // sample. Its b2 range qualifies the producer as the 480-byte scene layout.
-  // Shadowed sun draws also bind the cascade atlas at t3.
   if (cmd_list == nullptr || !enabled.load(std::memory_order_acquire)) return;
   const auto selected = inputs::ReadSelection(cmd_list->get_device());
   if (selected.device == nullptr) return;
@@ -250,7 +240,6 @@ inline void CaptureScene(reshade::api::command_list* cmd_list, bool has_sun_shad
     if (context1 == nullptr) constant_count = description.ByteWidth / 16u;
     if (constant_count >= 30u && (static_cast<uint64_t>(first_constant) * 16u) + 480u <= description.ByteWidth) {
       depth->GetResource(&scene.depth);
-      if (has_sun_shadow_map) context->PSGetShaderResources(3u, 1u, &scene.sun_shadow);
     }
   }
   Record(cmd_list, {

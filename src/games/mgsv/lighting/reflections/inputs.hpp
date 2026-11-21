@@ -13,7 +13,7 @@
 
 namespace mgsv::lighting::reflections {
 
-inline constexpr UINT INPUT_COUNT = 13u;
+inline constexpr UINT INPUT_COUNT = 12u;
 
 // Reflection inputs captured at deferred composition, published with that
 // native command list, and used by the same scene's later reflection composite.

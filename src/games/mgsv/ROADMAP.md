@@ -8,7 +8,7 @@ The goal is a path-traced method with DLSS Ray Reconstruction as the highest-qua
 
 - **Path tracing quality is not reduced for the other methods.** Path tracing is designed for the best result. The other methods may reuse its parts, never the reverse.
 - **The raster method stays affordable.** It needs a D3D12 GPU, as reconstruction already does, but no ray-tracing hardware, and it does not wait for the traced methods' scene capture. It may trace in software where that is cheap. Its default tier costs at most about 1 ms of GPU time more than today's Global Illumination; more expensive work belongs to its Ultra tier or to the traced methods.
-- **Information before sampling.** Screen-space lighting is limited by what it cannot see, so the raster work first adds a memory of the scene, then a better gather.
+- **Information before sampling.** Screen-space lighting is limited by what it cannot see. Seeing more takes rays against the real scene, so that work belongs to the ray-traced method; the raster method keeps the game's authored light wherever the screen cannot show what is there.
 - **Each direction counted once.** Linear light, energy conserved, no strength above 100%. Where our lighting has information it replaces the game's ambient light; where it has none, the game's look stays.
 - **Shaders say what, the engine says when.** Shader CRC32s identify shaders and never change (a shader many draws share also needs the draw's role); new work attaches where the engine itself starts or ends a pass, and is verified against the executable and against captures before it is relied on.
 - **Every new feature has a Vanilla setting.**
@@ -20,12 +20,12 @@ Stage 1, hardening what exists, is done.
 
 | Stage | Contents | Depends on |
 |---|---|---|
-| 2. Raster lighting | Scene memory, probe grid, reflection chain, forward-drawn surfaces, screen probes at Ultra, new settings, BRDF replacement | — |
+| 2. Raster lighting | Multiple bounces (built), a cheaper gather, reflections with variable ray density, Lighting Quality, BRDF replacement | — |
 | 3. Atmosphere | Volumetric fog with light shafts, physical sky, clouds | The fog volume can run beside 2 |
-| 4. Water | River, pond and ocean shaders: reflections, absorption, caustics | 2's trace and probe grid; 3's sky |
+| 4. Water | River, pond and ocean shaders: reflections, absorption, caustics | 3's sky |
 | 5. Frame generation | FSR, then DLSS, then XeSS frame generation | Independent of 2 to 4; it needs its own camera-cut signal (stage 2 did not need one) |
 | 6. The scene on D3D12 | Geometry, skinning, materials, lights, acceleration structures | New engine entries: bone uploads, scene lists |
-| 7. Ray-traced lighting | Ray-traced shadows, the gather and reflections on real rays, RTXDI, SHaRC | 6 |
+| 7. Ray-traced lighting | Ray-traced shadows, screen probes on real rays over the bitmask gather, reflections on real rays, forward surfaces lit from the radiance cache, RTXDI, SHaRC | 6 |
 | 8. Path tracing | Path tracing with Ray Reconstruction, then caustics | 7 |
 | Lowest priority | XeSS upscaling, Analytical TAA improvements, reactive masks, projection coverage | — |
 
@@ -50,29 +50,25 @@ Our lighting runs on the G-buffer: GI before skin scattering, reflections at the
 
 Skid marks are not on this list: they are G-buffer decals and already receive our lighting. The fog nearly all of these shaders apply comes from one small image the engine fills once per frame (128 depth slices of 16 by 64 cells, no shadow maps); particles without a volumetric-fog variant, the scattering effect and the sky apply fog differently or not at all. Replacing what is written in that image changes fog for the rest at once.
 
-How each lighting method treats these surfaces is in the design: [raster](docs/DESIGN.md#48-forward-drawn-surfaces), [water](docs/DESIGN.md#6-water), [ray-traced](docs/DESIGN.md#9-ray-traced-method) and [path-traced](docs/DESIGN.md#10-path-traced-method).
+How each lighting method treats these surfaces is in the design: [raster](docs/DESIGN.md#45-forward-drawn-surfaces), [water](docs/DESIGN.md#6-water), [ray-traced](docs/DESIGN.md#9-ray-traced-method) and [path-traced](docs/DESIGN.md#10-path-traced-method).
 
 ## Stage 2: raster lighting
 
-Today's Global Illumination is replaced, not tuned: it can only gather light from what the current frame shows. The new method is described in the [design](docs/DESIGN.md#4-raster-method). Its default tier must cost at most about 1 ms of GPU time more than today in the same scene (today: about 2 to 3 ms at the sortie menu and Mother Base and about 3.6 ms on the hillside, at 1920×1080 internal on an RTX 5080). Its steps are ordered so each one ships something and the riskiest part is judged first. The earlier plan for a cheaper gather (`build/analysis/mgsv/mgsv-gi-unified-20261118/PLAN.md`, steps 3 to 5) is superseded; its constraints still apply.
+Today's Global Illumination is kept and made better within what the screen shows. Light from surfaces off screen, and what the directions the screen leaves open really see, belong to the ray-traced method (stage 7); the raster method keeps the game's ambient light there. The method is in the [design](docs/DESIGN.md#4-raster-method). Its default tier must cost at most about 1 ms of GPU time more than today in the same scene (today: about 2 to 3 ms at the sortie menu and Mother Base and about 3.6 ms on the hillside, at 1920×1080 internal on an RTX 5080). The remaining steps follow the earlier plan for a cheaper gather and reflections (`build/analysis/mgsv/mgsv-gi-unified-20261118/PLAN.md`, steps 3 to 5), whose constraints and validation still apply.
 
-**Step 1: facts.** The executable answered the open questions; the answers are in the design. Captures at Mother Base and in Africa confirmed the shadow, mask and terrain answers; sharing the 8-bit G-buffer targets cost nothing measurable at the ACC title, which is to be repeated in a scene with a heavy G-buffer before the main block relies on it. How scene memory keeps sun visibility outside the cascades is decided in the [design](docs/DESIGN.md#42-scene-memory): stored while the cascades cover a surface, traced through the distance field and terrain height when not.
+**Step 1: facts.** The executable answered the open questions; the answers are in the design. Captures at Mother Base and in Africa confirmed the shadow, mask and terrain answers; sharing the 8-bit G-buffer targets cost nothing measurable at the ACC title, which is to be repeated in a scene with a heavy G-buffer before the main block relies on it.
 
-**Step 2: scene memory (built).** The world-aligned grids in `lighting/memory/` ([guide](lighting/memory/README.md)), fed by the camera, the sun's shadow maps and the terrain's height textures, with moving objects kept out and nothing stored while game time is stopped. They are in world space, so camera cuts and teleports do not clear them; only a world change does. Occluders were not used. Nothing reads them yet except four debug views. **Gate, as judged in game:** seen surfaces and the ground around the player are known within seconds outdoors, and interiors entered for the first time stay unknown beyond walls not yet seen past. The air above the player's head and much of the sky stay unknown, because the camera rarely looks through them; step 3 decides how rays leaving through that space are treated. The cost of upkeep was measured and is a small part of the stage's budget. A load froze once with scene memory on; the cause was not found.
+**Step 2: multiple bounces (built).** The gather's source includes the previous frame's indirect light, carried through camera and object motion, so light keeps bouncing ([guide](lighting/indirect/README.md)). Before it, a world-space scene memory and a probe grid traced through it were built and then removed; why is in the [design](docs/DESIGN.md#47-considered-and-not-chosen).
 
-**Step 3: hit lighting and the probe grid.** The trace function, lighting at world hits from the albedo cache, the sun's shadow maps and the light list, and the world probe grid with its irradiance grid. This step ships the diffuse half of the default tier (reflections stay today's chain until step 4): the grid lights the directions the shortened bitmask pass finds open, and replaces the game's ambient light as far as the scene is known. Forward-drawn surfaces get the grid's light through the one engine function that sets their ambient colors. **Gate:** bounce light stays when the camera turns away from a sunlit wall or a lamp; a uniform-light test passes; a dark interior beside a bright exterior does not leak; the image matches or beats today's in the fixed scenes; and the cost stays within the budget.
+**Step 3: a cheaper gather.** A pyramid that stores the nearest surface's depth with its source light, fewer steps where it makes them redundant, and output as spherical harmonics so each full-resolution pixel is lit with its own normal. Then a test of whether a D3D12 gather started after the G-buffer overlaps the game's shadow and light draws; the trace moves to D3D12 only if it does. **Gate:** error against a converged reference no higher than today's default, no more flicker at a static camera, the uniform-light test passes, and the cost is lower.
 
-**Step 4: the reflection chain.** Rough reflections from the probe grid, glossy screen rays that continue into scene memory on a miss, and the cube map as the last fallback, dimmed by what the ray found in its way and never brighter than the locally gathered light. The rays and their denoising move into the main D3D12 block for the pixels the G-buffer marks as possible receivers, reading the mod's copies of last frame's reflection-pass image and depth; the engine's reflection pass applies composition's receiver data to the finished texture, so the frame keeps today's two round trips. **Gate:** the G-buffer marks the same receivers and roughness that composition uses today, and side by side with today's current-frame source, moving characters and vehicles in reflections show no visible delay; if either fails, the reflection block stays at the reflection pass and the frame makes three round trips.
+**Step 4: reflections.** Variable ray density (one ray per pixel on sharp surfaces, one per 2×2 pixels elsewhere), first with NRD's own reconstruction of skipped pixels and, if that is noisier than today, with a pass that reuses neighbors' hits; fewer duplicate outputs from the input pass, and the engine's targets tried shareable. Then the rays and their denoising move into the main D3D12 block for the pixels the G-buffer marks as possible receivers, reading the mod's copies of last frame's reflection-pass image and depth; the engine's reflection pass applies composition's receiver data to the finished texture, so the frame keeps today's two round trips. **Gate:** as step 3, on the reflection output and the final image; the G-buffer marks the same receivers and roughness that composition uses today; and side by side with today's current-frame source, moving characters and vehicles in reflections show no visible delay. If either of the last two fails, the reflection block stays at the reflection pass and the frame makes three round trips.
 
-**Step 5: screen probes for Ultra.** Probes on the depth buffer, their filters, and the merge with the near layer, as the Ultra tier. The same gather becomes the ray-traced method's diffuse lighting. **Gate:** it is visibly better than the default tier in the fixed scenes, stays stable under the upscaler without a diffuse denoiser, and its cost is measured.
-
-**Step 6: forward-drawn surfaces per pixel.** Ports of the glass and lit forward model shaders that sample the irradiance grid and take reflections from the trace. Emissive models become light for their surroundings where no engine light already does that job. The blob shadows under characters are removed where contact shadows cover them.
-
-**Step 7: settings.** Lighting Method and Lighting Quality arrive; the tuning controls of the old gather are retired. The full layout is in the [design](docs/DESIGN.md#11-settings).
+**Step 5: settings.** Lighting Quality arrives, mapped to the gather's resolution and steps and to the reflection ray density, and the tuning controls the new passes fix are retired. Lighting Method arrives with the ray-traced method. The full layout is in the [design](docs/DESIGN.md#11-settings). The blob shadows under characters are removed where contact shadows cover them.
 
 **BRDF replacement (for example EON diffuse).** Possible, and best done here, as the diffuse lobe of the one shared BSDF rather than a patch on individual shaders. Direct diffuse is computed inside the engine's light shaders, which Enhanced shadows already port, so the lobe can change there; ambient, environment, GI application, and later ray and path tracing must all use the same lobe, or energy is counted differently in each. The earlier attempt (kept in `git stash` as the 2026-11-18 EON experiment) changed many shaders before the material model was settled; this time the order is material record first, then a uniform-light test of every consumer, then the visual comparison. Skin keeps the engine's scattering passes; a physical skin model is a later, separate decision.
 
-**Exit:** the default tier passes its gates within its budget; every tier's cost is measured in the fixed scenes; the uniform-light test passes for the gather, the reflection chain and the forward lighting.
+**Exit:** the gather and the reflections pass their gates within the budget; every tier's cost is measured in the fixed scenes; the uniform-light test passes for the gather and the reflection chain.
 
 ## Stage 3: atmosphere
 
@@ -92,7 +88,7 @@ The engine already has the pieces this replaces or feeds: a precomputed-sky plug
 
 The pond that started this: its reflection is one authored cube map that fades in the sun's shadow, the view through the water ignores Fresnel, and the ocean reflects fixed colors. The method is in the [design](docs/DESIGN.md#6-water).
 
-- **Rivers and ponds first.** Ports that keep the game's ripples, flow and foam and add an in-shader screen reflection, real Fresnel, absorption with depth, ambient light from the irradiance grid, and caustics from the ripple normals.
+- **Rivers and ponds first.** Ports that keep the game's ripples, flow and foam and add an in-shader screen reflection, real Fresnel, absorption with depth, the game's ambient light, and caustics from the ripple normals.
 - **The oceans second**, the same way. The Fourier ocean and the marsh draw before the engine's scene copy exists and read last frame's image instead; the 24-hour ocean draws after it.
 - **The surface record.** Every port writes the water's normal, roughness, depth and type to a side target, for reconstruction and frame generation now and for the traced methods later.
 - **Wet surfaces** are audited against a published wetness model before anything changes.
@@ -105,7 +101,7 @@ After the raster stages and before ray tracing. All three providers present thro
 
 **Step 1: the presentation path.** An experiment decides between replacing the game's swap chain and leaving it to ReShade and RenoDX while a D3D12 swap chain shows the frames. It must keep the ReShade overlay, HDR10 output and even pacing.
 
-**Step 2: inputs.** The image without the HUD and the HUD as a separate layer, split by the engine's draw lists; depth and dense motion, including the water surface record; camera data latched once per frame; a camera-cut signal. Stage 2 found only the cutscene "cancel camera blur" bit, and scene memory did not need one; aiming, binoculars, field-of-view changes and teleports still need a signal of their own.
+**Step 2: inputs.** The image without the HUD and the HUD as a separate layer, split by the engine's draw lists; depth and dense motion, including the water surface record; camera data latched once per frame; a camera-cut signal. Stage 2 found only the cutscene "cancel camera blur" bit; aiming, binoculars, field-of-view changes and teleports still need a signal of their own.
 
 **Step 3: providers.** FSR first, then DLSS Frame Generation with Reflex in the engine's main loop, then XeSS (last: it needs Intel's latency library, which cannot run beside Reflex).
 
@@ -122,9 +118,9 @@ The prerequisite for every ray-traced feature, and the largest piece of reverse 
 The raster method with real rays wherever a ray helps, on any ray-tracing GPU, denoised by NRD ([design](docs/DESIGN.md#9-ray-traced-method)).
 
 - **Shadows:** one ray toward the sun's disk; every local light can cast a shadow, chosen per pixel by resampling, with RTXDI's ReSTIR direct lighting as the higher setting.
-- **Diffuse indirect:** the screen-probe gather from stage 2 with its rays as ray queries against the real scene, and hits lit from SHaRC.
-- **Reflections:** rays below a roughness cutoff, probes above.
-- **Forward surfaces and fog:** water and glass trace from the surface record; the fog volume takes its visibility from rays.
+- **Diffuse indirect:** screen probes whose rays are ray queries against the real scene, with hits lit from SHaRC, over the bitmask gather as the near layer; they replace the game's ambient light in the directions the gather finds open.
+- **Reflections:** rays below a roughness cutoff, screen probes above.
+- **Forward surfaces and fog:** water and glass trace from the surface record; lit forward objects take the traced light at their position through the engine function that sets their ambient colors; emissive models without an engine light become lights; the fog volume takes its visibility from rays.
 
 **Exit:** each part is selectable, never darker or brighter than the raster method in a uniform-light test, stable in the fixed scenes, with its cost measured.
 

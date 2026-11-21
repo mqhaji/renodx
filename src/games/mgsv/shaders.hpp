@@ -23,7 +23,6 @@
 #include "lighting/indirect/runtime.hpp"
 #include "lighting/indirect/source_preparation.hpp"
 #include "lighting/indirect_lighting_mode.hpp"
-#include "lighting/memory/runtime.hpp"
 #include "lighting/reflections/native_chain.hpp"
 #include "lighting/reflections/runtime.hpp"
 #include "lighting/shadows/screen_space_shadows.hpp"
@@ -106,7 +105,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
     }
   };
   const auto capture_environment = [](reshade::api::command_list* cmd_list) {
-    mgsv::lighting::temporal_inputs::CaptureScene(cmd_list, false);
+    mgsv::lighting::temporal_inputs::CaptureScene(cmd_list);
     mgsv::lighting::environment_specular::BeginCapture(cmd_list, mgsv::lighting::UsesEnhancedIndirectLighting());
     return true;
   };
@@ -122,7 +121,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
   // around the same draw as the enhanced shadows.
   const auto begin_directional = [begin_shadows](reshade::api::command_list* cmd_list, bool has_shadow_map = true) {
     begin_shadows(cmd_list, 0u, has_shadow_map);
-    mgsv::lighting::temporal_inputs::CaptureScene(cmd_list, has_shadow_map);
+    mgsv::lighting::temporal_inputs::CaptureScene(cmd_list);
     mgsv::lighting::environment_specular::BeginCapture(cmd_list, mgsv::lighting::UsesEnhancedIndirectLighting());
     return true;
   };
@@ -360,11 +359,6 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
                                        .on_draw = &mgsv::lighting::material_inputs::OnMaterialDraw,
                                        .on_drawn = &mgsv::lighting::material_inputs::EndCapture,
                                    });
-  }
-  // Scene memory keeps the terrain textures from the terrain depth and shadow
-  // draws (NewTerrain_Depth, NewTerrain_Shadow); the game's shaders run.
-  for (const uint32_t hash : {0x4710870Eu, 0xD68FF97Au}) {
-    shaders.emplace(hash, renodx::mods::shader::CustomShader{.crc32 = hash, .on_inject = [](auto*) { return false; }, .on_draw = &mgsv::lighting::memory::CaptureTerrain});
   }
   // Enhanced reflections cancel both the general and the sortie-floor native
   // traces. The shared filters are skipped only when they follow a canceled trace.

@@ -16,9 +16,6 @@ Work runs before LocalReflectionAddBuffer (0xDC3A84C3) or LocalReflectionComposi
 | Saved environment | Deferred output 1: linear specular already present; alpha is receiver fog transmission |
 | Late scene and material | Reflection-compositor pixel t0/t2, matching the captured surface grid |
 | Motion and camera | Same scene's velocity, object mask, depth, nonjittered matrices, jitter and reservation |
-| Sun cascade atlas | The atlas the scene's shadowed sun draw sampled (pixel t3), for scene memory only; absent when no shadowed directional light was drawn |
-
-[Scene memory](../memory/README.md) rides in this round trip: its D3D11 sample and terrain-window passes run right after preparation, with these inputs still bound, and its D3D12 passes follow the resolve. Its debug views (18 to 21) replace the reflection result on every pixel, sky included.
 
 The late floating-point scene contains extended sRGB. Preparation decodes it once before sampling light. Albedo uses its native sRGB view. Normals, depth, motion and sampling weights receive no gamma conversion. RenoDX tone mapping keeps scene and environment linear, and Enhanced needs it: under the Vanilla tone mapper the composition shader applies its tone curve before this stage, so the environment could only be exchanged in a curved domain. Global Illumination is therefore off under the Vanilla tone mapper. Its controls are disabled there and a red note above them says to select the RenoDX tone mapper. See the [material contracts](../../materials/README.md) before changing interpretation.
 

@@ -7,7 +7,6 @@
 // submission and slot retirement; these only create resources and record commands.
 
 #include <array>
-#include <climits>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -98,15 +97,14 @@ inline SharedInput CreateSharedInput(d3d12_bridge::Bridge* bridge, UINT width, U
   return input;
 }
 
-// A depth above one makes a Texture3D.
 inline Microsoft::WRL::ComPtr<ID3D12Resource> CreateTexture(
-    ID3D12Device* device, UINT width, UINT height, DXGI_FORMAT format, UINT16 mips = 1u, UINT16 depth = 1u) {
+    ID3D12Device* device, UINT width, UINT height, DXGI_FORMAT format, UINT16 mips = 1u) {
   const D3D12_HEAP_PROPERTIES heap = {.Type = D3D12_HEAP_TYPE_DEFAULT};
   const D3D12_RESOURCE_DESC description = {
-      .Dimension = (depth > 1u ? D3D12_RESOURCE_DIMENSION_TEXTURE3D : D3D12_RESOURCE_DIMENSION_TEXTURE2D),
+      .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
       .Width = width,
       .Height = height,
-      .DepthOrArraySize = depth,
+      .DepthOrArraySize = 1u,
       .MipLevels = mips,
       .Format = format,
       .SampleDesc = {.Count = 1u},
@@ -245,25 +243,18 @@ struct ImageView {
   UINT mips = 1u;
 };
 
-// Records one pass: width x height x depth threads in groups of 8 x 8 x 1
-// (one group for a 1 x 1 pass). Every image begins and ends in COMMON. The
-// views name exact mip subresources, so a reduction can read one level while
-// writing the next; a Texture3D is viewed whole. constants bind as b0 onward.
+// Records one pass: width x height threads in groups of 8 x 8 (one group for
+// a 1 x 1 pass). Every image begins and ends in COMMON. The views name exact
+// mip subresources, so a reduction can read one level while writing the next.
+// constants bind as b0 onward.
 inline void DispatchPass(ID3D12Device* device, ID3D12GraphicsCommandList* commands, Frame* frame, const Pipeline& pipeline,
                          std::span<const D3D12_GPU_VIRTUAL_ADDRESS> constants, std::span<const ImageView> inputs,
-                         std::span<const ImageView> outputs, UINT width, UINT height, UINT depth = 1u) {
+                         std::span<const ImageView> outputs, UINT width, UINT height) {
   const UINT first = frame->Allocate(static_cast<UINT>(inputs.size() + outputs.size()));
   for (size_t index = 0u; index < inputs.size(); ++index) {
     const auto& input = inputs[index];
     const auto description = input.resource->GetDesc();
-    D3D12_SHADER_RESOURCE_VIEW_DESC view = {.Format = description.Format, .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING};
-    if (description.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D) {
-      view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
-      view.Texture3D = {.MostDetailedMip = input.mip, .MipLevels = input.mips};
-    } else {
-      view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-      view.Texture2D = {.MostDetailedMip = input.mip, .MipLevels = input.mips};
-    }
+    const D3D12_SHADER_RESOURCE_VIEW_DESC view = {.Format = description.Format, .ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D, .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING, .Texture2D = {.MostDetailedMip = input.mip, .MipLevels = input.mips}};
     device->CreateShaderResourceView(input.resource, &view, frame->Cpu(first + static_cast<UINT>(index)));
     for (UINT mip = input.mip; mip < input.mip + input.mips; ++mip) {
       Transition(commands, input.resource, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, mip);
@@ -271,15 +262,9 @@ inline void DispatchPass(ID3D12Device* device, ID3D12GraphicsCommandList* comman
   }
   for (size_t index = 0u; index < outputs.size(); ++index) {
     const auto& output = outputs[index];
-    const auto description = output.resource->GetDesc();
-    D3D12_UNORDERED_ACCESS_VIEW_DESC view = {.Format = description.Format};
-    if (description.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D) {
-      view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
-      view.Texture3D = {.MipSlice = output.mip, .FirstWSlice = 0u, .WSize = UINT_MAX};
-    } else {
-      view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-      view.Texture2D = {.MipSlice = output.mip};
-    }
+    const D3D12_UNORDERED_ACCESS_VIEW_DESC view = {.Format = output.resource->GetDesc().Format,
+                                                   .ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D,
+                                                   .Texture2D = {.MipSlice = output.mip}};
     device->CreateUnorderedAccessView(output.resource, nullptr, &view, frame->Cpu(first + static_cast<UINT>(inputs.size() + index)));
     Transition(commands, output.resource, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, output.mip);
   }
@@ -287,7 +272,7 @@ inline void DispatchPass(ID3D12Device* device, ID3D12GraphicsCommandList* comman
   for (UINT index = 0u; index < constants.size(); ++index) {
     commands->SetComputeRootConstantBufferView(index + 1u, constants[index]);
   }
-  commands->Dispatch((width + 7u) / 8u, (height + 7u) / 8u, depth);
+  commands->Dispatch((width + 7u) / 8u, (height + 7u) / 8u, 1u);
   for (const auto& output : outputs) {
     Transition(commands, output.resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON, output.mip);
   }

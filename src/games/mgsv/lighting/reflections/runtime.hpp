@@ -31,7 +31,6 @@
 #include "../../rendering/submission.hpp"
 #include "../environment_specular.hpp"
 #include "../indirect_lighting_mode.hpp"
-#include "../memory/runtime.hpp"
 #include "probe_api.hpp"
 
 // Enhanced reflections. At deferred composition, Capture records the scene's
@@ -39,7 +38,6 @@
 // schedules Execute just before the draw. Execute prepares shared inputs with
 // one D3D11 compute pass, then records on D3D12: depth mips, the GGX trace, NRD
 // denoising, and the resolve into the shared result, which the composite reads.
-// Scene memory upkeep, when on, rides in the same round trip.
 namespace mgsv::lighting::reflections {
 
 namespace bridge_api = rendering::d3d12_bridge;
@@ -168,7 +166,6 @@ inline bool QueueCameraCapture(uint32_t frames, probe::Status* status) {
 }
 
 inline void UseProbe(bool attach) {
-  memory::UseProbe(attach);
   if (attach) {
     probe::shared.RegisterModule();
     if (probe::shared.data == nullptr) return;
@@ -242,7 +239,6 @@ inline void Report(const char* message, reshade::log::level level = reshade::log
 inline void Destroy() {
   bridge_api::Drain();
   runtime = {};
-  memory::Destroy();
   nrd_submissions.store(0u, std::memory_order_relaxed);
   nrd_restarts.store(0u, std::memory_order_relaxed);
   const std::unique_lock lock(reload.mutex);
@@ -283,7 +279,6 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
   const auto camera = reconstruction::camera_state::GetForCapture();
   views[8] = scene.motion.velocity;
   views[11] = scene.motion.object_velocity;
-  views[12] = scene.scene.sun_shadow;
   // Allocate on the first scene or a resize. Other frames reuse the pipelines,
   // shared inputs, descriptors, and private ray outputs.
   const UINT width = inputs.result->width;
@@ -361,9 +356,6 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
     runtime.filtered = compute::CreateTexture(bridge.device12.Get(), width, height, DXGI_FORMAT_R16G16B16A16_FLOAT);
     runtime.history_valid = false;
   }
-  const int debug_view = static_cast<int>(material_inputs::controls->lighting_debug_view);
-  const bool memory_active = memory::enabled.load(std::memory_order_relaxed) || memory::IsMemoryView(debug_view);
-  if (memory_active) memory::Prepare(&bridge);
   // Load NRD once. If its DLL is missing or incompatible, log a warning once and
   // use the raw, undenoised estimate instead of retrying every frame.
   if (!runtime.denoiser_attempted) {
@@ -438,6 +430,7 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
   const float occlusion_strength = material_inputs::controls->specular_occlusion_strength;
   const auto rays_per_pixel = static_cast<uint32_t>(std::clamp(material_inputs::controls->reflection_rays_per_pixel,
                                                                1.f, static_cast<float>(MGSV_REFLECTION_MAX_RAYS_PER_PIXEL)));
+  const int debug_view = static_cast<int>(material_inputs::controls->lighting_debug_view);
   const bool camera_valid = scene.valid && camera.valid && camera.camera_matrix_valid
                             && camera.scene == owner.scene && camera.owner_generation == owner.generation
                             && camera.publication_sequence == scene.camera_publication && camera.reservation != 0u;
@@ -476,12 +469,10 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
   const nrd::ReblurSettings denoiser_settings;
   constants.hit_distance_parameters = {denoiser_settings.hitDistanceParameters.A, denoiser_settings.hitDistanceParameters.B, denoiser_settings.hitDistanceParameters.C};
   nrd::CommonSettings denoising;
-  std::optional<std::array<double, 3>> camera_origin;
   if (camera_valid) {
     const auto view_to_world = reconstruction::camera_state::Multiply(
         camera.inverse_view_projection, reconstruction::camera_state::LoadColumnMajorMatrix(camera.projection.data()));
-    camera_origin = {view_to_world.m[0][3], view_to_world.m[1][3], view_to_world.m[2][3]};
-    const auto& origin = *camera_origin;
+    const std::array<double, 3> origin = {view_to_world.m[0][3], view_to_world.m[1][3], view_to_world.m[2][3]};
     const auto set_camera = [&origin](const reconstruction::camera_state::CameraFrame& source, float* projection, float* view) {
       std::ranges::copy(source.projection, projection);
       std::ranges::copy(source.view, view);
@@ -552,7 +543,6 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
   }
   const auto saved = rendering::d3d11_compute_state::Capture(cmd_list);
   bool succeeded = false;
-  std::optional<size_t> memory_slot;
   try {
     const auto record_reflections = [&](const bridge_api::Dispatch& dispatch) {
       auto& frame = runtime.frames[dispatch.slot_index];
@@ -622,12 +612,6 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
       const std::array<ImageView, 2> resolve_outputs = {{{.resource = frame.outputs[0].resource.Get()}, {.resource = frame.outputs[1].resource.Get()}}};
       dispatch_pass(dispatch, &frame.arena, runtime.pipelines.resolve, constant_address, resolve_inputs, resolve_outputs, runtime.size[0], runtime.size[1]);
       dispatch.Mark("resolve");
-      if (memory_active) {
-        memory::Record(bridge.device12.Get(), dispatch, &frame.arena, {constant_address, runtime.scene->GetGPUVirtualAddress()},
-                       runtime.size, {.resource = runtime.depth.Get(), .mip = 0u, .mips = runtime.mip_count},
-                       {.resource = runtime.inputs[1].image.resource.Get()}, debug_view, frame.outputs[0].resource.Get());
-        memory_slot = dispatch.slot_index;
-      }
       compute::Transition(dispatch.commands, runtime.scene.Get(), D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER, D3D12_RESOURCE_STATE_COMMON);
       return true;
     };
@@ -647,7 +631,6 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
       context->CSSetShaderResources(0u, static_cast<UINT>(srvs.size()), srvs.data());
       context->CSSetUnorderedAccessViews(0u, static_cast<UINT>(outputs.size()), outputs.data(), nullptr);
       context->Dispatch((runtime.size[0] + 7u) / 8u, (runtime.size[1] + 7u) / 8u, 1u);
-      if (memory_active) memory::Sample(context);
       srvs.fill(nullptr);
       outputs.fill(nullptr);
       context->CSSetShaderResources(0u, static_cast<UINT>(srvs.size()), srvs.data());
@@ -678,7 +661,6 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
     runtime.previous_occlusion_strength = occlusion_strength;
     runtime.previous_rays_per_pixel = rays_per_pixel;
     runtime.previous_debug_view = debug_view;
-    if (memory_slot) memory::Submitted(*memory_slot, camera_origin);
     if (camera_capture) {
       const std::unique_lock lock(reload.mutex);
       if (reload.status.camera_count < reload.status.camera_requested) {
