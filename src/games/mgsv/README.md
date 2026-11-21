@@ -15,7 +15,7 @@ RenoDX for Metal Gear Solid V: The Phantom Pain adds HDR output and color gradin
 | [Bloom](postprocess/bloom/README.md) | Vanilla and Enhanced bloom, color handling, and testing |
 | [Engine table](engine/README.md) | What the mod relies on in the game executable, and how to move it to a new game build |
 | [Rendering architecture](docs/ARCHITECTURE.md) | File ownership, frame order, shared layouts, and submission rules |
-| [Roadmap](ROADMAP.md) | Planned work in order: hardening, raster lighting, atmosphere, water, frame generation, the scene on D3D12, ray-traced lighting, path tracing |
+| [Roadmap](ROADMAP.md) | Planned work in order: hardening, atmosphere, water, raster lighting and materials, the physical sky, frame generation, the scene on D3D12, ray-traced lighting, path tracing |
 | [Planned design](docs/DESIGN.md) | How the planned lighting methods, atmosphere, water, frame generation and settings are meant to work, how the mod should survive game updates, the planned folder layout, and how each claim is known |
 
 ## Temporal reconstruction

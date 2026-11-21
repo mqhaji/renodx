@@ -16,17 +16,18 @@ The goal is a path-traced method with DLSS Ray Reconstruction as the highest-qua
 
 ## Overview
 
-Stage 1, hardening what exists, is done.
+Stage 1, hardening what exists, is done. The order follows what each item needs from the others; the map behind it is in `build/analysis/mgsv/mgsv-dependencies-20261121/`.
 
 | Stage | Contents | Depends on |
 |---|---|---|
-| 2. Raster lighting | Multiple bounces (built), a cheaper gather, reflections with variable ray density, Lighting Quality, BRDF replacement | — |
-| 3. Atmosphere | Volumetric fog with light shafts, physical sky, clouds | The fog volume can run beside 2 |
-| 4. Water | River, pond and ocean shaders: reflections, absorption, caustics | 3's sky |
-| 5. Frame generation | FSR, then DLSS, then XeSS frame generation | Independent of 2 to 4; it needs its own camera-cut signal (stage 2 did not need one) |
-| 6. The scene on D3D12 | Geometry, skinning, materials, lights, acceleration structures | New engine entries: bone uploads, scene lists |
-| 7. Ray-traced lighting | Ray-traced shadows, screen probes on real rays over the bitmask gather, reflections on real rays, forward surfaces lit from the radiance cache, RTXDI, SHaRC | 6 |
-| 8. Path tracing | Path tracing with Ray Reconstruction, then caustics | 7 |
+| 2. Atmosphere | Volumetric fog, light shafts, clouds with cloud shadows, the sky environment map | — |
+| 3. Water | Rivers, ponds and puddles, then the oceans: reflections, refraction, absorption, scattering, caustics | 2's light record and sky environment map |
+| 4. Raster lighting and materials | Multiple bounces (built), a cheaper gather, reflections with variable ray density, Lighting Quality, the material record and BRDF replacement | Must finish before 8, which writes the formats these define and shades with the final BSDF |
+| 5. Physical sky | Atmosphere tables fitted to the game's sky, with the Authored Look control | 2; optional |
+| 6. Frame generation | FSR, then DLSS, then XeSS frame generation | Independent of 2 to 5 |
+| 7. The scene on D3D12 | Geometry, skinning, materials, lights, acceleration structures; then the main D3D12 block | New engine entries; the reading work can start at any time |
+| 8. Ray-traced lighting | Ray-traced shadows, screen probes on real rays over the bitmask gather, reflections on real rays, forward surfaces lit from the radiance cache, fog visibility from rays, RTXDI, SHaRC | 4, 7 |
+| 9. Path tracing | Path tracing with Ray Reconstruction, then caustics | 8 |
 | Lowest priority | XeSS upscaling, Analytical TAA improvements, reactive masks, projection coverage | — |
 
 ## Surfaces the game draws forward
@@ -52,9 +53,35 @@ Skid marks are not on this list: they are G-buffer decals and already receive ou
 
 How each lighting method treats these surfaces is in the design: [raster](docs/DESIGN.md#45-forward-drawn-surfaces), [water](docs/DESIGN.md#6-water), [ray-traced](docs/DESIGN.md#9-ray-traced-method) and [path-traced](docs/DESIGN.md#10-path-traced-method).
 
-## Stage 2: raster lighting
+## Stage 2: atmosphere
 
-Today's Global Illumination is kept and made better within what the screen shows. Light from surfaces off screen, and what the directions the screen leaves open really see, belong to the ray-traced method (stage 7); the raster method keeps the game's ambient light there. The method is in the [design](docs/DESIGN.md#4-raster-method). Its default tier must cost at most about 1 ms of GPU time more than today in the same scene (today: about 2 to 3 ms at the sortie menu and Mother Base and about 3.6 ms on the hillside, at 1920×1080 internal on an RTX 5080). The remaining steps follow the earlier plan for a cheaper gather and reflections (`build/analysis/mgsv/mgsv-gi-unified-20261118/PLAN.md`, steps 3 to 5), whose constraints and validation still apply.
+The engine already has the pieces this replaces or feeds: the fog image (`GLOBAL_VOLUMETRIC_FOG`) and fog applied inside deferred composition, the sky draw and two cloud draws. The method is in the [design](docs/DESIGN.md#5-atmosphere).
+
+**Step 1: the fog volume.** Our pass fills the engine's fog image after the sun's cascades are drawn and before deferred composition, its first reader; the game's draw is skipped. The image is enlarged at creation; all 174 shaders that read it address it by fractions of a tile, so none of them should need to change. The medium keeps the game's authored density and its curve of optical depth over distance; the light becomes physical: the sun through the shadow maps (soft shafts), the sky light, multiple scattering, then local lights. The step builds the pieces later steps share: the frame's light record (the true sun direction, the shadow-casting light's direction, sun color, sky light, exposure), the phase functions and the multiple-scattering table. **Gate:** with shadows and the new light off, the result matches the game's fog; the enlarged image works for every consumer in game; single and multiple scattering match an offline Monte Carlo reference; burst captures after DLSS show no flicker.
+
+**Step 2: sharp shafts.** A per-pixel average of sun visibility along the view ray at half resolution, used by the composition shader for opaque surfaces. The game's painted shaft cards (additive sprites under the African canopy) are kept and multiplied by that visibility: at the authored clear-weather density, real shafts are estimated to be far weaker than the cards.
+
+**Step 3: clouds.** Ports of the two cloud shaders, relit with the light record, the fog's phase function and multiple scattering. A cloud shadow map, one tileable map per frame from the clouds' noise textures under a stated convention (the clouds have no world position), read by the sun light, the fog and the shafts.
+
+**Step 4: the sky environment map.** The sky and clouds evaluated in linear light for any direction each frame, with the fog's far value, into a small environment map for reflections: the reflection fallback, the oceans, and later rays that miss. Diffuse sky light stays the game's baked sky light, which the drawn sky does not match (1.5 to 3.5 times dimmer, and a different hue at a low sun).
+
+**Exit:** day, night, rain and sandstorm look correct side by side with Vanilla; fog, clouds and sky agree at the horizon; cost is measured at Mother Base.
+
+## Stage 3: water
+
+The pond that started this: its reflection is one authored cube map that fades in the sun's shadow, the view through the water ignores Fresnel, and the ocean reflects fixed colors. The method is in the [design](docs/DESIGN.md#6-water). The game's water is 19 shaders in 38 hashes; each port is registered under both hashes of its shader.
+
+- **Rivers, ponds and puddles first.** One shader source in 12 variants; puddles are the river model shader. Ports keep the game's ripples, flow and foam and add a screen reflection, real Fresnel, a refraction checked against depth (already bound), absorption and scattering, and caustics from the ripple normals.
+- **The oceans and the marsh second.** The Fourier ocean draws after the copy of this frame's scene the game makes before the reflection pass, so its port can trace that copy. Its colors are constants and it has no cube map or ambient input (only the sun's direction and color), so its port takes ambient light from the light record and its sky from the environment map, and drops the darkening that fakes reflections of the platforms.
+- **The surface record.** Every port writes the water's normal, roughness, depth and type to the second render target every water shader already writes, for reconstruction and frame generation now and for the traced methods later.
+- **Wet surfaces** are audited against a published wetness model before anything changes.
+- **Coverage first.** The marsh, the 24-hour ocean, nine river variants and the waterfall sheet are in no capture yet; each gets one before its port.
+
+**Exit:** the pond and the ocean reflect the scene and the sky in sun and in shade; water looks right side by side with Vanilla at the hillside and at Mother Base in every weather; cost is measured.
+
+## Stage 4: raster lighting and materials
+
+Today's Global Illumination is kept and made better within what the screen shows. Light from surfaces off screen, and what the directions the screen leaves open really see, belong to the ray-traced method (stage 8); the raster method keeps the game's ambient light there. The method is in the [design](docs/DESIGN.md#4-raster-method). Its default tier must cost at most about 1 ms of GPU time more than today in the same scene (today: about 2 to 3 ms at the sortie menu and Mother Base and about 3.6 ms on the hillside, at 1920×1080 internal on an RTX 5080). The steps follow the earlier plan for a cheaper gather and reflections (`build/analysis/mgsv/mgsv-gi-unified-20261118/PLAN.md`, steps 3 to 5), whose constraints and validation still apply. The stage must finish before stage 8: the ray-traced passes write the formats the gather and reflections define, and shade with the final BSDF.
 
 **Step 1: facts.** The executable answered the open questions; the answers are in the design. Captures at Mother Base and in Africa confirmed the shadow, mask and terrain answers; sharing the 8-bit G-buffer targets cost nothing measurable at the ACC title, which is to be repeated in a scene with a heavy G-buffer before the main block relies on it.
 
@@ -62,69 +89,52 @@ Today's Global Illumination is kept and made better within what the screen shows
 
 **Step 3: a cheaper gather.** A pyramid that stores the nearest surface's depth with its source light, fewer steps where it makes them redundant, and output as spherical harmonics so each full-resolution pixel is lit with its own normal. Then a test of whether a D3D12 gather started after the G-buffer overlaps the game's shadow and light draws; the trace moves to D3D12 only if it does. **Gate:** error against a converged reference no higher than today's default, no more flicker at a static camera, the uniform-light test passes, and the cost is lower.
 
-**Step 4: reflections.** Variable ray density (one ray per pixel on sharp surfaces, one per 2×2 pixels elsewhere), first with NRD's own reconstruction of skipped pixels and, if that is noisier than today, with a pass that reuses neighbors' hits; fewer duplicate outputs from the input pass, and the engine's targets tried shareable. Then the rays and their denoising move into the main D3D12 block for the pixels the G-buffer marks as possible receivers, reading the mod's copies of last frame's reflection-pass image and depth; the engine's reflection pass applies composition's receiver data to the finished texture, so the frame keeps today's two round trips. **Gate:** as step 3, on the reflection output and the final image; the G-buffer marks the same receivers and roughness that composition uses today; and side by side with today's current-frame source, moving characters and vehicles in reflections show no visible delay. If either of the last two fails, the reflection block stays at the reflection pass and the frame makes three round trips.
+**Step 4: reflections.** Variable ray density (one ray per pixel on sharp surfaces, one per 2×2 pixels elsewhere), first with NRD's built-in reconstruction of skipped pixels and, if that is noisier than today, with a pass that reuses neighbors' hits; fewer duplicate outputs from the input pass, and the engine's targets tried shareable. **Gate:** as step 3, on the reflection output and the final image.
 
 **Step 5: settings.** Lighting Quality arrives, mapped to the gather's resolution and steps and to the reflection ray density, and the tuning controls the new passes fix are retired. Lighting Method arrives with the ray-traced method. The full layout is in the [design](docs/DESIGN.md#11-settings). The blob shadows under characters are removed where contact shadows cover them.
 
-**BRDF replacement (for example EON diffuse).** Possible, and best done here, as the diffuse lobe of the one shared BSDF rather than a patch on individual shaders. Direct diffuse is computed inside the engine's light shaders, which Enhanced shadows already port, so the lobe can change there; ambient, environment, GI application, and later ray and path tracing must all use the same lobe, or energy is counted differently in each. The earlier attempt (kept in `git stash` as the 2026-11-18 EON experiment) changed many shaders before the material model was settled; this time the order is material record first, then a uniform-light test of every consumer, then the visual comparison. Skin keeps the engine's scattering passes; a physical skin model is a later, separate decision.
+**Step 6: the material record and BRDF replacement (for example EON diffuse).** One material record and one shared BSDF, the same record a ray hit needs in stage 7. Direct diffuse is computed inside the engine's light shaders, which Enhanced shadows already port, so the lobe can change there; ambient, environment, GI application, and later ray and path tracing must all use the same lobe, or energy is counted differently in each. The earlier attempt (kept in `git stash` as the 2026-11-18 EON experiment) changed many shaders before the material model was settled; this time the order is material record first, then a uniform-light test of every consumer, then the visual comparison. Skin keeps the engine's scattering passes; a physical skin model is a later, separate decision.
 
-**Exit:** the gather and the reflections pass their gates within the budget; every tier's cost is measured in the fixed scenes; the uniform-light test passes for the gather and the reflection chain.
+**Exit:** the gather and the reflections pass their gates within the budget; every tier's cost is measured in the fixed scenes; the uniform-light test passes for the gather, the reflection chain and every consumer of the BSDF.
 
-## Stage 3: atmosphere
+## Stage 5: physical sky
 
-The engine already has the pieces this replaces or feeds: a precomputed-sky plugin (`PRECOMPUTE_SKY`), the sky draws, the fog image (`GLOBAL_VOLUMETRIC_FOG`) and fog applied inside deferred composition. The method is in the [design](docs/DESIGN.md#5-atmosphere).
+Per-frame atmosphere tables (the multiple-scattering table from stage 2 is one of them), fitted to the game's drawn sky, which matches the layout of one layer of the engine's precomputed Bruneton tables, with a Mie term stronger or taller than the paper's defaults, then tinted per weather. The game's baked sun color and sky light do not match that drawn sky, so the fit has to reconcile all three; the remaining difference is kept as the explicit Authored Look control. Nothing else depends on this stage. If the fit is poor for a weather type, the game's tables stay.
 
-**Step 1: the fog volume.** A view-aligned volume computed by the mod, lit by the sun through its shadow maps, by ambient light and by local lights, written into the engine's fog image enlarged at creation. Every surface, forward-drawn ones included, then shows soft light shafts with no other shader changed. With shadows ignored the result must match the game's fog. **Gate:** the enlarged image works for every consumer.
+**Exit:** fog, clouds and sky agree at the horizon; sun color and sky light from the tables match the game's within the Authored Look; surfaces look right side by side with Vanilla in every weather.
 
-**Step 2: sharp shafts.** A per-pixel average of sun visibility along the view ray, used by the composition shader for opaque surfaces.
-
-**Step 3: the sky.** Sky and clouds projected to spherical harmonics and a small environment map each frame, for the fog, the reflection fallback and the water. Then the physical sky: per-frame atmosphere tables fitted to the game's baked tables, with the remaining difference kept as the explicit Authored Look control. If the fit is poor for a weather type, the baked tables stay and only the projections are added.
-
-**Step 4: clouds.** Relight the game's clouds from the same sun and sky; add a cloud shadow map read by sun lighting, fog and shafts.
-
-**Exit:** day, night, rain and sandstorm look correct side by side with Vanilla; fog and sky agree at the horizon; GI and reflections see the same sky; cost is measured at Mother Base.
-
-## Stage 4: water
-
-The pond that started this: its reflection is one authored cube map that fades in the sun's shadow, the view through the water ignores Fresnel, and the ocean reflects fixed colors. The method is in the [design](docs/DESIGN.md#6-water).
-
-- **Rivers and ponds first.** Ports that keep the game's ripples, flow and foam and add an in-shader screen reflection, real Fresnel, absorption with depth, the game's ambient light, and caustics from the ripple normals.
-- **The oceans second**, the same way. The Fourier ocean and the marsh draw before the engine's scene copy exists and read last frame's image instead; the 24-hour ocean draws after it.
-- **The surface record.** Every port writes the water's normal, roughness, depth and type to a side target, for reconstruction and frame generation now and for the traced methods later.
-- **Wet surfaces** are audited against a published wetness model before anything changes.
-
-**Exit:** the pond and the ocean reflect the scene and the sky in sun and in shade; water looks right side by side with Vanilla at the hillside and at Mother Base in every weather; cost is measured.
-
-## Stage 5: frame generation
+## Stage 6: frame generation
 
 After the raster stages and before ray tracing. All three providers present through a D3D12 swap chain; none documents a D3D11 path. The method and its inputs are in the [design](docs/DESIGN.md#7-frame-generation).
 
 **Step 1: the presentation path.** An experiment decides between replacing the game's swap chain and leaving it to ReShade and RenoDX while a D3D12 swap chain shows the frames. It must keep the ReShade overlay, HDR10 output and even pacing.
 
-**Step 2: inputs.** The image without the HUD and the HUD as a separate layer, split by the engine's draw lists; depth and dense motion, including the water surface record; camera data latched once per frame; a camera-cut signal. Stage 2 found only the cutscene "cancel camera blur" bit; aiming, binoculars, field-of-view changes and teleports still need a signal of their own.
+**Step 2: inputs.** The image before the engine's 2D list as the HUD-free input (the HUD and the camera filters share that list, so a separate HUD layer is not available cheaply) and the finished frame; depth and dense motion, including the water surface record; camera data latched once per frame; a camera-cut signal built from the mod's camera records, because no setter of the engine's cut flag was found outside cutscene code.
 
 **Step 3: providers.** FSR first, then DLSS Frame Generation with Reflex in the engine's main loop, then XeSS (last: it needs Intel's latency library, which cannot run beside Reflex).
 
 **Exit:** each provider is selectable, the HUD is never interpolated, frame pacing is even, generation is off in menus and loading, and HDR output and the overlay still work.
 
-## Stage 6: the scene on D3D12
+## Stage 7: the scene on D3D12
 
-The prerequisite for every ray-traced feature, and the largest piece of reverse engineering left. It adds nothing visible by itself. The list is in the [design](docs/DESIGN.md#8-the-scene-on-d3d12): static geometry and instances from the engine's model resources and scene lists, terrain and vegetation, skinned characters from the bone matrices each frame's draws upload, a simplified material at each hit, the forward set flagged apart, alpha-tested geometry, lights with their authored bounds, and a top-level structure rebuilt every frame.
+The prerequisite for every ray-traced feature, and the largest piece of reverse engineering left. It adds nothing visible by itself. The list is in the [design](docs/DESIGN.md#8-the-scene-on-d3d12): static geometry and instances from the engine's model resources and scene lists, terrain and vegetation, skinned characters from the bone matrices each frame's draws upload, a simplified material at each hit, the forward set flagged apart, alpha-tested geometry, lights with their authored bounds, and a top-level structure rebuilt every frame. Lights and skinning are the best understood today, vegetation and instancing the least. The reading work depends on nothing else and can run beside the raster stages.
+
+**Then the main D3D12 block** at the diffuse hand-off: the reflection rays and their denoising move into it, reading the mod's copies of last frame's reflection-pass image and depth, and the fog volume moves into it, so the frame keeps two round trips. **Gate:** the G-buffer marks the same receivers and roughness that composition uses today, and side by side with today's current-frame source, moving characters and vehicles in reflections show no visible delay; if either fails, the reflection block stays at the reflection pass and the frame makes three round trips.
 
 **Exit:** a debug view traces primary rays against the D3D12 scene and matches the G-buffer's depth and materials, including skinned characters and off-screen geometry, at a known update cost and memory use.
 
-## Stage 7: ray-traced lighting
+## Stage 8: ray-traced lighting
 
 The raster method with real rays wherever a ray helps, on any ray-tracing GPU, denoised by NRD ([design](docs/DESIGN.md#9-ray-traced-method)).
 
-- **Shadows:** one ray toward the sun's disk; every local light can cast a shadow, chosen per pixel by resampling, with RTXDI's ReSTIR direct lighting as the higher setting.
+- **Shadows:** one ray toward the sun's disk; every local light can cast a shadow, chosen per pixel by resampling, with RTXDI's ReSTIR direct lighting as the higher setting. At a low sun the engine casts shadows from a light held at 26 to 27 degrees of elevation; rays can use the true sun instead, which is decided here, and the cloud shadow map follows the same choice.
 - **Diffuse indirect:** screen probes whose rays are ray queries against the real scene, with hits lit from SHaRC, over the bitmask gather as the near layer; they replace the game's ambient light in the directions the gather finds open.
 - **Reflections:** rays below a roughness cutoff, screen probes above.
-- **Forward surfaces and fog:** water and glass trace from the surface record; lit forward objects take the traced light at their position through the engine function that sets their ambient colors; emissive models without an engine light become lights; the fog volume takes its visibility from rays.
+- **Forward surfaces and fog:** water and glass trace from the surface record; lit forward objects take the traced light at their position through the engine function that sets their ambient colors; emissive models without an engine light become lights; the fog volume takes its sun and sky visibility from rays, which stops fog indoors from being lit like outdoors.
 
 **Exit:** each part is selectable, never darker or brighter than the raster method in a uniform-light test, stable in the fixed scenes, with its cost measured.
 
-## Stage 8: path tracing
+## Stage 9: path tracing
 
 The highest-quality method ([design](docs/DESIGN.md#10-path-traced-method)). It requires DLSS Ray Reconstruction.
 

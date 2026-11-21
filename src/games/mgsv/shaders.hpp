@@ -397,6 +397,26 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
           return true; },
                                   });
   }
+  // The game's shader set holds some shaders twice, with the same instructions
+  // and bindings under two hashes, and runs one of each pair; which one is not
+  // known in advance. A port named by one hash also replaces its twin.
+  static constexpr auto TWINS = std::to_array<std::pair<uint32_t, std::span<const uint8_t>>>({
+      {0xBA3880D3, __0x1A96649E},  // Primitive_TppFourierOceanHQ
+      {0xE2A104C7, __0x42D27394},  // Primitive_TppFourierOceanLQ
+      {0xE4387947, __0xEBCBED4E},  // Primitive_TppFourierOceanFill
+      {0x51BA0392, __0x52398872},  // Primitive_Tpp24hOcean
+      {0x0092C258, __0xC15B18F4},  // Primitive_TppBaseOcean
+      {0xCC05FAFC, __0x49CCEBC1},  // Primitive_TppSandWind
+      {0x91C4A87A, __0xC4B7795C},  // tpp3dfw_Wormhole
+      {0xC4BE6ECB, __0x2B7E283E},  // tpp3dfw_WormholeForBigThings
+      {0xE9351D6A, __0x2B479DA0},  // tpp3dfw_WormholeBigThingsMoving
+      {0x9E5DECF7, __0xE847AD2B},  // tpp3dfw_WormholeMovingEffect
+      {0xB26F03DB, __0xB4AF3A07},  // Prim_Poly_FastDraw_SSky
+      {0x5617D364, __0x60A50F81},  // Prim_Poly_FastDraw_SSky_VF
+  });
+  for (const auto& [twin, code] : TWINS) {
+    shaders.emplace(twin, renodx::mods::shader::CreateCustomShader(twin, code));
+  }
   // merge keeps existing keys, so the entries above win over generated ones.
   shaders.merge(renodx::mods::shader::CustomShaders{__ALL_CUSTOM_SHADERS});
   return shaders;
