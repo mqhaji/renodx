@@ -38,8 +38,11 @@ RWTexture2D<float4> scattering_copy : register(u2);
   // AO and GI are each normalized over their own valid taps.
   const uint2 pixel = thread_id.xy;
   if (pixel.x >= buffer_width || pixel.y >= buffer_height) return;
+  // The trace placed lighting pixel q at full-resolution pixel
+  // floor((q + 0.5) * scale), which is q * scale + floor(scale / 2) for the
+  // divisors 1, 2, 4 and 8, so that pixel takes q's result alone.
   const float scale = max(CUSTOM_MGSV_LIGHTING_RESOLUTION_DIVISOR, 1.0);
-  const float2 position = (float2(pixel) + 0.5) / scale - 0.5;
+  const float2 position = (float2(pixel) - floor(0.5 * scale)) / scale;
   const int2 base = (int2)floor(position);
   const float2 fraction = frac(position);
 

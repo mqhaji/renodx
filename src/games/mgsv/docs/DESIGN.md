@@ -305,7 +305,7 @@ The preset sets the rest; changing any of them selects Custom. Reference Accumul
 
 **Direct Lighting (Advanced)** keeps Shadow Softness, Contact Shadow Reach (`DirectLightingContactShadowReach`), Spot Contact Shadow Budget (`DirectLightingSpotContactShadowBudget`) and the debug views as they are, and gains **Local Light Shadows** (`DirectLightingLocalShadows`: Vanilla (default), All Lights; All Lights needs ray tracing).
 
-**Indirect Lighting (Advanced)** keeps the four strength controls, Multiple Bounces and the debug views. The diffuse resolution, rays per pixel, search radius, thickness, offset, direction and sample controls and the depth-mip and backface-rejection switches are retired as the planned gather and reflection changes fix the values they tune; their work moves into Lighting Quality.
+**Indirect Lighting (Advanced)** keeps the four strength controls, Multiple Bounces and the debug views. The diffuse resolution, rays per pixel, search radius, direction and sample controls and the depth-mip and backface-rejection switches are retired as the planned gather and reflection changes fix the values they tune; their work moves into Lighting Quality.
 
 **Atmosphere**
 

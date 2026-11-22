@@ -146,26 +146,44 @@ float LoadTraceDepth(int2 sample_pixel, int mip_level) {
 }
 
 // Returns the sectors one depth sample blocks. The sample is treated as a slab
-// from its depth to depth + thickness, not as an infinitely thick wall.
-uint GetCoverageMask(float2 sample_position, float sample_depth, float thickness,
+// from its depth to depth + thickness, not as an infinitely thick wall, and
+// its back reaches at least as far as the back of the occluder it belongs to,
+// taken from where that occluder started (occluder_start, view space).
+uint GetCoverageMask(float3 sample_point, float thickness, float3 occluder_start,
                      float3 position, float3 view_direction, float side, float normal_angle, float cos_n,
                      float sector_offset) {
-  const float sample_z = LinearZ(sample_depth);
-  // Native reverse-Z zero is background, not a finite surface slab.
-  if (!(sample_depth > 0.0 && sample_z > 0.0) || sample_z > 1.0e6) return 0u;
-  // Project both slab ends into the slice. A coarse depth still blocks
+  // Project the slab's ends into the slice. A coarse depth still blocks
   // conservatively even though its radiance is read from its owner pixel.
-  const float3 front = ViewPos(sample_position, sample_z) - position;
-  const float3 back = ViewPos(sample_position, sample_z + thickness) - position;
-  const float2 lengths_squared = float2(dot(front, front), dot(back, back));
+  // Moving a view-space point back along its camera ray scales it.
+  const float3 front = sample_point - position;
+  const float3 back = sample_point * (1.0 + thickness / sample_point.z) - position;
+  const float3 start_back = occluder_start * (1.0 + thickness / occluder_start.z) - position;
+  const float3 lengths_squared = float3(dot(front, front), dot(back, back), dot(start_back, start_back));
   if (any(lengths_squared < 1e-12)) return 0u;
-  const float2 horizon_cos = clamp(float2(dot(front, view_direction), dot(back, view_direction)) * rsqrt(lengths_squared), -1.0, 1.0);
+  const float3 cosines = float3(dot(front, view_direction), dot(back, view_direction), dot(start_back, view_direction)) * rsqrt(lengths_squared);
+  const float2 horizon_cos = clamp(float2(cosines.x, min(cosines.y, cosines.z)), -1.0, 1.0);
   float2 horizon = saturate(acos(horizon_cos) * (side / AO_PI) + normal_angle / AO_PI + 0.5);
   if (side < 0.0) horizon = horizon.yx;
   horizon.x = GetSliceCosineCDF(horizon.x, normal_angle, cos_n, side > 0.0);
   horizon.y = GetSliceCosineCDF(horizon.y, normal_angle, cos_n, side > 0.0);
   const uint2 sectors = (uint2)floor(saturate(horizon + sector_offset) * float(AO_SECTORS));
   return GetSectorMask(sectors.x, sectors.y);
+}
+
+// Linear, pre-exposed outgoing radiance of one full-resolution pixel (albedo
+// was decoded by its sRGB view): the prepared source where it exists, else
+// rebuilt from the source inputs. Alpha only flags a cube-material fallback.
+float4 LoadTraceSource(int2 pixel, float depth, bool prepared_available) {
+  // One return: FXC reports a value returned early from a branch as
+  // potentially uninitialized.
+  float4 source;
+  [branch] if (prepared_available) {
+    source = prepared_source.Load(int3(pixel, 0));
+  } else {
+    source = LoadSourceRadiance(source_diffuse, source_albedo, native_material, clean_material, material_owner,
+                                pixel, uint2(buffer_width, buffer_height), normal_buffer.Load(int3(pixel, 0)), depth, true);
+  }
+  return source;
 }
 
 [numthreads(8, 8, 1)] void main(uint3 thread_id : SV_DispatchThreadID) {
@@ -206,10 +224,15 @@ uint GetCoverageMask(float2 sample_position, float sample_depth, float thickness
   const float3 surface_position = ViewPos(pixel, z);
   const float3 surface_view = normalize(-surface_position);
   normal -= 2.0 * min(dot(normal, surface_view), 0.0) * surface_view;
-  // Keep the biased point on the view-facing side of the receiver plane.
-  // Half the available distance leaves a margin for nearly tangent normals.
-  const float offset = min(max(CUSTOM_MGSV_LIGHTING_SURFACE_OFFSET, 0.0),
-                           0.5 * max(dot(normal, -surface_position), 0.0));
+  // The search's samples are rebuilt at the pixel centers whose depth they
+  // read (below), so the receiver's own surface lies on its plane and does not
+  // shade it. What is left to clear is the depth's rounding. The game's depth
+  // has 24 bits, and one step of it is z^2 / (2^24 * projection_parameters.z)
+  // of view depth (LinearZ's slope): the receiver and a neighbor can each be
+  // half a step off. Keep the biased point on the view-facing side of the
+  // receiver plane; half the available distance leaves a margin for nearly
+  // tangent normals.
+  const float offset = min(z * z / (16777216.0 * abs(projection_parameters.z)), 0.5 * max(dot(normal, -surface_position), 0.0));
   const float3 position = surface_position + normal * offset;
   const float3 view_direction = normalize(-position);
   // The reference CDF assumes a view-facing receiver. Do not extrapolate its
@@ -236,7 +259,6 @@ uint GetCoverageMask(float2 sample_position, float sample_depth, float thickness
   const int slices = (int)max(CUSTOM_MGSV_LIGHTING_SLICE_COUNT, 1.0);
   const int steps = (int)max(CUSTOM_MGSV_LIGHTING_SAMPLES_PER_SIDE, 1.0);
   const float radius_px = max(CUSTOM_MGSV_LIGHTING_SEARCH_RADIUS_PIXELS, 1.0);
-  const float thickness = max(CUSTOM_MGSV_LIGHTING_SURFACE_THICKNESS, 0.0);
   const float step_multiplier = pow(radius_px, 1.0 / float(steps));
 
   // 3. Build a basis around the view direction; slices rotate about it. The
@@ -263,13 +285,14 @@ uint GetCoverageMask(float2 sample_position, float sample_depth, float thickness
   // directions with exponentially increasing distances.
   [loop] for (int slice = 0; slice < slices; ++slice) {
     // The noise texel holds two uniform values: slice angle and step phase.
-    // A second read at an R2-sequence offset supplies the sector offset,
-    // following EA's guidance. Noise is indexed by lighting pixel, so a reduced
-    // lighting resolution does not skip noise texels.
+    // A second read at an R2-sequence offset supplies the sector offset and
+    // the thickness scale, following EA's guidance. Noise is indexed by
+    // lighting pixel, so a reduced lighting resolution does not skip noise
+    // texels.
     const uint sample_index = (noise_frame * (uint)slices + (uint)slice) & 31u;
-    float3 phases;
+    float4 phases;
     phases.xy = fast_noise.Load(int4(noise_pixel, sample_index, 0));
-    phases.z = fast_noise.Load(int4((noise_pixel + uint2(96u, 72u)) & 127u, sample_index, 0)).x;
+    phases.zw = fast_noise.Load(int4((noise_pixel + uint2(96u, 72u)) & 127u, sample_index, 0));
     // Map the 256 stored ranks to bin centers, excluding exact zero/one.
     phases = (phases * 255.0 + 0.5) / 256.0;
     const float2 slice_direction = SampleCosineSliceDirection(normal_xy, (float(slice) + phases.x) / float(slices));
@@ -295,6 +318,31 @@ uint GetCoverageMask(float2 sample_position, float sample_depth, float thickness
     const float normal_angle = normal_sign * acos(cos_n);
     const float sector_offset = phases.z / float(AO_SECTORS);
     const float radial_phase = phases.y;
+    // Auto thickness, after bjornornorn's GT-VBAO thickness heuristic
+    // (https://www.shadertoy.com/view/3clGWB, under its MIT option; see the
+    // README's credits). Behind a visible surface the depth buffer shows
+    // nothing, so how far back an occluder goes is a guess: it is taken to be
+    // as thick as it is long along the search. That length is how far its
+    // front surface has run since it started, plus the part the search
+    // skipped before the sample where it first met it. The occluder's edge
+    // lies anywhere between that sample and the one before, so the skipped
+    // part is taken as half that gap, in view space at the sample's depth. A
+    // new occluder starts where the search steps mostly toward or away from
+    // the camera (a depth jump, not the same surface going on) or crosses
+    // background. The first starts at the receiver itself, so a surface joined
+    // to it without a depth jump (a floor running into a wall) blocks down to
+    // the horizon.
+    //
+    // A scale of 2^(-1..1), per pixel, slice and camera sample, multiplies
+    // every thickness and, as in the reference, the sideways part of the step
+    // in the new-occluder test, so the heuristic's guesses average out under
+    // temporal reconstruction instead of leaving bands. With reconstruction
+    // off the noise, and this scale, hold still.
+    const float thickness_scale = exp2(2.0 * phases.w - 1.0);
+    // ViewPos is linear in depth and in the pixel, so a gap of g pixels along
+    // this slice at depth z spans g * z * gap_scale in view space, on either
+    // side.
+    const float gap_scale = length(ViewPos(ray_start + screen_direction, 1.0) - ViewPos(ray_start, 1.0));
     // A set bit means a nearer sampled surface already owns this angular band.
     // Share one mask across both search sides so GI cannot count it twice.
     uint occupied = 0u;
@@ -303,43 +351,72 @@ uint GetCoverageMask(float2 sample_position, float sample_depth, float thickness
       const float2 ray_direction = screen_direction * side_sign;
       const float side_phase = side == 0 ? radial_phase : 1.0 - radial_phase;
       float distance_px = pow(step_multiplier, side_phase);
+      float3 occluder_start = position;
+      float3 previous_point = position;
+      float previous_distance_px = 0.0;
+      // Half the gap before the current occluder's first sample.
+      float skipped_run = 0.0;
+      // Whether the search crossed background (sky) since the last surface:
+      // the next surface then starts a new occluder, so objects with sky
+      // between them are not joined into one.
+      bool crossed_background = false;
       [loop] for (int step = 0; step < steps; ++step) {
         const float sample_distance = distance_px;
         distance_px *= step_multiplier;
+        const float gap_px = sample_distance - previous_distance_px;
+        previous_distance_px = sample_distance;
         // One shared geometry sample supplies both visibility and bounce.
-        const float2 sample_position = ray_start + ray_direction * sample_distance;
-        if (any(sample_position < 0.0) || any(sample_position >= float2(buffer_width, buffer_height))) break;
+        const int2 sample_pixel = (int2)floor(ray_start + ray_direction * sample_distance + 0.5);
+        if (any(sample_pixel < 0) || any(sample_pixel >= int2(buffer_width, buffer_height))) break;
 
-        const int2 sample_pixel = min((int2)floor(sample_position + 0.5), int2(buffer_width, buffer_height) - 1);
         int mip_level = 0;
         [branch] if (CUSTOM_MGSV_LIGHTING_DEPTH_MIPS_ENABLED > 0.5) {
           mip_level = clamp((int)floor(log2(max(sample_distance, 1.0)) - 3.3), 0, AO_DEPTH_MIP_LEVELS);
         }
         const float sample_depth = LoadTraceDepth(sample_pixel, mip_level);
-        const uint covered = GetCoverageMask(sample_position, sample_depth, thickness, position, view_direction, side_sign,
-                                             normal_angle, cos_n, sector_offset);
+        const float sample_z = LinearZ(sample_depth);
+        uint covered = 0u;
+        // Native reverse-Z zero is background, not a finite surface slab.
+        if (!(sample_depth > 0.0 && sample_z > 0.0 && sample_z <= 1.0e6)) {
+          crossed_background = true;
+        } else {
+          // At the center of the pixel whose depth was read, so a point of the
+          // receiver's plane lies on that plane. Rebuilt at the search's own
+          // position instead, it would be up to half a pixel off and sloped
+          // surfaces would shade themselves. A coarse depth belongs to some
+          // pixel of its block, so this is exact for full-resolution samples
+          // only.
+          const float3 sample_point = ViewPos(float2(sample_pixel), sample_z);
+          float3 step_offset = sample_point - previous_point;
+          step_offset.xy *= thickness_scale;
+          const float toward_camera = dot(step_offset, view_direction);
+          if (crossed_background || toward_camera * toward_camera > 0.81 * dot(step_offset, step_offset)) {
+            occluder_start = sample_point;
+            skipped_run = 0.5 * gap_px * sample_z * gap_scale;
+          }
+          crossed_background = false;
+          previous_point = sample_point;
+          covered = GetCoverageMask(sample_point, thickness_scale * (skipped_run + length(sample_point - occluder_start)), occluder_start,
+                                    position, view_direction, side_sign, normal_angle, cos_n, sector_offset);
+        }
         // 5. Gather radiance only for newly covered diffuse sectors. A coarse
         // depth has no color, so descend to its full-size owner first.
         uint fresh = covered & ~occupied;
         if (fresh != 0u) {
           int2 owner;
           if (!ResolveDepthOwner(sample_pixel, mip_level, sample_depth, owner)) {
-            if (fresh != 0u) gi_valid = false;
+            gi_valid = false;
           } else {
-            float3 source_normal = 0.0;
-            if (CUSTOM_MGSV_GI_REJECT_BACKFACES > 0.5 && fresh != 0u) {
-              source_normal = DecodeNormal(normal_buffer.Load(int3(owner, 0)).xyz);
-            }
-            if (CUSTOM_MGSV_GI_REJECT_BACKFACES > 0.5 && fresh != 0u) {
-              if (any(!isfinite(source_normal))) {
-                gi_valid = false;
-                fresh = 0u;
-              }
+            if (CUSTOM_MGSV_GI_REJECT_BACKFACES > 0.5) {
+              const float3 source_normal = DecodeNormal(normal_buffer.Load(int3(owner, 0)).xyz);
               // A backfacing surface still occludes. Only its outgoing radiance
               // is masked, using the reference's projected source hemisphere.
               const float3 source_projected = source_normal - slice_normal * dot(source_normal, slice_normal);
               const float source_length_squared = dot(source_projected, source_projected);
-              if (source_length_squared > 1e-12) {
+              if (any(!isfinite(source_normal))) {
+                gi_valid = false;
+                fresh = 0u;
+              } else if (source_length_squared > 1e-12) {
                 const bool flip_t = dot(projected_tangent, source_normal) < 0.0;
                 const float source_cos = clamp(dot(projected_normal, source_projected)
                                                    * projected_inverse_length * rsqrt(source_length_squared),
@@ -355,21 +432,11 @@ uint GetCoverageMask(float2 sample_position, float sample_depth, float thickness
               }
             }
             if (fresh != 0u) {
-              // Source RGB is linear, pre-exposed outgoing radiance (albedo
-              // was decoded by its sRGB view). Black is a valid source. Alpha
-              // only flags a cube-material fallback and is not used here.
-              float4 source;
-              if (prepared_available) {
-                source = prepared_source.Load(int3(owner, 0));
-              } else {
-                source = LoadSourceRadiance(source_diffuse, source_albedo, native_material, clean_material, material_owner,
-                                            owner, uint2(buffer_width, buffer_height), normal_buffer.Load(int3(owner, 0)), sample_depth, true);
-              }
-
-              const float3 radiance = source.rgb;
-              if (any(!isfinite(radiance))) {
-                if (fresh != 0u) gi_valid = false;
-              } else {
+              // Black is a valid source. One that is not finite adds no light
+              // but still blocks: marking the result invalid instead would
+              // void the GI of every receiver whose search reaches that pixel.
+              const float3 radiance = LoadTraceSource(owner, sample_depth, prepared_available).rgb;
+              if (all(isfinite(radiance))) {
                 const float fresh_coverage = float(countbits(fresh)) / float(AO_SECTORS);
                 indirect += max(radiance, 0.0) * fresh_coverage;
                 accepted_coverage += fresh_coverage;
@@ -387,7 +454,7 @@ uint GetCoverageMask(float2 sample_position, float sample_depth, float thickness
     visibility += 1.0 - float(countbits(occupied)) / float(AO_SECTORS);
   }
 
-  // 5. Average the slices. Open sectors count as ambient visibility; blocked
+  // 6. Average the slices. Open sectors count as ambient visibility; blocked
   // sectors have contributed their source radiance once.
   const float occlusion = saturate(1.0 - visibility / float(slices));
   const float applied = saturate(occlusion * CUSTOM_MGSV_AO_STRENGTH);
@@ -404,7 +471,8 @@ uint GetCoverageMask(float2 sample_position, float sample_depth, float thickness
     if (diagnostic == 3) value = (accepted_coverage / float(slices)).xxx;
     if (diagnostic == 4) value = gi_valid ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
     if (diagnostic == 5) {
-      value = source_albedo.Load(int3(receiver_pixel, 0)).rgb * source_diffuse.Load(int3(receiver_pixel, 0)).rgb;
+      // What the search gathers from this pixel when it is a source.
+      value = LoadTraceSource(receiver_pixel, depth, prepared_available).rgb;
       value = all(isfinite(value)) ? clamp(value, 0.0, 65504.0) : float3(1.0, 0.0, 0.0);
     }
     diagnostic_output[ao_pixel] = float4(value, 1.0);

@@ -54,8 +54,6 @@ struct ShaderInjectData {
   float reflection_strength;  // Blends the complete screen/environment reflection replacement.
   float lighting_resolution;  // Pixel count: 0 = full, 1 = 1/4, 2 = 1/16, 3 = 1/64.
   float lighting_search_radius_pixels;
-  float lighting_surface_thickness;  // Native view-depth units.
-  float lighting_surface_offset;     // Receiver offset along the shading normal, in native view-space units.
   float lighting_slice_count;
   float lighting_samples_per_side;
   float lighting_depth_mips_enabled;  // User choice; each dispatch copy records whether the mips are ready.
@@ -147,8 +145,6 @@ cbuffer RenoDXSettings : register(b13) {
 #define CUSTOM_MGSV_REFLECTION_RAYS_PER_PIXEL     shader_injection.reflection_rays_per_pixel
 #define CUSTOM_MGSV_SPECULAR_OCCLUSION_STRENGTH   shader_injection.specular_occlusion_strength
 #define CUSTOM_MGSV_LIGHTING_SEARCH_RADIUS_PIXELS shader_injection.lighting_search_radius_pixels
-#define CUSTOM_MGSV_LIGHTING_SURFACE_THICKNESS    shader_injection.lighting_surface_thickness
-#define CUSTOM_MGSV_LIGHTING_SURFACE_OFFSET       shader_injection.lighting_surface_offset
 #define CUSTOM_MGSV_LIGHTING_SLICE_COUNT          shader_injection.lighting_slice_count
 #define CUSTOM_MGSV_LIGHTING_SAMPLES_PER_SIDE     shader_injection.lighting_samples_per_side
 #define CUSTOM_MGSV_LIGHTING_DEPTH_MIPS_ENABLED   shader_injection.lighting_depth_mips_enabled

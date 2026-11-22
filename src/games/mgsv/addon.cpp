@@ -119,6 +119,8 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
     ImGui::PushTextWrapPos();
     ImGui::TextUnformatted(R"license(GT-VBGI reference: Mirko Salm (TinyTexel).
 https://www.shadertoy.com/view/lfdBWn
+Occluder thickness heuristic: bjornornorn.
+https://www.shadertoy.com/view/3clGWB
 
 MIT License
 
