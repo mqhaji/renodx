@@ -146,8 +146,12 @@ void main(
   r9.y = dot(r5.xyzw, g_psScene.m_shadowProjection._m01_m11_m21_m31);
   r9.z = dot(r5.xyzw, g_psScene.m_shadowProjection._m02_m12_m22_m32);
   r9.w = dot(r5.xyzw, g_psScene.m_shadowProjection._m03_m13_m23_m33);
-  const float4 shadow_projected_dx = ddx(r9);
-  const float4 shadow_projected_dy = ddy(r9);
+  // Take the derivatives of the view position and carry them through the
+  // matrix. FXC moves the three products above into the shadow branch below,
+  // where ddx/ddy of them would read a stale value from a quad neighbor that
+  // skips the branch (a pixel beside a full contact shadow).
+  const float4 shadow_projected_dx = mul(ddx(r5), g_psScene.m_shadowProjection);
+  const float4 shadow_projected_dy = mul(ddy(r5), g_psScene.m_shadowProjection);
   r1.w = g_psMaterial.m_materials[7].y;
   r2.w = g_psMaterial.m_materials[7].z;
   r1.w = -r1.w;

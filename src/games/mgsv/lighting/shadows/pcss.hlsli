@@ -6,10 +6,13 @@
 // point-light shadow maps, used by the native light shader replacements. Each
 // filter searches the map for blockers, sizes the soft edge from their distance
 // to the receiver, then filters with hardware depth comparisons. When it cannot
-// (no blocker found, a footprint under one texel, or no usable projection), it
-// returns filtered = false and the caller runs the native four-tap filter.
+// (no blocker found, a filter radius under one texel, or no usable projection),
+// it returns filtered = false and the caller runs the native four-tap filter.
 // Shadow-map depth is reversed in all three: larger values are nearer the light.
 struct PcssResult {
+  // The native light shaders square the map visibility they are given, a
+  // shaping of their four-tap result. A filtered result is the square root of
+  // the share of the source the pixel sees, so that share is what lights it.
   float visibility;
   float blocker_gap;  // Receiver-to-blocker distance in game units.
   float radius;  // Soft edge radius in game units, before projection to texture UV.
@@ -18,6 +21,11 @@ struct PcssResult {
   bool filtered;  // False asks the caller to evaluate the native four-tap fallback.
 };
 
+// The native four taps sit about 0.73 texel from the pixel (root mean square),
+// and a disk of radius r spreads its taps r / sqrt(2). Under one texel the
+// native filter is the softer of the two, so a soft edge never gets sharper as
+// its radius grows past the switch.
+static const float PCSS_MINIMUM_TEXELS = 1.0;
 // Fixed sampling budgets keep the shadow path small and predictable.
 static const uint PCSS_SUN_BLOCKER_SAMPLES = 12u;
 static const uint PCSS_LOCAL_BLOCKER_SAMPLES = 4u;
@@ -233,9 +241,9 @@ PcssResult FilterSunShadow(Texture2D<float4> shadow_map, SamplerComparisonState 
   // Sparse searches can miss thin casters. Keep the native filter on a miss.
   if (blockers == 0u) return result;
   result.blocker_gap = gap_sum / (float(blockers) * depth_per_unit);
-  result.radius = min(max_radius, result.blocker_gap * tan(max(CUSTOM_SHADOW_SOFTNESS, 0.0) * SHADOW_DIRECTIONAL_ANGULAR_RADIUS));
+  result.radius = min(max_radius, result.blocker_gap * tan(CUSTOM_SHADOW_SOFTNESS * SHADOW_DIRECTIONAL_ANGULAR_RADIUS));
   float2 uv_radius = result.radius * uv_scale;
-  if (max(uv_radius.x / texel.x, uv_radius.y / texel.y) <= 0.5) return result;
+  if (max(uv_radius.x / texel.x, uv_radius.y / texel.y) <= PCSS_MINIMUM_TEXELS) return result;
   // A local plane is unreliable if extending it across the filter reaches a
   // blocker. Retain native filtering instead of erasing that shadow with bias.
   if (dot(abs(depth_gradient), uv_radius) + bias >= closest_blocker_gap) return result;
@@ -250,7 +258,7 @@ PcssResult FilterSunShadow(Texture2D<float4> shadow_map, SamplerComparisonState 
     float reference = receiver_depth + dot(depth_gradient, sample_uv - uv) + bias;
     occlusion += shadow_map.SampleCmpLevelZero(comparison, sample_uv, reference).x;
   }
-  result.visibility = saturate(1.0 - occlusion / float(filter_samples));
+  result.visibility = sqrt(saturate(1.0 - occlusion / float(filter_samples)));
   result.filtered = true;
   return result;
 }
@@ -308,7 +316,7 @@ PcssResult FilterSpotShadow(Texture2D<float4> shadow_map, SamplerComparisonState
   // blocker. Keep the search bound separate from the calculated filter radius.
   result.radius = min(max_radius, light_radius * result.blocker_gap / max(blocker_distance, 1e-6));
   float2 uv_radius = result.radius * uv_per_unit;
-  if (max(uv_radius.x / texel.x, uv_radius.y / texel.y) <= 0.5) return result;
+  if (max(uv_radius.x / texel.x, uv_radius.y / texel.y) <= PCSS_MINIMUM_TEXELS) return result;
   float occlusion = 0.0;
   [loop]
   for (uint filter_index = 0u; filter_index < filter_samples; ++filter_index) {
@@ -317,7 +325,7 @@ PcssResult FilterSpotShadow(Texture2D<float4> shadow_map, SamplerComparisonState
     float reference = coordinate.z + dot(gradient, uv - coordinate.xy) + bias;
     occlusion += shadow_map.SampleCmpLevelZero(comparison, uv, reference).x;
   }
-  result.visibility = saturate(1.0 - occlusion / float(filter_samples));
+  result.visibility = sqrt(saturate(1.0 - occlusion / float(filter_samples)));
   result.filtered = true;
   return result;
 }
@@ -412,7 +420,7 @@ PcssResult FilterPointShadow(Texture2D<float4> shadow_map, SamplerComparisonStat
   result.radius = min(max_radius, light_radius * result.blocker_gap / max(blocker_distance, 1e-6));
   float filter_spread = min(result.radius / receiver_distance, search_spread);
   // The native four taps cover smaller footprints more reliably.
-  if (filter_spread * min(float(width) * 0.25, float(height) * 0.5) <= 0.5) return result;
+  if (filter_spread * min(float(width) * 0.25, float(height) * 0.5) <= PCSS_MINIMUM_TEXELS) return result;
   float occlusion = 0.0;
   uint samples = 0u;
   // Ignore rays that cannot intersect the receiver plane. Average only valid
@@ -430,7 +438,7 @@ PcssResult FilterPointShadow(Texture2D<float4> shadow_map, SamplerComparisonStat
     ++samples;
   }
   if (samples > 0u) {
-    result.visibility = saturate(1.0 - occlusion / float(samples));
+    result.visibility = sqrt(saturate(1.0 - occlusion / float(samples)));
     result.filtered = true;
   }
   return result;

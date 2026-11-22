@@ -200,10 +200,7 @@ void main(
   r0.xyzw = r0.xyzw;
   o0.xyzw = r0.xyzw;
   o1.xyzw = float4(0, 0, 0, 1);
-  const BendShadow contact_shadow = ReadBendShadow(v0.xy, 1u, g_DepthTexture);
-  // Apply the contact shadow to RGB only; native output alpha stays as written.
-  o0.rgb *= contact_shadow.visibility;
-  o1.rgb *= contact_shadow.visibility;
-  ApplyBendDebug(contact_shadow, o0.rgb, o1.rgb);
+  // Contact shadows darken RGB only; native output alpha stays as written.
+  ApplyBendShadow(v0.xy, 1u, g_DepthTexture, o0.rgb, o1.rgb);
   return;
 }

@@ -274,8 +274,9 @@ void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
   const uint sample_divisor = render_scale > 0.7071 ? 1u : (render_scale > 0.3536 ? 2u : 4u);
   const float2 inverse_size = rcp(float2(metadata.xy));
   if (lane == 0u) {
-    // A local light's group starts with no receiver to trace for.
-    group_reach = receiver_culling ? 0u : 16u;
+    // A group starts with no receiver to trace for. One of sky alone, or that
+    // a local light does not reach, then reads no more depths.
+    group_reach = 0u;
   }
   GroupMemoryBarrierWithGroupSync();
 
@@ -294,21 +295,32 @@ void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
                       - bend_camera_center.xy)
                      * bend_projection_param.xy;
   const float3 receiver_position = float3(ray * view_depth, view_depth);
-  // Reach is a world distance: a render pixel along the ray's main screen
-  // axis covers more of the world the farther the receiver is. Without a
-  // usable projection, 60 render pixels.
+  // Reach is a world distance toward the light. The point that far along the
+  // light's direction lies, by perspective division, this many render pixels
+  // along the ray's main screen axis: the direction's part across the camera
+  // ray through the receiver, over the point's view depth, in pixels per unit
+  // of that axis (view_depth / footprint). So a light near the view axis
+  // takes fewer pixels for the same length. Without a usable projection, 60
+  // render pixels.
   uint reach = 60u;
   const float footprint = 2.0 * abs(major_x ? bend_projection_param.x * inverse_size.x : bend_projection_param.y * inverse_size.y) * view_depth;
-  if (projected && isfinite(footprint) && footprint > 0.0
+  // The sun's direction toward it, or a local light's position.
+  const float3 source = ReadBendLightParam(light_index, directional ? 0u : 3u).xyz;
+  const float3 toward_source = directional ? source : source - receiver_position;
+  const float source_distance = length(toward_source);
+  if (projected && isfinite(footprint) && footprint > 0.0 && isfinite(source_distance) && source_distance > 0.0
       && isfinite(CUSTOM_CONTACT_SHADOW_REACH) && CUSTOM_CONTACT_SHADOW_REACH > 0.0) {
-    reach = (uint)clamp(CUSTOM_CONTACT_SHADOW_REACH / footprint, 16.0, float(BEND_MAX_REACH));
+    const float3 toward = toward_source / source_distance;
+    const float end_depth = view_depth + CUSTOM_CONTACT_SHADOW_REACH * toward.z;
+    const float across = abs(major_x ? toward.x - ray.x * toward.z : toward.y - ray.y * toward.z);
+    // An end behind the camera is past the screen's edge.
+    const float pixels = end_depth > 0.0 ? across * CUSTOM_CONTACT_SHADOW_REACH * view_depth / (footprint * end_depth) : float(BEND_MAX_REACH);
+    reach = (uint)clamp(isfinite(pixels) ? pixels : 16.0, 16.0, float(BEND_MAX_REACH));
   }
   if (projected && !directional) {
     // Stop BEND_FIXTURE_DISTANCE short of the light. On screen the ray covers
     // the fraction s of its pixels to the light, from the 3D fraction t by
     // perspective division.
-    const float3 source = ReadBendLightParam(light_index, 3u).xyz;
-    const float source_distance = length(source - receiver_position);
     if (source.z > 0.0 && isfinite(source_distance) && source_distance > 0.0) {
       const float t = 1.0 - min(BEND_FIXTURE_DISTANCE / source_distance, 1.0);
       const float s = t * source.z / max((1.0 - t) * view_depth + t * source.z, 1e-20);
@@ -367,7 +379,7 @@ void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
   if (any(floor(endpoint_delta + 0.5) != 0.0)) return;
   // Receivers too close to the light for a trace past its fixture stay lit.
   if (!(receiver_depth > 0.0) || abs(pixel_distance) < 1e-7 || reach < 16u) {
-    bend_output[BendMaskPixel(output_pixel, bounds, record)] = float4(1.0, 0.25, receiver_depth, 0.0);
+    bend_output[BendMaskPixel(output_pixel, bounds, record)] = float4(1.0, 0.25, 0.0, 0.0);
     return;
   }
 
@@ -485,15 +497,11 @@ void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
     // as PCSS. Receiver depth cancels out of the radius in screen pixels; only
     // the world-space cap (PCSS_MAX_RADIUS) needs inverse depth.
     const float2 viewport = bend_viewport.xy;
-    const float2 receiver_ray = ((float2(output_pixel) + 0.5) / viewport * float2(2.0, -2.0)
-                                 + float2(-1.0, 1.0) - bend_camera_center.xy)
-                                * bend_projection_param.xy;
-    const float3 source = directional ? ReadBendLightParam(light_index, 0u).xyz : ReadBendLightParam(light_index, 3u).xyz;
-    const float2 projected_span = (source.xy - receiver_ray * source.z) * (0.5 * viewport / bend_projection_param.xy);
+    const float2 projected_span = (source.xy - ray * source.z) * (0.5 * viewport / bend_projection_param.xy);
     const float remaining_span = max(abs(projected_span.x), abs(projected_span.y)) - float(blocker_pixel) * source.z;
     const float pixel_scale = 0.5 * max(viewport.x / abs(bend_projection_param.x), viewport.y / abs(bend_projection_param.y));
     const float inverse_depth = (receiver_depth - bend_projection_param.w) / bend_projection_param.z;
-    const float source_radius = directional ? tan(CUSTOM_SHADOW_SOFTNESS * SHADOW_DIRECTIONAL_ANGULAR_RADIUS) * length(source)
+    const float source_radius = directional ? tan(CUSTOM_SHADOW_SOFTNESS * SHADOW_DIRECTIONAL_ANGULAR_RADIUS) * source_distance
                                             : CUSTOM_SHADOW_SOFTNESS * SHADOW_LOCAL_SOURCE_RADIUS;
     if (remaining_span > 1e-6 && inverse_depth > 0.0 && all(isfinite(float3(remaining_span, inverse_depth, pixel_scale)))) {
       const float cone_radius = source_radius * float(blocker_pixel) * pixel_scale / remaining_span;

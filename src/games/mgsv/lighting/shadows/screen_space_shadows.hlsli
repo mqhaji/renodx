@@ -234,4 +234,19 @@ void ApplyBendDebug(BendShadow shadow, inout float3 diffuse, inout float3 specul
   }
 }
 
+// Applies a light's contact shadow to its finished direct light, for a light
+// without a shadow map. A pixel the light does not reach (outside its cone or
+// range, or facing away) has nothing to darken, so its mask is not read; most
+// pixels of a local light's draw are such pixels. The contact debug views
+// write every pixel.
+void ApplyBendShadow(float2 pixel, uint light_type, Texture2D<float4> depth, inout float3 diffuse, inout float3 specular) {
+  [branch]
+  if (any(diffuse != 0.0) || any(specular != 0.0) || CUSTOM_CONTACT_SHADOW_DEBUG_VIEW != 0.0) {
+    const BendShadow contact_shadow = ReadBendShadow(pixel, light_type, depth);
+    diffuse *= contact_shadow.visibility;
+    specular *= contact_shadow.visibility;
+    ApplyBendDebug(contact_shadow, diffuse, specular);
+  }
+}
+
 #endif

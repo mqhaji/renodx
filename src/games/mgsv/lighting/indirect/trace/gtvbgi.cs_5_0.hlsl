@@ -226,13 +226,14 @@ float4 LoadTraceSource(int2 pixel, float depth, bool prepared_available) {
   normal -= 2.0 * min(dot(normal, surface_view), 0.0) * surface_view;
   // The search's samples are rebuilt at the pixel centers whose depth they
   // read (below), so the receiver's own surface lies on its plane and does not
-  // shade it. What is left to clear is the depth's rounding. The game's depth
-  // has 24 bits, and one step of it is z^2 / (2^24 * projection_parameters.z)
-  // of view depth (LinearZ's slope): the receiver and a neighbor can each be
-  // half a step off. Keep the biased point on the view-facing side of the
-  // receiver plane; half the available distance leaves a margin for nearly
-  // tangent normals.
-  const float offset = min(z * z / (16777216.0 * abs(projection_parameters.z)), 0.5 * max(dot(normal, -surface_position), 0.0));
+  // shade it. What is left to clear is rounding. The scene depth is a 32-bit
+  // float, so the view depth it gives is good to about one part in 2^23: the
+  // receiver and a neighbor can each be half of that off, and rebuilding their
+  // positions rounds about as much again. Four parts in 2^23 of the view depth
+  // cover both. Keep the biased point on the view-facing side of the receiver
+  // plane; half the available distance leaves a margin for nearly tangent
+  // normals.
+  const float offset = min(4.76837158e-7 * z, 0.5 * max(dot(normal, -surface_position), 0.0));
   const float3 position = surface_position + normal * offset;
   const float3 view_direction = normalize(-position);
   // The reference CDF assumes a view-facing receiver. Do not extrapolate its
