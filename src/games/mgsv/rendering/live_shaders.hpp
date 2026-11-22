@@ -13,9 +13,9 @@
 
 // Development: shaders the local probe replaced in the running game, by the
 // name they are embedded under (gtvbgi for __gtvbgi). The diffuse lighting
-// chain's passes recreate their pipelines from these bytes when the revision
-// changes, so a shader edit is tried without restarting the game. Nothing
-// is replaced unless the probe sends it.
+// chain's passes and the fog volume's passes recreate their shaders from
+// these bytes when the revision changes, so a shader edit is tried without
+// restarting the game. Nothing is replaced unless the probe sends it.
 namespace mgsv::rendering::live_shaders {
 
 struct State {

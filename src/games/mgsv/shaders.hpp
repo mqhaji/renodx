@@ -18,6 +18,7 @@
 
 #include "../../mods/shader.hpp"
 #include "../../utils/mutex.hpp"
+#include "atmosphere/fog/volume.hpp"
 #include "lighting/environment_specular.hpp"
 #include "lighting/indirect/ambient_diffuse.hpp"
 #include "lighting/indirect/runtime.hpp"
@@ -118,8 +119,12 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
     return saved != nullptr && saved->active && saved->replacement_safe;
   };
   // Sun draws also feed the environment-specular capture, so begin and end it
-  // around the same draw as the enhanced shadows.
-  const auto begin_directional = [begin_shadows](reshade::api::command_list* cmd_list, bool has_shadow_map = true) {
+  // around the same draw as the enhanced shadows. The fog volume takes the
+  // sun's shadow maps from the draw as the game bound it.
+  const auto begin_directional = [begin_shadows](reshade::api::command_list* cmd_list, bool has_shadow_map = true, bool has_world_shadow_mask = false) {
+    if (has_shadow_map) {
+      mgsv::atmosphere::fog::OnShadowedSunDraw(cmd_list, has_world_shadow_mask);
+    }
     begin_shadows(cmd_list, 0u, has_shadow_map);
     mgsv::lighting::temporal_inputs::CaptureScene(cmd_list);
     mgsv::lighting::environment_specular::BeginCapture(cmd_list, mgsv::lighting::UsesEnhancedIndirectLighting());
@@ -136,6 +141,11 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
         .code = code,
         .on_replace = shadow_active,
         .on_draw = [begin_shadows, light_type, has_shadow_map](auto* cmd_list) {
+          // A shadowed spot (types 1 and 3): the fog keeps its shadow map
+          // while the draw's inputs are still the game's.
+          if (has_shadow_map && (light_type & 1u) != 0u) {
+            mgsv::atmosphere::fog::OnShadowedSpotDraw(cmd_list);
+          }
           begin_shadows(cmd_list, light_type, has_shadow_map);
           return true;
         },
@@ -145,12 +155,12 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
   // Use the replacement only when the capture or the shadow pass accepted this
   // draw's bindings; otherwise the original light shader runs.
   const auto directional_shadow_shader = [begin_directional, end_directional, capture_active, shadow_active](
-                                             uint32_t hash, std::span<const uint8_t> code, bool has_shadow_map) {
+                                             uint32_t hash, std::span<const uint8_t> code, bool has_shadow_map, bool has_world_shadow_mask = false) {
     return renodx::mods::shader::CustomShader{
         .crc32 = hash,
         .code = code,
         .on_replace = [capture_active, shadow_active](auto* cmd_list) { return capture_active(cmd_list) || shadow_active(cmd_list); },
-        .on_draw = [begin_directional, has_shadow_map](auto* cmd_list) { return begin_directional(cmd_list, has_shadow_map); },
+        .on_draw = [begin_directional, has_shadow_map, has_world_shadow_mask](auto* cmd_list) { return begin_directional(cmd_list, has_shadow_map, has_world_shadow_mask); },
         .on_drawn = end_directional,
     };
   };
@@ -289,7 +299,8 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
       // response. Lights without shadow maps still get contact shadows and the
       // same spotlight budget.
       {0x0636037A, local_shadow_shader(0x0636037A, __0x0636037A, 2u, true)},
-      {0x0C708B4B, directional_shadow_shader(0x0C708B4B, __0x0C708B4B, true)},
+      // The largest-cascade sun fades its shadows to a world shadow mask (t13).
+      {0x0C708B4B, directional_shadow_shader(0x0C708B4B, __0x0C708B4B, true, true)},
       {0x1B5FA666, local_shadow_shader(0x1B5FA666, __0x1B5FA666, 1u, true)},
       {0x22A2A1C6, local_shadow_shader(0x22A2A1C6, __0x22A2A1C6, 1u, true)},
       {0x246ED82C, local_shadow_shader(0x246ED82C, __0x246ED82C, 4u, true)},
@@ -326,15 +337,17 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
       {0x9815404F, {.crc32 = 0x9815404F, .code = __0x9815404F, .on_replace = &IsTemporalReconstructionOn, .on_inject = [](auto*) { return false; }}},
       {0x58C10658, {.crc32 = 0x58C10658, .code = __0x58C10658, .on_replace = &IsTemporalReconstructionOn, .on_inject = [](auto*) { return false; }}},
       {0xA13321B6, {.crc32 = 0xA13321B6, .code = __0xA13321B6, .on_replace = &IsTemporalReconstructionOn, .on_inject = [](auto*) { return false; }}},
-      // The enhanced diffuse lighting passes run just before the first native
-      // skin-scatter pass. The scatter shader itself stays native, because a
-      // port of it did not match its normal and angle math.
+      // The fog volume passes and the enhanced diffuse lighting passes run just
+      // before the first native skin-scatter pass. The scatter shader itself
+      // stays native, because a port of it did not match its normal and angle
+      // math.
       {
           0x6DAF0C4A,
           {
               .crc32 = 0x6DAF0C4A,
               .on_inject = [](auto*) { return false; },
               .on_draw = [shader_injection](auto* cmd_list) {
+                mgsv::atmosphere::fog::Apply(cmd_list);
                 mgsv::lighting::ApplyLightPasses(cmd_list, *shader_injection);
                 return true; },
           },
@@ -359,6 +372,40 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
                                        .on_draw = &mgsv::lighting::material_inputs::OnMaterialDraw,
                                        .on_drawn = &mgsv::lighting::material_inputs::EndCapture,
                                    });
+  }
+  // Both shaders that fill the fog volume keep running; their draw's viewport
+  // is widened to the volume's created size. Only VolFog_TppVolFog (0x99BEE81F)
+  // draws with the fog material the mod's volume pass reads.
+  for (const uint32_t hash : {0x99BEE81Fu, 0xD76ECA29u}) {
+    shaders.emplace(hash, renodx::mods::shader::CustomShader{.crc32 = hash, .on_inject = [](auto*) { return false; }, .on_draw = [hash](auto* cmd_list) { return mgsv::atmosphere::fog::OnVolumeDraw(cmd_list, hash == 0x99BEE81Fu); }, .on_drawn = &mgsv::atmosphere::fog::OnVolumeDrawn});
+  }
+  // Lit particles the game draws without the sun's shadow maps (the NS and
+  // Fast variants of Prim_Poly_Lit* that read the fog volume). Their ports
+  // scale the sun's term by the fog volume's sun visibility at the particle.
+  for (const auto& [hash, code] : std::to_array<std::pair<uint32_t, std::span<const uint8_t>>>({
+           {0xB170995Du, __0xB170995D},
+           {0xA21162DFu, __0xA21162DF},
+           {0x42EA9E8Cu, __0x42EA9E8C},
+           {0x835A5097u, __0x835A5097},
+           {0xD350003Au, __0xD350003A},
+           {0x6A9A6354u, __0x6A9A6354},
+           {0x73CC2D1Eu, __0x73CC2D1E},
+           {0x7C887529u, __0x7C887529},
+       })) {
+    shaders.emplace(hash, renodx::mods::shader::CustomShader{
+                              .crc32 = hash,
+                              .code = code,
+                              .on_replace = &mgsv::atmosphere::fog::IsParticleInputBound,
+                              .on_inject = [](auto*) { return false; },
+                              .on_draw = &mgsv::atmosphere::fog::OnParticleDraw,
+                              .on_drawn = &mgsv::atmosphere::fog::OnParticleDrawn,
+                          });
+  }
+  // The terrain depth and shadow draws (NewTerrain_Depth, NewTerrain_Shadow
+  // and the _ln variant of each) show the fog volume where the map's height
+  // textures are.
+  for (const uint32_t hash : {0x4710870Eu, 0xFC72369Au, 0xD68FF97Au, 0xEAF0D644u}) {
+    shaders.emplace(hash, renodx::mods::shader::CustomShader{.crc32 = hash, .on_inject = [](auto*) { return false; }, .on_draw = &mgsv::atmosphere::fog::OnTerrainDraw});
   }
   // Enhanced reflections cancel both the general and the sortie-floor native
   // traces. The shared filters are skipped only when they follow a canceled trace.

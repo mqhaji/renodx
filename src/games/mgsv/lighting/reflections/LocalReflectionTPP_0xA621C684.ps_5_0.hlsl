@@ -1,4 +1,5 @@
 #include "../../common.hlsli"
+#include "../../atmosphere/fog/fog_read.hlsli"
 // Port of the game's LocalReflectionTPP, the sortie-floor reflection trace. It
 // searches the camera depth along a mirror direction about a fixed floor plane.
 // The host skips this draw when enhanced reflections replace it.
@@ -127,9 +128,9 @@ void main(
   r3.xyzw = float4(0.03125,0.25,0.03125,0.25) * r3.xyzw;
   r0.xyzw = r3.xyzw + r0.xyzw;
   r1.z = frac(r1.z);
-  r0.x = g_tex_fog.Sample(g_samplerLinear_Clamp_s, r0.xy).w;
+  r0.x = FogVolumeSample(g_tex_fog, g_samplerLinear_Clamp_s, r0.xy).w;
   r0.x = r0.x;
-  r0.y = g_tex_fog.Sample(g_samplerLinear_Clamp_s, r0.zw).w;
+  r0.y = FogVolumeSample(g_tex_fog, g_samplerLinear_Clamp_s, r0.zw).w;
   r0.y = r0.y;
   r0.z = -r1.z;
   r0.z = 1 + r0.z;

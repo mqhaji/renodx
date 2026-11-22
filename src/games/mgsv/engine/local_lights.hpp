@@ -28,10 +28,14 @@
 // to draw.
 namespace mgsv::engine::local_lights {
 
-// The scene and light constant banks of one light draw, as shader b2 and b3.
+// The scene and light constant banks of one light draw, as shader b2 and b3,
+// and the last vector of its material bank (b4, m_materials[7]): the least
+// distance the light's falloff is evaluated at (x) and the most the falloff
+// can reach (w). Zeros when the material bank could not be read.
 struct Constants {
   std::array<float, 120> scene = {};
   std::array<float, 44> light = {};
+  std::array<float, 4> falloff_limits = {};
 };
 
 // Runs on the build thread when PluginLocalLight::MainExec begins, before that
@@ -107,7 +111,15 @@ inline bool ReadConstants(uintptr_t command_buffer, ID3D11DeviceContext* context
     std::memcpy(destination.data(), data, destination.size_bytes());
     return true;
   };
-  return copy_bank(2u, output->scene) && copy_bank(3u, output->light);
+  if (!copy_bank(2u, output->scene) || !copy_bank(3u, output->light)) return false;
+  if ((active_banks & 0x10u) != 0u) {
+    const auto* entry = banks + (size_t{4u} << Value(Field::CONSTANT_BANK_SHIFT));
+    const auto* data = *reinterpret_cast<const float* const*>(entry + Value(Field::CONSTANT_BANK_DATA));
+    if (data != nullptr && *reinterpret_cast<const uint32_t*>(entry + Value(Field::CONSTANT_BANK_VECTORS)) >= 8u) {
+      std::memcpy(output->falloff_limits.data(), data + (7u * 4u), sizeof(output->falloff_limits));
+    }
+  }
+  return true;
 }
 
 // Register each device once and balance successful calls with Detach.

@@ -40,12 +40,12 @@ struct BendShadow {
 };
 
 // Each light owns one packed rectangle of the shared atlas: its first texel and
-// the atlas width. Keep screen bounds for geometry and filter rejection, then
-// map accepted texels into the atlas.
+// the atlas width, a power of two. Keep screen bounds for geometry and filter
+// rejection, then map accepted texels into the atlas.
 float2 ReadBendMask(int2 pixel, uint4 bounds, uint2 atlas) {
   const uint2 local = uint2(pixel - int2(bounds.xy));
   const uint texel_index = atlas.x + local.y * (bounds.z - bounds.x) + local.x;
-  return bend_shadow_mask.Load(int3(texel_index % atlas.y, texel_index / atlas.y, 0)).xy;
+  return bend_shadow_mask.Load(int3(texel_index & (atlas.y - 1u), texel_index >> firstbithigh(atlas.y), 0)).xy;
 }
 
 // Resolve once before shadow-map filtering. A fully blocked direct light can
@@ -106,10 +106,20 @@ BendShadow ReadBendShadow(float2 pixel, uint light_type, Texture2D<float4> depth
         maximum_visibility = max(maximum_visibility, value.x);
       }
     }
-    // The packed value increases with radius, so decode only the largest one.
-    const float radius = min((packed_radius - 0.25) / max(1.0 - packed_radius, 0.001), SHADOW_CONTACT_FILTER_RADIUS);
+    // The packed value increases with radius, so decode only the largest one,
+    // and this pixel's own. A shadowed pixel far from its caster carries a
+    // radius the nine texels cannot span; it takes taps over a disk instead.
+    const float2 radii = (float2(packed_radius, sample.y) - 0.25) / max(1.0 - float2(packed_radius, sample.y), 0.001);
+    const float radius = min(radii.x, SHADOW_CONTACT_FILTER_RADIUS);
+    const float wide_radius = min(radii.y, SHADOW_CONTACT_WIDE_RADIUS);
+    const bool wide = sample.x < 1.0 && wide_radius > SHADOW_CONTACT_FILTER_RADIUS;
+    // How far a soft edge beside this pixel has gone past the small filter's
+    // radius. The wide filter keeps its soft edge inside the shadow, so a lit
+    // pixel beside it stays lit; over one render pixel past that radius both
+    // sides change over from the small filter, so the edge does not jump.
+    const float2 widening = saturate(min(radii, SHADOW_CONTACT_WIDE_RADIUS) - SHADOW_CONTACT_FILTER_RADIUS);
     [branch]
-    if (radius >= 0.5 && maximum_visibility > minimum_visibility) {
+    if (wide || (radius >= 0.5 && maximum_visibility > minimum_visibility)) {
       const float receiver_depth = depth.Load(int3(position, 0)).x;
       const int2 last_pixel = int2(metadata.xy) - 1;
       const float left_depth = depth.Load(int3(max(int2(position) - int2(1, 0), 0), 0)).x;
@@ -123,40 +133,77 @@ BendShadow ReadBendShadow(float2 pixel, uint light_type, Texture2D<float4> depth
       const float2 forward_difference = float2(right_depth, lower_depth) - receiver_depth;
       float2 depth_gradient = abs(backward_difference) < abs(forward_difference) ? backward_difference : forward_difference;
       depth_gradient = backward_difference * forward_difference >= 0.0 ? depth_gradient : 0.0;
-      // Approximate the source footprint with a Gaussian (sigma = radius / 2),
-      // truncated to neighboring texels. Normalized weights preserve constant
-      // visibility without moving the light or animating a whole shadow edge.
-      const float falloff = 2.88539008178 / (radius * radius);  // 2 / ln(2), for exp2.
-      // This 3-by-3 kernel has only three distances: center, axis, and diagonal.
-      const float2 spatial_weights = exp2(-float2(1.0, 2.0) * falloff);
       const float tolerance = max(receiver_depth * 0.005, 2e-7);
       float visibility_sum = 0.0;
       float weight_sum = 0.0;
-      [unroll]
-      for (int index = 0; index < 9; ++index) {
-        const int2 offset = int2(index % 3 - 1, index / 3 - 1);
-        const float2 value = neighborhood[index];
-        if (value.y < 0.24) continue;
-        float neighbor_depth;
-        switch (index) {
-          case 1:  neighbor_depth = upper_depth; break;
-          case 3:  neighbor_depth = left_depth; break;
-          case 4:  neighbor_depth = receiver_depth; break;
-          case 5:  neighbor_depth = right_depth; break;
-          case 7:  neighbor_depth = lower_depth; break;
-          default: neighbor_depth = depth.Load(int3(int2(position) + offset, 0)).x; break;
+      if (wide) {
+        // Eight taps over a disk of the pixel's radius, turned by a different
+        // angle at each pixel and frame so temporal reconstruction fills the
+        // disk in. The Gaussian is the same as below (sigma = radius / 2).
+        // The filter runs on shadowed pixels only, so the soft edge lies
+        // inside the shadow: where lit taps hold half the weight, the pixel is
+        // lit. A shadow narrower than its soft edge is mostly lost.
+        const float angle = 6.28318530718 * frac(52.9829189 * frac(dot(pixel + 5.588238 * CUSTOM_SHADOW_NOISE_FRAME, float2(0.06711056, 0.00583715))));
+        const float2 turn = float2(cos(angle), sin(angle));
+        const float falloff = 2.88539008178 / (wide_radius * wide_radius);  // 2 / ln(2), for exp2.
+        visibility_sum = sample.x;
+        weight_sum = 1.0;
+        float lit_sum = 0.0;
+        [unroll]
+        for (uint tap = 0u; tap < 8u; ++tap) {
+          const float2 direction = PCSS_DIRECTIONS[tap];
+          const int2 offset = int2(round(float2(direction.x * turn.x - direction.y * turn.y, direction.x * turn.y + direction.y * turn.x)
+                                         * (wide_radius * sqrt((float(tap) + 0.5) / 8.0))));
+          const int2 neighbor = int2(position) + offset;
+          // A tap rounded onto the center would count it twice.
+          if (all(offset == 0) || any(neighbor < int2(bounds.xy)) || any(neighbor >= int2(bounds.zw))) continue;
+          const float2 value = ReadBendMask(neighbor, bounds, atlas);
+          const float neighbor_depth = depth.Load(int3(neighbor, 0)).x;
+          const float plane_weight = saturate(1.0 - abs(neighbor_depth - (receiver_depth + dot(depth_gradient, float2(offset)))) / tolerance);
+          const float weight = value.y >= 0.24 && neighbor_depth > 0.0
+                                   ? exp2(-dot(float2(offset), float2(offset)) * falloff) * plane_weight
+                                   : 0.0;
+          visibility_sum += value.x * weight;
+          lit_sum += value.x >= 0.999 ? weight : 0.0;
+          weight_sum += weight;
         }
-        const float expected_depth = receiver_depth + dot(depth_gradient, float2(offset));
-        const float plane_weight = saturate(1.0 - abs(neighbor_depth - expected_depth) / tolerance);
-        const float spatial_weight = index == 4 ? 1.0 : ((index & 1) != 0 ? spatial_weights.x : spatial_weights.y);
-        const float weight = neighbor_depth > 0.0 ? spatial_weight * plane_weight : 0.0;
-        visibility_sum += value.x * weight;
-        weight_sum += weight;
-      }
-      if (weight_sum > 0.0) {
-        // Normalize the accepted taps so a constant visibility stays constant.
-        // Depth rejection removes samples instead of introducing dark borders.
-        result.visibility = saturate(visibility_sum / weight_sum);
+        result.visibility = lerp(saturate(visibility_sum / weight_sum), 1.0, saturate(2.0 * lit_sum / weight_sum) * widening.y);
+      } else {
+        // Approximate the source footprint with a Gaussian (sigma = radius / 2),
+        // truncated to neighboring texels. Normalized weights preserve constant
+        // visibility without moving the light or animating a whole shadow edge.
+        const float falloff = 2.88539008178 / (radius * radius);  // 2 / ln(2), for exp2.
+        // This 3-by-3 kernel has only three distances: center, axis, and diagonal.
+        const float2 spatial_weights = exp2(-float2(1.0, 2.0) * falloff);
+        [unroll]
+        for (int index = 0; index < 9; ++index) {
+          const int2 offset = int2(index % 3 - 1, index / 3 - 1);
+          const float2 value = neighborhood[index];
+          if (value.y < 0.24) continue;
+          float neighbor_depth;
+          switch (index) {
+            case 1:  neighbor_depth = upper_depth; break;
+            case 3:  neighbor_depth = left_depth; break;
+            case 4:  neighbor_depth = receiver_depth; break;
+            case 5:  neighbor_depth = right_depth; break;
+            case 7:  neighbor_depth = lower_depth; break;
+            default: neighbor_depth = depth.Load(int3(int2(position) + offset, 0)).x; break;
+          }
+          const float expected_depth = receiver_depth + dot(depth_gradient, float2(offset));
+          const float plane_weight = saturate(1.0 - abs(neighbor_depth - expected_depth) / tolerance);
+          const float spatial_weight = index == 4 ? 1.0 : ((index & 1) != 0 ? spatial_weights.x : spatial_weights.y);
+          const float weight = neighbor_depth > 0.0 ? spatial_weight * plane_weight : 0.0;
+          visibility_sum += value.x * weight;
+          weight_sum += weight;
+        }
+        if (weight_sum > 0.0) {
+          // Normalize the accepted taps so a constant visibility stays constant.
+          // Depth rejection removes samples instead of introducing dark borders.
+          result.visibility = saturate(visibility_sum / weight_sum);
+        }
+        if (sample.x >= 1.0) {
+          result.visibility = lerp(result.visibility, 1.0, widening.x);
+        }
       }
     }
   }

@@ -2,6 +2,7 @@
 // ApplyTppTonemap, which skips the curve when RenoDX tone mapping is on, and
 // applies the Boost Sun Brightness setting to the sun and moon texture.
 #include "../../tonemap/tonemap.hlsli"
+#include "../../atmosphere/fog/fog_read.hlsli"
 
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:22 2026
 
@@ -327,7 +328,7 @@ void main(
   r0.xy = float2(0.0146484375,0.123046875) * r0.xy;
   r0.xy = float2(0.015625,0.125) + r0.xy;
   r0.xy = float2(0.96875,0.75) + r0.xy;
-  r2.xyzw = g_tex_fog.Sample(g_samplerLinear_Clamp_s, r0.xy).xyzw;
+  r2.xyzw = FogVolumeSample(g_tex_fog, g_samplerLinear_Clamp_s, r0.xy).xyzw;
   r0.x = g_psScene.m_fogParam[1].y;
   r2.xyz = r2.xyz * r0.xxx;
   r2.xyz = r2.xyz;

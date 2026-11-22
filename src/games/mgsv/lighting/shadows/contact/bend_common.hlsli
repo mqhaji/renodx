@@ -32,11 +32,16 @@ bool IsBendDistanceLight(float light_type) {
 //       and the number of sweeps
 //   48  up to eight sweep dispatches, BEND_DISPATCH_STRIDE bytes each
 //   348 cached PCSS projection (PCSS_PROJECTION_OFFSET)
-//   368 first atlas texel and atlas width
+//   368 first atlas texel and atlas width (a power of two)
 //   380 and 384 running totals of trace tiles and atlas texels
 // The indirect arguments for clear and trace follow the last record.
 #define BEND_GROUP_SIZE          64
-#define BEND_MAX_SAMPLES         256
+// The farthest pixel toward the light a receiver tests, and the casting
+// depths one group keeps to reach it (BendDepthSlot in bend_trace). The last
+// lane's farthest pixel, 704 + 63, is the last slot's: a longer reach needs
+// more slots.
+#define BEND_MAX_REACH           704
+#define BEND_DEPTH_SLOTS         320
 #define BEND_DISPATCH_HEADER     48
 #define BEND_DISPATCH_STRIDE     32
 #define BEND_TILE_ROW_BITS       15
@@ -44,9 +49,10 @@ bool IsBendDistanceLight(float light_type) {
 #define BEND_RECORD_STRIDE       400
 // The host's batch::MAX_LIGHTS. Setup holds one shared-memory entry per light.
 #define BEND_MAX_LIGHTS          1024u
-#define BEND_LIGHT_VECTORS       16
+#define BEND_LIGHT_VECTORS       17
 #define BEND_LIGHT_KIND          11
 #define BEND_LIGHT_SHADOW        12
+#define BEND_LIGHT_FALLOFF_LIMITS 16
 #define BEND_ATLAS_OFFSET        368
 #define BEND_TRACE_END_OFFSET    380
 #define BEND_CLEAR_END_OFFSET    384
@@ -63,8 +69,9 @@ cbuffer BendScene : register(b2) {
   float4 bend_camera_center : packoffset(c28);
 }
 // Header: integer light count and atlas dimensions, stored as raw float bits.
-// Each light then has its eleven native float4 values, a kind vector, and the
-// four vectors of its shadow-map projection (native b2 c12 to c15).
+// Each light then has its eleven native float4 values, a kind vector, the
+// four vectors of its shadow-map projection (native b2 c12 to c15), and its
+// falloff limits (native b4 m_materials[7]), which the fog's local lights read.
 Buffer<float4> bend_lights : register(t4);
 
 float4 ReadBendLightParam(uint light_index, uint parameter) {
@@ -73,7 +80,7 @@ float4 ReadBendLightParam(uint light_index, uint parameter) {
 
 // x: light type (0 directional, 1/2 spot/point, 3/4 distance spot/point).
 // y: 1 when the light draw reads a native shadow map.
-// z: the light at this slot's position in draw order; lights admit in that order.
+// z: the light at this slot's position in draw order, which settles ties in the order lights admit in.
 uint3 ReadBendLightKind(uint light_index) {
   return asuint(ReadBendLightParam(light_index, BEND_LIGHT_KIND).xyz);
 }
@@ -105,32 +112,5 @@ RWByteAddressBuffer bend_spot_budget : register(u2);
 ByteAddressBuffer bend_dispatch : register(t3);
 #endif
 RWTexture2D<float4> bend_output : register(u1);
-
-#ifndef MGSV_BEND_SETUP
-// Each light stores its cumulative work count. Skipped lights repeat the
-// preceding count, so binary search jumps over them and finds the owning light.
-uint FindBendLight(uint work_index, uint light_count, uint prefix_offset) {
-  uint lower = 0u;
-  uint upper = light_count;
-  [loop]
-  while (lower < upper) {
-    const uint middle = lower + ((upper - lower) >> 1u);
-    if (bend_dispatch.Load(middle * BEND_RECORD_STRIDE + prefix_offset) <= work_index) {
-      lower = middle + 1u;
-    } else {
-      upper = middle;
-    }
-  }
-  return lower;
-}
-
-// Each admitted light owns one packed rectangle of the atlas.
-int2 BendMaskPixel(int2 pixel, int4 bounds, uint record) {
-  const uint2 storage = bend_dispatch.Load2(record + BEND_ATLAS_OFFSET);
-  const uint2 local = uint2(pixel - bounds.xy);
-  const uint texel_index = storage.x + local.y * uint(bounds.z - bounds.x) + local.x;
-  return int2(texel_index % storage.y, texel_index / storage.y);
-}
-#endif
 
 #endif

@@ -42,13 +42,15 @@ namespace mgsv::shadows::batch {
 
 // These sizes match contact/bend_common.hlsli. A light's record holds its
 // projected position, bounds, sweeps, shadow-map projection, atlas location and
-// work totals. Its inputs are eleven native vectors, a kind vector, and the
-// four vectors of its shadow-map projection.
+// work totals. Its inputs are eleven native vectors, a kind vector, the four
+// vectors of its shadow-map projection, and its falloff limits (the fog's
+// local lights read those; zeros for a light recorded beside its draw).
 inline constexpr UINT RECORD_BYTES = 400u;
 inline constexpr UINT MAX_LIGHTS = 1024u;
-inline constexpr UINT LIGHT_VECTORS = 16u;
+inline constexpr UINT LIGHT_VECTORS = 17u;
 inline constexpr UINT LIGHT_KIND = 11u;
 inline constexpr UINT LIGHT_SHADOW = 12u;
+inline constexpr UINT LIGHT_FALLOFF_LIMITS = 16u;
 // Scene constants c0 to c29 of the light draws' b2.
 inline constexpr UINT SCENE_BYTES = 480u;
 inline constexpr UINT LIGHT_BYTES = 176u;
@@ -76,6 +78,9 @@ struct Storage {
   std::vector<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>> light_dispatch_views;
   Microsoft::WRL::ComPtr<ID3D11Buffer> light_buffer;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> light_srv;
+  // The view build whose lights the light buffer was last filled with. The
+  // fog's local lights read the buffer only for that build.
+  std::atomic<uint64_t> lights_scene = 0u;
   Microsoft::WRL::ComPtr<ID3D11Buffer> scene_buffer;
   Microsoft::WRL::ComPtr<ID3D11Buffer> settings_buffer;
   // Bound as the spot budget when no light of the batch uses one.
@@ -124,7 +129,9 @@ inline std::shared_ptr<Storage> CreateStorage(ID3D11Device* device, uint32_t wid
                                      MAX_ATLAS_DIMENSION * MAX_ATLAS_DIMENSION / pixels});
   if (screens == 0u) return nullptr;
   const uint64_t texels = pixels * screens;
-  storage->atlas_width = static_cast<UINT>(std::max<uint64_t>(width, (texels + MAX_ATLAS_DIMENSION - 1u) / MAX_ATLAS_DIMENSION));
+  // A power of two: every light pixel of every light draw turns texel
+  // indices into atlas coordinates, and the shaders do it without dividing.
+  storage->atlas_width = static_cast<UINT>(std::bit_ceil(std::max<uint64_t>(width, (texels + MAX_ATLAS_DIMENSION - 1u) / MAX_ATLAS_DIMENSION)));
   storage->atlas_height = static_cast<UINT>((texels + storage->atlas_width - 1u) / storage->atlas_width);
   storage->width = width;
   storage->height = height;
@@ -223,7 +230,7 @@ inline void RecordPasses(ID3D11DeviceContext* context, const DeviceState& progra
   context->CSSetUnorderedAccessViews(0u, static_cast<UINT>(outputs.size()), outputs.data(), nullptr);
   context->CSSetSamplers(0u, 1u, programs.border.GetAddressOf());
   context->CSSetShader(programs.shaders[0].Get(), nullptr, 0u);
-  // Setup admits lights in draw order and publishes the indirect arguments.
+  // Setup ranks the lights, admits them by rank and publishes the indirect arguments.
   // Clear and trace then process all admitted rectangles in parallel.
   context->Dispatch(1u, 1u, 1u);
   context->CSSetUnorderedAccessViews(0u, 1u, no_outputs.data(), nullptr);
@@ -287,6 +294,7 @@ struct Batch {
     // merged into another deferred context.
     const D3D11_BOX used = {.left = 0u, .top = 0u, .front = 0u, .right = static_cast<UINT>(lights.size() * sizeof(LightVector)), .bottom = 1u, .back = 1u};
     context->UpdateSubresource(storage->light_buffer.Get(), 0u, &used, lights.data(), 0u, 0u);
+    storage->lights_scene.store(scene_id, std::memory_order_release);
     context->UpdateSubresource(storage->scene_buffer.Get(), 0u, nullptr, scene.data(), 0u, 0u);
     std::array<std::byte, SETTINGS_BYTES> settings_bytes = {};
     std::memcpy(settings_bytes.data(), &settings, sizeof(settings));
@@ -503,6 +511,7 @@ inline bool CollectLight(ID3D11DeviceContext* context, DeviceState* device_state
   if (has_shadow_map) {
     std::memcpy(&light[LIGHT_SHADOW], &constants.scene[12u * 4u], 4u * sizeof(LightVector));
   }
+  light[LIGHT_FALLOFF_LIMITS] = constants.falloff_limits;
   *views = {batch->storage->atlas_srv.Get(), batch->storage->light_dispatch_views[index].Get()};
   return true;
 }

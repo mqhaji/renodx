@@ -157,6 +157,17 @@ struct FrameImages {
   std::array<FrameImage, FRAME_TARGETS.size()> images;
 };
 static FrameImages frame_images;
+// The fog volume: 128 depth slices as a 32 x 4 grid of tiles in one image.
+// The engine asks for 16 x 64 cells per slice (512 x 256). Every shader that
+// reads it addresses a tile by fractions, and the vertex shader that fills it
+// places cell centers by fractions too, so more cells per slice need no shader
+// change; atmosphere/fog/volume.hpp widens the fixed viewport of the draw
+// that fills it.
+inline constexpr uint64_t FOG_VOLUME_NAME = 0xD65871AB6B08ull;
+inline constexpr uint32_t FOG_VOLUME_NATIVE_WIDTH = 32u * 16u;
+inline constexpr uint32_t FOG_VOLUME_NATIVE_HEIGHT = 4u * 64u;
+inline constexpr uint32_t FOG_VOLUME_WIDTH = 32u * 160u;
+inline constexpr uint32_t FOG_VOLUME_HEIGHT = 4u * 90u;
 // Private data on the D3D texture of an image with a scene role; it lives and dies with the texture.
 inline constexpr GUID SCENE_ROLE_GUID = {
     .Data1 = 0x3E8C1D54u, .Data2 = 0x7A21u, .Data3 = 0x4F0Bu, .Data4 = {0x9C, 0x35, 0x6D, 0x1E, 0xB2, 0x40, 0x8A, 0x17}};
@@ -214,6 +225,7 @@ struct HookState {
 static HookState hooks;
 static std::atomic<uint32_t> calls_in_flight = 0u;
 static std::atomic<bool> logged_format_mismatch = false;
+static std::atomic<bool> logged_fog_volume = false;
 
 struct __declspec(uuid("5C0B5B0E-6E0B-4E2B-9E0A-7C1D3B6C2F41")) DeviceState {
   bool hooks_installed = false;
@@ -240,6 +252,8 @@ inline void __fastcall HookInitialize(void* target, const Parameter* parameter, 
   const bool is_exposure_source = (parameter->name & NAME_MASK) == EXPOSURE_SOURCE_NAME;
   // A private image already asks for the float code; it still gets its tags below.
   const bool is_float = float_target != nullptr && (parameter->format_code == BGRA8_CODE || parameter->format_code == FLOAT_CODE);
+  const bool is_fog_volume = (parameter->name & NAME_MASK) == FOG_VOLUME_NAME;
+  const bool enlarges_fog_volume = !is_float && is_fog_volume && parameter->width == FOG_VOLUME_NATIVE_WIDTH && parameter->height == FOG_VOLUME_NATIVE_HEIGHT;
   if (is_float) {
     // Callers reuse one parameter for several targets, and the manager compares
     // its stored copy when a name is created twice. Only this call sees the
@@ -247,8 +261,21 @@ inline void __fastcall HookInitialize(void* target, const Parameter* parameter, 
     Parameter float_parameter = *parameter;
     float_parameter.format_code = FLOAT_CODE;
     hooks.initialize(target, &float_parameter, texture_handle);
+  } else if (enlarges_fog_volume) {
+    // Only this call sees the larger size, like the float code above.
+    Parameter larger_parameter = *parameter;
+    larger_parameter.width = FOG_VOLUME_WIDTH;
+    larger_parameter.height = FOG_VOLUME_HEIGHT;
+    hooks.initialize(target, &larger_parameter, texture_handle);
   } else {
     hooks.initialize(target, parameter, texture_handle);
+  }
+  if (is_fog_volume && !logged_fog_volume.exchange(true, std::memory_order_acq_rel)) {
+    if (enlarges_fog_volume) {
+      reshade::log::message(reshade::log::level::info, "MgsvTargets: fog volume created with 160 x 90 cells per slice.");
+    } else {
+      reshade::log::message(reshade::log::level::warning, "MgsvTargets: the engine's fog volume is not the expected 512 x 256 image; it keeps its size.");
+    }
   }
   if (!is_float && frame_target == FRAME_TARGETS.end() && !is_exposure_source) return;
 

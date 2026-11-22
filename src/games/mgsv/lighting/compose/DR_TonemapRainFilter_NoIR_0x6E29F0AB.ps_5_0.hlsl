@@ -1,5 +1,6 @@
 #include "specular_composition.hlsli"
 #include "../../tonemap/tonemap.hlsli"
+#include "../../atmosphere/fog/fog_read.hlsli"
 
 // Port of the game's DR_TonemapRainFilter_NoIR deferred composition: albedo *
 // diffuse plus specular, times AO, then volumetric fog and the game's TPP tone
@@ -290,8 +291,8 @@ void main(
   r2.xyzw = float4(0.03125, 0.25, 0.03125, 0.25) * r3.xyzw;
   r1.xyzw = r2.xyzw + r1.xyzw;
   r2.xyzw = frac(r0.wwww);
-  r3.xyzw = g_tex_fog.Sample(g_samplerLinear_Clamp_s, r1.xy).xyzw;
-  r1.xyzw = g_tex_fog.Sample(g_samplerLinear_Clamp_s, r1.zw).xyzw;
+  r3.xyzw = FogVolumeSample(g_tex_fog, g_samplerLinear_Clamp_s, r1.xy).xyzw;
+  r1.xyzw = FogVolumeSample(g_tex_fog, g_samplerLinear_Clamp_s, r1.zw).xyzw;
   r4.xyzw = -r2.xyzw;
   r4.xyzw = float4(1, 1, 1, 1) + r4.xyzw;
   r3.xyzw = r4.xyzw * r3.xyzw;

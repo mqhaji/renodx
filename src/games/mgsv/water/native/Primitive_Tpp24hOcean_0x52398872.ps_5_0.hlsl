@@ -1,6 +1,7 @@
 // Port of a native ocean surface shader. The mod replaces its TppTonemap curve with
 // ApplyTppTonemap, which skips the curve when RenoDX tone mapping is on.
 #include "../../tonemap/tonemap.hlsli"
+#include "../../atmosphere/fog/fog_read.hlsli"
 
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:25 2026
 
@@ -368,8 +369,8 @@ void main(
   r5.xyzw = float4(0.03125,0.25,0.03125,0.25) * r6.xyzw;
   r0.xyzw = r5.xyzw + r0.xyzw;
   r5.xyzw = frac(r2.wwww);
-  r6.xyzw = g_tex_fog.Sample(g_samplerLinear_Clamp_s, r0.xy).xyzw;
-  r0.xyzw = g_tex_fog.Sample(g_samplerLinear_Clamp_s, r0.zw).xyzw;
+  r6.xyzw = FogVolumeSample(g_tex_fog, g_samplerLinear_Clamp_s, r0.xy).xyzw;
+  r0.xyzw = FogVolumeSample(g_tex_fog, g_samplerLinear_Clamp_s, r0.zw).xyzw;
   r7.xyzw = -r5.xyzw;
   r7.xyzw = float4(1,1,1,1) + r7.xyzw;
   r6.xyzw = r7.xyzw * r6.xyzw;

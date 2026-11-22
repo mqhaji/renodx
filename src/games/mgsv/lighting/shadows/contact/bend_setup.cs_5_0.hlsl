@@ -8,9 +8,12 @@
 #include "../pcss.hlsli"
 
 // Runs as a single group for one batch of lights. Builds each light's record
-// (projected light, receiver bounds, and up to eight sweep dispatches), admits
-// lights in draw order while atlas space and the spot budget last, then writes
-// the indirect arguments for the clear and trace dispatches.
+// (projected light, receiver bounds, and up to eight sweep dispatches), ranks
+// the lights by how much light each puts on the surfaces in view, admits them
+// in that order while atlas space and the spot budget last, then writes the
+// indirect arguments for the clear and trace dispatches.
+
+Texture2D<float4> bend_depth : register(t0);
 
 struct BendDispatch {
   int3 groups;
@@ -230,9 +233,13 @@ uint2 PrepareBendLight(uint light_index, uint2 output_size) {
 #define BEND_CANDIDATE     3u
 #define BEND_BUDGETED_SPOT 4u
 
-// Per draw position, the light drawn there. Per light, its texels, trace tiles,
-// and state; admission and packing then turn those into running totals.
+// Per draw position, the light drawn there. Per rank, the light of that rank.
+// Per light, its importance, texels, trace tiles, and state; admission and
+// packing then turn those into running totals.
+#define BEND_UNRANKED 0xFFFFFFFFu
 groupshared uint bend_order[BEND_MAX_LIGHTS];
+groupshared uint bend_ranked[BEND_MAX_LIGHTS];
+groupshared float bend_importance[BEND_MAX_LIGHTS];
 groupshared uint bend_area[BEND_MAX_LIGHTS];
 groupshared uint bend_tiles[BEND_MAX_LIGHTS];
 groupshared uint bend_state[BEND_MAX_LIGHTS];
@@ -251,28 +258,94 @@ void main(uint thread : SV_GroupIndex) {
     const uint light_type = ReadBendLightKind(light_index).x;
     const uint2 work = PrepareBendLight(light_index, output_size);
     bend_order[position] = light_index;
+    bend_ranked[position] = BEND_UNRANKED;
     bend_area[light_index] = work.x;
     bend_tiles[light_index] = work.y;
     bend_state[light_index] = work.x == 0u ? 0u
                               : (spot_budget_enabled && (light_type == 1u || light_type == 3u) ? BEND_BUDGETED_SPOT : BEND_CANDIDATE);
+    // How much the light matters to the picture: the light it puts on the
+    // surfaces in view, taken at an 8 x 8 grid of pixels across its receiver
+    // bounds, times the bounds' area. A lamp on a face in a close-up scores
+    // far above one on a wall in the distance. A light alone in its batch
+    // (the sun, or a light recorded beside its draw) needs no rank.
+    float importance = 0.0;
+    if (light_type != 0u && work.x != 0u) {
+      const uint4 bounds = bend_dispatch.Load4(light_index * BEND_RECORD_STRIDE + 16u);
+      const float3 light_position = ReadBendLightParam(light_index, 3u).xyz;
+      const float4 falloff = ReadBendLightParam(light_index, 6u);
+      const float4 limits = ReadBendLightParam(light_index, BEND_LIGHT_FALLOFF_LIMITS);
+      const float3 axis = ReadBendLightParam(light_index, 5u).xyz;
+      const float3 cone = ReadBendLightParam(light_index, 7u).xyz;
+      const bool spot = light_type == 1u || light_type == 3u;
+      float received = 0.0;
+      [loop]
+      for (uint sample_index = 0u; sample_index < 64u; ++sample_index) {
+        const float2 pixel = lerp(float2(bounds.xy), float2(bounds.zw), (float2(sample_index & 7u, sample_index >> 3u) + 0.5) * 0.125);
+        const float view_depth = bend_projection_param.z / (bend_depth.Load(int3(pixel, 0)).x - bend_projection_param.w);
+        const float3 toward = light_position
+                              - float3((pixel / float2(output_size) * float2(2.0, -2.0) + float2(-1.0, 1.0) - bend_camera_center.xy) * bend_projection_param.xy, 1.0) * view_depth;
+        const float distance = max(length(toward), 1.0e-4);
+        // The native falloffs, with what keeps them bounded at the source: a
+        // point light measures from no nearer than limits.x and adds [6].x,
+        // and a spot's falloff stops at limits.w. Without them a lamp's
+        // housing on screen would outweigh everything the lamp lights.
+        const float measured = spot ? distance : max(max(distance, limits.x) + falloff.x, 1.0e-4);
+        const float squared = measured * measured;
+        const float fourth = squared * squared;
+        // 1 / d^2 - k d^2, or (1 - k d^16) / d^2.
+        float light_received = light_type >= 3u ? (1.0 - falloff.z * min(fourth * fourth * fourth * fourth, 3.402823466e+38)) / squared
+                                                : 1.0 / squared - falloff.w * squared;
+        if (spot) {
+          if (limits.w > 0.0) {
+            light_received = min(light_received, limits.w);
+          }
+          light_received *= pow(saturate((dot(axis, -toward / distance) - cone.x) * cone.y), cone.z);
+        }
+        // A pixel the light does not reach (the sky among them) or a bad
+        // depth adds nothing.
+        received += view_depth > 0.0 && light_received > 0.0 ? light_received : 0.0;
+      }
+      const float3 color = ReadBendLightParam(light_index, 4u).xyz * ReadBendLightParam(light_index, 8u).y;
+      importance = received * max(color.r, max(color.g, color.b)) * float(work.x);
+    }
+    // A value that compares false with everything would share a rank.
+    bend_importance[light_index] = isfinite(importance) ? importance : 0.0;
+  }
+  GroupMemoryBarrierWithGroupSync();
+  // A light's rank is the number of lights that come before it: those that
+  // matter more, and of those that matter the same, the ones drawn earlier.
+  [loop]
+  for (uint ranking = thread; ranking < light_count; ranking += BEND_SETUP_THREADS) {
+    const uint light_index = bend_order[ranking];
+    if (bend_state[light_index] == 0u) continue;
+    uint rank = 0u;
+    [loop]
+    for (uint other = 0u; other < light_count; ++other) {
+      const uint other_index = bend_order[other];
+      rank += bend_state[other_index] != 0u
+                      && (bend_importance[other_index] > bend_importance[light_index]
+                          || (bend_importance[other_index] == bend_importance[light_index] && other < ranking))
+                  ? 1u
+                  : 0u;
+    }
+    bend_ranked[rank] = light_index;
   }
   GroupMemoryBarrierWithGroupSync();
   if (thread == 0u) {
-    // Admit lights in the order their draws execute, which the host supplies
-    // because parallel jobs append their lights in any order. The atlas space
-    // and the spot budget go to the first lights in that order; a light that
-    // does not fit, or a spot past the budget, keeps native shadows. Every
-    // budgeted spot that fits the atlas counts toward the budget, including one
-    // the budget then rejects. The count lives in bend_spot_budget, which the
-    // host shares across the lighting pass.
+    // Admit lights by rank. The atlas space and the spot budget go to the
+    // lights that matter most; a light that does not fit, or a spot past the
+    // budget, keeps native shadows. Point lights take no budget but share the
+    // atlas, so they are ranked with the spots. Every budgeted spot that fits the atlas
+    // counts toward the budget, including one the budget then rejects. The
+    // count lives in bend_spot_budget, which the host shares across the
+    // lighting pass. Ranks are dense, so the first unranked entry ends them.
     const uint spot_budget = spot_budget_enabled ? uint(min(CUSTOM_SPOT_CONTACT_SHADOW_BUDGET, 2147483520.0)) : 0u;
     uint spots = spot_budget_enabled ? bend_spot_budget.Load(0) : 0u;
     uint atlas_free = batch.y * batch.z;
     [loop]
-    for (uint position = 0u; position < light_count; ++position) {
-      const uint light_index = bend_order[position];
+    for (uint rank = 0u; rank < light_count && bend_ranked[rank] != BEND_UNRANKED; ++rank) {
+      const uint light_index = bend_ranked[rank];
       const uint state = bend_state[light_index];
-      if (state == 0u) continue;
       const uint area = bend_area[light_index];
       bool admitted = area <= atlas_free;
       if (admitted && state == BEND_BUDGETED_SPOT) {
@@ -285,8 +358,9 @@ void main(uint thread : SV_GroupIndex) {
     if (spot_budget_enabled) {
       bend_spot_budget.Store(0, spots);
     }
-    // Pack the admitted rectangles in record order. Clear and trace find a
-    // light by binary search over these running totals.
+    // Pack the admitted rectangles in record order. The trace finds a light
+    // by binary search over its running total; the clear needs only the last
+    // light's.
     uint atlas_end = 0u;
     uint trace_tiles = 0u;
     [loop]

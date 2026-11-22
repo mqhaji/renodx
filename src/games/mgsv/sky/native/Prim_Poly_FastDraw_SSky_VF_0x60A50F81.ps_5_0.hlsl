@@ -1,6 +1,7 @@
 // Port of a native sky primitive shader. The mod replaces its TppTonemap curve with
 // ApplyTppTonemap, which skips the curve when RenoDX tone mapping is on.
 #include "../../tonemap/tonemap.hlsli"
+#include "../../atmosphere/fog/fog_read.hlsli"
 
 // ---- Created with 3Dmigoto v1.4.1 on Tue Feb 17 09:33:26 2026
 
@@ -142,8 +143,8 @@ void main(
   r3.xyzw = float4(0.03125,0.25,0.03125,0.25) * r3.xyzw;
   r0.xyzw = r3.xyzw + r0.xyzw;
   r3.xyzw = frac(r1.wwww);
-  r4.xyzw = g_tex_fog.Sample(g_samplerLinear_Clamp_s, r0.xy).xyzw;
-  r0.xyzw = g_tex_fog.Sample(g_samplerLinear_Clamp_s, r0.zw).xyzw;
+  r4.xyzw = FogVolumeSample(g_tex_fog, g_samplerLinear_Clamp_s, r0.xy).xyzw;
+  r0.xyzw = FogVolumeSample(g_tex_fog, g_samplerLinear_Clamp_s, r0.zw).xyzw;
   r5.xyzw = -r3.xyzw;
   r5.xyzw = float4(1,1,1,1) + r5.xyzw;
   r4.xyzw = r5.xyzw * r4.xyzw;

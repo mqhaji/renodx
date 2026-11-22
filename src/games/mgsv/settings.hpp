@@ -385,6 +385,7 @@ inline void ApplyPresetOff(renodx::utils::settings::Settings* registry, ShaderIn
       {"FxMotionBlurStrength", 100.f},
       {"DirectLightingShadowsMode", 0.f},
       {"IndirectLightingMode", 0.f},
+      {"AtmosphereFogMode", 0.f},
   });
   reconstruction::output_size::ui_visible.store(true, std::memory_order_relaxed);
   {

@@ -34,6 +34,8 @@ The [render map](render-map.html) follows these owners through the native frame,
 | `lighting/indirect/trace/`, `compose/` | Diffuse estimator and its application |
 | `lighting/reflections/` | GGX screen/environment estimation, NRD history and native reflection-chain bypass |
 | `lighting/compose/` | Native deferred lighting/fog composition ports, including their early tone curves |
+| `atmosphere/fog/` | The enlarged fog volume's fill viewport, and with Fog set to Enhanced the passes that fill the main view's volume with the sun's shadows: from the cascade maps nearby and from the terrain's heights across the map, and with the view's local lights from the contact-shadow batch's light list |
+| `effects/particles/` | Ports of the lit particle shaders the game draws without sun shadows; they take the fog volume's sun visibility |
 | `sky/native/`, `water/native/`, `effects/` | Existing sky/cloud, ocean, and wormhole/sand-wind ports, not new rendering models |
 | `copy/` | Native image-copy shader edits |
 | `reconstruction/` | Methods, native camera and motion precision, sizing, backend lifecycle, submission, and output-sized post-processing support |

@@ -33,6 +33,10 @@ static const float SHADOW_LOCAL_SOURCE_RADIUS = 0.05;
 // Contact shadows supply fine detail; bound their small spatial filter in
 // render pixels rather than widening a sparsely sampled kernel indefinitely.
 static const float SHADOW_CONTACT_FILTER_RADIUS = 2.0;
+// A contact shadow far from its caster has a wider soft edge than that small
+// filter can make. Up to this radius, in render pixels, the light shader
+// spreads taps over a disk instead.
+static const float SHADOW_CONTACT_WIDE_RADIUS = 12.0;
 
 struct PcssProjection {
   float2 uv_scale;

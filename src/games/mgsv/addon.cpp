@@ -42,6 +42,7 @@
 #include "../../utils/shader.hpp"
 #include "../../utils/state.hpp"
 #include "../../utils/swapchain.hpp"
+#include "atmosphere/fog/volume.hpp"
 #include "engine/build.hpp"
 #include "engine/image.hpp"
 #include "engine/local_lights.hpp"
@@ -391,6 +392,8 @@ void OnPresent(
     uint32_t dirty_rect_count,
     const reshade::api::rect* dirty_rects) {
   bool lighting_enabled = false;
+  bool fog_volumetric = false;
+  mgsv::atmosphere::fog::Controls fog_controls;
   bool selected_present = false;
   uint32_t shadow_noise_frame = 0u;
   {
@@ -398,6 +401,15 @@ void OnPresent(
     // Enhanced indirect lighting needs the RenoDX tone mapper, and its controls say so. This is the
     // host side of CUSTOM_MGSV_ENHANCED_INDIRECT_LIGHTING in shared.h.
     lighting_enabled = shader_injection.indirect_lighting_mode >= 0.5f && shader_injection.tone_map_type != 0.f;
+    fog_volumetric = shader_injection.fog_mode >= 0.5f;
+    fog_controls = {
+        .shadow_strength = shader_injection.fog_shadow_strength,
+        .terrain_shadows = shader_injection.fog_terrain_shadows >= 0.5f,
+        .debug_view = static_cast<uint32_t>(shader_injection.fog_debug_view),
+        .local_lights = (shader_injection.shadows_mode >= 0.5f ? shader_injection.fog_local_lights : 0.f),
+        .height_falloff = shader_injection.fog_height_falloff / mgsv::atmosphere::fog::HAZE_SCALE_HEIGHT,
+        .unevenness = shader_injection.fog_unevenness,
+    };
   }
   {
     const mgsv::rendering::submission::ExecutionGuard execution_guard;
@@ -421,6 +433,15 @@ void OnPresent(
       // lighting noise phase, so they are kept only while enhanced lighting is on.
       mgsv::lighting::temporal_inputs::enabled.store(lighting_enabled, std::memory_order_release);
       mgsv::lighting::indirect_lighting_enhanced.store(lighting_enabled, std::memory_order_release);
+      // Leaving Enhanced fog releases the fog passes' images and the game's
+      // images they kept, and clears the history.
+      if (mgsv::atmosphere::fog::volumetric.exchange(fog_volumetric, std::memory_order_acq_rel) && !fog_volumetric) {
+        mgsv::atmosphere::fog::Destroy();
+      }
+      {
+        const std::unique_lock fog_lock(mgsv::atmosphere::fog::state.mutex);
+        mgsv::atmosphere::fog::state.controls = fog_controls;
+      }
       mgsv::engine::motion_vectors::wanted.store(lighting_enabled || mgsv::reconstruction::state::IsEnabled(), std::memory_order_release);
       shadow_noise_frame = mgsv::lighting::noise_frame.fetch_add(1u, std::memory_order_relaxed) + 1u;
       selected_present = true;
@@ -456,6 +477,7 @@ void OnDestroyDevice(reshade::api::device* device) {
   const mgsv::rendering::submission::ExecutionGuard execution_guard;
   mgsv::engine::views::Shutdown();
   mgsv::lighting::reflections::Destroy();
+  mgsv::atmosphere::fog::Destroy();
   mgsv::inputs::OnDestroyDevice(device);
   mgsv::lighting::environment_specular::Reset();
   mgsv::lighting::material_inputs::Reset();
@@ -487,6 +509,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       mgsv::shadows::AppendSettings(&settings, &shader_injection);
       mgsv::reconstruction::settings::AppendSettings(&settings, &shader_injection, &reconstruction_settings);
       mgsv::lighting::AppendSettings(&settings, &shader_injection);
+      mgsv::atmosphere::fog::AppendSettings(&settings, &shader_injection);
 
       // Before the menu is first drawn, list the features whose engine entries
       // or structure fields did not verify in the running executable.
@@ -551,6 +574,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
             "Effects",
             "Direct Lighting",
             "Indirect Lighting",
+            "Atmosphere",
             "Options",
             "Links",
             "About",

@@ -81,6 +81,13 @@ struct ShaderInjectData {
   float bloom_type;                   // 0 = Vanilla, 1 = Enhanced.
   float specular_occlusion_strength;  // Blocks environment fallback along confirmed geometry hits.
   float reflection_rays_per_pixel;    // GGX samples per receiver; controls trace cost rather than strength.
+  float fog_mode;                     // 0 = Vanilla, 1 = Enhanced. Read by the host only.
+  float fog_shadow_strength;          // 0 to 1. This and the fog values below are read by the host only.
+  float fog_terrain_shadows;          // 0 = Off, 1 = On.
+  float fog_debug_view;               // 0 = Off, 1 = Shadows, 2 = Local Lights.
+  float fog_local_lights;             // 0 to 1.
+  float fog_height_falloff;           // 0 to 1.
+  float fog_unevenness;               // 0 to 1.
 };
 
 #ifndef __cplusplus
