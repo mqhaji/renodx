@@ -774,17 +774,17 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .default_value = 1.f,
           .label = "Global Illumination",
           .section = "Indirect Lighting",
-          .tooltip = "Enhanced adds ambient occlusion and diffuse light bounced from visible surfaces, and replaces native screen-space reflections with ray-marched reflections traced after sky, fog, and forward lighting. Rays that leave the screen keep environment lighting. It runs in the main view only and needs the RenoDX tone mapper. With Reconstruction Off the reflections are not denoised.",
+          .tooltip = "Enhanced adds ambient occlusion and diffuse light bounced from surfaces on screen, and replaces the game's screen-space reflections with ones traced from the finished image, with sky, fog and forward lighting. Reflection rays that leave the screen keep the game's environment reflection. It runs in the main view only and needs the RenoDX tone mapper. With Reconstruction Off the reflections are not denoised.",
           .labels = {"Vanilla", "Enhanced"},
       },
       new renodx::utils::settings::Setting{
           .key = "IndirectLightingDiffuseResolution",
-          .binding = &shader_injection->lighting_resolution,
+          .binding = &shader_injection->diffuse_resolution,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
           .default_value = 1.f,
-          .label = "Diffuse Lighting Resolution",
+          .label = "Diffuse Resolution",
           .section = "Indirect Lighting",
-          .tooltip = "Fraction of the full-resolution pixel count used by the shared lighting trace. 1/4 halves each axis; 1/16 divides each axis by 4; 1/64 divides each axis by 8. Lower resolutions can lose thin geometry and contact detail. Search radii stay in full-resolution pixels.",
+          .tooltip = "Share of the render's pixels the ambient occlusion and bounce light trace runs at: 1/4 halves each axis, 1/16 quarters it and 1/64 divides it by 8. Lower resolutions cost less but can lose thin geometry and contact detail. Reflections always trace at full resolution.",
           .labels = {"Full", "1/4", "1/16", "1/64"},
       },
       new renodx::utils::settings::Setting{
@@ -792,30 +792,30 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .binding = &shader_injection->reflection_rays_per_pixel,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
           .default_value = 1.f,
-          .label = "Rays per Pixel",
+          .label = "Reflection Rays per Pixel",
           .section = "Indirect Lighting",
-          .tooltip = "Reflection samples per input pixel. Lower values reduce tracing cost but add noise and can reduce stability in motion. Higher values do more tracing; reflection strength and material roughness stay the same.",
+          .tooltip = "Reflection rays traced per pixel each frame. More rays reduce noise, most visibly on rough surfaces and in motion, at proportionally more tracing cost. Brightness and roughness stay the same.",
           .min = 1.f,
           .max = static_cast<float>(MGSV_REFLECTION_MAX_RAYS_PER_PIXEL),
           .format = "%d",
       },
       new renodx::utils::settings::Setting{
-          .key = "IndirectLightingDiffuseOcclusionStrength",
-          .binding = &shader_injection->ao_strength,
+          .key = "IndirectLightingAmbientOcclusionStrength",
+          .binding = &shader_injection->ambient_occlusion_strength,
           .default_value = 100.f,
-          .label = "Diffuse Occlusion Strength",
+          .label = "Ambient Occlusion Strength",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Controls how strongly nearby geometry blocks ambient diffuse light. Direct light keeps its own shadows, and added GI is not darkened again.",
+          .tooltip = "How much nearby geometry blocks the game's ambient light (sky and light probes). Direct light keeps its own shadows, and bounce light already accounts for what blocks it.",
           .max = 100.f,
           .parse = [](float value) { return value * 0.01f; },
       },
       new renodx::utils::settings::Setting{
-          .key = "IndirectLightingDiffuseGIStrength",
-          .binding = &shader_injection->diffuse_gi_strength,
+          .key = "IndirectLightingDiffuseBounceStrength",
+          .binding = &shader_injection->diffuse_bounce_strength,
           .default_value = 100.f,
-          .label = "Diffuse GI Strength",
+          .label = "Bounce Light Strength",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Controls diffuse light bounced from visible surfaces. Ambient occlusion remains active at 0%.",
+          .tooltip = "How much diffuse light surfaces on screen bounce onto each other. At 0%, ambient occlusion still applies.",
           .max = 100.f,
           .parse = [](float value) { return value * 0.01f; },
       },
@@ -825,7 +825,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .default_value = 100.f,
           .label = "Reflection Strength",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Blends screen-space reflections with environment lighting. Added reflected light and removed environment change together. Zero retains environment lighting without running the original SSR chain.",
+          .tooltip = "Blends from the game's environment reflection (0%) to the traced reflections (100%). The game's screen-space reflections stay off at every value.",
           .max = 100.f,
           .parse = [](float value) { return value * 0.01f; },
       },
@@ -835,77 +835,77 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
           .default_value = 100.f,
           .label = "Specular Occlusion Strength",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Blocks environment light when a reflection ray hits nearby geometry, including hits whose screen color is unavailable. Does not darken accepted screen reflections again. Off-screen misses retain the environment. Changes image strength, not tracing cost.",
+          .tooltip = "How much a reflection ray that hits geometry blocks the game's environment reflection, including hits whose color is not on screen. Rays that leave the screen keep the environment, and reflections of what is on screen are not darkened again. It does not change tracing cost.",
           .max = 100.f,
           .parse = [](float value) { return value * 0.01f; },
       },
       new renodx::utils::settings::Setting{
-          .key = "IndirectLightingDiffuseSearchRadiusPixels",
-          .binding = &shader_injection->lighting_search_radius_pixels,
+          .key = "IndirectLightingDiffuseSearchRadius",
+          .binding = &shader_injection->diffuse_search_radius_pixels,
           .default_value = 2000.f,
-          .label = "Search Radius",
+          .label = "Diffuse Search Radius",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Search distance in output pixels for AO and diffuse GI. Converted to the current render size when upscaling. Larger values reach farther surfaces but spread samples farther apart.",
+          .tooltip = "How far across the screen, in output pixels, ambient occlusion and bounce light look for surfaces. Larger values reach farther surfaces but spread the same samples farther apart.",
           .min = 1.f,
           .max = 4096.f,
           .format = "%.0f px",
       },
       new renodx::utils::settings::Setting{
-          .key = "IndirectLightingDiffuseSamplingDirections",
-          .binding = &shader_injection->lighting_slice_count,
+          .key = "IndirectLightingDiffuseSearchDirections",
+          .binding = &shader_injection->diffuse_direction_count,
           .default_value = 3.f,
-          .label = "Sampling Directions",
+          .label = "Diffuse Search Directions",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Search lines through each pixel, sampled on both sides for AO and diffuse GI. More directions improve coverage but cost more GPU time.",
+          .tooltip = "Lines through each pixel along which ambient occlusion and bounce light search, both ways. More directions reduce noise at proportionally more cost.",
           .min = 1.f,
           .max = 8.f,
       },
       new renodx::utils::settings::Setting{
           .key = "IndirectLightingDiffuseSamplesPerSide",
-          .binding = &shader_injection->lighting_samples_per_side,
+          .binding = &shader_injection->diffuse_samples_per_side,
           .default_value = 40.f,
-          .label = "Samples per Side",
+          .label = "Diffuse Samples per Side",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Depth samples on each side of every search line, shared by AO and diffuse GI. More samples find smaller surfaces but cost more GPU time.",
+          .tooltip = "Depth samples on each side of every search line, spaced closer near the pixel. More samples find smaller and thinner surfaces at proportionally more cost.",
           .min = 1.f,
           .max = 64.f,
       },
       new renodx::utils::settings::Setting{
-          .key = "IndirectLightingDiffuseDepthMipsEnabled",
-          .binding = &shader_injection->lighting_depth_mips_enabled,
+          .key = "IndirectLightingDiffuseCoarseDepth",
+          .binding = &shader_injection->diffuse_coarse_depth,
           .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
           .default_value = 0.f,
-          .label = "Coarse Depth Sampling",
+          .label = "Diffuse Coarse Depth",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Uses smaller depth images for distant samples to catch surfaces between steps. GI finds the matching full-resolution pixel before reading its light. Off reads full-resolution depth throughout.",
+          .tooltip = "Distant samples read reduced depth images that keep the nearest surface of each block, so surfaces between far samples are not missed. Bounce light still reads each surface's own pixel. Off reads full-resolution depth throughout.",
       },
       new renodx::utils::settings::Setting{
-          .key = "IndirectLightingDiffuseGIBackfaceRejectionEnabled",
-          .binding = &shader_injection->gi_reject_backfaces,
+          .key = "IndirectLightingDiffuseBackfaceRejection",
+          .binding = &shader_injection->diffuse_reject_backfaces,
           .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
           .default_value = 0.f,
-          .label = "Reject Backfacing GI Sources",
+          .label = "Reject Backfacing Bounce Sources",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Rejects bounced light from surfaces facing away from the receiver. These surfaces still block light and reflections.",
+          .tooltip = "Surfaces facing away from a pixel send it no bounce light. They still block light.",
       },
       new renodx::utils::settings::Setting{
-          .key = "IndirectLightingDiffuseMultipleBouncesEnabled",
+          .key = "IndirectLightingDiffuseMultipleBounces",
           .binding = &shader_injection->diffuse_multiple_bounces,
           .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
           .default_value = 1.f,
           .label = "Multiple Bounces",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Surfaces pass on the light they received in the previous frame, including its occlusion and bounced light, so light keeps bouncing instead of stopping after one bounce. Surfaces that just came into view bounce once for a frame. Has no effect with Reconstruction Off.",
+          .tooltip = "Surfaces pass on the light they received in the previous frame, including its occlusion and bounce light, so light keeps bouncing instead of stopping after one bounce. Surfaces that just came into view bounce once for a frame. Has no effect with Reconstruction Off.",
       },
       new renodx::utils::settings::Setting{
           .key = "IndirectLightingDebugView",
-          .binding = &shader_injection->lighting_debug_view,
+          .binding = &shader_injection->indirect_lighting_debug_view,
           .value_type = renodx::utils::settings::SettingValueType::INTEGER,
           .default_value = 0.f,
-          .label = "Lighting Debug View",
+          .label = "Indirect Lighting Debug View",
           .section = "Indirect Lighting (Advanced)",
-          .tooltip = "Diffuse views inspect the AO/GI stages. Reflection views compare denoised and raw light, environment weights, input coverage, saved environment, specular visibility, and NRD validation. Sampling weights can exceed one. Reflection Coverage shows qualified inputs, not ray hits. Magenta marks unavailable inputs.",
-          .labels = {"Off", "GI Lighting", "Geometry Coverage", "Accepted Source Coverage", "Valid / Invalid Results", "Source Lighting", "Ambient Occlusion", "Ambient Diffuse", "Direct Diffuse", "Corrected Diffuse", "Ambient Input Validity", "Reflected Light", "Environment Weight", "Reflection Coverage", "Environment Specular", "Specular Visibility", "Raw Reflections", "NRD Validation"},
+          .tooltip = "Diffuse views replace the diffuse light with a stage of ambient occlusion and bounce light: Occluded Share and Gathered Share are the parts of the hemisphere that geometry blocks and that sent light. Reflection views show denoised and raw light, environment weights (which can exceed one), coverage of usable inputs (not ray hits), the game's environment reflection and specular visibility. Magenta marks unavailable inputs.",
+          .labels = {"Off", "Bounce Light", "Occluded Share", "Gathered Share", "Result Validity", "Bounce Source", "Ambient Occlusion", "Game Ambient Light", "Direct Diffuse", "Final Diffuse", "Ambient Input Validity", "Reflected Light", "Environment Weight", "Reflection Coverage", "Game Environment Reflection", "Specular Visibility", "Raw Reflections", "NRD Validation"},
       },
   };
   for (auto* setting : additions) {
@@ -950,21 +950,21 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   auto* device = cmd_list->get_device();
   const auto plan = reconstruction::resolution::Read();
   if (plan.IsScaled() && plan.render == reconstruction::resolution::Size{.width = frame.width, .height = frame.height}) {
-    constants.lighting_search_radius_pixels *= static_cast<float>(frame.width) / static_cast<float>(plan.output.width);
+    constants.diffuse_search_radius_pixels *= static_cast<float>(frame.width) / static_cast<float>(plan.output.width);
   }
   uint32_t scale = 1u;
-  if (constants.lighting_resolution > 2.5f) {
+  if (constants.diffuse_resolution > 2.5f) {
     scale = 8u;
-  } else if (constants.lighting_resolution > 1.5f) {
+  } else if (constants.diffuse_resolution > 1.5f) {
     scale = 4u;
-  } else if (constants.lighting_resolution > 0.5f) {
+  } else if (constants.diffuse_resolution > 0.5f) {
     scale = 2u;
   }
-  constants.lighting_resolution_divisor = static_cast<float>(scale);
+  constants.diffuse_resolution_divisor = static_cast<float>(scale);
 
   const bool scene_sample = temporal.camera_publication != 0u;
   const uint32_t sample = (scene_sample ? temporal.camera_sample : lighting::noise_frame.load(std::memory_order_relaxed));
-  constants.lighting_noise_frame = static_cast<float>(sample & 31u);
+  constants.diffuse_noise_frame = static_cast<float>(sample & 31u);
   const auto noise = lighting::GetNoiseView(device);
   if (noise == nullptr) return;
   const uint32_t width = (frame.width + scale - 1u) / scale;
@@ -987,10 +987,10 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
              " trace=", width, "x", height, " axis_divisor=", scale);
   }
 
-  const bool diagnostic_requested = (constants.lighting_debug_view >= 2.f && constants.lighting_debug_view <= 6.f);
+  const bool diagnostic_requested = (constants.indirect_lighting_debug_view >= 2.f && constants.indirect_lighting_debug_view <= 6.f);
   const bool diagnostic_ready = diagnostic_requested && EnsureLightTarget(device, &il::diagnostic_target, width, height);
   if (diagnostic_requested && !diagnostic_ready) {
-    constants.lighting_debug_view = 0.f;
+    constants.indirect_lighting_debug_view = 0.f;
     static std::atomic_flag failed = {};
     LogLightOnce(&failed, reshade::log::level::warning,
                  "Lighting debug texture unavailable; normal lighting remains enabled");
@@ -1007,9 +1007,9 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
   if (environment != nullptr && environment->depth.Get() != depth_resource.Get()) {
     environment.reset();
   }
-  const bool depth_mips_requested = constants.lighting_depth_mips_enabled != 0.f;
+  const bool depth_mips_requested = constants.diffuse_coarse_depth != 0.f;
   const bool depth_mips_ready = BuildDepthMips(cmd_list, frame.depth, depth_mips_requested);
-  constants.lighting_depth_mips_enabled = (depth_mips_ready ? 1.f : 0.f);
+  constants.diffuse_coarse_depth = (depth_mips_ready ? 1.f : 0.f);
   // EnsureFallbackViews above created these placeholders for the whole chain.
   const auto fallback_input = lighting::fallback_srv;
   const auto fallback_outputs = lighting::fallback_uavs;
@@ -1147,16 +1147,16 @@ inline void Apply(const lighting::LightFrame& frame, reshade::api::command_list*
                "GT-VBGI commands recorded; effect=", width, "x", height,
                " noise=IS-FAST",
                " full_resolution=", frame.width, "x", frame.height,
-               " scale=", constants.lighting_resolution_divisor,
-               " slices=", constants.lighting_slice_count,
-               " radius_px=", constants.lighting_search_radius_pixels,
-               " steps_per_side=", constants.lighting_samples_per_side,
-               " ao_strength=", constants.ao_strength,
-               " gi_backface=", constants.gi_reject_backfaces,
-               " diffuse_gi_strength=", constants.diffuse_gi_strength,
+               " scale=", constants.diffuse_resolution_divisor,
+               " directions=", constants.diffuse_direction_count,
+               " search_radius_px=", constants.diffuse_search_radius_pixels,
+               " samples_per_side=", constants.diffuse_samples_per_side,
+               " ambient_occlusion_strength=", constants.ambient_occlusion_strength,
+               " reject_backfaces=", constants.diffuse_reject_backfaces,
+               " diffuse_bounce_strength=", constants.diffuse_bounce_strength,
                " multiple_bounces=", multiple_bounces,
-               " lighting_depth_mips_enabled=", constants.lighting_depth_mips_enabled,
-               " debug_view=", constants.lighting_debug_view,
+               " diffuse_coarse_depth=", constants.diffuse_coarse_depth,
+               " debug_view=", constants.indirect_lighting_debug_view,
                "; command submission is not GPU completion");
 
   if (depth_mips_requested && !depth_mips_ready) {
@@ -1183,7 +1183,7 @@ inline void ApplyLightPasses(reshade::api::command_list* cmd_list, const ShaderI
   {
     const std::shared_lock lock(renodx::utils::mutex::global_mutex);
     constants = shader_injection;
-    constants.lighting_debug_view = std::clamp(constants.lighting_debug_view, 0.f, 17.f);
+    constants.indirect_lighting_debug_view = std::clamp(constants.indirect_lighting_debug_view, 0.f, 17.f);
   }
 
   // Lighting runs only on the device selected at the first Present, and not during a resize.

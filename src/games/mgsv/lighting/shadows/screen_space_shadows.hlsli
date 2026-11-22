@@ -15,7 +15,7 @@ ByteAddressBuffer bend_shadow_data : register(t19);
 
 // Setup caches these five floats in the record, after the indirect arguments.
 // It fills them for every light with a state (1 traced, 2 not traced), so a
-// light skipped by the contact budget still has them.
+// light the spotlight limit leaves out still has them.
 PcssProjection ReadPcssProjection(float4x4 projection, float4x4 cascades, bool directional) {
   if (bend_shadow_data.Load(40) != 0u) {
     float4 values = asfloat(bend_shadow_data.Load4(PCSS_PROJECTION_OFFSET));
@@ -61,7 +61,7 @@ BendShadow ReadBendShadow(float2 pixel, uint light_type, Texture2D<float4> depth
   const bool diagnostic = ((debug >= 1 && debug <= 3) || debug == 5 || debug == 6) && light_type == (uint)CUSTOM_SHADOW_DEBUG_LIGHT;
   result.diagnostic = diagnostic;
   const uint4 metadata = bend_shadow_data.Load4(32);
-  // Budget or culling can omit this light's clear and trace. Its mask
+  // The spotlight limit or culling can omit this light's clear and trace. Its mask
   // still contains another light's pixels, so never read it in this state.
   if (metadata.z == 2) {
     result.valid = diagnostic;

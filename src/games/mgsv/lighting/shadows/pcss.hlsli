@@ -26,7 +26,7 @@ struct PcssResult {
 // native filter is the softer of the two, so a soft edge never gets sharper as
 // its radius grows past the switch.
 static const float PCSS_MINIMUM_TEXELS = 1.0;
-// Fixed sampling budgets keep the shadow path small and predictable.
+// Fixed sample counts keep the shadow path small and predictable.
 static const uint PCSS_SUN_BLOCKER_SAMPLES = 12u;
 static const uint PCSS_LOCAL_BLOCKER_SAMPLES = 4u;
 static const uint PCSS_FILTER_SAMPLES = 4u;

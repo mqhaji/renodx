@@ -27,7 +27,7 @@
 // PCSS filtering. End restores the displaced inputs after the draw.
 namespace mgsv::shadows::screen_space {
 
-inline constexpr GUID SPOT_BUDGET_ID = {
+inline constexpr GUID SPOTLIGHT_COUNTER_ID = {
     .Data1 = 0xcdb408ed, .Data2 = 0xcba8, .Data3 = 0x44e8, .Data4 = {0xa6, 0xc8, 0xfb, 0x38, 0x81, 0xd4, 0xd5, 0xa1}};
 
 // A view's resource description never changes. Cache it on the view itself to
@@ -45,8 +45,8 @@ struct __declspec(uuid("F5591171-16BF-4AC9-B341-D74C1F56BDE2")) DrawState {
   std::array<UINT, 2> buffer_sizes = {};
   bool active = false;
   bool replacement_safe = false;
-  Microsoft::WRL::ComPtr<ID3D11RenderTargetView> budget_target;
-  Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> budget;
+  Microsoft::WRL::ComPtr<ID3D11RenderTargetView> spotlight_counter_target;
+  Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> spotlight_counter;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> displaced_pcss_noise;
   bool pcss_noise_active = false;
   // The sun pass and depth view whose mask and record the views below hold. A
@@ -121,14 +121,14 @@ inline bool OnClearRenderTarget(reshade::api::command_list* cmd_list, reshade::a
   view->GetResource(&resource);
   Microsoft::WRL::ComPtr<IUnknown> stored;
   UINT bytes = sizeof(IUnknown*);
-  if (FAILED(resource->GetPrivateData(SPOT_BUDGET_ID, &bytes, stored.GetAddressOf()))) return false;
-  Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> budget;
-  if (FAILED(stored.As(&budget))) return false;
+  if (FAILED(resource->GetPrivateData(SPOTLIGHT_COUNTER_ID, &bytes, stored.GetAddressOf()))) return false;
+  Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> spotlight_counter;
+  if (FAILED(stored.As(&spotlight_counter))) return false;
   const std::array<UINT, 4> zero = {};
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());  // NOLINT(performance-no-int-to-ptr)
-  // Reset the spot budget next to the game's clear of its lighting target, so
+  // Reset the spotlight counter next to the game's clear of its lighting target, so
   // recording and replay follow GPU order instead of a CPU Present counter.
-  context->ClearUnorderedAccessViewUint(budget.Get(), zero.data());
+  context->ClearUnorderedAccessViewUint(spotlight_counter.Get(), zero.data());
   return false;
 }
 
@@ -269,37 +269,37 @@ inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& 
     }
   }
 
-  ID3D11UnorderedAccessView* budget = nullptr;
-  if ((light_type == 1u || light_type == 3u) && settings.spot_contact_shadow_budget >= 1.f) {
+  ID3D11UnorderedAccessView* spotlight_counter = nullptr;
+  if ((light_type == 1u || light_type == 3u) && settings.contact_shadow_spotlight_limit >= 1.f) {
     // Contexts writing the same native lighting texture share its counter,
     // which OnClearRenderTarget resets next to the game's clear.
-    if (state->budget_target.Get() != targets[0].Get()) {
+    if (state->spotlight_counter_target.Get() != targets[0].Get()) {
       Microsoft::WRL::ComPtr<ID3D11Resource> resource;
       targets[0]->GetResource(&resource);
       Microsoft::WRL::ComPtr<IUnknown> stored;
       UINT bytes = sizeof(IUnknown*);
       {
         const std::shared_lock lock(device_state->mutex);
-        resource->GetPrivateData(SPOT_BUDGET_ID, &bytes, stored.GetAddressOf());
+        resource->GetPrivateData(SPOTLIGHT_COUNTER_ID, &bytes, stored.GetAddressOf());
       }
       if (stored == nullptr) {
-        const auto candidate = batch::CreateBudget(reinterpret_cast<ID3D11Device*>(cmd_list->get_device()->get_native()));  // NOLINT(performance-no-int-to-ptr)
+        const auto candidate = batch::CreateSpotlightCounter(reinterpret_cast<ID3D11Device*>(cmd_list->get_device()->get_native()));  // NOLINT(performance-no-int-to-ptr)
         if (candidate == nullptr) {
-          unavailable(7u, "MgsvShadows: spotlight budget allocation failed; keeping native shadows");
+          unavailable(7u, "MgsvShadows: spotlight counter allocation failed; keeping native shadows");
           return;
         }
         const std::unique_lock lock(device_state->mutex);
         bytes = sizeof(IUnknown*);
-        resource->GetPrivateData(SPOT_BUDGET_ID, &bytes, stored.GetAddressOf());
+        resource->GetPrivateData(SPOTLIGHT_COUNTER_ID, &bytes, stored.GetAddressOf());
         if (stored == nullptr) {
-          if (FAILED(resource->SetPrivateDataInterface(SPOT_BUDGET_ID, candidate.Get()))) return;
+          if (FAILED(resource->SetPrivateDataInterface(SPOTLIGHT_COUNTER_ID, candidate.Get()))) return;
           stored = candidate;
         }
       }
-      if (FAILED(stored.As(&state->budget))) return;
-      state->budget_target = targets[0];
+      if (FAILED(stored.As(&state->spotlight_counter))) return;
+      state->spotlight_counter_target = targets[0];
     }
-    budget = state->budget.Get();
+    spotlight_counter = state->spotlight_counter.Get();
   }
 
   // The trace's sample counts and depth bias are tuned in output pixels; give
@@ -319,9 +319,9 @@ inline void Begin(reshade::api::command_list* cmd_list, const ShaderInjectData& 
   if (sun_pass != 0u && state->sun_pass == sun_pass && state->sun_depth == depth.Get()) {
     result = {state->sun_views[0].Get(), state->sun_views[1].Get()};
   } else if (!batch::CollectLight(context, device_state, constants, light_type, has_shadow_map, depth_description.Width, depth_description.Height,
-                                  selected.generation, depth.Get(), targets[0].Get(), budget, &result)) {
+                                  selected.generation, depth.Get(), targets[0].Get(), spotlight_counter, &result)) {
     if (!batch::RecordLight(context, device_state, constants, light_type, has_shadow_map, depth_description.Width, depth_description.Height,
-                            depth.Get(), budget, buffers, first, &result)) {
+                            depth.Get(), spotlight_counter, buffers, first, &result)) {
       unavailable(3u, "MgsvShadows: contact-shadow storage or programs unavailable; keeping native shadows");
       return;
     }

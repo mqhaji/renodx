@@ -256,7 +256,7 @@ inline thread_local std::optional<Microsoft::WRL::ComPtr<ID3D11ShaderResourceVie
 // Adds the Atmosphere sections after the lighting sections, before Options.
 inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderInjectData* shader_injection) {
   if (std::ranges::any_of(*registry, [](const auto* setting) { return setting->key == "AtmosphereFogMode"; })) return;
-  const auto is_volumetric = [shader_injection] { return shader_injection->fog_mode >= 0.5f; };
+  const auto is_fog_enhanced = [shader_injection] { return shader_injection->fog_mode >= 0.5f; };
   registry->insert(
       std::ranges::find_if(*registry, [](const auto* setting) { return setting->section == "Options"; }),
       {
@@ -267,7 +267,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .default_value = 1.f,
               .label = "Fog",
               .section = "Atmosphere",
-              .tooltip = "Enhanced lights the main view's fog as light behaves: the sun and moon reach it only where nothing shades them (shadow maps nearby, hills across the map), lamps light it, it thins with height, and thick fog drifts unevenly. The fog's amount and colors for each weather and time stay the game's.",
+              .tooltip = "Enhanced lights the fog of the main view the way light behaves in it: the sun and moon reach it only where nothing shades them (nearby objects, and hills across the map), lamps light it, it thins with height, and thick fog drifts unevenly. The fog's amount and colors for each weather and time stay the game's.",
               .labels = {"Vanilla", "Enhanced"},
           },
           new renodx::utils::settings::Setting{
@@ -276,11 +276,11 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .default_value = 100.f,
               .label = "Fog Shadow Strength",
               .section = "Atmosphere (Advanced)",
-              .tooltip = "How much of the sun's and moon's light a shadow takes from the fog. 100% is a full shadow; 0% gives the game's fog.",
+              .tooltip = "How much of the sun's and moon's light a shadow takes from the fog. 100% is a full shadow; 0% lights the fog everywhere, as the game does.",
               .max = 100.f,
               .format = "%.0f%%",
               .parse = [](float value) { return value * 0.01f; },
-              .is_visible = is_volumetric,
+              .is_visible = is_fog_enhanced,
           },
           new renodx::utils::settings::Setting{
               .key = "AtmosphereFogHeightFalloff",
@@ -292,7 +292,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .max = 100.f,
               .format = "%.0f%%",
               .parse = [](float value) { return value * 0.01f; },
-              .is_visible = is_volumetric,
+              .is_visible = is_fog_enhanced,
           },
           new renodx::utils::settings::Setting{
               .key = "AtmosphereFogUnevenness",
@@ -304,7 +304,7 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .max = 100.f,
               .format = "%.0f%%",
               .parse = [](float value) { return value * 0.01f; },
-              .is_visible = is_volumetric,
+              .is_visible = is_fog_enhanced,
           },
           new renodx::utils::settings::Setting{
               .key = "AtmosphereFogLocalLights",
@@ -312,23 +312,23 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .default_value = 100.f,
               .label = "Local Lights in Fog",
               .section = "Atmosphere (Advanced)",
-              .tooltip = "How strongly lamps, spot lights and other local lights light the fog around them, which the game's fog does not do. 100% is what fog of this thickness scatters of the light the lamps put on surfaces; 0% turns it off. Needs Shadows set to Enhanced, which gathers the lights.",
+              .tooltip = "How strongly lamps, spotlights and other local lights light the fog around them, which the game's fog does not do. 100% is what fog of this thickness scatters of the light the lamps put on surfaces; 0% turns it off. Needs Shadows set to Enhanced, which gathers the lights.",
               .max = 100.f,
               .format = "%.0f%%",
               .is_enabled = [shader_injection] { return shader_injection->shadows_mode >= 0.5f; },
               .parse = [](float value) { return value * 0.01f; },
-              .is_visible = is_volumetric,
+              .is_visible = is_fog_enhanced,
           },
           new renodx::utils::settings::Setting{
               .key = "AtmosphereFogTerrainShadows",
               .binding = &shader_injection->fog_terrain_shadows,
               .value_type = renodx::utils::settings::SettingValueType::BOOLEAN,
               .default_value = 1.f,
-              .label = "Terrain Shadows",
+              .label = "Fog Terrain Shadows",
               .section = "Atmosphere (Advanced)",
               .tooltip = "Lets hills and mountains shade the fog and haze across the whole map, far past the reach of the shadow maps. Most visible at a low sun or moon. Off keeps only the nearby shadows.",
               .labels = {"Off", "On"},
-              .is_visible = is_volumetric,
+              .is_visible = is_fog_enhanced,
           },
           new renodx::utils::settings::Setting{
               .key = "AtmosphereFogDebugView",
@@ -337,9 +337,9 @@ inline void AppendSettings(renodx::utils::settings::Settings* registry, ShaderIn
               .default_value = 0.f,
               .label = "Fog Debug View",
               .section = "Atmosphere (Advanced)",
-              .tooltip = "Over a dimmed scene: Shadows shows how much of the sun's or moon's light reaches the fog at each pixel's distance, white where it is lit and black in shadow. Local Lights shows only the light that lamps and spot lights add to the fog.",
+              .tooltip = "Over a dimmed scene: Shadows shows how much of the sun's or moon's light reaches the fog at each pixel's distance, white where it is lit and black in shadow. Local Lights shows only the light that lamps and spotlights add to the fog.",
               .labels = {"Off", "Shadows", "Local Lights"},
-              .is_visible = is_volumetric,
+              .is_visible = is_fog_enhanced,
           },
       });
 }

@@ -57,7 +57,7 @@ inline constexpr UINT LIGHT_BYTES = 176u;
 // Bound a single atlas allocation, including any padding on its final row.
 inline constexpr uint64_t MAX_ATLAS_BYTES = 256ull * 1024ull * 1024ull;
 inline constexpr uint64_t MAX_ATLAS_DIMENSION = D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION;
-// Atlas space in full-screen masks when the spot budget is unlimited.
+// Atlas space in full-screen masks when the spotlight limit is off.
 inline constexpr UINT DEFAULT_ATLAS_SCREENS = 13u;
 inline constexpr UINT SETTINGS_BYTES = (sizeof(ShaderInjectData) + 15u) & ~15u;
 
@@ -83,8 +83,8 @@ struct Storage {
   std::atomic<uint64_t> lights_scene = 0u;
   Microsoft::WRL::ComPtr<ID3D11Buffer> scene_buffer;
   Microsoft::WRL::ComPtr<ID3D11Buffer> settings_buffer;
-  // Bound as the spot budget when no light of the batch uses one.
-  Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> idle_budget;
+  // Bound as the spotlight counter when no light of the batch uses one.
+  Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> idle_spotlight_counter;
   uint32_t width = 0u;
   uint32_t height = 0u;
   uint32_t requested_screens = 0u;
@@ -93,7 +93,7 @@ struct Storage {
 };
 
 // A 16-byte counter for the setup pass, zeroed at creation.
-inline Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> CreateBudget(ID3D11Device* device) {
+inline Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> CreateSpotlightCounter(ID3D11Device* device) {
   const D3D11_BUFFER_DESC description = {
       .ByteWidth = 16u,
       .Usage = D3D11_USAGE_DEFAULT,
@@ -195,8 +195,8 @@ inline std::shared_ptr<Storage> CreateStorage(ID3D11Device* device, uint32_t wid
   if (FAILED(device->CreateBuffer(&constants, nullptr, &storage->scene_buffer))) return nullptr;
   constants.ByteWidth = SETTINGS_BYTES;
   if (FAILED(device->CreateBuffer(&constants, nullptr, &storage->settings_buffer))) return nullptr;
-  storage->idle_budget = CreateBudget(device);
-  if (storage->idle_budget == nullptr) return nullptr;
+  storage->idle_spotlight_counter = CreateSpotlightCounter(device);
+  if (storage->idle_spotlight_counter == nullptr) return nullptr;
   return storage;
 }
 
@@ -217,7 +217,7 @@ struct __declspec(uuid("DFA07B80-EFCF-4D15-83EE-98B7DA01A5E2")) DeviceState {
 // Records setup, clear, and trace. The caller has uploaded the inputs and
 // preserves the compute state these calls change.
 inline void RecordPasses(ID3D11DeviceContext* context, const DeviceState& programs, const Storage& storage,
-                         ID3D11ShaderResourceView* depth, ID3D11UnorderedAccessView* budget, UINT light_count) {
+                         ID3D11ShaderResourceView* depth, ID3D11UnorderedAccessView* spotlight_counter, UINT light_count) {
   constexpr std::array<ID3D11ShaderResourceView*, 1> no_input = {};
   constexpr std::array<ID3D11UnorderedAccessView*, 3> no_outputs = {};
   context->CSSetConstantBuffers(2u, 1u, storage.scene_buffer.GetAddressOf());
@@ -226,7 +226,7 @@ inline void RecordPasses(ID3D11DeviceContext* context, const DeviceState& progra
   context->CSSetShaderResources(3u, 1u, no_input.data());
   context->CSSetShaderResources(4u, 1u, storage.light_srv.GetAddressOf());
   const std::array<ID3D11UnorderedAccessView*, 3> outputs = {
-      storage.dispatch_uav.Get(), storage.atlas_uav.Get(), budget != nullptr ? budget : storage.idle_budget.Get()};
+      storage.dispatch_uav.Get(), storage.atlas_uav.Get(), spotlight_counter != nullptr ? spotlight_counter : storage.idle_spotlight_counter.Get()};
   context->CSSetUnorderedAccessViews(0u, static_cast<UINT>(outputs.size()), outputs.data(), nullptr);
   context->CSSetSamplers(0u, 1u, programs.border.GetAddressOf());
   context->CSSetShader(programs.shaders[0].Get(), nullptr, 0u);
@@ -251,7 +251,7 @@ struct Batch {
   std::shared_ptr<Storage> storage;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
   Microsoft::WRL::ComPtr<ID3D11RenderTargetView> target;
-  Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> budget;
+  Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> spotlight_counter;
   ShaderInjectData settings = {};
   std::array<float, SCENE_BYTES / 4u> scene = {};
   // The header vector, then LIGHT_VECTORS per light.
@@ -299,7 +299,7 @@ struct Batch {
     std::array<std::byte, SETTINGS_BYTES> settings_bytes = {};
     std::memcpy(settings_bytes.data(), &settings, sizeof(settings));
     context->UpdateSubresource(storage->settings_buffer.Get(), 0u, nullptr, settings_bytes.data(), 0u, 0u);
-    RecordPasses(context, *programs, *storage, depth.Get(), budget.Get(), light_count);
+    RecordPasses(context, *programs, *storage, depth.Get(), spotlight_counter.Get(), light_count);
     rendering::d3d11_compute_state::Restore(cmd_list, saved);
     static std::atomic_flag reported;
     if (!reported.test_and_set(std::memory_order_relaxed)) {
@@ -401,7 +401,7 @@ inline void BeginLocalLights() {
 // CPU constants cannot be read, or the batch cannot take it.
 inline bool CollectLight(ID3D11DeviceContext* context, DeviceState* device_state, const ShaderInjectData& settings,
                          uint32_t light_type, bool has_shadow_map, uint32_t width, uint32_t height, uint64_t input_generation,
-                         ID3D11ShaderResourceView* depth, ID3D11RenderTargetView* target, ID3D11UnorderedAccessView* budget,
+                         ID3D11ShaderResourceView* depth, ID3D11RenderTargetView* target, ID3D11UnorderedAccessView* spotlight_counter,
                          std::array<ID3D11ShaderResourceView*, 2>* views) {
   if (light_type == 0u) return false;
   const auto scope = engine::views::GetScope();
@@ -449,13 +449,13 @@ inline bool CollectLight(ID3D11DeviceContext* context, DeviceState* device_state
     second->GetResource(&second_resource);
     return first_resource == second_resource;
   };
-  constexpr const char* different_inputs = "its depth, target, settings, camera or spot budget differ from the batch's";
+  constexpr const char* different_inputs = "its depth, target, settings, camera or spotlight counter differ from the batch's";
   const std::scoped_lock lock(batch->mutex);
   if (batch->sealed || batch->draw_order.size() == MAX_LIGHTS) return rejected(2u, "its lighting pass's batch has already run or is full");
   if (batch->draw_order.empty()) {
     // The first light fixes what the whole batch traces against.
-    const auto requested_screens = (std::isfinite(settings.spot_contact_shadow_budget) && settings.spot_contact_shadow_budget >= 1.f
-                                        ? static_cast<UINT>(std::min(settings.spot_contact_shadow_budget, 256.f))
+    const auto requested_screens = (std::isfinite(settings.contact_shadow_spotlight_limit) && settings.contact_shadow_spotlight_limit >= 1.f
+                                        ? static_cast<UINT>(std::min(settings.contact_shadow_spotlight_limit, 256.f))
                                         : DEFAULT_ATLAS_SCREENS);
     {
       const std::unique_lock storage_lock(device_state->mutex);
@@ -486,21 +486,21 @@ inline bool CollectLight(ID3D11DeviceContext* context, DeviceState* device_state
     // layout can change while a lighting pass is still recording.
     const auto& traced = batch->settings;
     const bool same_settings = traced.shadow_softness == settings.shadow_softness
-                               && traced.contact_shadow_reach == settings.contact_shadow_reach
+                               && traced.contact_shadow_length == settings.contact_shadow_length
                                && traced.contact_shadow_render_scale == settings.contact_shadow_render_scale
                                && traced.contact_shadow_debug_view == settings.contact_shadow_debug_view
                                && traced.shadow_debug_light == settings.shadow_debug_light
-                               && traced.spot_contact_shadow_budget == settings.spot_contact_shadow_budget;
+                               && traced.contact_shadow_spotlight_limit == settings.contact_shadow_spotlight_limit;
     if (!same_texture(batch->depth.Get(), depth) || !same_texture(batch->target.Get(), target)
         || batch->input_generation != input_generation || batch->storage->width != width || batch->storage->height != height
         || !same_settings || !same_camera) {
       return rejected(3u, different_inputs);
     }
   }
-  if (budget != nullptr) {
-    // Every budgeted spot of a lighting pass counts against the same counter.
-    if (batch->budget != nullptr && batch->budget.Get() != budget) return rejected(3u, different_inputs);
-    batch->budget = budget;
+  if (spotlight_counter != nullptr) {
+    // Every limited spotlight of a lighting pass counts on the same counter.
+    if (batch->spotlight_counter != nullptr && batch->spotlight_counter.Get() != spotlight_counter) return rejected(3u, different_inputs);
+    batch->spotlight_counter = spotlight_counter;
   }
   const auto index = static_cast<uint32_t>(batch->draw_order.size());
   batch->draw_order.emplace_back(scope.node, index);
@@ -521,7 +521,7 @@ inline bool CollectLight(ID3D11DeviceContext* context, DeviceState* device_state
 // own bound buffers, so this path needs nothing from the engine.
 inline bool RecordLight(ID3D11DeviceContext* context, DeviceState* device_state, const ShaderInjectData& settings,
                         uint32_t light_type, bool has_shadow_map, uint32_t width, uint32_t height,
-                        ID3D11ShaderResourceView* depth, ID3D11UnorderedAccessView* budget,
+                        ID3D11ShaderResourceView* depth, ID3D11UnorderedAccessView* spotlight_counter,
                         const std::array<ID3D11Buffer*, 2>& native_constants, const std::array<UINT, 2>& first_constants,
                         std::array<ID3D11ShaderResourceView*, 2>* views) {
   Microsoft::WRL::ComPtr<ID3D11Device> device;
@@ -603,7 +603,7 @@ inline bool RecordLight(ID3D11DeviceContext* context, DeviceState* device_state,
   for (size_t index = 0u; index < saved_buffers.size(); ++index) {
     saved_buffer_refs[index].Attach(saved_buffers[index]);
   }
-  RecordPasses(context, *device_state, *storage, depth, budget, 1u);
+  RecordPasses(context, *device_state, *storage, depth, spotlight_counter, 1u);
   context->CSSetShaderResources(0u, 1u, saved_inputs.data());
   context->CSSetShaderResources(3u, 2u, saved_inputs.data() + 1u);
   context->CSSetUnorderedAccessViews(0u, static_cast<UINT>(saved_outputs.size()), saved_outputs.data(), nullptr);

@@ -83,7 +83,7 @@ Under **Atmosphere (Advanced)**, shown while Fog is Enhanced:
 - **Fog Height Falloff** (`AtmosphereFogHeightFalloff`, 0 to 100%, default 100%): how fast the density thins with height. 0% is the game's even fog.
 - **Fog Unevenness** (`AtmosphereFogUnevenness`, 0 to 100%, default 100%): how much thick fog's density varies. 0% is the game's even fog.
 - **Local Lights in Fog** (`AtmosphereFogLocalLights`, 0 to 100%, default 100%): the strength of the local lights' share. Disabled unless Shadows is Enhanced.
-- **Terrain Shadows** (`AtmosphereFogTerrainShadows`, default On): the terrain passes and their lookup.
+- **Fog Terrain Shadows** (`AtmosphereFogTerrainShadows`, default On): the terrain passes and their lookup.
 - **Fog Debug View** (`AtmosphereFogDebugView`): Shadows writes each cell's visibility into the volume in place of its light, over a dimmed scene. Local Lights writes only the local lights' share.
 
 ### Limits

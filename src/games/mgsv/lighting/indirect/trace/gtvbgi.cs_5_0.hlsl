@@ -196,7 +196,7 @@ float4 LoadTraceSource(int2 pixel, float depth, bool prepared_available) {
   uint prepared_width, prepared_height;
   prepared_source.GetDimensions(prepared_width, prepared_height);
   const bool prepared_available = prepared_width == buffer_width && prepared_height == buffer_height;
-  const int diagnostic = (int)CUSTOM_MGSV_LIGHTING_DEBUG_VIEW;
+  const int diagnostic = (int)CUSTOM_MGSV_INDIRECT_LIGHTING_DEBUG_VIEW;
   // Debug views 2 to 6 read diagnostic_output. Fill it first so pixels that
   // exit early still show a defined value.
   if (diagnostic >= 2 && diagnostic <= 6) {
@@ -204,7 +204,7 @@ float4 LoadTraceSource(int2 pixel, float depth, bool prepared_available) {
     if (diagnostic == 6) diagnostic_output[ao_pixel] = 1.0;
   }
 
-  const float scale = max(CUSTOM_MGSV_LIGHTING_RESOLUTION_DIVISOR, 1.0);
+  const float scale = max(CUSTOM_MGSV_DIFFUSE_RESOLUTION_DIVISOR, 1.0);
   const int2 receiver_pixel = min((int2)floor((float2(ao_pixel) + 0.5) * scale),
                                   int2(buffer_width, buffer_height) - 1);
   const float depth = depth_buffer.Load(int3(receiver_pixel, 0)).x;
@@ -239,7 +239,7 @@ float4 LoadTraceSource(int2 pixel, float depth, bool prepared_available) {
   // The reference CDF assumes a view-facing receiver. Do not extrapolate its
   // measure to backfacing shading normals; use neutral visibility instead.
   if (any(!isfinite(normal)) || !(position.z > 0.0) || dot(normal, view_direction) < 0.0) {
-    // The Valid / Invalid Results view colors each rejection reason.
+    // The Result Validity view colors each rejection reason.
     if (diagnostic == 4) {
       float3 reason = float3(0.0, 0.0, 1.0);
       if (any(!isfinite(normal)))
@@ -257,9 +257,9 @@ float4 LoadTraceSource(int2 pixel, float depth, bool prepared_available) {
                                 * float2(1.0, -1.0)
                             + 1.0)
                            * 0.5 * float2(buffer_width, buffer_height);
-  const int slices = (int)max(CUSTOM_MGSV_LIGHTING_SLICE_COUNT, 1.0);
-  const int steps = (int)max(CUSTOM_MGSV_LIGHTING_SAMPLES_PER_SIDE, 1.0);
-  const float radius_px = max(CUSTOM_MGSV_LIGHTING_SEARCH_RADIUS_PIXELS, 1.0);
+  const int slices = (int)max(CUSTOM_MGSV_DIFFUSE_DIRECTION_COUNT, 1.0);
+  const int steps = (int)max(CUSTOM_MGSV_DIFFUSE_SAMPLES_PER_SIDE, 1.0);
+  const float radius_px = max(CUSTOM_MGSV_DIFFUSE_SEARCH_RADIUS_PIXELS, 1.0);
   const float step_multiplier = pow(radius_px, 1.0 / float(steps));
 
   // 3. Build a basis around the view direction; slices rotate about it. The
@@ -278,7 +278,7 @@ float4 LoadTraceSource(int2 pixel, float depth, bool prepared_available) {
   // With reconstruction on, the noise changes with each camera sample so the
   // temporal upscaler averages it. With reconstruction off, a fixed pattern
   // keeps the image still.
-  const uint noise_frame = CUSTOM_RECONSTRUCTION_MODE != 0.0 ? (uint)CUSTOM_MGSV_LIGHTING_NOISE_FRAME : 0u;
+  const uint noise_frame = CUSTOM_RECONSTRUCTION_MODE != 0.0 ? (uint)CUSTOM_MGSV_DIFFUSE_NOISE_FRAME : 0u;
   const uint2 noise_pixel = ao_pixel & 127u;
 
   // 4. Rotate each slice using IS-FAST noise (EA's importance-sampled
@@ -371,7 +371,7 @@ float4 LoadTraceSource(int2 pixel, float depth, bool prepared_available) {
         if (any(sample_pixel < 0) || any(sample_pixel >= int2(buffer_width, buffer_height))) break;
 
         int mip_level = 0;
-        [branch] if (CUSTOM_MGSV_LIGHTING_DEPTH_MIPS_ENABLED > 0.5) {
+        [branch] if (CUSTOM_MGSV_DIFFUSE_COARSE_DEPTH > 0.5) {
           mip_level = clamp((int)floor(log2(max(sample_distance, 1.0)) - 3.3), 0, AO_DEPTH_MIP_LEVELS);
         }
         const float sample_depth = LoadTraceDepth(sample_pixel, mip_level);
@@ -408,7 +408,7 @@ float4 LoadTraceSource(int2 pixel, float depth, bool prepared_available) {
           if (!ResolveDepthOwner(sample_pixel, mip_level, sample_depth, owner)) {
             gi_valid = false;
           } else {
-            if (CUSTOM_MGSV_GI_REJECT_BACKFACES > 0.5) {
+            if (CUSTOM_MGSV_DIFFUSE_REJECT_BACKFACES > 0.5) {
               const float3 source_normal = DecodeNormal(normal_buffer.Load(int3(owner, 0)).xyz);
               // A backfacing surface still occludes. Only its outgoing radiance
               // is masked, using the reference's projected source hemisphere.
@@ -458,7 +458,7 @@ float4 LoadTraceSource(int2 pixel, float depth, bool prepared_available) {
   // 6. Average the slices. Open sectors count as ambient visibility; blocked
   // sectors have contributed their source radiance once.
   const float occlusion = saturate(1.0 - visibility / float(slices));
-  const float applied = saturate(occlusion * CUSTOM_MGSV_AO_STRENGTH);
+  const float applied = saturate(occlusion * CUSTOM_MGSV_AMBIENT_OCCLUSION_STRENGTH);
   if (diagnostic == 6) {
     diagnostic_output[ao_pixel] = float4((1.0 - applied).xxx, 1.0);
   }

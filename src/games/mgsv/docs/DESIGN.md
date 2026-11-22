@@ -303,9 +303,9 @@ Lighting Quality selects the raster tier (4.6), and the ray-traced tiers once st
 
 The preset sets the rest; changing any of them selects Custom. Reference Accumulation is the ground truth the other methods are checked against.
 
-**Direct Lighting (Advanced)** keeps Shadow Softness, Contact Shadow Reach (`DirectLightingContactShadowReach`), Spot Contact Shadow Budget (`DirectLightingSpotContactShadowBudget`) and the debug views as they are, and gains **Local Light Shadows** (`DirectLightingLocalShadows`: Vanilla (default), All Lights; All Lights needs ray tracing).
+**Direct Lighting (Advanced)** keeps Shadow Softness, Contact Shadow Length (`DirectLightingContactShadowLength`), Contact Shadow Spotlight Limit (`DirectLightingContactShadowSpotlightLimit`) and the debug views as they are, and gains **Local Light Shadows** (`DirectLightingLocalShadows`: Vanilla (default), All Lights; All Lights needs ray tracing).
 
-**Indirect Lighting (Advanced)** keeps the four strength controls, Multiple Bounces and the debug views. The diffuse resolution, rays per pixel, search radius, direction and sample controls and the depth-mip and backface-rejection switches are retired as the planned gather and reflection changes fix the values they tune; their work moves into Lighting Quality.
+**Indirect Lighting (Advanced)** keeps the four strength controls, Multiple Bounces and the debug views. Diffuse Resolution, Reflection Rays per Pixel, the diffuse search radius, direction and sample controls, Diffuse Coarse Depth and Reject Backfacing Bounce Sources are retired as the planned gather and reflection changes fix the values they tune; their work moves into Lighting Quality.
 
 **Atmosphere**
 
@@ -316,7 +316,7 @@ The preset sets the rest; changing any of them selects Custom. Reference Accumul
 | Fog Height Falloff (Advanced) | `AtmosphereFogHeightFalloff` | 0 to 100% | 100% |
 | Fog Unevenness (Advanced) | `AtmosphereFogUnevenness` | 0 to 100% | 100% |
 | Local Lights in Fog (Advanced) | `AtmosphereFogLocalLights` | 0 to 100%; needs Shadows on Enhanced | 100% |
-| Terrain Shadows (Advanced) | `AtmosphereFogTerrainShadows` | Off, On | On |
+| Fog Terrain Shadows (Advanced) | `AtmosphereFogTerrainShadows` | Off, On | On |
 | Fog Debug View (Advanced) | `AtmosphereFogDebugView` | Off, Shadows, Local Lights | Off |
 | Light Shafts | `AtmosphereLightShafts` | Off, Soft, Sharp | Soft until Sharp is measured |
 | Fog Quality | `AtmosphereFogQuality` | Medium, High, Ultra | High |

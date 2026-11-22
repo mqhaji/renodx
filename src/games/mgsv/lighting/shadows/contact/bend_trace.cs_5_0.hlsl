@@ -167,7 +167,7 @@ void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
   // One dispatch traces every admitted light; each group finds its light from
   // its tile index. A group's 64 lanes are receivers on one shared screen ray
   // from the light. Each lane tests its receiver against the depths of the
-  // next pixels toward the light, up to the reach setting.
+  // next pixels toward the light, up to Contact Shadow Length.
   uint tile = group.y + (group.z << BEND_TILE_ROW_BITS);
   const uint light_count = asuint(bend_lights.Load(0u).x);
   // Each light stores the running total of trace tiles. Skipped lights repeat
@@ -295,7 +295,7 @@ void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
                       - bend_camera_center.xy)
                      * bend_projection_param.xy;
   const float3 receiver_position = float3(ray * view_depth, view_depth);
-  // Reach is a world distance toward the light. The point that far along the
+  // Contact Shadow Length is a world distance toward the light. The point that far along the
   // light's direction lies, by perspective division, this many render pixels
   // along the ray's main screen axis: the direction's part across the camera
   // ray through the receiver, over the point's view depth, in pixels per unit
@@ -309,12 +309,12 @@ void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
   const float3 toward_source = directional ? source : source - receiver_position;
   const float source_distance = length(toward_source);
   if (projected && isfinite(footprint) && footprint > 0.0 && isfinite(source_distance) && source_distance > 0.0
-      && isfinite(CUSTOM_CONTACT_SHADOW_REACH) && CUSTOM_CONTACT_SHADOW_REACH > 0.0) {
+      && isfinite(CUSTOM_CONTACT_SHADOW_LENGTH) && CUSTOM_CONTACT_SHADOW_LENGTH > 0.0) {
     const float3 toward = toward_source / source_distance;
-    const float end_depth = view_depth + CUSTOM_CONTACT_SHADOW_REACH * toward.z;
+    const float end_depth = view_depth + CUSTOM_CONTACT_SHADOW_LENGTH * toward.z;
     const float across = abs(major_x ? toward.x - ray.x * toward.z : toward.y - ray.y * toward.z);
     // An end behind the camera is past the screen's edge.
-    const float pixels = end_depth > 0.0 ? across * CUSTOM_CONTACT_SHADOW_REACH * view_depth / (footprint * end_depth) : float(BEND_MAX_REACH);
+    const float pixels = end_depth > 0.0 ? across * CUSTOM_CONTACT_SHADOW_LENGTH * view_depth / (footprint * end_depth) : float(BEND_MAX_REACH);
     reach = (uint)clamp(isfinite(pixels) ? pixels : 16.0, 16.0, float(BEND_MAX_REACH));
   }
   if (projected && !directional) {
@@ -449,7 +449,7 @@ void main(uint3 group: SV_GroupID, uint lane: SV_GroupIndex) {
         blocker_pixel = BendSlotPixel(first_sample + soft_index + component) - lane;
       }
     }
-    // The reach setting need not be a multiple of four samples.
+    // The search length need not be a multiple of four samples.
     [loop]
     for (; soft_index < samples - fade_samples; ++soft_index) {
       const float separation = BendCasterSeparation(receiver, reference - shared_depth[first_sample + soft_index] * depth_scale, first_sample + soft_index);

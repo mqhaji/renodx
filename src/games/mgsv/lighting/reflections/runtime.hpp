@@ -446,7 +446,7 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
   const float occlusion_strength = material_inputs::controls->specular_occlusion_strength;
   const auto rays_per_pixel = static_cast<uint32_t>(std::clamp(material_inputs::controls->reflection_rays_per_pixel,
                                                                1.f, static_cast<float>(MGSV_REFLECTION_MAX_RAYS_PER_PIXEL)));
-  const int debug_view = static_cast<int>(material_inputs::controls->lighting_debug_view);
+  const int debug_view = static_cast<int>(material_inputs::controls->indirect_lighting_debug_view);
   const bool camera_valid = scene.valid && camera.valid && camera.camera_matrix_valid
                             && camera.scene == owner.scene && camera.owner_generation == owner.generation
                             && camera.publication_sequence == scene.camera_publication && camera.reservation != 0u;

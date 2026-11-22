@@ -297,7 +297,7 @@ inline renodx::mods::shader::CustomShaders CreateShaders(ShaderInjectData* shade
 
       // Light variants by type. Each port keeps its native masks and material
       // response. Lights without shadow maps still get contact shadows and the
-      // same spotlight budget.
+      // same spotlight limit.
       {0x0636037A, local_shadow_shader(0x0636037A, __0x0636037A, 2u, true)},
       // The largest-cascade sun fades its shadows to a world shadow mask (t13).
       {0x0C708B4B, directional_shadow_shader(0x0C708B4B, __0x0C708B4B, true, true)},

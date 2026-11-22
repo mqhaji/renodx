@@ -53,7 +53,7 @@ ReflectionResult LoadReflectionResult(float2 uv) {
 // destination are left to the caller. Debug views 11 to 17 show the
 // reflection inputs; magenta marks a pixel without valid reflection data.
 float3 ComposeReflections(float3 encoded_scene, ReflectionResult result) {
-  const int debug_view = (int)CUSTOM_MGSV_LIGHTING_DEBUG_VIEW;
+  const int debug_view = (int)CUSTOM_MGSV_INDIRECT_LIGHTING_DEBUG_VIEW;
   float3 scene = renodx::color::srgb::Decode(max(encoded_scene, 0.0));
   const float4 light = result.light;
   const float4 environment_weight = result.environment_weight;

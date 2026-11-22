@@ -107,7 +107,7 @@ bool BendSphereOutsideRays(float3 center, float radius, float2 low_pixel, float2
 
 #ifdef MGSV_BEND_SETUP
 RWByteAddressBuffer bend_dispatch : register(u0);
-RWByteAddressBuffer bend_spot_budget : register(u2);
+RWByteAddressBuffer bend_spotlight_counter : register(u2);
 #else
 ByteAddressBuffer bend_dispatch : register(t3);
 #endif

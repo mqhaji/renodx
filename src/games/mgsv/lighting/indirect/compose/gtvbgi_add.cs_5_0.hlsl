@@ -41,7 +41,7 @@ RWTexture2D<float4> scattering_copy : register(u2);
   // The trace placed lighting pixel q at full-resolution pixel
   // floor((q + 0.5) * scale), which is q * scale + floor(scale / 2) for the
   // divisors 1, 2, 4 and 8, so that pixel takes q's result alone.
-  const float scale = max(CUSTOM_MGSV_LIGHTING_RESOLUTION_DIVISOR, 1.0);
+  const float scale = max(CUSTOM_MGSV_DIFFUSE_RESOLUTION_DIVISOR, 1.0);
   const float2 position = (float2(pixel) - floor(0.5 * scale)) / scale;
   const int2 base = (int2)floor(position);
   const float2 fraction = frac(position);
@@ -61,7 +61,7 @@ RWTexture2D<float4> scattering_copy : register(u2);
   float weight_sum = 0.0;
   float visibility = 0.0;
   float visibility_weight = 0.0;
-  const int diagnostic = (int)clamp(CUSTOM_MGSV_LIGHTING_DEBUG_VIEW, 0.0, 17.0);
+  const int diagnostic = (int)clamp(CUSTOM_MGSV_INDIRECT_LIGHTING_DEBUG_VIEW, 0.0, 17.0);
   float3 diagnostic_sum = 0.0;
   float diagnostic_weight = 0.0;
   [unroll] for (int y = 0; y < 2; ++y) {
@@ -100,7 +100,7 @@ RWTexture2D<float4> scattering_copy : register(u2);
   // 2. Rebuild the native ambient diffuse exactly as the game upsampled it, so
   // subtracting it from the light buffer leaves direct light unchanged. The
   // trace upsample above differs and cannot be reused for this.
-  const float3 bounce = radiance / max(weight_sum, 1.0e-4) * CUSTOM_MGSV_DIFFUSE_GI_STRENGTH;
+  const float3 bounce = radiance / max(weight_sum, 1.0e-4) * CUSTOM_MGSV_DIFFUSE_BOUNCE_STRENGTH;
   const float4 center_light = light_output.Load(pixel);
   const float ao = visibility_weight > 1.0e-4 ? visibility / visibility_weight : 1.0;
   float3 ambient = 0.0;

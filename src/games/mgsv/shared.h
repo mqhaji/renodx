@@ -29,63 +29,58 @@ struct ShaderInjectData {
   float scene_grade_strength;
   float scene_grade_scaling;
 
+  // Effects.
+  float bloom_type;  // 0 = Vanilla, 1 = Enhanced.
   float bloom_strength;
   float sun_brightness_boost_enabled;
   float film_grain_random;
   float film_grain_strength;
-
-  // TemporalMode: 0 = Off, 1 = Analytical TAA, 2 = FSR, 3 = NVIDIA DLSS.
-  float reconstruction_mode;
-
-  float swap_chain_output_preset;
   float motion_blur_strength;
 
-  // 0 = Vanilla, 1 = Enhanced shadow maps and contact shadows.
-  float shadows_mode;
+  // Temporal Anti-Aliasing.
+  float reconstruction_mode;  // 0 = Off, 1 = Analytical TAA, 2 = FSR, 3 = NVIDIA DLSS.
 
-  float shadow_softness;       // Multiplies tuned source sizes; 1 keeps the default softness.
-  float contact_shadow_reach;  // Contact-shadow search length in game units, converted to pixels at each receiver's depth.
+  float swap_chain_output_preset;
+
+  // Direct Lighting.
+  float shadows_mode;                    // 0 = Vanilla, 1 = Enhanced shadow-map filtering and contact shadows.
+  float shadow_softness;                 // Scales the light sizes that soften shadow-map and contact edges; 1 is the tuned size.
+  float contact_shadow_length;           // Search length toward the light in game units; each receiver converts it to pixels.
+  float contact_shadow_spotlight_limit;  // Spotlights traced per lighting pass; 0 = no count, 13 screens of masks.
   float shadow_map_debug_view;
-
-  // Indirect Lighting controls. Keep their storage order stable across passes.
-  float indirect_lighting_mode;  // 0 = Vanilla, 1 = Enhanced diffuse AO/GI and reflections together.
-  float ao_strength;
-  float diffuse_gi_strength;
-  float reflection_strength;  // Blends the complete screen/environment reflection replacement.
-  float lighting_resolution;  // Pixel count: 0 = full, 1 = 1/4, 2 = 1/16, 3 = 1/64.
-  float lighting_search_radius_pixels;
-  float lighting_slice_count;
-  float lighting_samples_per_side;
-  float lighting_depth_mips_enabled;  // User choice; each dispatch copy records whether the mips are ready.
-  float gi_reject_backfaces;
-  float diffuse_multiple_bounces;  // Read by the host only: the trace's source includes the previous frame's indirect light.
-  float lighting_debug_view;
-
-  // Set by the host for each lighting dispatch, not by the menu.
-  float lighting_resolution_divisor;  // Full-resolution pixels per trace pixel along each axis: 1, 2, 4, or 8.
-  float lighting_noise_frame;         // Changes the FAST sample sequence; does not prove history is valid.
-
-  // Bend contact-shadow controls and values copied for this light draw.
   float contact_shadow_debug_view;
-  float shadow_debug_light;
+  float shadow_debug_light;  // Light the shadow debug views show: 0 = sun or moon, 1 = spot, 2 = point.
+  // Set by the host, not by the menu.
   float contact_shadow_render_scale;  // Render pixels per output pixel along each axis; 1 without upscaling.
+  float shadow_noise_frame;           // IS-FAST layer (0 to 31) for shadow-map filtering, advanced once per Present.
 
-  // Local-light contact work limits.
-  float spot_contact_shadow_budget;  // Maximum spotlight evaluations per lighting-buffer fill; 0 = unlimited.
+  // Indirect Lighting.
+  float indirect_lighting_mode;        // 0 = Vanilla, 1 = Enhanced diffuse AO/GI and reflections together.
+  float diffuse_resolution;            // Diffuse trace pixel count: 0 = full, 1 = 1/4, 2 = 1/16, 3 = 1/64.
+  float reflection_rays_per_pixel;     // GGX samples per pixel; sets trace cost, not strength.
+  float ambient_occlusion_strength;    // 0 to 1; darkens only the game's ambient light.
+  float diffuse_bounce_strength;       // 0 to 1.
+  float reflection_strength;           // 0 to 1; blends the whole screen and environment reflection replacement.
+  float specular_occlusion_strength;   // 0 to 1; blocks the environment fallback where a reflection ray hits geometry.
+  float diffuse_search_radius_pixels;  // Output pixels in the menu; each dispatch's copy is in render pixels.
+  float diffuse_direction_count;
+  float diffuse_samples_per_side;
+  float diffuse_coarse_depth;      // Requested in the menu; each dispatch's copy says whether the depth mips are ready.
+  float diffuse_reject_backfaces;  // Surfaces facing away from a receiver still block but send it no light.
+  float diffuse_multiple_bounces;  // Read by the host only: the trace's source includes the previous frame's indirect light.
+  float indirect_lighting_debug_view;
+  // Set by the host for each diffuse dispatch, not by the menu.
+  float diffuse_resolution_divisor;  // Full-resolution pixels per trace pixel along each axis: 1, 2, 4, or 8.
+  float diffuse_noise_frame;         // Selects the IS-FAST layer; does not say whether history is valid.
 
-  // IS-FAST noise layer (0-31) for shadows, advanced once per Present.
-  float shadow_noise_frame;
-
-  float bloom_type;                   // 0 = Vanilla, 1 = Enhanced.
-  float specular_occlusion_strength;  // Blocks environment fallback along confirmed geometry hits.
-  float reflection_rays_per_pixel;    // GGX samples per receiver; controls trace cost rather than strength.
-  float fog_mode;                     // 0 = Vanilla, 1 = Enhanced. Read by the host only.
-  float fog_shadow_strength;          // 0 to 1. This and the fog values below are read by the host only.
-  float fog_terrain_shadows;          // 0 = Off, 1 = On.
-  float fog_debug_view;               // 0 = Off, 1 = Shadows, 2 = Local Lights.
-  float fog_local_lights;             // 0 to 1.
-  float fog_height_falloff;           // 0 to 1.
-  float fog_unevenness;               // 0 to 1.
+  // Atmosphere. Read by the host only.
+  float fog_mode;             // 0 = Vanilla, 1 = Enhanced.
+  float fog_shadow_strength;  // 0 to 1.
+  float fog_height_falloff;   // 0 to 1.
+  float fog_unevenness;       // 0 to 1.
+  float fog_local_lights;     // 0 to 1.
+  float fog_terrain_shadows;  // 0 = Off, 1 = On.
+  float fog_debug_view;       // 0 = Off, 1 = Shadows, 2 = Local Lights.
 };
 
 #ifndef __cplusplus
@@ -113,46 +108,41 @@ cbuffer RenoDXSettings : register(b13) {
 #define RENODX_COLOR_GRADE_STRENGTH          shader_injection.scene_grade_strength
 #define RENODX_COLOR_GRADE_SCALING           shader_injection.scene_grade_scaling
 
-#define CUSTOM_BLOOM_STRENGTH               shader_injection.bloom_strength
 #define CUSTOM_BLOOM_TYPE                   shader_injection.bloom_type
+#define CUSTOM_BLOOM_STRENGTH               shader_injection.bloom_strength
 #define CUSTOM_SUN_BRIGHTNESS_BOOST_ENABLED shader_injection.sun_brightness_boost_enabled
 #define CUSTOM_FILM_GRAIN_RANDOM            shader_injection.film_grain_random
 #define CUSTOM_FILM_GRAIN_STRENGTH          shader_injection.film_grain_strength
 #define CUSTOM_MOTION_BLUR_STRENGTH         shader_injection.motion_blur_strength
+#define CUSTOM_RECONSTRUCTION_MODE          shader_injection.reconstruction_mode
 
-#define CUSTOM_RECONSTRUCTION_MODE shader_injection.reconstruction_mode
-
-#define CUSTOM_MGSV_ENHANCED_SHADOWS (shader_injection.shadows_mode >= 0.5)
-
-#define CUSTOM_SHADOW_SOFTNESS       shader_injection.shadow_softness
-#define CUSTOM_CONTACT_SHADOW_REACH  shader_injection.contact_shadow_reach
-#define CUSTOM_SHADOW_MAP_DEBUG_VIEW shader_injection.shadow_map_debug_view
-#define CUSTOM_SHADOW_NOISE_FRAME    shader_injection.shadow_noise_frame
-
-#define CUSTOM_CONTACT_SHADOW_DEBUG_VIEW   shader_injection.contact_shadow_debug_view
-#define CUSTOM_SHADOW_DEBUG_LIGHT          shader_injection.shadow_debug_light
-#define CUSTOM_CONTACT_SHADOW_RENDER_SCALE shader_injection.contact_shadow_render_scale
-
-#define CUSTOM_SPOT_CONTACT_SHADOW_BUDGET shader_injection.spot_contact_shadow_budget
+#define CUSTOM_MGSV_ENHANCED_SHADOWS          (shader_injection.shadows_mode >= 0.5)
+#define CUSTOM_SHADOW_SOFTNESS                shader_injection.shadow_softness
+#define CUSTOM_CONTACT_SHADOW_LENGTH          shader_injection.contact_shadow_length
+#define CUSTOM_CONTACT_SHADOW_SPOTLIGHT_LIMIT shader_injection.contact_shadow_spotlight_limit
+#define CUSTOM_SHADOW_MAP_DEBUG_VIEW          shader_injection.shadow_map_debug_view
+#define CUSTOM_CONTACT_SHADOW_DEBUG_VIEW      shader_injection.contact_shadow_debug_view
+#define CUSTOM_SHADOW_DEBUG_LIGHT             shader_injection.shadow_debug_light
+#define CUSTOM_CONTACT_SHADOW_RENDER_SCALE    shader_injection.contact_shadow_render_scale
+#define CUSTOM_SHADOW_NOISE_FRAME             shader_injection.shadow_noise_frame
 
 // The vanilla tone curve runs inside deferred composition, before the late reflection pass could
 // swap in linear light, so Enhanced needs the RenoDX tone mapper. OnPresent in addon.cpp applies
 // the same rule on the host side.
-#define CUSTOM_MGSV_ENHANCED_INDIRECT_LIGHTING    (shader_injection.indirect_lighting_mode >= 0.5 && RENODX_TONE_MAP_TYPE != 0.0)
-#define CUSTOM_MGSV_AO_STRENGTH                   shader_injection.ao_strength
-#define CUSTOM_MGSV_DIFFUSE_GI_STRENGTH           shader_injection.diffuse_gi_strength
-#define CUSTOM_MGSV_REFLECTION_STRENGTH           shader_injection.reflection_strength
-#define CUSTOM_MGSV_REFLECTION_RAYS_PER_PIXEL     shader_injection.reflection_rays_per_pixel
-#define CUSTOM_MGSV_SPECULAR_OCCLUSION_STRENGTH   shader_injection.specular_occlusion_strength
-#define CUSTOM_MGSV_LIGHTING_SEARCH_RADIUS_PIXELS shader_injection.lighting_search_radius_pixels
-#define CUSTOM_MGSV_LIGHTING_SLICE_COUNT          shader_injection.lighting_slice_count
-#define CUSTOM_MGSV_LIGHTING_SAMPLES_PER_SIDE     shader_injection.lighting_samples_per_side
-#define CUSTOM_MGSV_LIGHTING_DEPTH_MIPS_ENABLED   shader_injection.lighting_depth_mips_enabled
-#define CUSTOM_MGSV_GI_REJECT_BACKFACES           shader_injection.gi_reject_backfaces
-#define CUSTOM_MGSV_LIGHTING_DEBUG_VIEW           shader_injection.lighting_debug_view
-
-#define CUSTOM_MGSV_LIGHTING_RESOLUTION_DIVISOR shader_injection.lighting_resolution_divisor
-#define CUSTOM_MGSV_LIGHTING_NOISE_FRAME        shader_injection.lighting_noise_frame
+#define CUSTOM_MGSV_ENHANCED_INDIRECT_LIGHTING   (shader_injection.indirect_lighting_mode >= 0.5 && RENODX_TONE_MAP_TYPE != 0.0)
+#define CUSTOM_MGSV_REFLECTION_RAYS_PER_PIXEL    shader_injection.reflection_rays_per_pixel
+#define CUSTOM_MGSV_AMBIENT_OCCLUSION_STRENGTH   shader_injection.ambient_occlusion_strength
+#define CUSTOM_MGSV_DIFFUSE_BOUNCE_STRENGTH      shader_injection.diffuse_bounce_strength
+#define CUSTOM_MGSV_REFLECTION_STRENGTH          shader_injection.reflection_strength
+#define CUSTOM_MGSV_SPECULAR_OCCLUSION_STRENGTH  shader_injection.specular_occlusion_strength
+#define CUSTOM_MGSV_DIFFUSE_SEARCH_RADIUS_PIXELS shader_injection.diffuse_search_radius_pixels
+#define CUSTOM_MGSV_DIFFUSE_DIRECTION_COUNT      shader_injection.diffuse_direction_count
+#define CUSTOM_MGSV_DIFFUSE_SAMPLES_PER_SIDE     shader_injection.diffuse_samples_per_side
+#define CUSTOM_MGSV_DIFFUSE_COARSE_DEPTH         shader_injection.diffuse_coarse_depth
+#define CUSTOM_MGSV_DIFFUSE_REJECT_BACKFACES     shader_injection.diffuse_reject_backfaces
+#define CUSTOM_MGSV_INDIRECT_LIGHTING_DEBUG_VIEW shader_injection.indirect_lighting_debug_view
+#define CUSTOM_MGSV_DIFFUSE_RESOLUTION_DIVISOR   shader_injection.diffuse_resolution_divisor
+#define CUSTOM_MGSV_DIFFUSE_NOISE_FRAME          shader_injection.diffuse_noise_frame
 
 #include "../../shaders/renodx.hlsl"
 

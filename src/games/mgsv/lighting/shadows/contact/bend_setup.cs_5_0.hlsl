@@ -10,7 +10,7 @@
 // Runs as a single group for one batch of lights. Builds each light's record
 // (projected light, receiver bounds, and up to eight sweep dispatches), ranks
 // the lights by how much light each puts on the surfaces in view, admits them
-// in that order while atlas space and the spot budget last, then writes the
+// in that order while atlas space and the spotlight limit last, then writes the
 // indirect arguments for the clear and trace dispatches.
 
 Texture2D<float4> bend_depth : register(t0);
@@ -231,7 +231,7 @@ uint2 PrepareBendLight(uint light_index, uint2 output_size) {
 
 #define BEND_SETUP_THREADS 256
 #define BEND_CANDIDATE     3u
-#define BEND_BUDGETED_SPOT 4u
+#define BEND_LIMITED_SPOT  4u
 
 // Per draw position, the light drawn there. Per rank, the light of that rank.
 // Per light, its importance, texels, trace tiles, and state; admission and
@@ -250,7 +250,7 @@ void main(uint thread : SV_GroupIndex) {
   const uint4 batch = asuint(bend_lights.Load(0u));
   const uint light_count = min(batch.x, BEND_MAX_LIGHTS);
   const uint2 output_size = uint2(bend_viewport.xy + 0.5);
-  const bool spot_budget_enabled = isfinite(CUSTOM_SPOT_CONTACT_SHADOW_BUDGET) && CUSTOM_SPOT_CONTACT_SHADOW_BUDGET >= 1.0;
+  const bool spotlight_limit_enabled = isfinite(CUSTOM_CONTACT_SHADOW_SPOTLIGHT_LIMIT) && CUSTOM_CONTACT_SHADOW_SPOTLIGHT_LIMIT >= 1.0;
   // Every light's geometry is independent, so all threads build records.
   [loop]
   for (uint position = thread; position < light_count; position += BEND_SETUP_THREADS) {
@@ -262,7 +262,7 @@ void main(uint thread : SV_GroupIndex) {
     bend_area[light_index] = work.x;
     bend_tiles[light_index] = work.y;
     bend_state[light_index] = work.x == 0u ? 0u
-                              : (spot_budget_enabled && (light_type == 1u || light_type == 3u) ? BEND_BUDGETED_SPOT : BEND_CANDIDATE);
+                              : (spotlight_limit_enabled && (light_type == 1u || light_type == 3u) ? BEND_LIMITED_SPOT : BEND_CANDIDATE);
     // How much the light matters to the picture: the light it puts on the
     // surfaces in view, taken at an 8 x 8 grid of pixels across its receiver
     // bounds, times the bounds' area. A lamp on a face in a close-up scores
@@ -332,15 +332,15 @@ void main(uint thread : SV_GroupIndex) {
   }
   GroupMemoryBarrierWithGroupSync();
   if (thread == 0u) {
-    // Admit lights by rank. The atlas space and the spot budget go to the
-    // lights that matter most; a light that does not fit, or a spot past the
-    // budget, keeps native shadows. Point lights take no budget but share the
-    // atlas, so they are ranked with the spots. Every budgeted spot that fits the atlas
-    // counts toward the budget, including one the budget then rejects. The
-    // count lives in bend_spot_budget, which the host shares across the
-    // lighting pass. Ranks are dense, so the first unranked entry ends them.
-    const uint spot_budget = spot_budget_enabled ? uint(min(CUSTOM_SPOT_CONTACT_SHADOW_BUDGET, 2147483520.0)) : 0u;
-    uint spots = spot_budget_enabled ? bend_spot_budget.Load(0) : 0u;
+    // Admit lights by rank. The atlas space and the spotlight limit go to the
+    // lights that matter most; a light that does not fit, or a spotlight past
+    // the limit, keeps native shadows. Point lights do not count toward the
+    // limit but share the atlas, so they are ranked with the spotlights. Every
+    // spotlight that fits the atlas counts, including one the limit then
+    // rejects. The count lives in bend_spotlight_counter, which the host
+    // shares across the lighting pass. Ranks are dense, so the first unranked entry ends them.
+    const uint spotlight_limit = spotlight_limit_enabled ? uint(min(CUSTOM_CONTACT_SHADOW_SPOTLIGHT_LIMIT, 2147483520.0)) : 0u;
+    uint spots = spotlight_limit_enabled ? bend_spotlight_counter.Load(0) : 0u;
     uint atlas_free = batch.y * batch.z;
     [loop]
     for (uint rank = 0u; rank < light_count && bend_ranked[rank] != BEND_UNRANKED; ++rank) {
@@ -348,15 +348,15 @@ void main(uint thread : SV_GroupIndex) {
       const uint state = bend_state[light_index];
       const uint area = bend_area[light_index];
       bool admitted = area <= atlas_free;
-      if (admitted && state == BEND_BUDGETED_SPOT) {
-        admitted = spots < spot_budget;
+      if (admitted && state == BEND_LIMITED_SPOT) {
+        admitted = spots < spotlight_limit;
         ++spots;
       }
       bend_state[light_index] = admitted ? 1u : 2u;
       atlas_free -= admitted ? area : 0u;
     }
-    if (spot_budget_enabled) {
-      bend_spot_budget.Store(0, spots);
+    if (spotlight_limit_enabled) {
+      bend_spotlight_counter.Store(0, spots);
     }
     // Pack the admitted rectangles in record order. The trace finds a light
     // by binary search over its running total; the clear needs only the last
