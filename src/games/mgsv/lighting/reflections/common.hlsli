@@ -43,6 +43,11 @@ cbuffer ReflectionConstants : register(b0) {
 };
 cbuffer CurrentReflectionScene : register(b1) { ReflectionScene current_scene; }
 
+// How deep a surface is taken to be behind the depth the camera sees, in game
+// units: the slab a reflection ray can hit, and how far in front of a surface
+// a forward-drawn layer still counts as part of it.
+static const float REFLECTION_SURFACE_THICKNESS = 0.05;
+
 // Positive linear view depth from native reverse-Z depth.
 float GetReflectionDepth(float depth) {
   return current_scene.projection_parameters.z / max(depth - current_scene.projection_parameters.w, 1e-7);

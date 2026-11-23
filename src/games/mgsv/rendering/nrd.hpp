@@ -84,6 +84,16 @@ struct Texture {
   D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
 };
 
+// REBLUR's settings for reflections: the SDK's defaults without its final
+// stabilization pass. A temporal upscaler always follows the denoiser (with
+// Reconstruction Off reflections are not denoised) and does that work: with
+// the pass on, reflections looked the same still and during a camera turn.
+inline nrd::ReblurSettings DefaultSettings() {
+  nrd::ReblurSettings settings;
+  settings.maxStabilizedFrameNum = 0u;
+  return settings;
+}
+
 struct Runtime {
   static constexpr nrd::Identifier SPECULAR = 0u;
   static constexpr size_t RESOURCE_COUNT = static_cast<size_t>(nrd::ResourceType::MAX_NUM);
@@ -121,7 +131,7 @@ struct Runtime {
       pipelines[index].Create(device, {static_cast<const uint8_t*>(source.computeShaderDXIL.bytecode), static_cast<size_t>(source.computeShaderDXIL.size)},
                               reads, writes, source.hasConstantData ? 1u : 0u, description.resourcesSpaceIndex, description.constantBufferAndSamplersSpaceIndex);
     }
-    Configure(nrd::ReblurSettings{});
+    Configure(DefaultSettings());
   }
 
   // Call on the render thread before Record asks the SDK for dispatches. Work

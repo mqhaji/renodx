@@ -59,12 +59,17 @@ cbuffer NativeSceneBytes : register(b3) { uint4 scene_rows[30]; }
   // The scene depth starts as a copy of the G-buffer depth after composition,
   // and every forward draw since then that wrote depth (forward models, glass,
   // the Fulton wormhole) is nearer there. Such a pixel shows that layer, not
-  // the surface the G-buffer describes, so it receives no reflection.
+  // the surface the G-buffer describes, so it receives no reflection. A layer
+  // within the surface's own thickness is part of it instead (a lamp's cover,
+  // the coat over an eye): the surface shows through it, and left out it
+  // would keep the game's raw environment light while everything around it
+  // takes the traced reflection.
   // Reverse Z: nearer is larger. Without the scene depth every surface counts.
   uint scene_depth_width, scene_depth_height;
   scene_depth.GetDimensions(scene_depth_width, scene_depth_height);
-  const bool covered = all(uint2(scene_depth_width, scene_depth_height) == reflection_size)
-                       && scene_depth.Load(int3(pixel, 0)) > depth;
+  const float layer_depth = scene_depth.Load(int3(pixel, 0));
+  const bool covered = all(uint2(scene_depth_width, scene_depth_height) == reflection_size) && layer_depth > depth
+                       && GetReflectionDepth(depth) - GetReflectionDepth(layer_depth) > REFLECTION_SURFACE_THICKNESS;
   const bool valid = depth > 0.0 && !covered && color.a >= 0.0 && material.valid && normal_valid
                      && captured.a >= 0.5 && receiver_environment.Load(int3(pixel, 0)).a >= 0.0;
 
@@ -90,7 +95,10 @@ cbuffer NativeSceneBytes : register(b3) { uint4 scene_rows[30]; }
   const float orientation = dot(normal, GetReflectionPosition(float2(pixel) + 0.5, depth)) > 0.0 ? -1.0 : 1.0;
   const float3 world_normal = valid ? normalize(mul((float3x3)current_scene.view_to_world, normal)) * orientation : float3(0.0, 0.0, 1.0);
   nrd_normal_output[pixel] = NRD_FrontEnd_PackNormalAndRoughness(world_normal, valid ? material.roughness : 1.0, 0.0);
-  view_depth_output[pixel] = valid ? GetReflectionDepth(depth) : 1e6;
+  // A surface with no reflection rate is not traced and the resolve writes its
+  // black result itself. Left inside the denoising range, its zero light
+  // would be blurred into reflective pixels beside it on the same plane.
+  view_depth_output[pixel] = valid && material.rate > 0.0 ? GetReflectionDepth(depth) : 1e6;
   // Motion is needed only when history continues. Static pixels use camera
   // motion from the matched transforms; pixels in the object mask use the
   // object image's motion with its projection jitter removed. velocity is

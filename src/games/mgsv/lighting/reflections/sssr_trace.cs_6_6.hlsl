@@ -2,7 +2,7 @@
 #include "common.hlsli"
 
 // Enhanced reflection trace. For each receiver, sample 1 to 4 GGX reflection
-// directions and march each through the nearest-depth pyramid. A hit gathers
+// directions and march each through the depth pyramids. A hit gathers
 // linear scene radiance; the rest falls back to the saved environment.
 // reflected_light holds the averaged demodulated light (material response
 // divided out) and normalized hit distance in NRD REBLUR packing.
@@ -16,15 +16,23 @@ Texture2D<float4> materials : register(t3);
 Texture2D<float4> brdf_table : register(t4);
 Texture2D<float2> sampling_noise : register(t5);
 Texture2D<float4> saved_environment : register(t6);
+// Each cell's farthest depth, from level 1 up.
+Texture2D<float> farthest_pyramid : register(t7);
 RWTexture2D<float4> reflected_light : register(u0);
 RWTexture2D<float4> environment_weight : register(u1);
-SamplerState linear_clamp : register(s1);
 
-static const uint MAX_TRACE_STEPS = 128u;
+// Under clutter (gratings, railings) a ray can need far more steps than
+// this; one that runs out takes the environment. 96 resolves as many rays as
+// 128 did before the pyramid held farthest depths.
+static const uint MAX_TRACE_STEPS = 96u;
 
-// Trace the projected segment through nearest-depth cells, moving up a level
-// after an empty cell and down when a cell may hold a hit. Reciprocal view
-// depth is linear along the screen-space segment; view depth itself is not.
+// Trace the projected segment through the depth pyramid's cells, moving up a
+// level after a cell the ray cannot hit in and down when a cell may hold a
+// hit. A cell cannot hold a hit when the ray stays in front of its nearest
+// surface or stays behind the back of its farthest one. Without the second
+// test a ray behind foreground geometry would cross it one pixel at a time.
+// Reciprocal view depth is linear along the screen-space segment; view depth
+// itself is not.
 bool TraceReflection(float3 origin, float3 direction, int2 receiver, out float2 hit_uv, out float distance) {
   hit_uv = 0.0;
   distance = 0.0;
@@ -53,6 +61,12 @@ bool TraceReflection(float3 origin, float3 direction, int2 receiver, out float2 
   const float epsilon = 1e-3 / max(length(delta), 1.0);
   const float inverse_start = rcp(origin.z);
   const float inverse_end = rcp(endpoint.z);
+  // A single depth layer has no back surface. A surface is taken to be a slab
+  // REFLECTION_SURFACE_THICKNESS deep plus one pixel's footprint at its depth, rather than
+  // accepting any crossed depth. The slab's back is nearer for a nearer
+  // surface, so a ray behind the back of a cell's farthest surface is behind
+  // every surface in the cell.
+  const float footprint = 1.0 + abs(current_scene.projection_parameters.y) * (2.0 / size.y);
   float current = epsilon;
   int level = 0;
   [loop] for (uint step = 0u; step < MAX_TRACE_STEPS && current < last; ++step) {
@@ -67,11 +81,17 @@ bool TraceReflection(float3 origin, float3 direction, int2 receiver, out float2 
     const float2 boundary = float2(delta.x > 0.0 ? upper.x : lower.x, delta.y > 0.0 ? upper.y : lower.y);
     const float2 crossing = select(moving, (boundary - start) * inverse_delta, 1e30);
     const float next = min(last, max(min(crossing.x, crossing.y), current + epsilon));
+    // Nearest and farthest raw depth of the cell; the same at level 0.
     const float raw_depth = depth_pyramid.Load(int3(cell, level));
+    float farthest_depth = raw_depth;
+    if (level > 0) farthest_depth = farthest_pyramid.Load(int3(cell, level));
     const float surface_inverse_z = (raw_depth - current_scene.projection_parameters.w) / current_scene.projection_parameters.z;
     const float inverse_z0 = lerp(inverse_start, inverse_end, current);
     const float inverse_z1 = lerp(inverse_start, inverse_end, next);
-    if (raw_depth <= 0.0 || min(inverse_z0, inverse_z1) > surface_inverse_z) {
+    // Background, or a depth that is not a number, has no surface to hit.
+    const bool in_front = !(raw_depth > 0.0) || min(inverse_z0, inverse_z1) > surface_inverse_z;
+    const bool behind = farthest_depth > 0.0 && max(inverse_z0, inverse_z1) * (GetReflectionDepth(farthest_depth) * footprint + REFLECTION_SURFACE_THICKNESS) < 1.0;
+    if (in_front || behind) {
       current = next + epsilon;
       level = min(level + 1, int(maximum_mip));
       continue;
@@ -80,15 +100,15 @@ bool TraceReflection(float3 origin, float3 direction, int2 receiver, out float2 
       --level;
       continue;
     }
-    // A single depth layer has no back surface. Use a small view-space slab,
-    // expanded by one pixel's footprint, rather than accepting any crossed depth.
-    const float surface_z = GetReflectionDepth(raw_depth);
-    const float thickness = 0.05 + surface_z * abs(current_scene.projection_parameters.y) * (2.0 / size.y);
-    if (max(inverse_z0, inverse_z1) * (1.0 + thickness * surface_inverse_z) >= surface_inverse_z
-        && max(abs(pixel.x - receiver.x), abs(pixel.y - receiver.y)) > 1) {
+    // Neither in front of this pixel's surface nor behind its slab: a hit,
+    // unless the pixel is the receiver's own neighborhood.
+    if (max(abs(pixel.x - receiver.x), abs(pixel.y - receiver.y)) > 1) {
       const float t = saturate((surface_inverse_z - inverse_start) / (inverse_end - inverse_start));
-      const float2 hit = abs(inverse_end - inverse_start) > 1e-10 ? start + clamp(t, current, next) * delta : position;
-      hit_uv = clamp(hit / size, 0.5 / size, 1.0 - 0.5 / size);
+      // Kept inside the pixel that was tested: the segment ends on its border,
+      // and the caller reads the hit's normal and color at this position.
+      const float2 hit = clamp(abs(inverse_end - inverse_start) > 1e-10 ? start + clamp(t, current, next) * delta : position,
+                               float2(pixel) + 0.001, float2(pixel) + 0.999);
+      hit_uv = hit / size;
       distance = length(GetReflectionPosition(hit_uv * size, raw_depth) - origin);
       return true;
     }
@@ -127,9 +147,12 @@ bool TraceReflection(float3 origin, float3 direction, int2 receiver, out float2 
   const float3 local_view = float3(dot(view, tangent), dot(view, bitangent), dot(view, normal));
   // Read the FAST noise atlas on this pass's pixel grid. Its 32 layers are
   // stacked vertically; the scene's camera sample, not Present, picks the
-  // layer. Decode each byte at its bin center to keep the GGX input strictly
-  // inside (0, 1).
-  const uint2 noise_pixel = uint2(id.x & 127u, (id.y & 127u) + (reflection_sample & 31u) * 128u);
+  // layer. The camera's jitter can repeat every 32 samples too, which would
+  // give each jitter position the same layer forever, so each cycle of 32
+  // also moves the tile across the screen. Decode each byte at its bin
+  // center to keep the GGX input strictly inside (0, 1).
+  const uint2 noise_shift = (reflection_sample >> 5u) * uint2(79u, 51u);
+  const uint2 noise_pixel = uint2((id.x + noise_shift.x) & 127u, ((id.y + noise_shift.y) & 127u) + (reflection_sample & 31u) * 128u);
   const float2 noise = (sampling_noise.Load(int3(noise_pixel, 0)) * 255.0 + 0.5) / 256.0;
   const float no_v = saturate(local_view.z);
   const float3 integral = GetSpecularBRDFIntegral(brdf_table, no_v, guide.a);
@@ -186,6 +209,9 @@ bool TraceReflection(float3 origin, float3 direction, int2 receiver, out float2 
     float3 light = 0.0;
     float3 remaining_weight = weight;
     float visibility = 1.0;
+    // Whether the environment's share of this ray is blocked: geometry was
+    // hit and its color could not be used.
+    bool blocked = false;
     float2 hit_uv;
     float hit_distance;
     const bool hit = TraceReflection(position + normal * bias, direction, pixel, hit_uv, hit_distance);
@@ -195,24 +221,29 @@ bool TraceReflection(float3 origin, float3 direction, int2 receiver, out float2 
       const float4 hit_normal = normals.Load(int3(hit_pixel, 0));
       const bool sky_hit = depth_pyramid.Load(int3(hit_pixel, 0)) <= 0.0;
       visibility = sky_hit ? 1.0 : 0.0;
+      blocked = !sky_hit;
       // A rejected source color still represents a geometric blocker. Sky and
       // unresolved exits use a long distance, never a false zero-distance hit.
       if (!sky_hit) first_hit_distance = hit_distance;
       if (sky_hit || (all(isfinite(hit_normal.xyz)) && dot(hit_normal.xyz, -direction) > 0.0)) {
-        const float4 source = source_radiance.SampleLevel(linear_clamp, hit_uv, 0.0);
+        // The hit pixel's own color: a filtered read would mix in the
+        // background across a silhouette.
+        const float4 source = source_radiance.Load(int3(hit_pixel, 0));
         if (source.a > 0.0 && all(isfinite(source))) {
-          // Fade screen light out near the screen edge; the rest of the
-          // weight falls back to the environment.
+          // Fade screen light out near the screen edge, where the next ray
+          // leaves the screen and takes the environment; the faded share
+          // takes the environment too, unblocked.
           const float edge = min(min(hit_uv.x, hit_uv.y), min(1.0 - hit_uv.x, 1.0 - hit_uv.y));
           const float confidence = smoothstep(0.0, 0.025, edge);
           light = source.rgb * weight * confidence;
           remaining_weight = weight * (1.0 - confidence * saturate(source.a));
+          blocked = false;
         }
       }
     }
-    // Confirmed geometry blocks only the unresolved environment contribution.
-    // Accepted screen radiance already contains visibility.
-    light_sum += light + fallback * remaining_weight * lerp(1.0, visibility, environment_occlusion_strength);
+    // Confirmed geometry blocks the environment only where its own color is
+    // unknown. Accepted screen radiance already contains visibility.
+    light_sum += light + fallback * remaining_weight * (blocked ? 1.0 - environment_occlusion_strength : 1.0);
     remaining_sum += remaining_weight;
     visibility_sum += visibility;
     NRD_FrontEnd_SpecHitDistAveraging_Add(tracking_distance, first_hit_distance);

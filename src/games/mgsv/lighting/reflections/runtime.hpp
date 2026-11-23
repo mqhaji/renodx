@@ -89,8 +89,8 @@ struct Pipelines {
       code[index] = (shaders[index].empty() ? embedded[index] : std::span<const uint8_t>(shaders[index]));
     }
     Check(device11->CreateComputeShader(code[0].data(), code[0].size(), nullptr, &prepare), "Create reflection preparation");
-    mips.Create(device12, code[1], 1u, 1u, 2u);
-    trace.Create(device12, code[2], 7u, 2u, 2u);
+    mips.Create(device12, code[1], 2u, 2u, 2u);
+    trace.Create(device12, code[2], 8u, 2u, 2u);
     resolve.Create(device12, code[3], 6u, 2u, 2u);
     integrate.Create(device12, code[4], 0u, 1u, 0u);
   }
@@ -197,6 +197,8 @@ struct Runtime {
   Microsoft::WRL::ComPtr<ID3D12Resource> scene;
   Microsoft::WRL::ComPtr<ID3D12Resource> brdf;
   Microsoft::WRL::ComPtr<ID3D12Resource> depth;
+  // Each depth mip cell's farthest surface; level 0 is never written or read.
+  Microsoft::WRL::ComPtr<ID3D12Resource> farthest_depth;
   Microsoft::WRL::ComPtr<ID3D12Resource> color;
   std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, 2> raw;
   Microsoft::WRL::ComPtr<ID3D12Resource> filtered;
@@ -364,6 +366,7 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
     // Preparation writes directly into the shared source color and depth. Only
     // depth needs a mip chain; source color keeps its original pixel footprint.
     runtime.depth = runtime.inputs[3].image.resource;
+    runtime.farthest_depth = compute::CreateTexture(bridge.device12.Get(), width, height, DXGI_FORMAT_R32_FLOAT, static_cast<UINT16>(runtime.mip_count));
     runtime.color = runtime.inputs[0].image.resource;
     for (auto& texture : runtime.raw) {
       texture = compute::CreateTexture(bridge.device12.Get(), width, height, DXGI_FORMAT_R16G16B16A16_FLOAT);
@@ -396,17 +399,14 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
   if (runtime.denoiser_usable && denoiser_settings_pending.exchange(false, std::memory_order_acquire)) {
     probe::Status requested;
     ReadProbeStatus(&requested);
-    nrd::ReblurSettings settings;
+    nrd::ReblurSettings settings = rendering::denoising::DefaultSettings();
     switch (requested.denoiser_mode) {
       case probe::DenoiserMode::DEFAULT:
-        break;
-      case probe::DenoiserMode::NO_STABILIZATION:
-        settings.maxStabilizedFrameNum = 0u;
+      case probe::DenoiserMode::NO_STABILIZATION:  // The default since the stabilization pass was dropped.
         break;
       case probe::DenoiserMode::SPATIAL_ONLY:
         settings.maxAccumulatedFrameNum = 0u;
         settings.maxFastAccumulatedFrameNum = 0u;
-        settings.maxStabilizedFrameNum = 0u;
         settings.historyFixFrameNum = 0u;
         break;
       case probe::DenoiserMode::TRACKING_PREPASS_ONLY:
@@ -415,7 +415,6 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
       case probe::DenoiserMode::SHORT_HISTORY:
         settings.maxAccumulatedFrameNum = 6u;
         settings.maxFastAccumulatedFrameNum = 1u;
-        settings.maxStabilizedFrameNum = 0u;
         settings.historyFixFrameNum = 0u;
         break;
       default:
@@ -482,7 +481,7 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
     constants.current_to_previous_clip = reconstruction::camera_state::ToRowMajorFloatArray(
         reconstruction::camera_state::Multiply(runtime.previous_camera.current_view_projection, camera.inverse_view_projection));
   }
-  const nrd::ReblurSettings denoiser_settings;
+  const nrd::ReblurSettings denoiser_settings = rendering::denoising::DefaultSettings();
   constants.hit_distance_parameters = {denoiser_settings.hitDistanceParameters.A, denoiser_settings.hitDistanceParameters.B, denoiser_settings.hitDistanceParameters.C};
   nrd::CommonSettings denoising;
   if (camera_valid) {
@@ -598,13 +597,13 @@ inline void Execute(reshade::api::command_list* cmd_list, const Inputs& inputs) 
       }
       dispatch.Mark("scene constants");
       for (UINT mip = 1u; mip < runtime.mip_count; ++mip) {
-        const std::array<ImageView, 1> srvs = {{{.resource = runtime.depth.Get(), .mip = mip - 1u}}};
-        const std::array<ImageView, 1> uavs = {{{.resource = runtime.depth.Get(), .mip = mip}}};
+        const std::array<ImageView, 2> srvs = {{{.resource = runtime.depth.Get(), .mip = mip - 1u}, {.resource = runtime.farthest_depth.Get(), .mip = mip - 1u}}};
+        const std::array<ImageView, 2> uavs = {{{.resource = runtime.depth.Get(), .mip = mip}, {.resource = runtime.farthest_depth.Get(), .mip = mip}}};
         dispatch_pass(dispatch, &frame.arena, runtime.pipelines.mips, constant_address, srvs, uavs,
                       std::max(runtime.size[0] >> mip, 1u), std::max(runtime.size[1] >> mip, 1u));
       }
       dispatch.Mark("depth mips");
-      const std::array<ImageView, 7> trace_inputs = {{{.resource = runtime.depth.Get(), .mip = 0u, .mips = runtime.mip_count}, {.resource = runtime.color.Get()}, {.resource = runtime.inputs[1].image.resource.Get()}, {.resource = runtime.inputs[2].image.resource.Get()}, {.resource = runtime.brdf.Get()}, {.resource = runtime.sampling_noise.image.resource.Get()}, {.resource = frame.environment.resource.Get()}}};
+      const std::array<ImageView, 8> trace_inputs = {{{.resource = runtime.depth.Get(), .mip = 0u, .mips = runtime.mip_count}, {.resource = runtime.color.Get()}, {.resource = runtime.inputs[1].image.resource.Get()}, {.resource = runtime.inputs[2].image.resource.Get()}, {.resource = runtime.brdf.Get()}, {.resource = runtime.sampling_noise.image.resource.Get()}, {.resource = frame.environment.resource.Get()}, {.resource = runtime.farthest_depth.Get(), .mip = 0u, .mips = runtime.mip_count}}};
       const std::array<ImageView, 2> trace_outputs = {{{.resource = runtime.raw[0].Get()}, {.resource = runtime.raw[1].Get()}}};
       dispatch_pass(dispatch, &frame.arena, runtime.pipelines.trace, constant_address, trace_inputs, trace_outputs, runtime.size[0], runtime.size[1]);
       dispatch.Mark("trace");
