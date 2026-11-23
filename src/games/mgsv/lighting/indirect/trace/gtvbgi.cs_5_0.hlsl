@@ -27,6 +27,13 @@
 #define AO_SECTORS 32u
 // Optional reductions cover 2, 4, 8, and 16 render pixels along each axis.
 #define AO_DEPTH_MIP_LEVELS 4
+// The most an occluder is taken to be thick, in game units. The automatic
+// thickness grows with how far an occluder runs along the search, which on a
+// long continuous surface (a Mother Base pillar and the deck it joins) reached
+// tens of units. Slabs that deep, under the random scale, now and then swung
+// across a shaded pixel's hemisphere and lit it with a sunlit surface it cannot
+// see: red specks that flashed from frame to frame. Up to 4 units they are gone.
+#define AO_MAX_OCCLUDER_THICKNESS 4.0
 
 Texture2D<float4> depth_buffer : register(t0);
 Texture2D<float4> normal_buffer : register(t1);
@@ -145,13 +152,16 @@ float LoadTraceDepth(int2 sample_pixel, int mip_level) {
   return sampled_depth;
 }
 
-// Returns the sectors one depth sample blocks. The sample is treated as a slab
-// from its depth to depth + thickness, not as an infinitely thick wall, and
-// its back reaches at least as far as the back of the occluder it belongs to,
-// taken from where that occluder started (occluder_start, view space).
-uint GetCoverageMask(float3 sample_point, float thickness, float3 occluder_start,
-                     float3 position, float3 view_direction, float side, float normal_angle, float cos_n,
-                     float sector_offset) {
+// Returns the sectors one depth sample blocks (x) and those its own slab
+// covers (y). The sample is treated as a slab from its depth to depth +
+// thickness, not as an infinitely thick wall. For occlusion its back reaches
+// at least as far as the back of the occluder it belongs to, taken from where
+// that occluder started (occluder_start, view space). Those extra sectors show
+// the occluder's hidden part, not the surface the sample saw, so only the
+// sample's own slab sends its light (y).
+uint2 GetCoverageMask(float3 sample_point, float thickness, float3 occluder_start,
+                      float3 position, float3 view_direction, float side, float normal_angle, float cos_n,
+                      float sector_offset) {
   // Project the slab's ends into the slice. A coarse depth still blocks
   // conservatively even though its radiance is read from its owner pixel.
   // Moving a view-space point back along its camera ray scales it.
@@ -160,14 +170,16 @@ uint GetCoverageMask(float3 sample_point, float thickness, float3 occluder_start
   const float3 start_back = occluder_start * (1.0 + thickness / occluder_start.z) - position;
   const float3 lengths_squared = float3(dot(front, front), dot(back, back), dot(start_back, start_back));
   if (any(lengths_squared < 1e-12)) return 0u;
-  const float3 cosines = float3(dot(front, view_direction), dot(back, view_direction), dot(start_back, view_direction)) * rsqrt(lengths_squared);
-  const float2 horizon_cos = clamp(float2(cosines.x, min(cosines.y, cosines.z)), -1.0, 1.0);
-  float2 horizon = saturate(acos(horizon_cos) * (side / AO_PI) + normal_angle / AO_PI + 0.5);
-  if (side < 0.0) horizon = horizon.yx;
+  const float3 cosines = clamp(float3(dot(front, view_direction), dot(back, view_direction), dot(start_back, view_direction)) * rsqrt(lengths_squared), -1.0, 1.0);
+  // Front, own back, and the occluder's back.
+  float3 horizon = saturate(acos(float3(cosines.x, cosines.y, min(cosines.y, cosines.z))) * (side / AO_PI) + normal_angle / AO_PI + 0.5);
   horizon.x = GetSliceCosineCDF(horizon.x, normal_angle, cos_n, side > 0.0);
   horizon.y = GetSliceCosineCDF(horizon.y, normal_angle, cos_n, side > 0.0);
-  const uint2 sectors = (uint2)floor(saturate(horizon + sector_offset) * float(AO_SECTORS));
-  return GetSectorMask(sectors.x, sectors.y);
+  horizon.z = GetSliceCosineCDF(horizon.z, normal_angle, cos_n, side > 0.0);
+  const uint3 sectors = (uint3)floor(saturate(horizon + sector_offset) * float(AO_SECTORS));
+  // The search's direction decides which end is which.
+  return side < 0.0 ? uint2(GetSectorMask(sectors.z, sectors.x), GetSectorMask(sectors.y, sectors.x))
+                    : uint2(GetSectorMask(sectors.x, sectors.z), GetSectorMask(sectors.x, sectors.y));
 }
 
 // Linear, pre-exposed outgoing radiance of one full-resolution pixel (albedo
@@ -377,6 +389,8 @@ float4 LoadTraceSource(int2 pixel, float depth, bool prepared_available) {
         const float sample_depth = LoadTraceDepth(sample_pixel, mip_level);
         const float sample_z = LinearZ(sample_depth);
         uint covered = 0u;
+        // The sectors whose light this sample sends: its own slab.
+        uint lit_sectors = 0u;
         // Native reverse-Z zero is background, not a finite surface slab.
         if (!(sample_depth > 0.0 && sample_z > 0.0 && sample_z <= 1.0e6)) {
           crossed_background = true;
@@ -397,12 +411,16 @@ float4 LoadTraceSource(int2 pixel, float depth, bool prepared_available) {
           }
           crossed_background = false;
           previous_point = sample_point;
-          covered = GetCoverageMask(sample_point, thickness_scale * (skipped_run + length(sample_point - occluder_start)), occluder_start,
-                                    position, view_direction, side_sign, normal_angle, cos_n, sector_offset);
+          const uint2 masks = GetCoverageMask(sample_point, min(thickness_scale * (skipped_run + length(sample_point - occluder_start)), AO_MAX_OCCLUDER_THICKNESS), occluder_start,
+                                              position, view_direction, side_sign, normal_angle, cos_n, sector_offset);
+          covered = masks.x;
+          lit_sectors = masks.y;
         }
         // 5. Gather radiance only for newly covered diffuse sectors. A coarse
         // depth has no color, so descend to its full-size owner first.
-        uint fresh = covered & ~occupied;
+        // Sectors the occluder blocks but its sample does not light still
+        // block; they send no light.
+        uint fresh = covered & lit_sectors & ~occupied;
         if (fresh != 0u) {
           int2 owner;
           if (!ResolveDepthOwner(sample_pixel, mip_level, sample_depth, owner)) {
